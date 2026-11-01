@@ -1,0 +1,8 @@
+# Secrets never enter the repo (CLAUDE.md rule 3)
+.env
+*.env
+!.env.example
+*.token
+*.key
+*.pem
+secrets/
