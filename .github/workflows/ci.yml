@@ -30,6 +30,12 @@ jobs:
       PROXYHUB_REDIS_URL: redis://127.0.0.1:6379/0
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.7"  # = AGENT_GO_VERSION in node-image/versions.lock (reproducible agent)
+          cache: false
+      # The agent e2e test runs the real Go agent through real Caddy mTLS; it skips without the image.
+      - run: docker pull caddy:2-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
       - run: pip install uv==0.11.32
       - run: uv sync --frozen
       - run: uv run --frozen ruff check proxyhub tests
@@ -56,11 +62,30 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  agent:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.7"
+          cache: false
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+
   deploy-files:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck deploy/*.sh ops/scripts/*.sh
+      - run: shellcheck deploy/*.sh deploy/backup/*.sh deploy/monitoring/*.sh ops/scripts/*.sh node-image/*.sh
+      - run: shellcheck -s sh deploy/monitoring/alertmanager/entrypoint.sh
+      # promtool config/rules/rule unit tests, amtool for every receiver variant, the runtime
+      # bot-token leak check of Alertmanager, loki and alloy, all with the pinned images.
+      - run: bash deploy/monitoring/check_configs.sh
       - run: docker compose -p proxyhub -f deploy/docker-compose.yml config -q
       - run: docker compose -f deploy/docker-compose.test.yml config -q
       - run: docker build --build-context dashboard=dashboard --target runtime panel
@@ -70,15 +95,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      # Same script as install.sh and the deployer: every secret file compose mounts (monitoring
+      # included). Without age on the runner it only skips backup_age_key, which nothing mounts.
       - run: |
           sudo sysctl -w fs.protected_regular=2
-          sudo install -d -m 0700 /etc/proxy-hub /etc/proxy-hub/secrets
-          for f in db_password redis_password master_key; do
-            openssl rand -hex 32 | sudo tee /etc/proxy-hub/secrets/$f >/dev/null
-            sudo chmod 0444 /etc/proxy-hub/secrets/$f
-          done
-          sudo openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out /etc/proxy-hub/secrets/agent_ca_key
-          sudo chmod 0444 /etc/proxy-hub/secrets/agent_ca_key
+          sudo bash deploy/ensure_secrets.sh
       - run: sudo bash ops/scripts/stack_restart_test.sh proxyhub-ci
       - if: always()
         run: sudo docker compose -p proxyhub-ci -f deploy/docker-compose.yml down -v
