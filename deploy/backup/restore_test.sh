@@ -3,15 +3,20 @@
 #
 # Decrypts the NEWEST backup with the private key (/etc/proxy-hub/secrets/backup_age_key) and
 # restores it into a THROWAWAY PostgreSQL container: the same image as the running panel postgres
-# (same pinned digest), no network at all, data in memory (tmpfs). Then it checks:
+# (same pinned digest), no network at all, capped memory and CPU. Its data and the decrypted dump
+# live on two anonymous Docker volumes on disk (labelled proxyhub.purpose=restore-test), not in RAM:
+# a tmpfs would be charged to the host's memory and could OOM a small panel server. The live database
+# is on the same disk unencrypted anyway; both volumes go with the container. Then it checks:
 #   - pg_restore finished with --exit-on-error in one transaction,
 #   - the restored database has public.alembic_version and public.settings,
 #   - every table's exact row count equals the manifest taken from the same snapshot as the dump.
-# The container is always destroyed. The result goes to node-exporter's textfile directory
+# The container and its volumes are always destroyed (leftovers of a crashed run are removed at
+# the next start). The result goes to node-exporter's textfile directory
 # (alerts RestoreTestFailing / RestoreTestTooOld) and to /var/lib/proxy-hub/restore_test.status.
 #
 # Overrides: PROXYHUB_COMPOSE_PROJECT (default proxyhub), PROXYHUB_BACKUP_DIR, PROXYHUB_METRICS_DIR,
-# PROXYHUB_RESTORE_IMAGE (default: image of the running postgres container), PROXYHUB_BACKUP_KEY.
+# PROXYHUB_RESTORE_IMAGE (default: image of the running postgres container), PROXYHUB_BACKUP_KEY,
+# PROXYHUB_RESTORE_MEMORY (default 512m; memory + swap cap of the throwaway container).
 set -euo pipefail
 
 PROJECT="${PROXYHUB_COMPOSE_PROJECT:-proxyhub}"
@@ -21,6 +26,8 @@ KEY_FILE="${PROXYHUB_BACKUP_KEY:-/etc/proxy-hub/secrets/backup_age_key}"
 STATUS_FILE="$(dirname "$BACKUP_DIR")/restore_test.status"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 READY_TIMEOUT_S=180
+MEMORY="${PROXYHUB_RESTORE_MEMORY:-512m}"
+LABEL=proxyhub.purpose=restore-test
 
 log() { echo "proxyhub-restore-test: $*"; }
 
@@ -88,13 +95,21 @@ STATUS
   mv -f "$tmp" "$STATUS_FILE"
 }
 
+# Remove every throwaway container and volume (they carry the label). The flock above guarantees no
+# other restore test is using them.
+remove_throwaways() {
+  local -a ids
+  mapfile -t ids < <(docker ps -a -q --filter "label=$LABEL")
+  [ ${#ids[@]} -eq 0 ] || docker rm -f -v "${ids[@]}" >/dev/null 2>&1 || true
+  mapfile -t ids < <(docker volume ls -q --filter "label=$LABEL")
+  [ ${#ids[@]} -eq 0 ] || docker volume rm -f "${ids[@]}" >/dev/null 2>&1 || true
+  [ -z "$(docker ps -a -q --filter "label=$LABEL")$(docker volume ls -q --filter "label=$LABEL")" ]
+}
+
 finish() {
   local rc=$?
   if [ -n "$container" ]; then
-    docker rm -f -v "$container" >/dev/null 2>&1 || log "WARNING: could not remove $container"
-    if docker ps -a -q --filter "name=^${container}\$" | grep -q .; then
-      log "WARNING: throwaway container $container still exists"
-    fi
+    remove_throwaways || log "WARNING: a throwaway container or volume ($LABEL) still exists"
   fi
   write_result || log "could not write result"
   if [ "$ok" = 1 ]; then log "PASS: $reason"; else log "FAIL (exit $rc): $reason"; fi
@@ -116,6 +131,14 @@ expected="$(age -d -i "$KEY_FILE" "$manifest_file")" || fail "cannot decrypt the
 grep -q $'^public\\.alembic_version\t' <<<"$expected" || fail "manifest has no public.alembic_version"
 grep -q $'^public\\.settings\t' <<<"$expected" || fail "manifest has no public.settings"
 
+remove_throwaways || fail "cannot remove leftovers of an earlier restore test ($LABEL)"
+# Room on Docker's disk for the decrypted dump plus the restored database: 1 GiB + 10 x the dump.
+need=$((1024 * 1024 * 1024 + 10 * $(stat -c %s "$dump")))
+docker_root="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+avail="$(df -B1 --output=avail "$docker_root" | tail -1 | tr -d ' ')" ||
+  fail "cannot read the free disk under $docker_root"
+[[ "$avail" =~ ^[0-9]+$ ]] && [ "$avail" -ge "$need" ] || fail "not enough free disk under $docker_root for the restore test (need $need bytes)"
+
 image="${PROXYHUB_RESTORE_IMAGE:-}"
 if [ -z "$image" ]; then
   pg="$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" \
@@ -126,11 +149,16 @@ fi
 log "throwaway postgres image: $image"
 
 container="proxyhub-restore-test-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-# No network; trust auth is only reachable from inside this container; data and dump on tmpfs.
-docker run -d --name "$container" --label proxyhub.purpose=restore-test --network none \
-  --tmpfs /var/lib/postgresql/data:rw,size=2g --tmpfs /restore:rw,size=2g,mode=1777 \
+# No network; trust auth is only reachable from inside this container. Memory (+ swap) and CPU are
+# capped so the test cannot starve the panel. Data and dump: anonymous, labelled volumes (rm -v).
+docker run -d --name "$container" --label "$LABEL" --network none \
+  --memory "$MEMORY" --memory-swap "$MEMORY" --cpus 1 --pids-limit 256 \
+  --mount "type=volume,dst=/var/lib/postgresql/data,volume-label=$LABEL" \
+  --mount "type=volume,dst=/restore,volume-label=$LABEL" \
   -e POSTGRES_USER=proxyhub -e POSTGRES_DB=proxyhub -e POSTGRES_HOST_AUTH_METHOD=trust \
   "$image" >/dev/null || fail "could not start the throwaway postgres"
+docker exec "$container" sh -c 'chown postgres:postgres /restore && chmod 0700 /restore' ||
+  fail "cannot prepare /restore in the throwaway postgres"
 
 end=$((SECONDS + READY_TIMEOUT_S))
 # 127.0.0.1 answers only after the entrypoint's init phase (its temporary server is socket-only).
