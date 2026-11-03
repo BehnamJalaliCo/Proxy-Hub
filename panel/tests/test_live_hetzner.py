@@ -37,7 +37,15 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from test_fleet_support import assert_absent_from_database, make_vault
-from test_live_support import NODE_IMAGE, LiveWorld, NoHetzner, api_client, clean_live_tables, good_settings
+from test_live_support import (
+    NODE_IMAGE,
+    LiveWorld,
+    NoHetzner,
+    api_client,
+    clean_live_tables,
+    good_settings,
+    requires_node_image,
+)
 
 from proxyhub.accounts.hetzner_io import call_hetzner, observe_servers, read_offers
 from proxyhub.accounts.service import store_observation, store_offers
@@ -126,6 +134,9 @@ async def real_world(
         get_live_settings.cache_clear()
 
 
+@pytest.mark.db
+@pytest.mark.redis
+@requires_node_image
 async def test_executor_creates_and_retires_one_real_test_server(
     real_world: LiveWorld, token: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -211,6 +222,7 @@ def compose(*args: str, timeout: float = 120) -> subprocess.CompletedProcess[str
     )
 
 
+@requires_node_image
 async def test_real_test_node_reaches_ready_through_the_deployed_agent_site(
     token: str, agent_domain: str
 ) -> None:
