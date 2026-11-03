@@ -1,5 +1,9 @@
 {
 	admin off
+	# UDP 443 is not published/opened, so do not advertise HTTP/3 (alt-svc h3).
+	servers {
+		protocols h1 h2
+	}
 }
 
 {$PANEL_DOMAIN} {
@@ -9,7 +13,9 @@
 	@internal path /internal/* /healthz /livez
 	respond @internal 404
 
-	reverse_proxy api:8000
+	reverse_proxy api:8000 {
+		header_down -Via
+	}
 
 	header {
 		Strict-Transport-Security "max-age=31536000"

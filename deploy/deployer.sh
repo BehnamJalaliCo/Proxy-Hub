@@ -42,6 +42,15 @@ deploy_commit() {
   export PROXYHUB_GIT_COMMIT="$commit"
   compose build --quiet
   compose up -d --remove-orphans
+  # Caddyfile is bind-mounted and Caddy's admin API is off: restart Caddy when the file changed.
+  if [ -n "${PANEL_DOMAIN:-}" ]; then
+    local caddy_hash
+    caddy_hash="$(sha256sum "$CHECKOUT/deploy/Caddyfile" | cut -d" " -f1)"
+    if [ "$caddy_hash" != "$(cat "$STATE/caddyfile_hash" 2>/dev/null || echo none)" ]; then
+      compose restart caddy
+      echo "$caddy_hash" > "$STATE/caddyfile_hash"
+    fi
+  fi
   wait_healthy
 }
 
