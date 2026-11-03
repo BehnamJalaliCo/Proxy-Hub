@@ -82,3 +82,34 @@ func TestTelemtDownReportsNoCounters(t *testing.T) {
 		t.Fatalf("report = %v", m)
 	}
 }
+
+// The panel refuses a whole report if any string in it is shaped like an IP address (rule 7). A
+// version of another shape is reported as unknown, so the rest of the report still arrives.
+func TestOnlySafeVersionsAreReported(t *testing.T) {
+	for v, ok := range map[string]bool{
+		"3.5.16":      true,
+		"10.20.300":   true,
+		"3.5.16-rc1":  true,
+		"":            false,
+		"3.5.16.1":    false, // four numeric parts: an IPv4 shape
+		"3.5":         false,
+		"3.5.16-rc.1": false,
+		"3.5.16+abc":  false,
+		"::1":         false,
+		"3.5.16-a:b":  false,
+		"v3.5.16":     false,
+	} {
+		got := SafeVersion(v)
+		if (got != nil) != ok || (got != nil && *got != v) {
+			t.Errorf("SafeVersion(%q) = %v, want ok=%v", v, got, ok)
+		}
+	}
+	r := Build(Input{AgentVersion: "0.1.0", TelemtUp: true, Stats: metrics.Stats{Version: "3.5.16.1"}})
+	if r.Telemt.Version != nil {
+		t.Fatalf("IP-shaped version reported: %q", *r.Telemt.Version)
+	}
+	r = Build(Input{AgentVersion: "0.1.0", TelemtUp: true, Stats: metrics.Stats{Version: "3.5.16"}})
+	if r.Telemt.Version == nil || *r.Telemt.Version != "3.5.16" {
+		t.Fatalf("version = %v", r.Telemt.Version)
+	}
+}

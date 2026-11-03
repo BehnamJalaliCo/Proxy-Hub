@@ -55,9 +55,13 @@ type Agent struct {
 
 	appliedETag string
 	applyErr    string
-	pending     telemt.Action
-	telemtUp    bool
-	stats       metrics.Stats
+	// desiredErr is set while the panel's current desired state is refused. It is kept apart from
+	// applyErr because the cached state is still applied (successfully) meanwhile, and that must
+	// not hide the refusal from the panel.
+	desiredErr string
+	pending    telemt.Action
+	telemtUp   bool
+	stats      metrics.Stats
 }
 
 // localState is node-only bookkeeping, persisted as local.json (0600).
@@ -198,13 +202,9 @@ func (a *Agent) Register(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var telemtVersion *string
-	if a.cfg.TelemtVersion != "" {
-		v := a.cfg.TelemtVersion
-		telemtVersion = &v
-	}
 	resp, err := a.client.Register(ctx, panel.RegisterRequest{
-		Token: token, CSRPEM: string(csr), AgentVersion: a.version, TelemtVersion: telemtVersion,
+		Token: token, CSRPEM: string(csr), AgentVersion: a.version,
+		TelemtVersion: report.SafeVersion(a.cfg.TelemtVersion),
 	})
 	if err != nil {
 		return fmt.Errorf("register: %w", err)
@@ -268,12 +268,13 @@ func (a *Agent) Pull(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if body == nil { // 304: unchanged
+	if body == nil { // 304: the panel's current state is the one we hold
+		a.desiredErr = ""
 		return nil
 	}
 	doc, err := desired.Decode(body, a.cfg.NodeID)
 	if err != nil {
-		a.applyErr = "desired_invalid"
+		a.desiredErr = "desired_invalid"
 		return err
 	}
 	data, err := json.Marshal(cachedDesired{ETag: etag, Body: body})
@@ -283,7 +284,7 @@ func (a *Agent) Pull(ctx context.Context) error {
 	if err := fsutil.WriteAtomic(a.cfg.DesiredFile(), data, 0o600, fsutil.KeepOwner); err != nil {
 		return fmt.Errorf("cache desired state: %w", err)
 	}
-	a.doc, a.etag = doc, etag
+	a.doc, a.etag, a.desiredErr = doc, etag, ""
 	return nil
 }
 
@@ -371,11 +372,15 @@ func (a *Agent) Report(ctx context.Context) error {
 	if a.identity == nil {
 		return errors.New("not registered")
 	}
+	code := a.applyErr // a local apply failure first: the node may not even run its cached state
+	if code == "" {
+		code = a.desiredErr
+	}
 	r := report.Build(report.Input{
 		AgentVersion: a.version,
 		AppliedETag:  a.appliedETag,
-		ApplyOK:      a.applyErr == "",
-		ApplyError:   a.applyErr,
+		ApplyOK:      code == "",
+		ApplyError:   code,
 		TelemtUp:     a.telemtUp,
 		Stats:        a.stats,
 		System:       sysstat.Read(a.procRoot),

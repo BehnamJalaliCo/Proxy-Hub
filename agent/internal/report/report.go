@@ -6,6 +6,7 @@
 package report
 
 import (
+	"regexp"
 	"sort"
 
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/desired"
@@ -15,6 +16,20 @@ import (
 
 // Format is the report format version the panel accepts.
 const Format = 1
+
+// safeVersion is what a Telemt version sent to the panel may look like: three numeric parts and an
+// optional short suffix without dots or colons. Such a string can never be shaped like an IPv4 or
+// IPv6 address, which the panel refuses anywhere in a body (rule 7): a four-part "3.5.16.1" would
+// get every report rejected, so a version of any other shape is sent as unknown instead.
+var safeVersion = regexp.MustCompile(`^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}(-[0-9A-Za-z]{1,20})?$`)
+
+// SafeVersion returns v if it may be sent as a Telemt version, and nil otherwise.
+func SafeVersion(v string) *string {
+	if !safeVersion.MatchString(v) {
+		return nil
+	}
+	return &v
+}
 
 // Report is the whole body.
 type Report struct {
@@ -82,10 +97,7 @@ func Build(in Input) Report {
 		r.ApplyError = &code
 	}
 	if in.TelemtUp {
-		if in.Stats.Version != "" {
-			v := in.Stats.Version
-			r.Telemt.Version = &v
-		}
+		r.Telemt.Version = SafeVersion(in.Stats.Version)
 		r.Telemt.UptimeS = in.Stats.UptimeS
 		r.Telemt.ConnectionsTotal = in.Stats.ConnectionsTotal
 		r.Telemt.ConnectionsBadTotal = in.Stats.ConnectionsBadTotal
