@@ -26,6 +26,7 @@
 | 9 | [`docs/08_ROADMAP.md`](docs/08_ROADMAP.md) | **فازها از روز اول تا پایان**، با معیار «تمام شد» برای هر فاز |
 | 10 | [`docs/09_RISKS.md`](docs/09_RISKS.md) | خطرها و راه مقابله |
 | 11 | [`docs/10_IMPLEMENTATION_PLAN.md`](docs/10_IMPLEMENTATION_PLAN.md) | **پلن اجرایی وارسی‌شده:** واقعیت‌های سنجیده (قیمت روز هتزنر، تلگرام، Xray، MTProto، ایران)، گام‌های ساخت با آزمون «تمام شد»، هزینه‌ی واقعی، راه‌اندازی بی ترمینال |
+| 12 | [`docs/11_MTPROTO_SPONSOR.md`](docs/11_MTPROTO_SPONSOR.md) | **اولویت اول:** Telemt، @MTProxybot، اسپانسر `@ipoxxo`، فروش اسپانسر، چند tag |
 
 ## کجا شروع میشود و کجا تمام میشود؟
 - **شروع (روز اول):** پیش‌نیازهای مالک در [`docs/08_ROADMAP.md`](docs/08_ROADMAP.md) بخش «فاز ۰». بدون آن‌ها هیچ کدی نوشته نمیشود. مهم‌ترینشان: **project جدا در هتزنر و توکن همان project.**
