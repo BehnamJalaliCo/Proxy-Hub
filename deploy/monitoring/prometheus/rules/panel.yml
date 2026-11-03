@@ -21,7 +21,15 @@ groups:
           severity: critical
         annotations:
           summary: "worker پنل از کار افتاده است"
-          description: "آخرین ضربان worker {{ $value | humanizeDuration }} پیش بوده است (حد مجاز ۹۰ ثانیه). چرخه‌های کنترل اجرا نمیشوند."
+          # +Inf = the worker never wrote a heartbeat (own wording). Durations: Persian words and digits.
+          description: >-
+            {{ if gt $value 1e15 }}worker هنوز هیچ ضربانی در دیتابیس ثبت نکرده است{{ else }}آخرین ضربان worker
+            {{ $value | humanizeDuration | reReplaceAll " 0[hms]" ""
+            | reReplaceAll "([0-9.]+)s" "${1} ثانیه" | reReplaceAll "([0-9]+)m" "${1} دقیقه"
+            | reReplaceAll "([0-9]+)h" "${1} ساعت" | reReplaceAll "([0-9]+)d" "${1} روز"
+            | reReplaceAll "([^0-9 ]) ([0-9])" "${1} و ${2}"
+            | reReplaceAll "0" "۰" | reReplaceAll "1" "۱" | reReplaceAll "2" "۲" | reReplaceAll "3" "۳" | reReplaceAll "4" "۴"
+            | reReplaceAll "5" "۵" | reReplaceAll "6" "۶" | reReplaceAll "7" "۷" | reReplaceAll "8" "۸" | reReplaceAll "9" "۹" | reReplaceAll "[.]" "٫" }} پیش بوده است{{ end }} (حد مجاز ۹۰ ثانیه). چرخه‌های کنترل اجرا نمیشوند.
 
       - alert: PanelDatabaseDown
         expr: proxyhub_db_up == 0
@@ -52,7 +60,10 @@ groups:
           severity: warning
         annotations:
           summary: "دیسک سرور پنل نزدیک پر شدن است"
-          description: "{{ $value | printf \"%.0f\" }}٪ از دیسک {{ $labels.mountpoint }} پر است (حد هشدار ۸۵٪)."
+          description: >-
+            {{ $value | printf "%.0f"
+            | reReplaceAll "0" "۰" | reReplaceAll "1" "۱" | reReplaceAll "2" "۲" | reReplaceAll "3" "۳" | reReplaceAll "4" "۴"
+            | reReplaceAll "5" "۵" | reReplaceAll "6" "۶" | reReplaceAll "7" "۷" | reReplaceAll "8" "۸" | reReplaceAll "9" "۹" | reReplaceAll "[.]" "٫" }}٪ از دیسک {{ $labels.mountpoint }} پر است (حد هشدار ۸۵٪).
 
       - alert: MonitoringTargetDown
         expr: up{job!="proxyhub-api"} == 0
@@ -89,7 +100,15 @@ groups:
           severity: critical
         annotations:
           summary: "backup دیتابیس کهنه است"
-          description: "آخرین backup موفق {{ $value | humanizeDuration }} پیش بوده است (حد مجاز ۲۶ ساعت)."
+          # last_success 0 (no backup ever succeeded) makes the age decades: own wording.
+          description: >-
+            {{ if gt $value 1e9 }}هنوز هیچ backup موفقی ثبت نشده است{{ else }}آخرین backup موفق
+            {{ $value | humanizeDuration | reReplaceAll " 0[hms]" ""
+            | reReplaceAll "([0-9.]+)s" "${1} ثانیه" | reReplaceAll "([0-9]+)m" "${1} دقیقه"
+            | reReplaceAll "([0-9]+)h" "${1} ساعت" | reReplaceAll "([0-9]+)d" "${1} روز"
+            | reReplaceAll "([^0-9 ]) ([0-9])" "${1} و ${2}"
+            | reReplaceAll "0" "۰" | reReplaceAll "1" "۱" | reReplaceAll "2" "۲" | reReplaceAll "3" "۳" | reReplaceAll "4" "۴"
+            | reReplaceAll "5" "۵" | reReplaceAll "6" "۶" | reReplaceAll "7" "۷" | reReplaceAll "8" "۸" | reReplaceAll "9" "۹" | reReplaceAll "[.]" "٫" }} پیش بوده است{{ end }} (حد مجاز ۲۶ ساعت).
 
       - alert: BackupMetricsMissing
         expr: absent(proxyhub_backup_last_run_timestamp_seconds)
@@ -115,7 +134,14 @@ groups:
           severity: warning
         annotations:
           summary: "آزمون بازگردانی هفتگی اجرا نشده است"
-          description: "آخرین آزمون بازگردانی موفق {{ $value | humanizeDuration }} پیش بوده است (حد مجاز ۸ روز)."
+          description: >-
+            {{ if gt $value 1e9 }}هنوز هیچ آزمون بازگردانی موفقی ثبت نشده است{{ else }}آخرین آزمون بازگردانی موفق
+            {{ $value | humanizeDuration | reReplaceAll " 0[hms]" ""
+            | reReplaceAll "([0-9.]+)s" "${1} ثانیه" | reReplaceAll "([0-9]+)m" "${1} دقیقه"
+            | reReplaceAll "([0-9]+)h" "${1} ساعت" | reReplaceAll "([0-9]+)d" "${1} روز"
+            | reReplaceAll "([^0-9 ]) ([0-9])" "${1} و ${2}"
+            | reReplaceAll "0" "۰" | reReplaceAll "1" "۱" | reReplaceAll "2" "۲" | reReplaceAll "3" "۳" | reReplaceAll "4" "۴"
+            | reReplaceAll "5" "۵" | reReplaceAll "6" "۶" | reReplaceAll "7" "۷" | reReplaceAll "8" "۸" | reReplaceAll "9" "۹" | reReplaceAll "[.]" "٫" }} پیش بوده است{{ end }} (حد مجاز ۸ روز).
 
       - alert: RestoreTestMetricsMissing
         expr: absent(proxyhub_restore_test_last_run_timestamp_seconds)

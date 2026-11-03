@@ -26,7 +26,7 @@ tests:
               instance: "api:8000"
             exp_annotations:
               summary: "worker پنل از کار افتاده است"
-              description: "آخرین ضربان worker 3m 20s پیش بوده است (حد مجاز ۹۰ ثانیه). چرخه‌های کنترل اجرا نمیشوند."
+              description: "آخرین ضربان worker ۳ دقیقه و ۲۰ ثانیه پیش بوده است (حد مجاز ۹۰ ثانیه). چرخه‌های کنترل اجرا نمیشوند."
 
   # No heartbeat row at all reads as +Inf (alert); database unreachable reads as NaN (no worker alert;
   # PanelDatabaseDown covers it instead).
@@ -48,7 +48,7 @@ tests:
               instance: "api:8000"
             exp_annotations:
               summary: "worker پنل از کار افتاده است"
-              description: "آخرین ضربان worker +Inf پیش بوده است (حد مجاز ۹۰ ثانیه). چرخه‌های کنترل اجرا نمیشوند."
+              description: "worker هنوز هیچ ضربانی در دیتابیس ثبت نکرده است (حد مجاز ۹۰ ثانیه). چرخه‌های کنترل اجرا نمیشوند."
       - eval_time: 2m
         alertname: PanelDatabaseDown
         exp_alerts:
@@ -110,7 +110,7 @@ tests:
               mountpoint: /
             exp_annotations:
               summary: "دیسک سرور پنل نزدیک پر شدن است"
-              description: "90٪ از دیسک / پر است (حد هشدار ۸۵٪)."
+              description: "۹۰٪ از دیسک / پر است (حد هشدار ۸۵٪)."
 
   # Backups: a success at t=1h is fine for 26 h, then BackupTooOld; a failed run alerts at once.
   - interval: 5m
@@ -134,7 +134,7 @@ tests:
               instance: "node-exporter:9100"
             exp_annotations:
               summary: "backup دیتابیس کهنه است"
-              description: "آخرین backup موفق 1d 3h 0m 0s پیش بوده است (حد مجاز ۲۶ ساعت)."
+              description: "آخرین backup موفق ۱ روز و ۳ ساعت پیش بوده است (حد مجاز ۲۶ ساعت)."
       - eval_time: 24h
         alertname: BackupFailed
         exp_alerts: []
@@ -191,6 +191,48 @@ tests:
             exp_annotations:
               summary: "آزمون بازگردانی backup شکست خورد"
               description: "آخرین backup به‌درستی بازگردانده نشد؛ ممکن است backupها قابل استفاده نباشند. جزئیات: journalctl -u proxyhub-restore-test.service"
+
+  # Ages with every unit and zero parts dropped; "never succeeded" (last success 0, i.e. decades
+  # ago; promtool's clock starts at 0, so a timestamp far before it stands in for that).
+  - interval: 5m
+    input_series:
+      - series: 'proxyhub_restore_test_last_success_timestamp_seconds{job="node", instance="node-exporter:9100"}'
+        values: "3595x3000"
+      - series: 'proxyhub_backup_last_success_timestamp_seconds{job="node", instance="node-exporter:9100"}'
+        values: "-1700000000x20"
+      - series: 'proxyhub_worker_heartbeat_age_seconds{job="proxyhub-api", instance="api:8000"}'
+        values: "3725x20"
+    alert_rule_test:
+      - eval_time: 8d2h
+        alertname: RestoreTestTooOld
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node
+              instance: "node-exporter:9100"
+            exp_annotations:
+              summary: "آزمون بازگردانی هفتگی اجرا نشده است"
+              description: "آخرین آزمون بازگردانی موفق ۸ روز و ۱ ساعت و ۵ ثانیه پیش بوده است (حد مجاز ۸ روز)."
+      - eval_time: 30m
+        alertname: BackupTooOld
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node
+              instance: "node-exporter:9100"
+            exp_annotations:
+              summary: "backup دیتابیس کهنه است"
+              description: "هنوز هیچ backup موفقی ثبت نشده است (حد مجاز ۲۶ ساعت)."
+      - eval_time: 30m
+        alertname: WorkerHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: proxyhub-api
+              instance: "api:8000"
+            exp_annotations:
+              summary: "worker پنل از کار افتاده است"
+              description: "آخرین ضربان worker ۱ ساعت و ۲ دقیقه و ۵ ثانیه پیش بوده است (حد مجاز ۹۰ ثانیه). چرخه‌های کنترل اجرا نمیشوند."
 
   # Watchdog is always firing (it feeds the external dead man's switch, never Telegram).
   - interval: 1m
