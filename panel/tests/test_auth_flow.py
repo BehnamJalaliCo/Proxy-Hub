@@ -553,6 +553,38 @@ async def test_idle_throttle_rows_are_pruned_without_waiting_on_busy_ones(
     assert {"u:old-busy", "u:recent", "u:still-locked", "global"} <= keys
 
 
+async def test_login_survives_its_throttle_row_being_pruned_mid_attempt(
+    env: Env, client: AsyncClient
+) -> None:
+    """Reviewer race: prune deletes the (idle) username row between ensure_rows and the row lock.
+    The login must re-create the row and finish normally, not answer 500."""
+    from proxyhub.auth import throttle
+
+    owner = await do_setup(env, client)
+    code = await env.fresh_code(owner.secret)
+    key = throttle.user_key(USERNAME)
+    await env.rows("INSERT INTO auth_throttle (key) VALUES (:k) ON CONFLICT DO NOTHING", k=key)
+    async with env.engine.connect() as pruner, make_client() as c:
+        await pruner.execute(text("SELECT key FROM auth_throttle WHERE key = :k FOR UPDATE"), {"k": key})
+        attempt = asyncio.create_task(login(c, totp_code=code))
+        for _ in range(50):  # wait until the login is blocked on the row lock
+            waiting = (
+                await env.rows(
+                    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                    "AND query ILIKE '%auth_throttle%FOR UPDATE%'"
+                )
+            )[0][0]
+            if waiting:
+                break
+            await asyncio.sleep(0.1)
+        assert waiting and not attempt.done()
+        await pruner.execute(text("DELETE FROM auth_throttle WHERE key = :k"), {"k": key})
+        await pruner.commit()
+        r = await asyncio.wait_for(attempt, timeout=10)
+    assert r.status_code == 200, r.text
+    assert await env.rows("SELECT key FROM auth_throttle WHERE key = :k", k=key)
+
+
 # --- CSRF and sessions ---------------------------------------------------------------------
 
 

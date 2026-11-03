@@ -80,10 +80,17 @@ async def ensure_rows(session: AsyncSession, keys: Sequence[str]) -> None:
 
 
 async def load(session: AsyncSession, key: str, *, for_update: bool) -> AuthThrottle:
+    """The counter row for ``key``. If :func:`prune` deleted it after :func:`ensure_rows` (an idle
+    row is prunable), it is inserted again in this transaction and read once more, so a login that
+    races a prune never fails with a 500."""
     stmt = select(AuthThrottle).where(AuthThrottle.key == key).execution_options(populate_existing=True)
     if for_update:
         stmt = stmt.with_for_update()
-    return (await session.execute(stmt)).scalar_one()
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    if row is None:
+        await ensure_rows(session, [key])
+        row = (await session.execute(stmt)).scalar_one()
+    return row
 
 
 def retry_after_s(row: AuthThrottle | None, now: datetime) -> int:
