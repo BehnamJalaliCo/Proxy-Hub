@@ -98,22 +98,28 @@ def ours(name: str, content: str) -> tuple[DnsRecord, OwnedRow]:
 # --- parsing real shapes ------------------------------------------------------------------------
 
 
-def test_a_token_that_sees_more_than_one_domain_is_refused() -> None:
-    """D34: the owner limits the token to the one proxy domain; seeing more is refused."""
-    one = [parse_zone(cf_zone_json(ZONE_ID, "example.com"))]
-    two = [*one, parse_zone(cf_zone_json(ZONE_ID_2, "example.net"))]
-    assert service.MAX_ZONES == 1
-    assert service.zone_scope_problem([]) is None  # reported separately as missing Zone:Read
-    assert service.zone_scope_problem(one) is None
-    assert service.zone_scope_problem(two) == "cf_token_too_broad"
+def test_a_token_that_sees_more_than_one_account_is_refused() -> None:
+    """D35: every zone of the ONE Proxy-Hub account is fine; zones of a second account are not."""
+
+    def zone(zone_id: str, name: str, account: str) -> Any:
+        raw = cf_zone_json(zone_id, name)
+        raw["account"] = {"id": account, "name": "x"}
+        return parse_zone(raw)
+
+    a, b = "a" * 32, "b" * 32
+    many = [zone(ZONE_ID, "example.com", a), zone(ZONE_ID_2, "example.net", a)]
+    assert service.account_scope_problem([]) is None  # reported separately as missing Zone:Read
+    assert service.account_scope_problem(many) is None
+    other = [*many, zone("c" * 32, "elsewhere.org", b)]
+    assert service.account_scope_problem(other) == "cf_token_multiple_accounts"
 
 
-def test_too_broad_token_has_a_persian_message_and_a_400() -> None:
+def test_multiple_accounts_token_has_a_persian_message_and_a_400() -> None:
     from proxyhub.api import routes_cloudflare
 
-    assert routes_cloudflare.STATUS["cf_token_too_broad"] == 400
-    text = routes_cloudflare.MESSAGES_FA["cf_token_too_broad"]
-    assert "Specific zone" in text and "دامنه" in text
+    assert routes_cloudflare.STATUS["cf_token_multiple_accounts"] == 400
+    text = routes_cloudflare.MESSAGES_FA["cf_token_multiple_accounts"]
+    assert "All zones from an account" in text and "Proxy-Hub" in text
 
 
 def test_parse_zone_and_record_shapes() -> None:

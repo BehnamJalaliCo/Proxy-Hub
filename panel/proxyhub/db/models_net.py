@@ -67,7 +67,7 @@ class CfState(Base):
     id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, autoincrement=False, default=1)
     verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Last problem as a contract error code (cf_token_invalid, cf_token_too_broad,
+    # Last problem as a contract error code (cf_token_invalid, cf_token_multiple_accounts,
     # cf_permissions_missing, cf_unavailable).
     error: Mapped[str | None] = mapped_column(String(40))
     missing: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)

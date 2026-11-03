@@ -12,7 +12,7 @@ describe("error bodies", () => {
     expect(toApiError(409, { error: "gate_refused", reasons: ["kill_switch_on"] }).messageFa).toMatch(/قفل‌های ایمنی/);
     expect(toApiError(400, { error: "bot_not_admin" }).messageFa).toMatch(/ادمین/);
     expect(toApiError(400, { error: "cf_permissions_missing", missing: ["DNS Write"] }).messageFa).toMatch(/Cloudflare/);
-    expect(toApiError(400, { error: "cf_token_too_broad" }).messageFa).toMatch(/Specific zone/);
+    expect(toApiError(400, { error: "cf_token_multiple_accounts" }).messageFa).toMatch(/All zones from an account/);
     // The server's own sentence always wins.
     expect(toApiError(400, { error: "bot_not_admin", message_fa: "متن سرور" }).messageFa).toBe("متن سرور");
   });
