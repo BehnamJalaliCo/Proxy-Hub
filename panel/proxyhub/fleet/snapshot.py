@@ -99,6 +99,7 @@ async def load_offers(db: Db) -> tuple[AccountOffer, ...]:
                 deprecated=o.deprecated,
                 available=o.available,
             ),
+            fetched_at=o.fetched_at,
         )
         for o in rows
     )

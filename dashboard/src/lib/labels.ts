@@ -86,6 +86,7 @@ const REASON: Record<string, string> = {
   spare_in_use: "جای خالی در حال استفاده است",
   no_other_location: "location دیگری در دسترس نیست",
   account_observation_stale: "داده‌ی حساب کهنه است",
+  prices_stale: "قیمت‌های هتزنر کهنه است (بیش از ۶ ساعت)",
   no_hetzner_id: "شناسه‌ی هتزنر ثبت نشده",
   server_not_observed: "سرور در هتزنر دیده نشد",
   no_active_account: "هیچ حساب هتزنر فعالی نیست",

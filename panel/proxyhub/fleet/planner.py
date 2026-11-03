@@ -44,6 +44,9 @@ from proxyhub.settings_schema import FleetSettings
 
 SPARE_SLOTS = 1  # D14: 9 active + 1 spare
 OBSERVATION_MAX_AGE = timedelta(minutes=30)  # account_guard checks every 10 minutes
+# The pricing loop refreshes offers hourly. Older prices may be lower than today's (Hetzner raised
+# prices twice in 2026), so budget projections built on them could let a creation exceed the cap.
+OFFER_MAX_AGE = timedelta(hours=6)
 REPLACEMENT_SETTLE = timedelta(minutes=2)  # DNS TTL 60 s + margin (section 3.11 step 4)
 CREATION_WINDOW = timedelta(hours=1)
 
@@ -79,6 +82,9 @@ class NodeSnapshot(NodeCostInput):
 class AccountOffer:
     account_id: str
     offer: LiveOffer
+    # When the pricing loop stored this offer. The database always has it (NOT NULL); None only in
+    # pure planner tests that do not model price age.
+    fetched_at: datetime | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -225,6 +231,8 @@ class _Planner:
             self.global_reasons.append("projection_incomplete")
         if not self.s.locations:
             self.global_reasons.append("no_location_configured")
+        if any(ao.fetched_at is not None and self.now - ao.fetched_at > OFFER_MAX_AGE for ao in snap.offers):
+            self.global_reasons.append("prices_stale")  # fail closed until the pricing loop recovers
         self.accounts_by_id = {a.id: a for a in snap.accounts}
 
     # --- accounts and placement -------------------------------------------------------------

@@ -232,6 +232,20 @@ def full_fleet(**overrides: dict[str, object]) -> list[NodeSnapshot]:
     return nodes
 
 
+def test_stale_prices_block_every_creation() -> None:
+    """Prices older than OFFER_MAX_AGE (pricing loop broken) may be lower than today's: fail closed."""
+    from proxyhub.fleet.planner import OFFER_MAX_AGE
+
+    base = offers_for("acc-a")
+    fresh = tuple(AccountOffer(a.account_id, a.offer, NOW - timedelta(minutes=50)) for a in base)
+    assert any(a.allowed for a in creates(plan_for(open_settings(), offers=fresh)))
+    too_old = NOW - OFFER_MAX_AGE - timedelta(minutes=1)
+    old = tuple(AccountOffer(a.account_id, a.offer, too_old) for a in base)
+    blocked = creates(plan_for(open_settings(), offers=old))
+    assert blocked and not any(a.allowed for a in blocked)
+    assert all("prices_stale" in a.reasons for a in blocked)
+
+
 def test_healthy_full_fleet_plans_nothing() -> None:
     plan = plan_for(open_settings(), nodes=tuple(full_fleet()))
     assert not creates(plan) and all(a.reasons == ("slot_healthy",) for a in plan.actions)
