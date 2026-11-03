@@ -327,6 +327,17 @@ async def test_booting_registering_ready_and_heartbeat(world: LiveWorld) -> None
     node = await world.node(node_id)
     assert node["state"] == "ready" and node["ready_at"] is not None
 
+    # The panel changed the desired state; the agent applies it with its next poll and report.
+    # That lag is no fault: a ready node stays ready while its reports keep working.
+    await world.rows(
+        "UPDATE agent_nodes SET last_served_etag = :e WHERE node_id = :n", e='"' + "c" * 64 + '"', n=node_id
+    )
+    await executor.run_once(world.engine)
+    assert (await world.node(node_id))["state"] == "ready"
+    await world.rows(
+        "UPDATE agent_nodes SET last_served_etag = last_applied_etag WHERE node_id = :n", n=node_id
+    )
+
     # Telemt configured for this node: ready needs Telemt up in the latest report.
     await world.rows(
         "INSERT INTO telemt_node_configs (node_id, ports, tls_domain, mode_classic, mode_secure, mode_tls) "

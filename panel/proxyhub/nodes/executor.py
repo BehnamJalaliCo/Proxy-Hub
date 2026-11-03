@@ -117,7 +117,15 @@ class NodeRef:
 class AgentHealth:
     registered: bool
     heartbeat_fresh: bool
-    good_report: bool
+    # A recent report since registration: the local apply worked and Telemt runs where it must.
+    working: bool
+    # ... and it applied exactly the desired state the panel served last (needed to become ready;
+    # right after the panel changes the desired state it lags one poll + report, which is no fault).
+    current: bool
+
+    @property
+    def good_report(self) -> bool:
+        return self.working and self.current
 
 
 def _transient(failure: HetznerFailure) -> bool:
@@ -528,17 +536,15 @@ class NodeExecutor:
     async def _health(self, s: AsyncSession, node_id: uuid.UUID, now: datetime) -> AgentHealth:
         agent = await s.get(AgentNode, node_id, populate_existing=True)
         if agent is None:
-            return AgentHealth(registered=False, heartbeat_fresh=False, good_report=False)
+            return AgentHealth(registered=False, heartbeat_fresh=False, working=False, current=False)
         fresh = agent.last_seen_at is not None and agent.last_seen_at >= now - HEARTBEAT_TIMEOUT
-        good = (
+        working = (
             agent.last_report_at is not None
             and agent.last_report_at >= agent.registered_at
             and agent.last_report_at >= now - HEARTBEAT_TIMEOUT
             and agent.last_apply_ok is True
-            and agent.last_applied_etag is not None
-            and agent.last_applied_etag == agent.last_served_etag
         )
-        if good and await s.get(TelemtNodeConfig, node_id) is not None:
+        if working and await s.get(TelemtNodeConfig, node_id) is not None:
             telemt_up = (
                 await s.execute(
                     select(AgentNodeReport.telemt_up)
@@ -547,8 +553,9 @@ class NodeExecutor:
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            good = telemt_up is True  # a node that must run Telemt is ready only with Telemt up
-        return AgentHealth(registered=True, heartbeat_fresh=fresh, good_report=good)
+            working = telemt_up is True  # a node that must run Telemt works only with Telemt up
+        current = agent.last_applied_etag is not None and agent.last_applied_etag == agent.last_served_etag
+        return AgentHealth(registered=True, heartbeat_fresh=fresh, working=working, current=current)
 
     async def _since(self, s: AsyncSession, row: Node) -> datetime:
         return (await self._op(s, row)).state_since
@@ -622,7 +629,7 @@ class NodeExecutor:
             health = await self._health(s, node.id, now)
             if not health.heartbeat_fresh:
                 await transition(s, row, S.UNHEALTHY, now, reason="heartbeat_lost")
-            elif not health.good_report:
+            elif not health.working:
                 await transition(s, row, S.UNHEALTHY, now, reason="report_not_good")
             await s.commit()
 
