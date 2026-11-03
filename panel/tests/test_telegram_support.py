@@ -7,6 +7,9 @@
   api.telegram.org on 2026-11-03. They are DATA for the parser, never served by a fake server.
 * ``closed_port_bot`` points the real client at a local port nobody listens on: a real
   connection refusal, used to exercise our network-failure handling.
+* ``SilentServer`` is a real local TCP server that reads a request and never answers anything (a
+  hung endpoint), used to exercise deadlines and cancellation. It sends nothing back, so it does
+  not imitate Telegram.
 """
 
 from __future__ import annotations
@@ -16,9 +19,10 @@ import functools
 import logging
 import secrets
 import socket
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from io import StringIO
+from types import TracebackType
 from typing import Any
 
 import httpx
@@ -99,6 +103,52 @@ def closed_port_bot() -> Any:
         return BotClient(token, base_url=f"http://127.0.0.1:{port}")
 
     return make
+
+
+class SilentServer:
+    """A real TCP server on 127.0.0.1 that accepts, reads and never answers (a hung endpoint)."""
+
+    def __init__(self) -> None:
+        self.connections = 0
+        self._server: asyncio.Server | None = None
+        self._writers: list[asyncio.StreamWriter] = []
+
+    async def __aenter__(self) -> SilentServer:
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        return self
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
+    ) -> None:
+        for writer in self._writers:
+            writer.close()
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+
+    @property
+    def port(self) -> int:
+        assert self._server is not None
+        return int(self._server.sockets[0].getsockname()[1])
+
+    def bot(self) -> Callable[[SecretValue], BotClient]:
+        port = self.port
+
+        def make(token: SecretValue) -> BotClient:
+            return BotClient(token, base_url=f"http://127.0.0.1:{port}")
+
+        return make
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.connections += 1
+        self._writers.append(writer)
+        try:
+            while await reader.read(65536):  # read and drop the request; never write an answer
+                pass
+        except ConnectionError:
+            pass
+        finally:
+            writer.close()
 
 
 def real_bot(token: SecretValue | str) -> BotClient:

@@ -13,8 +13,9 @@ the worker stopped (WorkerHeartbeatStale).
 * :class:`TargetCache` remembers the last bot token + owner chat it read from the database, in this
   process's memory only, so an alert can still go out while PostgreSQL is down (PanelDatabaseDown).
 * :func:`send_direct` retries briefly: up to 3 attempts, waiting for a 429 ``retry_after`` of at
-  most 10 s. An alert may arrive twice if Telegram's answer is lost after it was sent (at least
-  once; a duplicate alert is harmless, a lost one is not).
+  most 10 s, all within a 25 s deadline (under Alertmanager's 30 s webhook timeout). An alert may
+  arrive twice if Telegram's answer is lost after it was sent (at least once; a duplicate alert is
+  harmless, a lost one is not).
 """
 
 from __future__ import annotations
@@ -36,6 +37,8 @@ from proxyhub.vault import SecretValue
 DEDUPE_WINDOW: Final = timedelta(minutes=5)
 SEND_ATTEMPTS: Final = 3
 MAX_RETRY_WAIT_S: Final = 10
+# Whole send_direct call, retries and waits included. Alertmanager gives a webhook 30 s.
+DIRECT_DEADLINE_S: Final = 25.0
 MAX_ALERTS: Final = 1000
 MAX_SUMMARY_CHARS: Final = 300
 MAX_DESCRIPTION_CHARS: Final = 1000
@@ -212,10 +215,32 @@ async def send_direct(
     *,
     attempts: int = SEND_ATTEMPTS,
     max_retry_wait_s: int = MAX_RETRY_WAIT_S,
+    deadline_s: float | None = DIRECT_DEADLINE_S,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> int:
     """Send ``text`` to the owner now; returns the message_id. Retries network/5xx errors and short
-    429 waits; raises the last error otherwise (Unauthorized, Forbidden, BadRequest at once)."""
+    429 waits; raises the last error otherwise (Unauthorized, Forbidden, BadRequest at once).
+
+    The whole call ends within ``deadline_s``: past it, :class:`NetworkError` with kind
+    ``"DeadlineExceeded"`` (``maybe_sent`` True: the last request may have reached Telegram)."""
+    timer = asyncio.timeout(deadline_s)
+    try:
+        async with timer:
+            return await _send_with_retries(make_bot, target, text, attempts, max_retry_wait_s, sleep)
+    except TimeoutError:
+        if not timer.expired():
+            raise
+        raise NetworkError("sendMessage", "DeadlineExceeded", maybe_sent=True) from None
+
+
+async def _send_with_retries(
+    make_bot: BotFactory,
+    target: OwnerTarget,
+    text: str,
+    attempts: int,
+    max_retry_wait_s: int,
+    sleep: Callable[[float], Awaitable[None]],
+) -> int:
     async with make_bot(target.token) as bot:
         for attempt in range(1, attempts + 1):
             try:

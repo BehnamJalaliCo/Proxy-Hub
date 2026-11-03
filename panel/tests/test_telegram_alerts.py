@@ -4,6 +4,7 @@ Alertmanager sent (tests/test_telegram_captured.py), dedupe, retry and the datab
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,6 +22,7 @@ from test_telegram_captured import (
     RESOLVED_WORKER_STALE,
 )
 from test_telegram_support import (
+    SilentServer,
     all_logs,
     assert_no_token,
     clean_telegram_tables,
@@ -35,6 +37,7 @@ from proxyhub.telegram import store
 from proxyhub.telegram.alerts import (
     ALERT_DEDUPER,
     ALERT_TARGETS,
+    DIRECT_DEADLINE_S,
     AlertmanagerWebhook,
     AmAlert,
     Deduper,
@@ -189,6 +192,20 @@ async def test_send_direct_retries_network_errors_then_gives_up() -> None:
         await send_direct(closed_port_bot(), target, "x", sleep=no_wait)
     assert info.value.maybe_sent is False  # connection refused: nothing was sent
     assert sleeps == [1.0, 2.0]  # 3 attempts
+
+
+async def test_send_direct_ends_at_its_deadline() -> None:
+    # Alertmanager waits 30 s for a webhook; the whole send, retries included, must end before.
+    assert DIRECT_DEADLINE_S <= 25
+    target = OwnerTarget(token=SecretValue(random_token()), chat_id=42)
+    async with SilentServer() as hung:  # a real server that accepts the request and never answers
+        started = time.monotonic()
+        with pytest.raises(NetworkError) as info:
+            await send_direct(hung.bot(), target, "x", deadline_s=0.5)
+        elapsed = time.monotonic() - started
+        assert hung.connections == 1
+    assert info.value.kind == "DeadlineExceeded" and info.value.maybe_sent is True
+    assert 0.4 < elapsed < 5
 
 
 # --- the route over HTTP -------------------------------------------------------------------------
