@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +29,9 @@ from proxyhub.pki.store import ensure_ca_certificate
 ACTOR = "agent_api"
 # A renewal may arrive this much before the two-thirds point (agent clock a little ahead).
 RENEW_EARLY_TOLERANCE = timedelta(hours=1)
+# last_seen_at moves at most this often: nodes poll every few seconds, and a row write per request
+# (about 70 a second at 1000 nodes) buys nothing a heartbeat needs.
+LAST_SEEN_RESOLUTION = timedelta(seconds=30)
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 
 
@@ -223,5 +226,12 @@ async def authenticate(session: AsyncSession, fingerprint: str, now: datetime) -
         .values(revoked_at=now, revoked_reason="superseded")
         .execution_options(synchronize_session=False)
     )
-    await session.execute(update(AgentNode).where(AgentNode.node_id == node_id).values(last_seen_at=now))
+    await session.execute(
+        update(AgentNode)
+        .where(
+            AgentNode.node_id == node_id,
+            or_(AgentNode.last_seen_at.is_(None), AgentNode.last_seen_at <= now - LAST_SEEN_RESOLUTION),
+        )
+        .values(last_seen_at=now)
+    )
     return AgentIdentity(node_id=node_id, certificate_id=cert_id, not_before=not_before, not_after=not_after)

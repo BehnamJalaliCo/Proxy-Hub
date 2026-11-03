@@ -171,8 +171,10 @@ def _etag_matches(header: str | None, etag: str) -> bool:
 async def desired(request: Request, identity: Identity, runtime: Runtime, session: Session) -> Response:
     body = canonical_json(await build_desired_state(session, runtime.seal_key, identity.node_id))
     etag = etag_for(body)
-    await session.execute(
-        update(AgentNode).where(AgentNode.node_id == identity.node_id).values(last_served_etag=etag)
+    await session.execute(  # written only when it changes: polls must not rewrite the row
+        update(AgentNode)
+        .where(AgentNode.node_id == identity.node_id, AgentNode.last_served_etag.is_distinct_from(etag))
+        .values(last_served_etag=etag)
     )
     await session.commit()
     headers = {"ETag": etag, **NO_STORE}

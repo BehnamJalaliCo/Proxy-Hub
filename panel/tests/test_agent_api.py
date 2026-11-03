@@ -633,6 +633,32 @@ async def test_report_needs_identity_and_size_limit(env: Env) -> None:
     ).status_code == 400
 
 
+async def test_polling_does_not_rewrite_the_node_row(env: Env) -> None:
+    # At 1000 nodes polling every 15 s, a row write per request would be ~70 writes a second for
+    # nothing: last_served_etag is written only when it changes, last_seen_at at most every 30 s.
+    node_id, fp = await registered(env)
+    first = await env.client.get("/agent/v1/desired", headers=env.headers(fp))
+    assert first.status_code == 200
+    sql = "SELECT xmin::text, last_seen_at, last_served_etag FROM agent_nodes WHERE node_id = :n"
+    before = await env.rows(sql, n=node_id)
+    assert before[0][2] == first.headers["etag"]
+    for _ in range(3):
+        assert (await env.client.get("/agent/v1/desired", headers=env.headers(fp))).status_code == 200
+        conditional = {**env.headers(fp), "If-None-Match": first.headers["etag"]}
+        assert (await env.client.get("/agent/v1/desired", headers=conditional)).status_code == 304
+    assert await env.rows(sql, n=node_id) == before  # same row version: no write at all
+
+    # Once the resolution has passed, the next request moves last_seen_at again.
+    await env.rows(
+        "UPDATE agent_nodes SET last_seen_at = last_seen_at - interval '31 seconds' WHERE node_id = :n",
+        n=node_id,
+    )
+    aged = (await env.rows(sql, n=node_id))[0][1]
+    assert (await env.client.get("/agent/v1/desired", headers=env.headers(fp))).status_code == 200
+    seen = (await env.rows(sql, n=node_id))[0][1]
+    assert seen > aged and seen > before[0][1]
+
+
 # --- hostile nesting -----------------------------------------------------------------------------
 # json.loads accepts thousands of nesting levels (Python's recursion limit is 1000); none of that may
 # ever reach code that walks the document recursively, or anyone could turn a request into a 500.
