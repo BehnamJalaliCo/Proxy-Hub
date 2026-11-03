@@ -22,11 +22,17 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         if "hetzner" in item.keywords and not os.environ.get("PROXYHUB_HETZNER_TEST_TOKEN_FILE"):
             item.add_marker(pytest.mark.skip(reason="runs only on the panel server with a real account"))
         if "telegram" in item.keywords and not os.environ.get("PROXYHUB_TELEGRAM_TEST_TOKEN_FILE"):
-            item.add_marker(pytest.mark.skip(reason="needs a real test bot (PROXYHUB_TELEGRAM_TEST_TOKEN_FILE)"))
+            item.add_marker(
+                pytest.mark.skip(reason="needs a real test bot (PROXYHUB_TELEGRAM_TEST_TOKEN_FILE)")
+            )
         if "cloudflare" in item.keywords and not os.environ.get("PROXYHUB_CLOUDFLARE_TEST_TOKEN_FILE"):
-            item.add_marker(pytest.mark.skip(reason="needs a real Cloudflare token (PROXYHUB_CLOUDFLARE_TEST_TOKEN_FILE)"))
+            item.add_marker(
+                pytest.mark.skip(reason="needs a real Cloudflare token (PROXYHUB_CLOUDFLARE_TEST_TOKEN_FILE)")
+            )
         if "globalping" in item.keywords and os.environ.get("PROXYHUB_GLOBALPING_TESTS") != "1":
-            item.add_marker(pytest.mark.skip(reason="real Globalping API calls (set PROXYHUB_GLOBALPING_TESTS=1)"))
+            item.add_marker(
+                pytest.mark.skip(reason="real Globalping API calls (set PROXYHUB_GLOBALPING_TESTS=1)")
+            )
 
 
 @pytest.fixture(scope="session")
