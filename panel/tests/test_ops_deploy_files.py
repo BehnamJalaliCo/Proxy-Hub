@@ -225,3 +225,24 @@ def test_alertmanager_runs_behind_the_redactor() -> None:
     assert "redact.awk" in (ALERTMANAGER / "Dockerfile").read_text(encoding="utf-8")
     safe_logs = (DEPLOY / "monitoring" / "safe_logs.sh").read_text(encoding="utf-8")
     assert "alertmanager/redact.awk" in safe_logs and "cat " not in safe_logs
+
+
+SECRETISH_ENV = re.compile(r"PASS(WORD)?|TOKEN|SECRET|API_?KEY|PRIVATE", re.IGNORECASE)
+
+
+def test_no_secret_is_passed_through_any_service_environment() -> None:
+    """P05 note: alloy reads /var/lib/docker/containers read-only, and each container's
+    config.v2.json there holds its environment. So a secret must never reach a container by
+    environment variable, only as a ``*_FILE`` path to a mounted secret under /run/secrets/."""
+    checked = 0
+    for name, svc in _compose()["services"].items():
+        env = svc.get("environment") or {}
+        if isinstance(env, list):
+            env = dict(item.split("=", 1) if "=" in item else (item, "") for item in env)
+        for key, value in env.items():
+            checked += 1
+            if SECRETISH_ENV.search(key):
+                assert key.endswith("_FILE"), f"{name}: {key} must be a *_FILE secret path"
+                assert str(value).startswith("/run/secrets/"), f"{name}: {key} must point into /run/secrets/"
+    assert checked >= 5  # the check really saw the services' environments
+    assert SECRETISH_ENV.search("REDIS_PASSWORD") and SECRETISH_ENV.search("bot_token")
