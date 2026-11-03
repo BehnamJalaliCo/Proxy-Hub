@@ -6,16 +6,20 @@ counting, the 3-in-a-row threshold and "nobody to tell / not delivered" are chec
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from test_fleet_support import make_vault
 from test_telegram_support import (
     LiveApi,
+    SilentServer,
     all_logs,
     assert_no_token,
     clean_telegram_tables,
@@ -90,3 +94,44 @@ async def test_three_failures_in_a_row_then_tell_the_owner(
     await api.start()
     await dog.try_run_once(engine)
     assert (dog.failures, dog.alerted) == (0, False)
+
+
+async def test_no_transaction_stays_open_while_telegram_is_called(
+    engine: AsyncEngine, api: LiveApi, vault: Vault
+) -> None:
+    async with engine.begin() as conn:
+        now = datetime.now(UTC)
+        await store.save_bot(
+            conn,
+            vault,
+            info=store.BotInfo(id=1234567, username="proxyhub_test_bot"),
+            token=SecretValue(random_token()),
+            now=now,
+        )
+        await store.set_owner_chat(conn, 111222333, now)
+    await api.stop()
+    async with SilentServer() as hung:  # Telegram that never answers: the send hangs
+        dog = ApiWatchdogReconciler(
+            url=api.url, failures_to_alert=1, vault_factory=lambda: vault, bot_factory=hung.bot()
+        )
+        task = asyncio.create_task(dog.try_run_once(engine))
+        try:
+            for _ in range(200):
+                if hung.connections:
+                    break
+                await asyncio.sleep(0.05)
+            assert hung.connections == 1  # the alert is being sent right now
+            async with engine.connect() as conn:
+                idle_in_tx = (
+                    await conn.execute(
+                        text(
+                            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                            "AND state LIKE 'idle in transaction%' AND pid <> pg_backend_pid()"
+                        )
+                    )
+                ).scalar_one()
+            assert idle_in_tx == 0
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task

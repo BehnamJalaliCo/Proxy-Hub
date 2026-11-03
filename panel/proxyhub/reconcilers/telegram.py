@@ -8,16 +8,20 @@
   Persian alert goes DIRECTLY to the owner (bot token from the vault), and a recovery message when
   the API answers again.
 
-The first two hold their advisory lock without an open transaction while they talk to Telegram
-(a 25 s long poll must not keep a transaction idle).
+All three hold their advisory lock without an open transaction while they talk to Telegram or
+probe the API (a 25 s long poll or a slow send must not keep a transaction idle). The updates loop
+stops its long poll as soon as the worker is asked to stop (Docker's stop grace is 10 s); the
+updates of a cancelled poll stay on Telegram's side because the offset is not advanced.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import datetime
-from typing import Final
+from typing import Any, Final
 
 import httpx
 from sqlalchemy import text
@@ -123,6 +127,11 @@ class TelegramUpdatesReconciler(Reconciler):
         self.vault = _VaultOnce(vault_factory)
         self.bot_factory = bot_factory
         self.long_poll_s = long_poll_s
+        self._stop: asyncio.Event | None = None
+
+    async def loop(self, engine: AsyncEngine, stop: asyncio.Event) -> None:
+        self._stop = stop  # a long poll in flight ends as soon as the worker is asked to stop
+        await super().loop(engine, stop)
 
     async def run_once(self, conn: AsyncConnection) -> None:
         raise NotImplementedError("this loop manages its own transactions (try_run_once)")
@@ -132,6 +141,23 @@ class TelegramUpdatesReconciler(Reconciler):
             await self.poll(engine)
 
         return await run_locked(engine, self.name, step)
+
+    async def _unless_stopping[T](self, call: Coroutine[Any, Any, T]) -> T | None:
+        """``call``'s result, or None if the worker is asked to stop first (``call`` is cancelled)."""
+        stop = self._stop
+        if stop is None:
+            return await call
+        task = asyncio.ensure_future(call)
+        waiter = asyncio.ensure_future(stop.wait())
+        try:
+            await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        return None if task.cancelled() else task.result()
 
     async def _record(self, engine: AsyncEngine, bot_id: int, offset: int | None, error: str | None) -> None:
         async with engine.begin() as conn:
@@ -156,8 +182,10 @@ class TelegramUpdatesReconciler(Reconciler):
         offset = saved if state.get("bot_id") == creds.info.id and isinstance(saved, int) else None
         try:
             async with self.bot_factory(creds.token) as bot:
-                updates = await bot.get_updates(
-                    offset=offset, long_poll_s=self.long_poll_s, allowed_updates=ALLOWED_UPDATES
+                updates = await self._unless_stopping(
+                    bot.get_updates(
+                        offset=offset, long_poll_s=self.long_poll_s, allowed_updates=ALLOWED_UPDATES
+                    )
                 )
         except Unauthorized:
             await self._record(engine, creds.info.id, offset, "bot_unauthorized")
@@ -171,6 +199,8 @@ class TelegramUpdatesReconciler(Reconciler):
             log.warning("telegram updates: %s", exc)
             await self._record(engine, creds.info.id, offset, "telegram_unavailable")
             self.interval_seconds = self.ERROR_SECONDS
+            return 0
+        if updates is None:  # stopping: the offset is not advanced, so Telegram keeps these updates
             return 0
         self.interval_seconds = 0.5
         paired: list[int] = []
@@ -255,13 +285,17 @@ class ApiWatchdogReconciler(Reconciler):
             return False
         return response.status_code == 200
 
-    async def notify(self, conn: AsyncConnection, message: str) -> bool:
+    async def notify(self, engine: AsyncEngine, message: str) -> bool:
+        """Tell the owner. The bot and chat are read in a short transaction that is closed before
+        Telegram is called; ``last_alert_at`` is written in another one afterwards."""
         try:
-            creds = await store.load_bot(conn, self.vault())
+            vault = self.vault()
+            async with engine.begin() as conn:
+                creds = await store.load_bot(conn, vault)
+                chat_id = await store.owner_chat_id(conn)
         except VaultError as exc:
             log.warning("api watchdog: vault unavailable (%s)", type(exc).__name__)
             return False
-        chat_id = await store.owner_chat_id(conn)
         if creds is None or chat_id is None:
             log.warning("api watchdog: no bot or no paired owner chat; nobody to tell")
             return False
@@ -270,16 +304,29 @@ class ApiWatchdogReconciler(Reconciler):
         except TelegramError as exc:
             log.warning("api watchdog: message not delivered (%s)", exc)
             return False
-        await store.mark_alert_delivered(conn, store.now_utc())
+        try:
+            async with engine.begin() as conn:
+                await store.mark_alert_delivered(conn, store.now_utc())
+        except Exception as exc:  # delivered; only the dashboard's "last alert" time is missing
+            log.warning("api watchdog: last_alert_at not recorded (%s)", type(exc).__name__)
         return True
 
     async def run_once(self, conn: AsyncConnection) -> None:
+        raise NotImplementedError("this loop manages its own transactions (try_run_once)")
+
+    async def try_run_once(self, engine: AsyncEngine) -> bool:
+        async def step() -> None:
+            await self.check(engine)
+
+        return await run_locked(engine, self.name, step)
+
+    async def check(self, engine: AsyncEngine) -> None:
         if await self.probe():
             self.failures = 0
-            if self.alerted and await self.notify(conn, API_BACK_FA):
+            if self.alerted and await self.notify(engine, API_BACK_FA):
                 self.alerted = False
             return
         self.failures += 1
         log.warning("api watchdog: %s did not answer (%d in a row)", self.url, self.failures)
         if self.failures >= self.failures_to_alert and not self.alerted:
-            self.alerted = await self.notify(conn, API_DOWN_FA)
+            self.alerted = await self.notify(engine, API_DOWN_FA)

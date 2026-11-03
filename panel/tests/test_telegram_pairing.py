@@ -6,6 +6,8 @@ Updates are the real Bot API ``Update`` JSON shape (core.telegram.org/bots/api#u
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from test_fleet_support import assert_absent_from_database, make_vault
 from test_telegram_support import (
+    SilentServer,
     assert_no_token,
     clean_telegram_tables,
     closed_port_bot,
@@ -211,6 +214,25 @@ async def test_loop_records_an_unreachable_telegram(engine: AsyncEngine, vault: 
     assert state is not None and state["error"] == "telegram_unavailable" and state["offset"] is None
     assert loop.interval_seconds == loop.ERROR_SECONDS
     assert_no_token(token, str(state))
+
+
+async def test_stopping_the_worker_ends_a_long_poll_at_once(engine: AsyncEngine, vault: Vault) -> None:
+    # Docker stops a container after 10 s; a 25 s long poll (40 s read timeout) must not hold it.
+    await configure_bot(engine, vault)
+    async with SilentServer() as hung:  # accepts getUpdates and never answers, like a long poll
+        loop = TelegramUpdatesReconciler(vault_factory=lambda: vault, bot_factory=hung.bot())
+        stop = asyncio.Event()
+        task = asyncio.create_task(loop.loop(engine, stop))
+        for _ in range(100):
+            if hung.connections:
+                break
+            await asyncio.sleep(0.05)
+        assert hung.connections == 1  # the poll is in flight
+        started = time.monotonic()
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+        assert time.monotonic() - started < 2
+    assert await updates_state(engine) is None  # nothing recorded: the offset did not move
 
 
 async def test_loop_with_real_telegram_and_a_revoked_token(engine: AsyncEngine, vault: Vault) -> None:
