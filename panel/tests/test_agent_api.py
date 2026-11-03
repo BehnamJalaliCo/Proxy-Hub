@@ -538,6 +538,20 @@ async def test_report_is_stored_as_aggregates(env: Env) -> None:
     assert agent == [(True, '"' + "c" * 64 + '"', "3.5.16")]
 
 
+async def test_integral_numbers_are_accepted_for_float_fields(env: Env) -> None:
+    # Go encodes float64(3725) as 3725; strict validation must still accept it.
+    node_id, fp = await registered(env)
+    body = report_body()
+    body["telemt"]["uptime_s"] = 3725
+    body["system"]["uptime_s"] = 100
+    body["system"]["load1"] = 0
+    assert (await env.client.post("/agent/v1/report", json=body, headers=env.headers(fp))).status_code == 204
+    rows = await env.rows(
+        "SELECT telemt_uptime_s, load1 FROM agent_node_reports WHERE node_id = :n", n=node_id
+    )
+    assert rows == [(3725.0, 0.0)]
+
+
 def _with(path: list[str | int], value: Any) -> dict[str, Any]:
     body = report_body()
     target: Any = body

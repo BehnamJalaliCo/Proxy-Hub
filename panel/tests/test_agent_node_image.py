@@ -21,6 +21,9 @@ NODE_IMAGE = REPO / "node-image"
 FILES = NODE_IMAGE / "files"
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
+# The panel's test container holds only panel/; node-image is checked from a full checkout.
+pytestmark = pytest.mark.skipif(not NODE_IMAGE.is_dir(), reason="node-image/ is not in this checkout")
+
 
 def lock() -> dict[str, str]:
     values: dict[str, str] = {}

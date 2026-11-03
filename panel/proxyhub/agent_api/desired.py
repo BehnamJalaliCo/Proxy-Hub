@@ -19,7 +19,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -162,7 +162,11 @@ async def create_telemt_user(
         raise DesiredStateError("data_quota_bytes must be positive")
     if max_tcp_conns is not None and max_tcp_conns <= 0:
         raise DesiredStateError("max_tcp_conns must be positive")
-    count = len((await session.execute(select(TelemtUser.id).where(TelemtUser.node_id == node_id))).all())
+    count = (
+        await session.execute(
+            select(func.count()).select_from(TelemtUser).where(TelemtUser.node_id == node_id)
+        )
+    ).scalar_one()
     if count >= MAX_USERS_PER_NODE:
         raise DesiredStateError("too many Telemt users on this node")
     user = TelemtUser(
