@@ -21,7 +21,9 @@ IP_APIS = re.compile(
     r"/v1/stats/users/active-ips|/v1/users\b|active_ips|unique_ips_list",
     re.IGNORECASE,
 )
-ALLOWED_MUTATION_FILES = {PANEL / "hetzner" / "mutations.py"}
+# mutations.py does the hcloud calls; the node executor is the single caller, holding gate permits
+# (test nodes only; panel/tests/test_live_architecture.py pins that it is the only one).
+ALLOWED_MUTATION_FILES = {PANEL / "hetzner" / "mutations.py", PANEL / "nodes" / "executor.py"}
 
 
 def _sources() -> list[Path]:

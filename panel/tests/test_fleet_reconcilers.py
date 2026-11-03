@@ -270,5 +270,7 @@ def test_worker_runs_every_fleet_loop() -> None:
     from proxyhub.worker import reconcilers
 
     loops = {r.name: r for r in reconcilers()}
-    assert set(loops) == {"heartbeat", "account_guard", "pricing", "fleet"}
+    # Other teams register their own loops in worker.py (round 2: "nodes"); the fleet's must all run.
+    assert {"heartbeat", "account_guard", "pricing", "fleet"} <= set(loops)
+    assert len(loops) == len(reconcilers())  # no duplicate names (each loop has its own advisory lock)
     assert loops["fleet"].interval_seconds == 60

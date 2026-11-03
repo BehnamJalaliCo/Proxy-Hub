@@ -22,6 +22,7 @@ from proxyhub.agent_api.tokens import CLOSED_STATES, consume_registration_token
 from proxyhub.db.models import ActionLog, Node, NodeEvent
 from proxyhub.db.models_agent import AgentCertificate, AgentNode
 from proxyhub.fleet.lifecycle import NodeState
+from proxyhub.nodes.hooks import on_agent_registered
 from proxyhub.pki.ca import spki_sha256, to_pem
 from proxyhub.pki.issue import CsrError, IssuedCertificate, parse_csr, renewal_time, sign_node_csr
 from proxyhub.pki.store import ensure_ca_certificate
@@ -164,6 +165,8 @@ async def register_node(
     }
     session.add(NodeEvent(node_id=node_id, kind="agent_registered", detail=detail))
     await audit(session, "agent_register", str(node_id), True, detail)
+    # Lifecycle: a booting node is now registering (proxyhub.nodes; same transaction).
+    await on_agent_registered(session, node_id, now)
     return IssuedBundle(cert_pem=issued.pem, ca_pem=ca_pem)
 
 
