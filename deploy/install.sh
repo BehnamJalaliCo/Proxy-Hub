@@ -44,12 +44,15 @@ else
   sed -i "s/^DEPLOY_BRANCH=.*/DEPLOY_BRANCH=$BRANCH/" "$ETC/deploy.env"
 fi
 
+# Pin GitHub host keys (official fingerprints) instead of trust-on-first-use.
+install -m 0644 -o root -g root "$(dirname "$0")/known_hosts.github" "$ETC/known_hosts"
+
 if [ ! -f "$ETC/deploy_key" ]; then
   ssh-keygen -q -t ed25519 -N "" -C "proxy-hub-panel-deploy (read-only)" -f "$ETC/deploy_key"
   chmod 0600 "$ETC/deploy_key"
 fi
 
-export GIT_SSH_COMMAND="ssh -i $ETC/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+export GIT_SSH_COMMAND="ssh -i $ETC/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ETC/known_hosts"
 if ! git ls-remote "$REPO_SSH" >/dev/null 2>&1; then
   echo
   echo "=== ACTION NEEDED (owner) ==="

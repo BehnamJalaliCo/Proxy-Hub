@@ -1,6 +1,6 @@
 # Proxy-Hub panel image (api, worker, migrate). Tests run in the "test" target against real
 # PostgreSQL/Redis containers (deploy/docker-compose.test.yml); decision D10: no fakes.
-FROM python:3.13-slim-bookworm AS base
+FROM python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/app/.venv PATH="/app/.venv/bin:$PATH"
 RUN pip install --no-cache-dir uv==0.11.32 \
@@ -14,8 +14,10 @@ RUN uv sync --frozen --no-dev
 FROM base AS test
 RUN uv sync --frozen
 COPY tests ./tests
+# /app is read-only for uid 10001: keep tool caches in /tmp.
+ENV HYPOTHESIS_STORAGE_DIRECTORY=/tmp/.hypothesis MYPY_CACHE_DIR=/tmp/.mypy_cache RUFF_CACHE_DIR=/tmp/.ruff_cache
 USER 10001
-CMD ["pytest", "-q"]
+CMD ["sh", "-c", "ruff check proxyhub tests && ruff format --check proxyhub tests && mypy proxyhub && pytest -q -p no:cacheprovider"]
 
 FROM base AS runtime
 ARG GIT_COMMIT=unknown

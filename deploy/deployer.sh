@@ -15,7 +15,7 @@ flock -n 9 || exit 0
 
 # shellcheck source=/dev/null
 source "$ETC/deploy.env"
-export GIT_SSH_COMMAND="ssh -i $ETC/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+export GIT_SSH_COMMAND="ssh -i $ETC/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ETC/known_hosts"
 
 log() { echo "proxyhub-deploy: $*"; }
 
@@ -59,6 +59,7 @@ if deploy_commit "$target"; then
   echo "$target" > "$STATE/deployed_commit"
   rm -f "$STATE/failed_commit"
   install -m 0755 "$CHECKOUT/deploy/deployer.sh" /usr/local/sbin/proxyhub-deploy
+  install -m 0644 "$CHECKOUT/deploy/known_hosts.github" "$ETC/known_hosts"
   log "ok: $target is healthy"
 else
   echo "$target" > "$STATE/failed_commit"

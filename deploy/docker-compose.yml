@@ -1,5 +1,5 @@
 # Proxy-Hub panel: core stack (docs/10 section 3.2). Monitoring stack (Prometheus, Alertmanager,
-# Loki, Grafana) is added in M1.7. Secrets are files under /etc/proxy-hub/secrets (root-only 0700
+# Loki, Grafana) is added in M1.7. Images are pinned by digest (resolved 2026-11-03). Secrets are files under /etc/proxy-hub/secrets (root-only 0700
 # directory) and are mounted read-only at /run/secrets; nothing secret is in env vars or the repo.
 name: proxyhub
 
@@ -16,7 +16,7 @@ x-panel: &panel
 
 services:
   postgres:
-    image: postgres:16-bookworm
+    image: postgres:16-bookworm@sha256:e8a07d2c7579b038938cdba6c539e580e5001caf9ea203d397b5cc83e76bd938
     environment:
       POSTGRES_USER: proxyhub
       POSTGRES_DB: proxyhub
@@ -32,11 +32,19 @@ services:
     networks: [backend]
 
   redis:
-    image: redis:7-bookworm
-    command: ["sh", "-c", "exec redis-server --requirepass \"$$(cat /run/secrets/redis_password)\" --save '' --appendonly no"]
+    image: redis:7-bookworm@sha256:b6b6e3dc0c0952737748e55d5d885272840c7e42ba41ab1d5489f693419882f5
+    # The password goes into a 0600 config file inside the container, never into argv (visible in ps).
+    command:
+      - sh
+      - -c
+      - >-
+        umask 077 &&
+        printf 'requirepass %s\nsave ""\nappendonly no\n' "$$(cat /run/secrets/redis_password)" > /tmp/redis.conf &&
+        chown redis:redis /tmp/redis.conf &&
+        exec docker-entrypoint.sh redis-server /tmp/redis.conf
     secrets: [redis_password]
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a \"$$(cat /run/secrets/redis_password)\" --no-auth-warning ping | grep -q PONG"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/redis_password)\" redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -69,7 +77,7 @@ services:
 
   caddy:
     profiles: ["edge"]  # enabled by the deployer once PANEL_DOMAIN is set in /etc/proxy-hub/deploy.env
-    image: caddy:2-alpine
+    image: caddy:2-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
     environment:
       PANEL_DOMAIN: ${PANEL_DOMAIN:-}  # the deployer enables this profile only when the domain is set
     ports: ["80:80", "443:443"]

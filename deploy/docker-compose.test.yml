@@ -6,7 +6,7 @@ name: proxyhub-test
 
 services:
   pg:
-    image: postgres:16-bookworm
+    image: postgres:16-bookworm@sha256:e8a07d2c7579b038938cdba6c539e580e5001caf9ea203d397b5cc83e76bd938
     environment:
       POSTGRES_USER: proxyhub
       POSTGRES_PASSWORD: throwaway-test-db
@@ -18,7 +18,7 @@ services:
       retries: 30
 
   rd:
-    image: redis:7-bookworm
+    image: redis:7-bookworm@sha256:b6b6e3dc0c0952737748e55d5d885272840c7e42ba41ab1d5489f693419882f5
     command: ["redis-server", "--save", "", "--appendonly", "no"]
 
   tests:
