@@ -1,6 +1,7 @@
 # Proxy-Hub panel image (api, worker, migrate). Tests run in the "test" target against real
 # PostgreSQL/Redis containers (deploy/docker-compose.test.yml); decision D10: no fakes.
-# Pinned by digest; a registry mirror of the SAME digest may be passed as PYTHON_IMAGE.
+# Pinned by digest; a registry mirror of the SAME digest may be passed as PYTHON_IMAGE / NODE_IMAGE
+# (compose: PROXYHUB_PYTHON_IMAGE / PROXYHUB_NODE_IMAGE).
 ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f
 # Node only builds the owner dashboard (dashboard/); nothing of it runs in the final image.
 # node:22-bookworm-slim, digest resolved from the Docker Hub registry on 2026-11-03 (Node 22.23.4).

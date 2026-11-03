@@ -63,7 +63,7 @@ jobs:
       - run: shellcheck deploy/*.sh ops/scripts/*.sh
       - run: docker compose -p proxyhub -f deploy/docker-compose.yml config -q
       - run: docker compose -f deploy/docker-compose.test.yml config -q
-      - run: docker build --target runtime panel
+      - run: docker build --build-context dashboard=dashboard --target runtime panel
 
   stack-restart:
     # Real core stack on the runner: start, restart all, restart redis alone (catches restart-only bugs).
