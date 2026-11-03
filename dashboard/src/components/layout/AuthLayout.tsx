@@ -7,8 +7,8 @@ import { Logo, ThemeSwitch } from "./Brand";
 /** Full-screen frame for /login and /setup: animated glow, centred card. */
 export function AuthLayout({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
   return (
-    <div className="relative flex min-h-dvh flex-col overflow-hidden bg-bg">
-      <div aria-hidden className="pointer-events-none absolute inset-0">
+    <div className="relative flex min-h-dvh flex-col overflow-clip bg-bg">
+      <div aria-hidden className="pointer-events-none absolute inset-0 overflow-clip">
         <div className="absolute -top-40 -right-32 size-[34rem] animate-float-a rounded-full bg-[radial-gradient(circle,var(--ph-bg-glow-1),transparent_65%)] blur-2xl" />
         <div className="absolute -bottom-48 -left-40 size-[38rem] animate-float-b rounded-full bg-[radial-gradient(circle,var(--ph-bg-glow-2),transparent_65%)] blur-2xl" />
         <div className="absolute inset-0 bg-[radial-gradient(var(--ph-line)_1px,transparent_1px)] [background-size:22px_22px] [mask-image:radial-gradient(ellipse_at_center,black_30%,transparent_75%)]" />

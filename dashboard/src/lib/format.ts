@@ -69,7 +69,7 @@ const PATTERNS: Record<DateStyle, string> = {
   time: "HH:mm:ss",
   long: "EEEE d MMMM yyyy، ساعت HH:mm",
   day: "d MMMM",
-  short: "d MMM، HH:mm",
+  short: "d MMMM، HH:mm",
 };
 
 /** Jalali date in Tehran time with Persian digits: "۱۴۰۵/۰۸/۱۳، ۰۰:۱۵". */

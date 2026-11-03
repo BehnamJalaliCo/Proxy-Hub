@@ -34,6 +34,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { cn } from "../lib/browser";
 import { decimalToNumber, formatDecimal, formatDurationSeconds, formatJalali, formatNumber, formatPercent, formatRelative } from "../lib/format";
 import { planActionInfo, reasonLabel, type Tone } from "../lib/labels";
+import { groupPlan } from "../lib/plan";
 import { useFleetPlan, useOverview, useRecentEvents } from "../lib/queries";
 import { TONE_SOFT } from "../lib/tones";
 import type { Overview } from "../lib/types";
@@ -50,7 +51,7 @@ const fmtInt = (n: number) => formatNumber(Math.round(n));
 
 function CostPerMemberHero({ overview }: { overview: Overview | undefined }) {
   return (
-    <Card className="ph-glow-border relative overflow-hidden lg:col-span-8">
+    <Card className="ph-glow-border relative overflow-clip lg:col-span-8">
       <div
         aria-hidden
         className="pointer-events-none absolute -top-24 -left-24 size-72 rounded-full bg-[radial-gradient(circle,var(--ph-bg-glow-1),transparent_70%)]"
@@ -71,8 +72,9 @@ function CostPerMemberHero({ overview }: { overview: Overview | undefined }) {
 
         <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <div className="text-[3.5rem] leading-none font-black tracking-tight text-fg-faint/70 sm:text-[4.25rem]" aria-label="بدون داده">
-              —
+            <div className="flex items-baseline gap-3" aria-label="هزینه‌ی هر عضو: هنوز داده‌ای نیست">
+              <span className="text-[3.5rem] leading-none font-black tracking-tight text-fg-faint/60 sm:text-[4.25rem]">−−</span>
+              <span className="text-lg font-bold text-fg-faint">€ برای هر عضو</span>
             </div>
             <p className="mt-3 flex max-w-md items-start gap-2 text-sm leading-7 text-fg-muted">
               <Sparkles className="mt-1 size-4 shrink-0 text-brand" />
@@ -107,7 +109,7 @@ function KillSwitchStatus({ overview }: { overview: Overview }) {
   return (
     <Card
       className={cn(
-        "relative flex flex-col overflow-hidden lg:col-span-4",
+        "relative flex flex-col overflow-clip lg:col-span-4",
         on ? "border-danger/30" : "border-success/30",
       )}
     >
@@ -510,16 +512,23 @@ function PlanCard() {
               {blocked > 0 ? <Badge tone="danger">{formatNumber(blocked)} رد با قفل ایمنی</Badge> : <Badge tone="success">همه مجاز</Badge>}
             </div>
             <ul className="flex flex-col divide-y divide-line">
-              {actions.slice(0, 8).map((a, i) => {
-                const kind = planActionInfo(a.action);
+              {groupPlan(actions).map((g, i) => {
+                const kind = planActionInfo(g.action);
+                const shown = g.targets.slice(0, 6);
                 return (
-                  <motion.li key={`${a.action}-${a.target}-${String(i)}`} {...fadeUp(i)} className="flex items-start gap-3 px-2 py-3">
-                    <span className={cn("mt-0.5 rounded-lg px-2 py-1 text-xs font-bold", TONE_SOFT[kind.tone])}>{kind.label}</span>
+                  <motion.li key={`${g.action}-${g.targets.join(",")}`} {...fadeUp(i)} className="flex items-start gap-3 px-2 py-3">
+                    <span className={cn("mt-0.5 shrink-0 rounded-lg px-2 py-1 text-xs font-bold", TONE_SOFT[kind.tone])}>
+                      {kind.label}
+                      {g.targets.length > 1 ? ` ×${formatNumber(g.targets.length)}` : ""}
+                    </span>
                     <div className="min-w-0 flex-1">
-                      <div className="ltr truncate text-start font-mono text-[0.82rem] font-semibold text-fg">{a.target}</div>
-                      {a.reasons.length > 0 ? (
-                        <div className="mt-1 flex flex-wrap gap-1">
-                          {a.reasons.map((r) => (
+                      <div className="ltr text-right font-mono text-[0.8rem] leading-6 font-semibold break-words text-fg">
+                        {shown.join(", ")}
+                        {g.targets.length > shown.length ? ` +${String(g.targets.length - shown.length)}` : ""}
+                      </div>
+                      {g.reasons.length > 0 ? (
+                        <div className="mt-1.5 flex flex-wrap gap-1">
+                          {g.reasons.map((r) => (
                             <span key={r} title={r} className="rounded-md bg-surface-3 px-1.5 py-0.5 text-[0.72rem] text-fg-muted">
                               {reasonLabel(r)}
                             </span>
@@ -527,7 +536,7 @@ function PlanCard() {
                         </div>
                       ) : null}
                     </div>
-                    {a.allowed ? (
+                    {g.allowed ? (
                       <Badge tone="success" className="gap-1">
                         <CircleCheck className="size-3.5" /> مجاز
                       </Badge>
@@ -540,7 +549,6 @@ function PlanCard() {
                 );
               })}
             </ul>
-            {actions.length > 8 ? <p className="px-2 pt-2 text-xs text-fg-faint">و {formatNumber(actions.length - 8)} کار دیگر</p> : null}
           </>
         )}
       </div>
@@ -578,8 +586,8 @@ function ActivityCard() {
         ) : (
           <div className="grid gap-5 lg:grid-cols-12">
             <div className="lg:col-span-7">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-sm font-semibold text-fg">۱۴ روز اخیر</span>
+              <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <span className="text-sm font-semibold whitespace-nowrap text-fg">۱۴ روز اخیر</span>
                 <ActivityLegend />
               </div>
               <ActivityChart events={events.data} days={14} className="h-52" />

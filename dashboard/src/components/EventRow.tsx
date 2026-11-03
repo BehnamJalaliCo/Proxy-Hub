@@ -90,11 +90,11 @@ export function EventRow({ event, compact = false }: { event: AuditEvent; compac
               <dt className="text-fg-faint">شناسه</dt>
               <dd className="text-fg">{toFaDigits(event.id)}</dd>
               <dt className="text-fg-faint">کد کار</dt>
-              <dd className="ltr text-start font-mono text-xs text-fg">{event.action}</dd>
+              <dd className="ltr text-right font-mono text-xs text-fg">{event.action}</dd>
               {event.target ? (
                 <>
                   <dt className="text-fg-faint">هدف</dt>
-                  <dd className="ltr text-start font-mono text-xs break-all text-fg">{event.target}</dd>
+                  <dd className="ltr text-right font-mono text-xs break-all text-fg">{event.target}</dd>
                 </>
               ) : null}
               {reasons.length > 0 ? (
@@ -112,7 +112,7 @@ export function EventRow({ event, compact = false }: { event: AuditEvent; compac
               {result ? (
                 <>
                   <dt className="text-fg-faint">نتیجه</dt>
-                  <dd className="ltr text-start font-mono text-xs break-all text-fg">{result}</dd>
+                  <dd className="ltr text-right font-mono text-xs break-all text-fg">{result}</dd>
                 </>
               ) : null}
             </dl>

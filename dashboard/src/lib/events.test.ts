@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { bucketByDay, EMPTY_FILTER, filterEvents, resultText, verdictOf } from "./events";
 import { accountActions, actionLabel, actorLabel, reasonLabel, stateReasonText } from "./labels";
+import { groupPlan } from "./plan";
 import type { AuditEvent } from "./types";
 
 const ev = (id: number, at: string, extra: Partial<AuditEvent> = {}): AuditEvent => ({
@@ -64,6 +65,11 @@ describe("labels", () => {
     expect(reasonLabel("kill_switch_on")).toBe("کلید توقف روشن است");
     expect(reasonLabel("budget_cap_eur")).toBe("سقف بودجه‌ی ماه");
     expect(reasonLabel("brand_new_code")).toBe("brand_new_code");
+    expect(reasonLabel("valid_minutes:60")).toBe("اعتبار (دقیقه): ۶۰");
+    expect(reasonLabel("method:recovery")).toBe("روش: کد بازیابی");
+    expect(reasonLabel("odd:thing")).toBe("odd:thing");
+    expect(actionLabel("login_failed")).toBe("ورود ناموفق");
+    expect(actorLabel("auth")).toBe("سیستم ورود");
     expect(actionLabel("kill_switch_off")).toBe("خاموش کردن کلید توقف");
     expect(actorLabel("admin:owner")).toBe("مالک (owner)");
     expect(actorLabel("account_guard")).toBe("نگهبان حساب");
@@ -81,5 +87,21 @@ describe("labels", () => {
     expect(accountActions("draining")).toEqual({ drain: false, retire: true });
     expect(accountActions("locked")).toEqual({ drain: false, retire: true });
     expect(accountActions("retired")).toEqual({ drain: false, retire: false });
+  });
+});
+
+describe("plan grouping", () => {
+  it("merges identical actions and keeps order", () => {
+    const groups = groupPlan([
+      { action: "create", target: "slot-1", allowed: false, reasons: ["kill_switch_on", "no_active_account"] },
+      { action: "create", target: "slot-2", allowed: false, reasons: ["no_active_account", "kill_switch_on"] },
+      { action: "delete", target: "node-a", allowed: true, reasons: [] },
+      { action: "create", target: "slot-3", allowed: true, reasons: [] },
+    ]);
+    expect(groups.map((g) => [g.action, g.allowed, g.targets])).toEqual([
+      ["create", false, ["slot-1", "slot-2"]],
+      ["delete", true, ["node-a"]],
+      ["create", true, ["slot-3"]],
+    ]);
   });
 });

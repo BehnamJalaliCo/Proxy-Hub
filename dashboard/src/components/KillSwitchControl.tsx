@@ -38,7 +38,7 @@ export function KillSwitchControl({ on, budgetSet, nodeCapSet }: { on: boolean; 
   };
 
   return (
-    <Card className={cn("relative overflow-hidden", on ? "border-danger/30" : "border-success/30")}>
+    <Card className={cn("relative overflow-clip", on ? "border-danger/30" : "border-success/30")}>
       <div
         aria-hidden
         className={cn(

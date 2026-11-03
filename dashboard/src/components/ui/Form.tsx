@@ -62,7 +62,7 @@ export function Field({
 }
 
 const INPUT =
-  "h-12 w-full rounded-xl border bg-surface-2 px-3.5 text-[0.98rem] text-fg placeholder:text-fg-faint transition-[border-color,box-shadow,background-color] outline-none focus:border-brand focus:bg-surface focus:ring-4 focus:ring-[var(--ph-ring)] disabled:opacity-60";
+  "h-12 w-full rounded-xl border bg-surface-2 px-3.5 text-base text-fg placeholder:text-fg-faint transition-[border-color,box-shadow,background-color] outline-none focus:border-brand focus:bg-surface focus:ring-4 focus:ring-[var(--ph-ring)] disabled:opacity-60";
 
 export interface TextInputProps extends InputHTMLAttributes<HTMLInputElement> {
   invalid?: boolean;
@@ -83,8 +83,9 @@ export const TextInput = forwardRef<HTMLInputElement, TextInputProps>(function T
       className={cn(
         INPUT,
         invalid ? "border-danger" : "border-line",
-        latin && "text-left font-medium tracking-wide",
-        suffix ? "pe-12" : "",
+        latin && "font-medium tracking-wide",
+        latin && !className?.includes("text-center") && "text-left",
+        suffix ? "pl-12" : "",
         className,
       )}
       {...rest}
@@ -94,7 +95,7 @@ export const TextInput = forwardRef<HTMLInputElement, TextInputProps>(function T
   return (
     <div className="relative">
       {input}
-      <span className="pointer-events-none absolute inset-y-0 end-3.5 flex items-center text-sm text-fg-faint">{suffix}</span>
+      <span className="pointer-events-none absolute inset-y-0 left-3.5 flex items-center text-sm text-fg-faint">{suffix}</span>
     </div>
   );
 });
@@ -115,14 +116,14 @@ export const SecretInput = forwardRef<HTMLInputElement, TextInputProps & { allow
         autoCapitalize="none"
         autoCorrect="off"
         aria-invalid={invalid || undefined}
-        className={cn(INPUT, "ps-12 text-left", invalid ? "border-danger" : "border-line", className)}
+        className={cn(INPUT, allowReveal ? "pl-12 text-left" : "text-left", invalid ? "border-danger" : "border-line", className)}
         {...rest}
       />
       {allowReveal ? (
         <button
           type="button"
           onClick={() => setShown((v) => !v)}
-          className="absolute inset-y-0 start-1 my-auto grid size-10 place-items-center rounded-lg text-fg-faint hover:text-fg"
+          className="absolute inset-y-0 left-1 my-auto grid size-10 place-items-center rounded-lg text-fg-faint hover:text-fg"
           aria-label={shown ? "پنهان کردن" : "نمایش"}
           title={shown ? "پنهان کردن" : "نمایش"}
         >
@@ -297,7 +298,7 @@ export function TagInput({
           placeholder={values.length === 0 ? placeholder : undefined}
           spellCheck={false}
           autoCapitalize="none"
-          className="h-8 min-w-24 flex-1 bg-transparent px-2 text-left text-sm text-fg outline-none placeholder:text-fg-faint"
+          className="h-8 min-w-24 flex-1 bg-transparent px-2 text-left text-base text-fg sm:text-sm outline-none placeholder:text-fg-faint"
         />
       </div>
       {rest.length > 0 ? (

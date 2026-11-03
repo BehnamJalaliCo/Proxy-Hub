@@ -23,6 +23,16 @@ const panel = {
 const PANEL_CLASS =
   "pointer-events-auto fixed inset-x-0 bottom-0 z-50 max-h-[92dvh] overflow-y-auto rounded-t-[1.75rem] border border-line bg-surface p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-pop outline-none sm:relative sm:inset-auto sm:w-[min(32rem,calc(100vw-2rem))] sm:rounded-[1.75rem] sm:p-6";
 
+/** Focus the first form field instead of the close button when a dialog opens. */
+function focusFirstField(e: Event): void {
+  const root = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
+  const field = root?.querySelector<HTMLElement>("input:not([type=checkbox]), textarea, select");
+  if (field) {
+    e.preventDefault();
+    field.focus();
+  }
+}
+
 /** Bottom sheet on phones, centred dialog on larger screens. */
 export function Modal({
   open,
@@ -48,7 +58,7 @@ export function Modal({
               <motion.div {...overlay} className="fixed inset-0 z-50 bg-[rgb(6_8_18/0.55)] backdrop-blur-[3px]" />
             </Dialog.Overlay>
             <div className="pointer-events-none fixed inset-0 z-50 sm:grid sm:place-items-center">
-              <Dialog.Content asChild forceMount>
+              <Dialog.Content asChild forceMount onOpenAutoFocus={focusFirstField}>
                 <motion.div {...panel} className={PANEL_CLASS}>
                   <div className="mx-auto mb-4 h-1.5 w-12 rounded-full bg-line-strong sm:hidden" aria-hidden />
                   <div className="mb-5 flex items-start gap-3">

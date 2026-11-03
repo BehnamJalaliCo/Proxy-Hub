@@ -128,7 +128,7 @@ function SessionRow({ s, index, onRevoke }: { s: SessionInfo; index: number; onR
           آخرین فعالیت {formatRelative(s.last_seen_at)} · ورود {formatJalali(s.created_at, "short")}
         </div>
       </div>
-      <Button variant={s.current ? "secondary" : "ghost"} size="sm" className={s.current ? "" : "text-danger"} icon={<LogOut className="size-4" />} onClick={onRevoke}>
+      <Button variant={s.current ? "secondary" : "ghost"} size="sm" className={s.current ? "" : "text-danger"} icon={<LogOut className="size-4 rtl:-scale-x-100" />} onClick={onRevoke}>
         {s.current ? "خروج" : "بیرون کردن"}
       </Button>
     </motion.li>
@@ -183,10 +183,10 @@ export default function SecurityPage() {
               ) : (
                 <dl className="grid grid-cols-[7.5rem_1fr] gap-y-3 text-sm">
                   <dt className="text-fg-muted">نام کاربری</dt>
-                  <dd className="ltr text-start font-bold text-fg">{me.data.username}</dd>
+                  <dd className="ltr text-right font-bold text-fg">{me.data.username}</dd>
                   <dt className="text-fg-muted">ساخته‌شده</dt>
                   <dd className="text-fg">{formatJalali(me.data.created_at, "date")}</dd>
-                  <dt className="text-fg-muted">ورود قبلی</dt>
+                  <dt className="text-fg-muted">آخرین ورود</dt>
                   <dd className="text-fg">{me.data.last_login_at ? `${formatJalali(me.data.last_login_at, "datetime")} (${formatRelative(me.data.last_login_at)})` : "—"}</dd>
                   <dt className="text-fg-muted">ورود دومرحله‌ای</dt>
                   <dd>
@@ -247,7 +247,7 @@ export default function SecurityPage() {
         }
         confirmLabel={revoke?.current ? "خروج" : "بیرون کن"}
         tone="danger"
-        icon={<LogOut className="size-6" />}
+        icon={<LogOut className="size-6 rtl:-scale-x-100" />}
         busy={busy}
         onConfirm={doRevoke}
       />

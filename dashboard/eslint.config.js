@@ -26,8 +26,14 @@ export default tseslint.config(
     },
   },
   {
+    // Node scripts; callbacks passed to page.evaluate() run in the browser.
     files: ["scripts/**/*.mjs", "eslint.config.js"],
     extends: [js.configs.recommended],
-    languageOptions: { ecmaVersion: 2023, sourceType: "module", globals: globals.node },
+    languageOptions: { ecmaVersion: 2023, sourceType: "module", globals: { ...globals.node, ...globals.browser } },
+  },
+  {
+    files: ["public/**/*.js"],
+    extends: [js.configs.recommended],
+    languageOptions: { ecmaVersion: 2019, sourceType: "script", globals: globals.browser },
   },
 );

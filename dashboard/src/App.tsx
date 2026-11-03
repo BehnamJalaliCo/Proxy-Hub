@@ -1,6 +1,6 @@
 import { QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { MotionConfig } from "motion/react";
-import { Direction, Tooltip } from "radix-ui";
+import { Direction } from "radix-ui";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
 
@@ -89,70 +89,68 @@ export default function App() {
   return (
     <Direction.Provider dir="rtl">
       <MotionConfig reducedMotion="user">
-        <Tooltip.Provider delayDuration={300}>
-          <QueryClientProvider client={queryClient}>
-            <BrowserRouter>
-              <UnauthorizedBridge />
-              <Suspense fallback={<Splash />}>
-                <Routes>
-                  <Route path="/login" element={<LoginPage />} />
-                  <Route path="/setup" element={<SetupPage />} />
-                  <Route element={<RequireOwner />}>
-                    <Route
-                      index
-                      element={
-                        <Suspense fallback={<PageFallback />}>
-                          <OverviewPage />
-                        </Suspense>
-                      }
-                    />
-                    <Route
-                      path="accounts"
-                      element={
-                        <Suspense fallback={<PageFallback />}>
-                          <AccountsPage />
-                        </Suspense>
-                      }
-                    />
-                    <Route
-                      path="events"
-                      element={
-                        <Suspense fallback={<PageFallback />}>
-                          <EventsPage />
-                        </Suspense>
-                      }
-                    />
-                    <Route
-                      path="settings"
-                      element={
-                        <Suspense fallback={<PageFallback />}>
-                          <SettingsPage />
-                        </Suspense>
-                      }
-                    />
-                    <Route
-                      path="security"
-                      element={
-                        <Suspense fallback={<PageFallback />}>
-                          <SecurityPage />
-                        </Suspense>
-                      }
-                    />
-                    <Route
-                      path="*"
-                      element={
-                        <Suspense fallback={<PageFallback />}>
-                          <NotFoundPage />
-                        </Suspense>
-                      }
-                    />
-                  </Route>
-                </Routes>
-              </Suspense>
-            </BrowserRouter>
-            <Toaster />
-          </QueryClientProvider>
-        </Tooltip.Provider>
+        <QueryClientProvider client={queryClient}>
+          <BrowserRouter>
+            <UnauthorizedBridge />
+            <Suspense fallback={<Splash />}>
+              <Routes>
+                <Route path="/login" element={<LoginPage />} />
+                <Route path="/setup" element={<SetupPage />} />
+                <Route element={<RequireOwner />}>
+                  <Route
+                    index
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <OverviewPage />
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="accounts"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <AccountsPage />
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="events"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <EventsPage />
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="settings"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <SettingsPage />
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="security"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <SecurityPage />
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="*"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <NotFoundPage />
+                      </Suspense>
+                    }
+                  />
+                </Route>
+              </Routes>
+            </Suspense>
+          </BrowserRouter>
+          <Toaster />
+        </QueryClientProvider>
       </MotionConfig>
     </Direction.Provider>
   );

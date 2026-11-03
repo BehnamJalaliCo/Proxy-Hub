@@ -44,7 +44,7 @@ export function RecoveryCodesPanel({
         </div>
       </div>
       <p className="text-sm leading-7 text-fg-muted">{intro}</p>
-      <ol className="grid grid-cols-2 gap-2 sm:grid-cols-2" aria-label="کدهای بازیابی">
+      <ol className="grid grid-cols-2 gap-2" aria-label="کدهای بازیابی" data-ph-secret>
         {codes.map((c, i) => (
           <motion.li
             key={c}

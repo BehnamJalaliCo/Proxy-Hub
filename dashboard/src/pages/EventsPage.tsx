@@ -49,7 +49,7 @@ export default function EventsPage() {
               onChange={(e) => set("text", e.target.value)}
               placeholder="جست‌وجو در کار، هدف، دلیل یا نتیجه…"
               aria-label="جست‌وجو در رویدادها"
-              className="h-11 w-full rounded-xl border border-line bg-surface-2 ps-9 pe-3 text-sm text-fg outline-none placeholder:text-fg-faint focus:border-brand focus:ring-4 focus:ring-[var(--ph-ring)]"
+              className="h-11 w-full rounded-xl border border-line bg-surface-2 ps-9 pe-3 text-base text-fg outline-none sm:text-sm placeholder:text-fg-faint focus:border-brand focus:ring-4 focus:ring-[var(--ph-ring)]"
             />
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -79,7 +79,7 @@ export default function EventsPage() {
               <select
                 value={filter.actor}
                 onChange={(e) => set("actor", e.target.value)}
-                className="h-10 appearance-none rounded-xl border border-line bg-surface-2 ps-3 pe-8 text-[0.82rem] font-semibold text-fg outline-none focus:border-brand"
+                className="h-10 appearance-none rounded-xl border border-line bg-surface-2 ps-3 pe-8 text-base font-semibold sm:text-[0.82rem] text-fg outline-none focus:border-brand"
               >
                 <option value="">همه‌ی انجام‌دهنده‌ها</option>
                 {actors.map((a) => (

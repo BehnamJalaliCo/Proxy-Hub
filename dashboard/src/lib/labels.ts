@@ -88,13 +88,42 @@ const REASON: Record<string, string> = {
   account_observation_stale: "داده‌ی حساب کهنه است",
   no_hetzner_id: "شناسه‌ی هتزنر ثبت نشده",
   server_not_observed: "سرور در هتزنر دیده نشد",
+  no_active_account: "هیچ حساب هتزنر فعالی نیست",
+  no_live_price: "قیمت زنده‌ی هتزنر هنوز خوانده نشده",
+  // accounts
+  resource_limit_exceeded: "هتزنر سقف منابع حساب را اعلام کرد",
+  account_not_empty: "project سرور بیگانه دارد",
+  verified: "توکن وارسی شد",
+  foreign_servers: "سرور بیگانه در project",
   // owner actions
   ...SETTINGS_LABEL,
   owner_request: "به درخواست مالک",
 };
 
+/** Reasons stored as {"key": value} come as "key:value" (auth audit, counts). */
+const REASON_KEY: Record<string, string> = {
+  valid_minutes: "اعتبار (دقیقه)",
+  count: "تعداد",
+  remaining: "باقی‌مانده",
+  method: "روش",
+};
+
+const REASON_VALUE: Record<string, string> = {
+  totp: "کد Authenticator",
+  recovery: "کد بازیابی",
+};
+
 export function reasonLabel(code: string): string {
-  return REASON[code] ?? code;
+  const known = REASON[code];
+  if (known) return known;
+  const i = code.indexOf(":");
+  if (i > 0) {
+    const key = code.slice(0, i);
+    const value = code.slice(i + 1);
+    const keyLabel = REASON_KEY[key] ?? REASON[key];
+    if (keyLabel) return `${keyLabel}: ${REASON_VALUE[value] ?? toFa(value)}`;
+  }
+  return code;
 }
 
 const ACTION: Record<string, string> = {
@@ -110,6 +139,18 @@ const ACTION: Record<string, string> = {
   account_guard: "نگهبان حساب",
   pricing_change: "تغییر قیمت هتزنر",
   learned_server_limit: "سقف سرور یادگرفته‌شده",
+  setup_link_created: "ساخت لینک راه‌اندازی",
+  setup_token_invalid: "لینک راه‌اندازی نامعتبر",
+  setup_completed: "راه‌اندازی پنل و ساخت حساب مالک",
+  login_ok: "ورود موفق",
+  login_failed: "ورود ناموفق",
+  logout: "خروج",
+  session_revoked: "بستن جلسه",
+  recovery_used: "ورود با کد بازیابی",
+  recovery_codes_regenerated: "ساخت کدهای بازیابی تازه",
+  recovery_regenerate_failed: "ساخت کدهای بازیابی رد شد",
+  node_create: "ساخت node",
+  node_delete: "حذف node",
   create: "ساخت سرور",
   delete: "حذف سرور",
   none: "بی کار",
@@ -136,6 +177,7 @@ const ACTOR: Record<string, string> = {
   fleet: "چرخه‌ی ناوگان",
   pricing: "چرخه‌ی قیمت",
   account_guard: "نگهبان حساب",
+  auth: "سیستم ورود",
   worker: "worker",
   system: "سیستم",
 };

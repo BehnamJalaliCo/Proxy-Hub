@@ -100,7 +100,7 @@ function AddAccountDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
         <Field
           label="توکن API"
           htmlFor="acc-token"
-          hint="در کنسول هتزنر: Security ← API tokens ← Generate (Read & Write)."
+          hint="در کنسول هتزنر، در همان project بخش Security و سپس API tokens؛ توکنی با دسترسی Read & Write بسازید."
           error={err?.field === "token" ? err.text : null}
         >
           <SecretInput
@@ -141,7 +141,7 @@ function AddAccountDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
           <Button variant="secondary" onClick={() => close(false)} disabled={busy}>
             انصراف
           </Button>
-          <Button type="submit" className="flex-1" loading={busy} icon={<Plus className="size-5" />}>
+          <Button type="submit" className="sm:flex-1" loading={busy} icon={<Plus className="size-5" />}>
             وارسی و افزودن
           </Button>
         </div>
@@ -224,7 +224,7 @@ function AccountCard({ account, index, onDrain, onRetire }: { account: Account; 
         {actions.drain || actions.retire ? (
           <div className="mt-auto flex flex-wrap gap-2 border-t border-line pt-4">
             {actions.drain ? (
-              <Button variant="secondary" size="sm" icon={<LogOut className="size-4" />} onClick={onDrain}>
+              <Button variant="secondary" size="sm" icon={<LogOut className="size-4 rtl:-scale-x-100" />} onClick={onDrain}>
                 تخلیه
               </Button>
             ) : null}
@@ -354,7 +354,7 @@ export default function AccountsPage() {
         }
         confirmLabel={confirm?.kind === "drain" ? "تخلیه کن" : "بازنشسته کن"}
         tone={confirm?.kind === "drain" ? "primary" : "danger"}
-        icon={confirm?.kind === "drain" ? <LogOut className="size-6" /> : <Archive className="size-6" />}
+        icon={confirm?.kind === "drain" ? <LogOut className="size-6 rtl:-scale-x-100" /> : <Archive className="size-6" />}
         busy={busy}
         onConfirm={runConfirm}
       />

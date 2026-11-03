@@ -120,7 +120,7 @@ function UserBlock({ onLogout, busy }: { onLogout: () => void; busy: boolean }) 
       </span>
       <div className="min-w-0 flex-1">
         <div className="text-xs text-fg-faint">مالک پنل</div>
-        <div className="ltr truncate text-start text-sm font-bold text-fg">{me?.username ?? "…"}</div>
+        <div className="ltr truncate text-right text-sm font-bold text-fg">{me?.username ?? "…"}</div>
       </div>
       <button
         type="button"
@@ -130,7 +130,7 @@ function UserBlock({ onLogout, busy }: { onLogout: () => void; busy: boolean }) 
         aria-label="خروج از پنل"
         title="خروج از پنل"
       >
-        <LogOut className="size-5" />
+        <LogOut className="size-5 rtl:-scale-x-100" />
       </button>
     </div>
   );

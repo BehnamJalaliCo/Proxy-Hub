@@ -44,9 +44,9 @@ function readTokenFromHash(): string {
 type Step = "intro" | "app" | "account" | "codes";
 const STEPS: { id: Step; label: string }[] = [
   { id: "intro", label: "شروع" },
-  { id: "app", label: "Authenticator" },
-  { id: "account", label: "حساب مالک" },
-  { id: "codes", label: "کدهای بازیابی" },
+  { id: "app", label: "برنامه‌ی کد" },
+  { id: "account", label: "حساب" },
+  { id: "codes", label: "کدها" },
 ];
 
 function Stepper({ step }: { step: Step }) {
@@ -67,7 +67,7 @@ function Stepper({ step }: { step: Step }) {
                 style={{ marginInlineStart: 0 }}
               />
             </div>
-            <span className={cn("text-[0.72rem] font-semibold", current ? "text-fg" : done ? "text-brand" : "text-fg-faint")}>
+            <span className={cn("truncate text-[0.72rem] font-semibold", current ? "text-fg" : done ? "text-brand" : "text-fg-faint")}>
               {toFaDigits(i + 1)}. {s.label}
             </span>
           </li>
@@ -182,7 +182,7 @@ export default function SetupPage() {
         </span>
         <h2 className="text-lg font-bold">پنل پیش‌تر راه‌اندازی شده است</h2>
         <p className="text-sm leading-7 text-fg-muted">حساب مالک ساخته شده و لینک راه‌اندازی دیگر کار نمیکند. از صفحه‌ی ورود وارد شوید.</p>
-        <LinkButton to="/login" block size="lg" icon={<LogIn className="size-5" />}>
+        <LinkButton to="/login" block size="lg" icon={<LogIn className="size-5 rtl:-scale-x-100" />}>
           رفتن به صفحه‌ی ورود
         </LinkButton>
       </div>
@@ -249,6 +249,7 @@ export default function SetupPage() {
                   animate={{ scale: 1, opacity: 1, rotate: 0 }}
                   transition={{ type: "spring", stiffness: 220, damping: 18 }}
                   className="rounded-3xl bg-white p-3 shadow-card ring-1 ring-line"
+                  data-ph-secret
                 >
                   <QRCodeSVG
                     value={enrollment.totp_uri}
@@ -272,7 +273,7 @@ export default function SetupPage() {
                     <div className="mb-1 flex items-center gap-2 text-xs font-semibold text-fg-muted">
                       <QrCode className="size-4" /> کلید دستی
                     </div>
-                    <code className="ltr block font-mono text-[0.95rem] leading-7 font-bold break-all text-fg">
+                    <code className="ltr block font-mono text-[0.95rem] leading-7 font-bold break-all text-fg" data-ph-secret>
                       {groupSecret(enrollment.totp_secret)}
                     </code>
                     <CopyButton text={enrollment.totp_secret} label="کپی کلید" className="mt-2" />
@@ -349,7 +350,7 @@ export default function SetupPage() {
               <Field
                 label="کد ۶ رقمی Authenticator"
                 htmlFor="setup-totp"
-                hint="کدی که برنامه برای Proxy-Hub نشان میدهد."
+                hint="کد تازه‌ای که برنامه برای این پنل نشان میدهد."
                 error={serverErr?.field === "totp" ? serverErr.text : touched && !isTotp(totp) ? "کد ۶ رقمی را وارد کنید." : null}
               >
                 <TextInput
@@ -373,7 +374,7 @@ export default function SetupPage() {
                 <Button variant="secondary" onClick={() => setStep("app")} disabled={busy}>
                   بازگشت به QR
                 </Button>
-                <Button type="submit" size="lg" className="flex-1" loading={busy} icon={<ShieldCheck className="size-5" />}>
+                <Button type="submit" size="lg" className="sm:flex-1" loading={busy} icon={<ShieldCheck className="size-5" />}>
                   ساخت حساب مالک
                 </Button>
               </div>
