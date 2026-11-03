@@ -31,3 +31,6 @@ gen_hex db_password
 gen_hex redis_password
 gen_hex master_key        # encrypts tokens stored in the database
 gen_ec_key agent_ca_key   # panel CA for node agent mTLS
+# Caddy -> API shared secret for /agent/v1: proves a request came through the mTLS agent site,
+# so the API may trust the client-certificate fingerprint header Caddy adds.
+gen_hex agent_proxy_secret
