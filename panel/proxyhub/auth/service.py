@@ -487,6 +487,9 @@ async def _record_failure(
                 "lock_s": int(event.duration.total_seconds()),
             },
         )
+    await session.commit()
+    # Separate transaction: the locks above are released, so pruning cannot deadlock with another
+    # attempt that holds its username row and waits for the global row.
     await throttle.prune(session, now)
     await session.commit()
     if locks:

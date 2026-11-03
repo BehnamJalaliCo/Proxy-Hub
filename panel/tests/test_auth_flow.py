@@ -531,6 +531,28 @@ async def test_parallel_guesses_cannot_exceed_the_threshold(env: Env, client: As
     assert statuses == [401, 401, 401, 401, 429, 429, 429, 429]
 
 
+async def test_idle_throttle_rows_are_pruned_without_waiting_on_busy_ones(
+    env: Env, client: AsyncClient
+) -> None:
+    await env.rows(
+        "INSERT INTO auth_throttle (key, failures, last_failure_at, locked_until) VALUES "
+        "('u:old-idle', 1, now() - interval '3 days', NULL), "
+        "('u:old-busy', 1, now() - interval '3 days', NULL), "
+        "('u:recent', 1, now() - interval '1 hour', NULL), "
+        "('u:still-locked', 0, now() - interval '3 days', now() + interval '1 hour')"
+    )
+    # Another attempt in flight holds 'u:old-busy': pruning must skip it, not wait for it.
+    async with env.engine.connect() as busy:
+        await busy.execute(text("SELECT key FROM auth_throttle WHERE key = 'u:old-busy' FOR UPDATE"))
+        async with make_client() as c:
+            r = await asyncio.wait_for(login(c, username="someone"), timeout=10)
+        assert_error(r, 401, "invalid_credentials")
+        await busy.rollback()
+    keys = {row.key for row in await env.rows("SELECT key FROM auth_throttle")}
+    assert "u:old-idle" not in keys
+    assert {"u:old-busy", "u:recent", "u:still-locked", "global"} <= keys
+
+
 # --- CSRF and sessions ---------------------------------------------------------------------
 
 

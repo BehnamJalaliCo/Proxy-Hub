@@ -125,12 +125,21 @@ def reset(row: AuthThrottle) -> None:
 
 
 async def prune(session: AsyncSession, now: datetime) -> None:
-    """Forget idle per-username rows so random usernames cannot grow the table forever."""
+    """Forget idle per-username rows so random usernames cannot grow the table forever.
+
+    Call it in a transaction of its own (holding no other lock). Rows that an attempt in flight
+    holds are skipped, never waited for, so pruning can neither block a login nor deadlock.
+    """
     cutoff = now - PRUNE_AFTER
-    await session.execute(
-        delete(AuthThrottle).where(
+    idle = (
+        select(AuthThrottle.key)
+        .where(
             AuthThrottle.key != GLOBAL_KEY,
             or_(AuthThrottle.last_failure_at.is_(None), AuthThrottle.last_failure_at < cutoff),
             or_(AuthThrottle.locked_until.is_(None), AuthThrottle.locked_until < cutoff),
         )
+        .with_for_update(skip_locked=True)
+    )
+    await session.execute(
+        delete(AuthThrottle).where(AuthThrottle.key.in_(idle)).execution_options(synchronize_session=False)
     )
