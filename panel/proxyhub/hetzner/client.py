@@ -16,6 +16,17 @@ from proxyhub.safety.budget import Price
 from proxyhub.safety.gates import ServerView
 
 USER_AGENT = "proxy-hub-panel"
+# Every HTTP request to Hetzner is bounded (hcloud's default is no timeout at all, so one stuck
+# connection could hold a worker thread forever). Seconds: TCP/TLS connect, then each read.
+# hcloud retries a timed-out request up to 5 times with backoff; callers bound the whole call with
+# proxyhub.accounts.hetzner_io.call_hetzner. A create that timed out may still have happened on
+# Hetzner's side: the node executor finds such a server by its node-id label and never creates a
+# second one (server names are unique per project, so a retried POST is refused as well).
+CONNECT_TIMEOUT_S = 10.0
+READ_TIMEOUT_S = 30.0
+# Polling a Hetzner action (e.g. waiting for a server to start) at most 2 minutes.
+POLL_INTERVAL_S = 1.0
+POLL_MAX_RETRIES = 120
 
 
 @dataclass(frozen=True)
@@ -34,7 +45,13 @@ def _delete_protected(protection: Any) -> bool:
 
 class HetznerReader:
     def __init__(self, token: str) -> None:
-        self._client = Client(token=token, application_name=USER_AGENT)
+        self._client = Client(
+            token=token,
+            application_name=USER_AGENT,
+            timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S),
+            poll_interval=POLL_INTERVAL_S,
+            poll_max_retries=POLL_MAX_RETRIES,
+        )
 
     @property
     def raw(self) -> Client:
