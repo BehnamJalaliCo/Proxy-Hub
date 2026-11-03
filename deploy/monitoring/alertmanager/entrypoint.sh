@@ -8,7 +8,8 @@
 #   healthchecks_watchdog_url        -> "watchdog": the always-firing Watchdog alert is POSTed there
 #                                       every 5 minutes (external dead man's switch). Empty: null.
 # Secret values are never printed. They are copied (trimmed) to /tmp, a tmpfs, and Alertmanager reads
-# them through *_file settings, so no secret is written into the rendered config.
+# them through *_file settings, so no secret is written into the rendered config. Alertmanager's own
+# log goes through redact.awk (see the end of this file): v0.34.2 logs the bot token on send errors.
 # PROXYHUB_RENDER_ONLY=1: render + amtool check-config, then exit (deploy/monitoring/check_configs.sh).
 set -eu
 
@@ -103,9 +104,33 @@ echo "alertmanager-entrypoint: telegram receiver: $telegram; external watchdog: 
 if [ "${PROXYHUB_RENDER_ONLY:-0}" = 1 ]; then
   exec /bin/amtool check-config "$CONFIG"
 fi
-exec /bin/alertmanager \
+
+# Rule 3 at runtime: Alertmanager v0.34.2 logs the full Telegram API URL (".../bot<TOKEN>/...") when
+# a send fails. So Alertmanager is NOT exec'd: it runs as a child and everything it prints goes
+# through redact.awk (secret values read from the tmpfs copies, never from argv) before reaching the
+# container log. If the redactor dies, Alertmanager's next log write fails on the closed pipe and it
+# exits (fail closed; the container restarts). This shell stays PID 1 only to forward signals:
+# TERM/INT -> TERM (graceful stop), HUP -> HUP (config reload); it exits with Alertmanager's code.
+LOG_FIFO="$RUNDIR/log.fifo"
+rm -f "$LOG_FIFO"
+mkfifo -m 0600 "$LOG_FIFO"
+awk -v secret_files="$RUNDIR/secrets/alert_bot_token $RUNDIR/secrets/healthchecks_watchdog_url" \
+  -f /etc/alertmanager/proxyhub/redact.awk <"$LOG_FIFO" >&2 &
+redactor=$!
+/bin/alertmanager \
   --config.file="$CONFIG" \
   --storage.path=/alertmanager \
   --web.listen-address=:9093 \
   --cluster.listen-address= \
-  --log.level=info
+  --log.level=info >"$LOG_FIFO" 2>&1 &
+am=$!
+trap 'kill -TERM "$am" 2>/dev/null || true' TERM INT
+trap 'kill -HUP "$am" 2>/dev/null || true' HUP
+# A trapped signal interrupts "wait" (status > 128) while Alertmanager still runs: wait again.
+rc=0
+while :; do
+  if wait "$am"; then rc=0; else rc=$?; fi
+  kill -0 "$am" 2>/dev/null || break
+done
+wait "$redactor" 2>/dev/null || true
+exit "$rc"

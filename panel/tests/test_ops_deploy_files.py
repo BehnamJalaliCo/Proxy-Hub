@@ -130,3 +130,83 @@ def test_backup_units_are_installed() -> None:
         assert (DEPLOY / "systemd" / f"{unit}.timer").exists()
         assert f"{unit}.timer" in install
     assert "apt-get install -y -qq --no-install-recommends age" in install
+
+
+ALERTMANAGER = DEPLOY / "monitoring" / "alertmanager"
+
+
+def _redact(text: str, secret_files: list[Path]) -> str:
+    """Run the real redact.awk (host awk) over text, the way entrypoint.sh and safe_logs.sh do."""
+    import shutil
+    import subprocess
+
+    awk = shutil.which("awk")
+    assert awk, "awk is needed for the log redactor"
+    # Fixed argv, no shell: the resolved awk binary and a repo file; only test data on stdin.
+    done = subprocess.run(  # noqa: S603
+        [
+            awk,
+            "-v",
+            "secret_files=" + " ".join(str(p) for p in secret_files),
+            "-f",
+            str(ALERTMANAGER / "redact.awk"),
+        ],
+        input=text,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    return done.stdout
+
+
+def test_log_redactor_removes_bot_token_and_secret_urls(tmp_path: Path) -> None:
+    """Rule 3: the exact line Alertmanager v0.34.2 logs on a failed Telegram send loses the token."""
+    import secrets
+
+    token = f"{secrets.randbelow(10**9) + 10**8}:{secrets.token_urlsafe(26)}"
+    half = token.split(":", 1)[1]
+    url = f"https://hc-ping.com/{secrets.token_hex(16)}"
+    (tmp_path / "alert_bot_token").write_text(token + "\n", encoding="utf-8")
+    (tmp_path / "healthchecks_watchdog_url").write_text(url + "\r\n", encoding="utf-8")
+    other = f"{secrets.randbelow(10**9) + 10**8}:{secrets.token_urlsafe(26)}"  # not in any file
+    lines = [
+        'level=WARN msg="Notify attempt failed, will retry later" integration=telegram[0] '
+        f'err="telebot: Post \\"https://api.telegram.org/bot{token}/sendMessage\\": dial tcp: timeout"',
+        f"half alone {half} and url {url} and twice {token}{token}",
+        f"other token in a Bot API URL /bot{other}/getMe and encoded /bot{other.replace(':', '%3A')}/x",
+        'level=INFO msg="Listening on" address=0.0.0.0:9093 ts=2026-11-03T10:11:12Z',
+    ]
+    out = _redact(
+        "\n".join(lines) + "\n", [tmp_path / "alert_bot_token", tmp_path / "healthchecks_watchdog_url"]
+    )
+    out_lines = out.splitlines()
+    assert len(out_lines) == len(lines)
+    for secret in (token, half, url, other, other.split(":", 1)[1]):
+        assert secret not in out
+    assert "/bot<redacted>/sendMessage" in out_lines[0] and "dial tcp: timeout" in out_lines[0]
+    assert out_lines[1] == "half alone <redacted> and url <redacted> and twice <redacted><redacted>"
+    assert out_lines[2] == "other token in a Bot API URL /bot<redacted>/getMe and encoded /bot<redacted>/x"
+    assert out_lines[3] == lines[3], "lines without a secret pass unchanged"
+
+
+def test_log_redactor_ignores_missing_empty_and_short_files(tmp_path: Path) -> None:
+    """The receivers are off by default (empty files): the filter must pass logs through untouched."""
+    (tmp_path / "empty").write_text("", encoding="utf-8")
+    (tmp_path / "short").write_text("-100\n", encoding="utf-8")  # < 8 chars: would mangle normal text
+    text = "a -100 b\nc 9093 d\n"
+    assert _redact(text, [tmp_path / "empty", tmp_path / "short", tmp_path / "missing"]) == text
+
+
+def test_alertmanager_runs_behind_the_redactor() -> None:
+    """Alertmanager is never exec'd directly, its output goes to the redactor, secrets never in argv."""
+    entry = (ALERTMANAGER / "entrypoint.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in entry.splitlines() if not line.lstrip().startswith("#"))
+    assert "exec /bin/alertmanager" not in code
+    assert re.search(r'--log\.level=info >"\$LOG_FIFO" 2>&1 &', code)
+    assert re.search(r'-f /etc/alertmanager/proxyhub/redact\.awk <"\$LOG_FIFO"', code)
+    assert 'secret_files="$RUNDIR/secrets/alert_bot_token $RUNDIR/secrets/healthchecks_watchdog_url"' in code
+    assert 'trap \'kill -TERM "$am"' in code, "SIGTERM must be forwarded to Alertmanager"
+    assert "redact.awk" in (ALERTMANAGER / "Dockerfile").read_text(encoding="utf-8")
+    safe_logs = (DEPLOY / "monitoring" / "safe_logs.sh").read_text(encoding="utf-8")
+    assert "alertmanager/redact.awk" in safe_logs and "cat " not in safe_logs
