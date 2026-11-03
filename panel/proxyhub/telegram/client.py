@@ -50,9 +50,8 @@ DEFAULT_TIMEOUT: Final = httpx.Timeout(15.0, connect=10.0)
 MAX_LONG_POLL_SECONDS: Final = 25
 DEFAULT_RETRY_AFTER: Final = 5
 # Telegram's admin flag for removing posts in a channel. It is only READ, to show the owner that
-# the bot should not have it (docs/04: the bot may post and edit, never remove). Written in two parts
-# because tests/test_architecture.py rejects the joined spelling anywhere in the code (rule 6 check).
-CAN_REMOVE_POSTS_FLAG: Final = "can_delete" + "_messages"
+# the bot should not have it (docs/04: the bot may post and edit, never remove).
+CAN_REMOVE_POSTS_FLAG: Final = "can_delete_messages"
 
 _LOGGERS = (
     "httpx",

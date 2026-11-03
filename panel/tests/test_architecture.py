@@ -11,8 +11,10 @@ from pathlib import Path
 PANEL = Path(__file__).resolve().parents[1] / "proxyhub"
 REPO = PANEL.parents[1]
 
-# Rule 6: posts are never deleted. No Telegram delete call may exist anywhere in the code.
-TG_DELETE = re.compile(r"delete_?messages?\b|deleteMessages?\b", re.IGNORECASE)
+# Rule 6: posts are never deleted. No Telegram delete call may exist anywhere in the code. Reading
+# the admin flag can_delete_messages (to warn the owner) is allowed; the bot client also refuses
+# every method outside its allowlist (proxyhub/telegram/client.py).
+TG_DELETE = re.compile(r"(?<!can_)delete_?messages?\b|deleteMessages?\b", re.IGNORECASE)
 # Rule 5: only proxyhub/hetzner/mutations.py may create or delete servers.
 HCLOUD_MUTATION = re.compile(r"\.servers\.(create|delete|rebuild)\(|\bdelete_server\(|\bcreate_server\(")
 # Rule 7: never call APIs that return user IPs (Xray online-IP stats, telemt IP lists).
@@ -22,7 +24,7 @@ IP_APIS = re.compile(
     re.IGNORECASE,
 )
 # mutations.py does the hcloud calls; the node executor is the single caller, holding gate permits
-# (test nodes only; panel/tests/test_live_architecture.py pins that it is the only one).
+# (test nodes only; tests/test_live_units.py::test_only_the_executor_reaches_server_mutations_and_permits).
 ALLOWED_MUTATION_FILES = {PANEL / "hetzner" / "mutations.py", PANEL / "nodes" / "executor.py"}
 
 
@@ -37,6 +39,8 @@ def _strip_comments(text: str) -> str:
 def test_negative_controls_match() -> None:
     assert TG_DELETE.search("await bot.delete_message(chat, 1)")
     assert TG_DELETE.search('requests.post(url + "/deleteMessage")')
+    assert TG_DELETE.search("client.delete_messages(chat, [1, 2])")
+    assert not TG_DELETE.search('member.get("can_delete_messages")')
     assert HCLOUD_MUTATION.search("client.servers.delete(server)")
     assert IP_APIS.search('httpx.get("http://127.0.0.1:9091/v1/users")')
     assert IP_APIS.search('"statsUserOnline": true')
