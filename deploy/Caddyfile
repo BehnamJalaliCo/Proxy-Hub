@@ -10,8 +10,13 @@
 	encode zstd gzip
 
 	# Internal endpoints (metrics, health) are never public; the deployer uses 127.0.0.1:8000.
-	@internal path /internal/* /healthz /livez
+	# /agent/* is served only on the node agents' own mTLS site (M2.1), never on the owner's site.
+	@internal path /internal/* /healthz /livez /agent/*
 	respond @internal 404
+
+	# Nobody outside may set the headers the agent site uses to vouch for a client certificate.
+	request_header -X-ProxyHub-Agent-Proxy-Secret
+	request_header -X-ProxyHub-Client-Cert-Sha256
 
 	reverse_proxy api:8000 {
 		header_down -Via
