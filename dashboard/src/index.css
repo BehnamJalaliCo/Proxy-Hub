@@ -1,0 +1,271 @@
+@import "tailwindcss";
+
+/* Dark mode follows html[data-theme] (set by public/theme-init.js and src/lib/theme.ts). */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* Design tokens. Components use the semantic names below, never raw colours, so light and dark stay
+   in step. Brand: violet -> cyan. */
+:root {
+  --ph-bg: #f4f5fb;
+  --ph-bg-glow-1: rgb(124 108 255 / 0.16);
+  --ph-bg-glow-2: rgb(34 195 230 / 0.12);
+  --ph-surface: #ffffff;
+  --ph-surface-2: #f6f7fc;
+  --ph-surface-3: #eceef7;
+  --ph-line: #e4e7f2;
+  --ph-line-strong: #cfd4e6;
+  --ph-fg: #121528;
+  --ph-fg-muted: #565d7e;
+  --ph-fg-faint: #858ba8;
+  --ph-brand: #6a5af9;
+  --ph-brand-strong: #5443ee;
+  --ph-brand-2: #1aa9d6;
+  --ph-brand-soft: rgb(106 90 249 / 0.1);
+  --ph-on-brand: #ffffff;
+  --ph-success: #0f9d6b;
+  --ph-success-soft: rgb(15 157 107 / 0.11);
+  --ph-warning: #c27c00;
+  --ph-warning-soft: rgb(217 138 0 / 0.13);
+  --ph-danger: #dc3d4b;
+  --ph-danger-soft: rgb(220 61 75 / 0.11);
+  --ph-info: #2b74e4;
+  --ph-info-soft: rgb(43 116 228 / 0.11);
+  --ph-shadow-card: 0 1px 2px rgb(18 21 40 / 0.04), 0 10px 30px -14px rgb(18 21 40 / 0.16);
+  --ph-shadow-pop: 0 18px 50px -12px rgb(18 21 40 / 0.28);
+  --ph-ring: rgb(106 90 249 / 0.38);
+  --ph-chart-grid: #e7e9f3;
+  /* Chart series (identity), validated with the dataviz palette checks for this surface:
+     slot 1 blue, slot 2 orange, slot 3 aqua; all-pairs CVD dE >= 9.2. */
+  --ph-series-1: #2a78d6;
+  --ph-series-2: #eb6834;
+  --ph-series-3: #1baf7a;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --ph-bg: #080a13;
+  --ph-bg-glow-1: rgb(124 108 255 / 0.2);
+  --ph-bg-glow-2: rgb(34 195 230 / 0.12);
+  --ph-surface: #0f1220;
+  --ph-surface-2: #141829;
+  --ph-surface-3: #1b2035;
+  --ph-line: rgb(255 255 255 / 0.075);
+  --ph-line-strong: rgb(255 255 255 / 0.14);
+  --ph-fg: #e8eaf8;
+  --ph-fg-muted: #a0a6c4;
+  --ph-fg-faint: #6e7596;
+  --ph-brand: #8b7dff;
+  --ph-brand-strong: #a093ff;
+  --ph-brand-2: #3dd0f0;
+  --ph-brand-soft: rgb(139 125 255 / 0.14);
+  --ph-on-brand: #ffffff;
+  --ph-success: #34d399;
+  --ph-success-soft: rgb(52 211 153 / 0.13);
+  --ph-warning: #fbbf24;
+  --ph-warning-soft: rgb(251 191 36 / 0.13);
+  --ph-danger: #fb7185;
+  --ph-danger-soft: rgb(251 113 133 / 0.13);
+  --ph-info: #60a5fa;
+  --ph-info-soft: rgb(96 165 250 / 0.13);
+  --ph-shadow-card: 0 1px 0 rgb(255 255 255 / 0.03) inset, 0 12px 32px -16px rgb(0 0 0 / 0.7);
+  --ph-shadow-pop: 0 24px 60px -12px rgb(0 0 0 / 0.75);
+  --ph-ring: rgb(139 125 255 / 0.5);
+  --ph-chart-grid: rgb(255 255 255 / 0.07);
+  /* Same three hues stepped for the dark surface (#0f1220): all-pairs CVD dE >= 9.4, >= 3:1. */
+  --ph-series-1: #3987e5;
+  --ph-series-2: #d95926;
+  --ph-series-3: #199e70;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: "Vazirmatn Variable", "Vazirmatn", ui-sans-serif, system-ui, "Segoe UI", Tahoma, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  --color-bg: var(--ph-bg);
+  --color-surface: var(--ph-surface);
+  --color-surface-2: var(--ph-surface-2);
+  --color-surface-3: var(--ph-surface-3);
+  --color-line: var(--ph-line);
+  --color-line-strong: var(--ph-line-strong);
+  --color-fg: var(--ph-fg);
+  --color-fg-muted: var(--ph-fg-muted);
+  --color-fg-faint: var(--ph-fg-faint);
+  --color-brand: var(--ph-brand);
+  --color-brand-strong: var(--ph-brand-strong);
+  --color-brand-2: var(--ph-brand-2);
+  --color-brand-soft: var(--ph-brand-soft);
+  --color-on-brand: var(--ph-on-brand);
+  --color-success: var(--ph-success);
+  --color-success-soft: var(--ph-success-soft);
+  --color-warning: var(--ph-warning);
+  --color-warning-soft: var(--ph-warning-soft);
+  --color-danger: var(--ph-danger);
+  --color-danger-soft: var(--ph-danger-soft);
+  --color-info: var(--ph-info);
+  --color-info-soft: var(--ph-info-soft);
+  --color-series-1: var(--ph-series-1);
+  --color-series-2: var(--ph-series-2);
+  --color-series-3: var(--ph-series-3);
+
+  --shadow-card: var(--ph-shadow-card);
+  --shadow-pop: var(--ph-shadow-pop);
+
+  --animate-shimmer: ph-shimmer 1.6s ease-in-out infinite;
+  --animate-float-a: ph-float-a 18s ease-in-out infinite;
+  --animate-float-b: ph-float-b 22s ease-in-out infinite;
+  --animate-spin-slow: spin 9s linear infinite;
+  --animate-ping-soft: ph-ping 2.2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes ph-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes ph-float-a {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-6%, 8%, 0) scale(1.12);
+  }
+}
+
+@keyframes ph-float-b {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1.05);
+  }
+  50% {
+    transform: translate3d(8%, -6%, 0) scale(0.92);
+  }
+}
+
+@keyframes ph-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  80%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-bg font-sans text-fg antialiased;
+    min-height: 100dvh;
+    font-feature-settings: "ss01";
+  }
+
+  ::selection {
+    background: var(--ph-brand-soft);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--ph-brand);
+    outline-offset: 2px;
+  }
+
+  /* Tokens, secrets, IDs and codes are Latin text inside a right-to-left page. */
+  .ltr {
+    direction: ltr;
+    unicode-bidi: isolate;
+  }
+
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+}
+
+@layer components {
+  /* Soft brand glow behind every page. */
+  .ph-backdrop {
+    background:
+      radial-gradient(60rem 30rem at 100% -10%, var(--ph-bg-glow-1), transparent 60%),
+      radial-gradient(50rem 26rem at -10% 0%, var(--ph-bg-glow-2), transparent 60%),
+      var(--ph-bg);
+  }
+
+  .ph-gradient-text {
+    background: linear-gradient(100deg, var(--ph-brand), var(--ph-brand-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .ph-skeleton {
+    background: linear-gradient(
+      90deg,
+      var(--ph-surface-3) 0%,
+      var(--ph-surface-2) 40%,
+      var(--ph-surface-3) 80%
+    );
+    background-size: 200% 100%;
+    animation: var(--animate-shimmer);
+  }
+
+  /* A rotating gradient ring for the hero card. */
+  .ph-glow-border {
+    position: relative;
+    isolation: isolate;
+  }
+  .ph-glow-border::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    z-index: -1;
+    border-radius: inherit;
+    padding: 1px;
+    background: conic-gradient(
+      from var(--ph-angle, 0deg),
+      var(--ph-brand),
+      var(--ph-brand-2),
+      transparent 40%,
+      transparent 60%,
+      var(--ph-brand)
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: ph-angle 8s linear infinite;
+  }
+}
+
+@property --ph-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes ph-angle {
+  to {
+    --ph-angle: 360deg;
+  }
+}
