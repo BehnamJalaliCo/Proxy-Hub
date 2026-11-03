@@ -19,11 +19,42 @@ export GIT_SSH_COMMAND="ssh -i $ETC/deploy_key -o IdentitiesOnly=yes -o StrictHo
 
 log() { echo "proxyhub-deploy: $*"; }
 
+# The node agents' mTLS site (deploy/caddy/agent-on.caddy) is served only when AGENT_DOMAIN is set;
+# otherwise Caddy imports agent-off.caddy and asks for no certificate for it.
+agent_site() {
+  if [ -n "${AGENT_DOMAIN:-}" ]; then echo on; else echo off; fi
+}
+
 compose() {
   local profiles=""
   [ -n "${PANEL_DOMAIN:-}" ] && profiles="edge"
-  COMPOSE_PROFILES="$profiles" PANEL_DOMAIN="${PANEL_DOMAIN:-}" \
+  COMPOSE_PROFILES="$profiles" PANEL_DOMAIN="${PANEL_DOMAIN:-}" AGENT_DOMAIN="${AGENT_DOMAIN:-}" \
+    PROXYHUB_AGENT_SITE="$(agent_site)" \
     docker compose -p proxyhub -f "$CHECKOUT/deploy/docker-compose.yml" "$@"
+}
+
+# The PUBLIC agent CA certificate for Caddy's client-certificate check, derived from the agent CA
+# key inside the freshly built panel image (python -m proxyhub.pki ca-pem; the key never leaves
+# the container). Written atomically, 0644, only if it is one valid certificate.
+AGENT_TRUST_DIR="$STATE/caddy-agent"
+export_agent_ca() {
+  local tmp
+  install -d -m 0755 "$AGENT_TRUST_DIR"
+  tmp="$(mktemp "$AGENT_TRUST_DIR/.agent_ca.XXXXXX")"
+  if ! compose run --rm --no-deps -T api python -m proxyhub.pki ca-pem > "$tmp"; then
+    rm -f "$tmp"; log "agent CA export failed"; return 1
+  fi
+  if [ "$(grep -c -- '-----BEGIN CERTIFICATE-----' "$tmp")" != 1 ] || ! openssl x509 -noout -in "$tmp" 2>/dev/null; then
+    rm -f "$tmp"; log "agent CA export is not one certificate"; return 1
+  fi
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$AGENT_TRUST_DIR/agent_ca.pem"
+}
+
+# Everything Caddy reads from files: a change in any of them needs a Caddy restart (admin API off).
+caddy_inputs_hash() {
+  cat "$CHECKOUT/deploy/Caddyfile" "$CHECKOUT"/deploy/caddy/*.caddy "$AGENT_TRUST_DIR/agent_ca.pem" 2>/dev/null \
+    | sha256sum | cut -d" " -f1
 }
 
 wait_healthy() {
@@ -42,12 +73,19 @@ deploy_commit() {
   git -C "$CHECKOUT" checkout --quiet --detach "$commit" || return 1
   if [ -f "$CHECKOUT/deploy/ensure_secrets.sh" ]; then bash "$CHECKOUT/deploy/ensure_secrets.sh" || return 1; fi
   export PROXYHUB_GIT_COMMIT="$commit"
+  if [ -n "${AGENT_DOMAIN:-}" ]; then
+    if ! [[ "$AGENT_DOMAIN" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] \
+      || [ "$AGENT_DOMAIN" = "${PANEL_DOMAIN:-}" ]; then
+      log "AGENT_DOMAIN must be a lower-case DNS name other than PANEL_DOMAIN"; return 1
+    fi
+  fi
   compose build --quiet || { log "compose build failed"; return 1; }
+  if [ -n "${AGENT_DOMAIN:-}" ]; then export_agent_ca || return 1; fi
   compose up -d --remove-orphans || { log "compose up failed"; return 1; }
-  # Caddyfile is bind-mounted and Caddy's admin API is off: restart Caddy when the file changed.
+  # Caddy's files are bind-mounted and its admin API is off: restart Caddy when any of them changed.
   if [ -n "${PANEL_DOMAIN:-}" ]; then
     local caddy_hash
-    caddy_hash="$(sha256sum "$CHECKOUT/deploy/Caddyfile" | cut -d" " -f1)"
+    caddy_hash="$(caddy_inputs_hash)"
     if [ "$caddy_hash" != "$(cat "$STATE/caddyfile_hash" 2>/dev/null || echo none)" ]; then
       compose restart caddy || { log "caddy restart failed"; return 1; }
       echo "$caddy_hash" > "$STATE/caddyfile_hash"

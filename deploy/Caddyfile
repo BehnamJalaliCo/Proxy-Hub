@@ -36,3 +36,7 @@
 		output discard
 	}
 }
+
+# The node agents' own mTLS site (agent.<domain>): deploy/caddy/agent-on.caddy when the deployer
+# finds AGENT_DOMAIN in /etc/proxy-hub/deploy.env, else agent-off.caddy (nothing, no certificate).
+import /etc/caddy/agent/agent-{$PROXYHUB_AGENT_SITE:off}.caddy
