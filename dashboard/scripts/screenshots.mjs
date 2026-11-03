@@ -11,7 +11,7 @@
 //
 // Playwright is not a dashboard dependency: it is resolved from the machine (global install).
 
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -24,7 +24,9 @@ const OUT = resolve(process.env.OUT ?? "screenshots-raw");
 const TOKEN = process.env.SETUP_TOKEN ?? "";
 const ONLY_PUBLIC = process.env.ONLY_PUBLIC === "1";
 const PREFIX = process.env.PREFIX ?? "";
-const PASSWORD = "Correct-Horse-Battery-42!";
+// A fresh random owner password per run (never printed, never in the repo): even a run pointed at
+// the wrong panel by mistake can never create an owner whose password anyone else knows.
+const PASSWORD = randomBytes(24).toString("base64url");
 
 mkdirSync(OUT, { recursive: true });
 
