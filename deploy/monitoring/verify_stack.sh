@@ -19,6 +19,9 @@ fail=0
 pass() { echo "PASS $*"; }
 bad() { echo "FAIL $*"; fail=1; }
 # GET from inside the prometheus container (busybox wget), which is on the monitoring network.
+# Service names carry a trailing dot ("loki.:3100"): Ubuntu's systemd stub resolv.conf has
+# "search .", Docker copies it into containers, and busybox wget then resolves no short name at
+# all (found on the panel server, P05). The fully-qualified form skips the search list.
 iget() { "${COMPOSE[@]}" exec -T prometheus wget -q -O - "$1"; }
 py() { python3 -I -c "$1"; }
 urlq() { python3 -I -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
@@ -53,7 +56,7 @@ end=$((SECONDS + WAIT_S))
 while :; do
   in_prom="$(iget 'http://127.0.0.1:9090/api/v1/alerts' | py 'import json,sys
 print(any(a["labels"].get("alertname")=="Watchdog" and a["state"]=="firing" for a in json.load(sys.stdin)["data"]["alerts"]))')"
-  in_am="$(iget 'http://alertmanager:9093/api/v2/alerts' | py 'import json,sys
+  in_am="$(iget 'http://alertmanager.:9093/api/v2/alerts' | py 'import json,sys
 print(any(a["labels"].get("alertname")=="Watchdog" for a in json.load(sys.stdin)))')"
   [ "$in_prom" = True ] && [ "$in_am" = True ] && break
   [ $SECONDS -lt $end ] || break
@@ -85,15 +88,15 @@ if [ "$bind" = "127.0.0.1:3000" ]; then pass "grafana: published on 127.0.0.1:30
 
 # 6. Loki reports "ready" only some seconds after a (re)start (ingester ring warm-up): poll.
 end=$((SECONDS + WAIT_S))
-until [ "$(iget http://loki:3100/ready 2>/dev/null || true)" = ready ] || [ $SECONDS -ge $end ]; do sleep 3; done
-if [ "$(iget http://loki:3100/ready 2>/dev/null || true)" = ready ]; then pass "loki: ready"; else bad "loki not ready"; fi
+until [ "$(iget http://loki.:3100/ready 2>/dev/null || true)" = ready ] || [ $SECONDS -ge $end ]; do sleep 3; done
+if [ "$(iget http://loki.:3100/ready 2>/dev/null || true)" = ready ]; then pass "loki: ready"; else bad "loki not ready"; fi
 
 # 7. Panel logs in Loki: present, only panel services, no IP address left.
 end=$((SECONDS + WAIT_S))
 while :; do
   now_ns="$(date +%s)000000000"
   start_ns="$(( $(date +%s) - 3600 ))000000000"
-  by_service="$(iget "http://loki:3100/loki/api/v1/query?query=$(urlq 'sum by (service) (count_over_time({job="panel"}[1h]))')&time=$now_ns" |
+  by_service="$(iget "http://loki.:3100/loki/api/v1/query?query=$(urlq 'sum by (service) (count_over_time({job="panel"}[1h]))')&time=$now_ns" |
     py 'import json,sys
 r=json.load(sys.stdin)["data"]["result"]
 print(" ".join(sorted(x["metric"].get("service","?")+"="+x["value"][1] for x in r)))')"
@@ -104,7 +107,7 @@ done
 if [ -n "$by_service" ]; then pass "loki: panel log lines in the last hour: $by_service"; else bad "loki: no panel logs shipped"; fi
 others="$(tr ' ' '\n' <<<"$by_service" | grep -v -E '^(api|worker|migrate)=' | grep . || true)"
 if [ -z "$others" ]; then pass "loki: only api/worker/migrate logs (no other container)"; else bad "loki holds logs of: $others"; fi
-ip_lines="$(iget "http://loki:3100/loki/api/v1/query_range?query=$(urlq '{job="panel"} |~ "([0-9]{1,3}[.]){3}[0-9]{1,3}"')&start=$start_ns&end=$now_ns&limit=1000" |
+ip_lines="$(iget "http://loki.:3100/loki/api/v1/query_range?query=$(urlq '{job="panel"} |~ "([0-9]{1,3}[.]){3}[0-9]{1,3}"')&start=$start_ns&end=$now_ns&limit=1000" |
   py 'import json,sys; print(sum(len(s["values"]) for s in json.load(sys.stdin)["data"]["result"]))')"
 if [ "$ip_lines" = 0 ]; then pass "loki: 0 shipped lines contain an IPv4 address (rule 7)"; else bad "loki: $ip_lines lines contain an IPv4 address"; fi
 
