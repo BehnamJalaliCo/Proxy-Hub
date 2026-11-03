@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -30,6 +31,30 @@ func TestParseGood(t *testing.T) {
 	}
 	if c.IdentityFile() != "/var/lib/proxyhub-agent/identity.pem" {
 		t.Fatal(c.IdentityFile())
+	}
+}
+
+// The agent.json that node-image's cloud-init template writes must be accepted as is.
+func TestCloudInitTemplateConfigParses(t *testing.T) {
+	data, err := os.ReadFile("../../../node-image/cloud-init/node-user-data.yaml.tmpl")
+	if err != nil {
+		t.Skip("node-image not next to the agent module")
+	}
+	text := string(data)
+	start := strings.Index(text, "\n      {\n")
+	end := strings.Index(text, "\n      }\n")
+	if start < 0 || end < start {
+		t.Fatal("agent.json block not found in the template")
+	}
+	block := text[start+1 : end+8]
+	block = strings.ReplaceAll(block, "${PANEL_AGENT_URL}", "https://agent.example.com")
+	block = strings.ReplaceAll(block, "${NODE_ID}", "0b7f6a3e-1c2d-4e5f-8a9b-0c1d2e3f4a5b")
+	c, err := Parse([]byte(block))
+	if err != nil {
+		t.Fatalf("template config refused: %v", err)
+	}
+	if c.TelemtUser != "telemt" || len(c.RestartCommand) == 0 || c.MetricsURL() != "http://127.0.0.1:9090/metrics" {
+		t.Fatalf("template config = %+v", c)
 	}
 }
 

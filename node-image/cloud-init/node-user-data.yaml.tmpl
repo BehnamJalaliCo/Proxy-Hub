@@ -1,0 +1,37 @@
+#cloud-config
+# Per-node user data, filled in by the panel's fleet for one server (docs/10 section 3.5).
+# Placeholders: ${NODE_ID}, ${PANEL_AGENT_URL}, ${AGENT_CA_PEM_B64}, ${REGISTRATION_TOKEN_B64}.
+# The token is single-use and valid for one hour; the agent deletes its file after registering,
+# and the metadata service that serves this document is blocked once cloud-init has finished.
+# The image already holds Telemt, the agent and the hardening (node-image/provision.sh).
+write_files:
+  - path: /etc/proxyhub-agent/agent.json
+    owner: root:root
+    permissions: '0600'
+    content: |
+      {
+        "panel_url": "${PANEL_AGENT_URL}",
+        "node_id": "${NODE_ID}",
+        "ca_file": "/etc/proxyhub-agent/ca.pem",
+        "token_file": "/etc/proxyhub-agent/registration_token",
+        "state_dir": "/var/lib/proxyhub-agent",
+        "telemt_config": "/etc/telemt/telemt.toml",
+        "telemt_data_dir": "/var/lib/telemt",
+        "telemt_user": "telemt",
+        "metrics_listen": "127.0.0.1:9090",
+        "telemt_version": "3.5.16",
+        "reload_command": ["systemctl", "reload", "telemt.service"],
+        "restart_command": ["systemctl", "restart", "telemt.service"]
+      }
+  - path: /etc/proxyhub-agent/ca.pem
+    owner: root:root
+    permissions: '0644'
+    encoding: b64
+    content: ${AGENT_CA_PEM_B64}
+  - path: /etc/proxyhub-agent/registration_token
+    owner: root:root
+    permissions: '0600'
+    encoding: b64
+    content: ${REGISTRATION_TOKEN_B64}
+runcmd:
+  - [systemctl, start, --no-block, proxyhub-agent.service]
