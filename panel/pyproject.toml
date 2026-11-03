@@ -1,0 +1,69 @@
+[project]
+name = "proxyhub"
+version = "0.1.0"
+description = "Proxy-Hub central panel: control loops, safety gates, API"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.162.0",
+    "uvicorn[standard]>=0.38",
+    "sqlalchemy[asyncio]==2.1.6",
+    "alembic==1.20.1",
+    "asyncpg==0.32.0",
+    "pydantic==2.13.5",
+    "pydantic-settings==2.16.2",
+    "hcloud==2.27.0",
+    "redis>=6.0",
+    "prometheus-client>=0.22",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
+    "pytest-asyncio>=1.2",
+    "hypothesis>=6.140",
+    "httpx>=0.28",
+    "ruff>=0.14",
+    "mypy>=1.18",
+]
+
+[project.scripts]
+proxyhub = "proxyhub.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["proxyhub"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = ["proxyhub/migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "RUF"]
+ignore = ["S101", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S311"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["hcloud.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+markers = [
+    "db: needs a real PostgreSQL (PROXYHUB_DATABASE_URL)",
+    "redis: needs a real Redis (PROXYHUB_REDIS_URL)",
+    "hetzner: talks to a real Hetzner account; runs only on the panel server",
+]
