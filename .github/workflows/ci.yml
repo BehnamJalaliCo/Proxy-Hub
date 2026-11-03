@@ -54,10 +54,12 @@ jobs:
       - run: |
           sudo sysctl -w fs.protected_regular=2
           sudo install -d -m 0700 /etc/proxy-hub /etc/proxy-hub/secrets
-          for f in db_password redis_password; do
+          for f in db_password redis_password master_key; do
             openssl rand -hex 32 | sudo tee /etc/proxy-hub/secrets/$f >/dev/null
             sudo chmod 0444 /etc/proxy-hub/secrets/$f
           done
+          sudo openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out /etc/proxy-hub/secrets/agent_ca_key
+          sudo chmod 0444 /etc/proxy-hub/secrets/agent_ca_key
       - run: sudo bash ops/scripts/stack_restart_test.sh proxyhub-ci
       - if: always()
         run: sudo docker compose -p proxyhub-ci -f deploy/docker-compose.yml down -v

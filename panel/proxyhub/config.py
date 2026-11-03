@@ -50,6 +50,11 @@ class RuntimeConfig(BaseSettings):
     redis_port: int = 6379
     redis_password_file: Path = Path("/run/secrets/redis_password")
 
+    # 32-byte hex key that encrypts secrets stored in the database (Hetzner/Telegram/Cloudflare tokens).
+    master_key_file: Path = Path("/run/secrets/master_key")
+    # EC P-256 private key (PEM) of the panel's own CA that signs node agent certificates (mTLS).
+    agent_ca_key_file: Path = Path("/run/secrets/agent_ca_key")
+
     log_level: str = "INFO"
     git_commit: str = os.environ.get("PROXYHUB_GIT_COMMIT", "unknown")
 

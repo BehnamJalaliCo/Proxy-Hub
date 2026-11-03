@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import pkgutil
 
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
+import proxyhub.db as db_pkg
 from proxyhub.db.models import Base
+
+# Feature teams add models in proxyhub/db/models_<team>.py; import them all so autogenerate and
+# metadata see every table.
+for _info in pkgutil.iter_modules(db_pkg.__path__):
+    if _info.name.startswith("models_"):
+        importlib.import_module(f"proxyhub.db.{_info.name}")
 
 config = context.config
 target_metadata = Base.metadata

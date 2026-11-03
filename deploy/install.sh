@@ -20,17 +20,7 @@ docker compose version >/dev/null || { echo "docker compose plugin is not instal
 install -d -m 0700 -o root -g root "$ETC" "$SECRETS"
 install -d -m 0755 -o root -g root "$STATE"
 
-gen_secret() {  # 0444 inside a 0700 root-only directory: containers can read, host users cannot reach.
-  local f="$SECRETS/$1"
-  if [ ! -s "$f" ]; then
-    umask 077
-    openssl rand -hex 32 > "$f"
-    echo "generated secret: $1"
-  fi
-  chown root:root "$f"; chmod 0444 "$f"
-}
-gen_secret db_password
-gen_secret redis_password
+bash "$(dirname "$0")/ensure_secrets.sh"
 
 if [ ! -f "$ETC/deploy.env" ]; then
   cat > "$ETC/deploy.env" <<CONF

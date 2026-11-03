@@ -11,7 +11,7 @@ x-panel: &panel
     args:
       GIT_COMMIT: ${PROXYHUB_GIT_COMMIT:-dev}
       PYTHON_IMAGE: ${PROXYHUB_PYTHON_IMAGE:-python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f}
-  secrets: [db_password, redis_password]
+  secrets: [db_password, redis_password, master_key, agent_ca_key]
   restart: unless-stopped
   networks: [backend]
 
@@ -99,6 +99,10 @@ secrets:
     file: /etc/proxy-hub/secrets/db_password
   redis_password:
     file: /etc/proxy-hub/secrets/redis_password
+  master_key:
+    file: /etc/proxy-hub/secrets/master_key
+  agent_ca_key:
+    file: /etc/proxy-hub/secrets/agent_ca_key
 
 volumes:
   pgdata:

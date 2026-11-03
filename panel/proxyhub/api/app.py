@@ -13,6 +13,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
 
 from proxyhub import __version__
+from proxyhub.api.registry import include_all
 from proxyhub.config import get_config
 from proxyhub.db.session import get_engine
 
@@ -79,3 +80,7 @@ async def healthz(response: Response) -> dict[str, Any]:
 async def metrics() -> Response:
     """Prometheus scrape target. Caddy never exposes /internal/* publicly."""
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# Feature routers (proxyhub/api/routes_*.py) are discovered automatically; keep this last.
+include_all(app)

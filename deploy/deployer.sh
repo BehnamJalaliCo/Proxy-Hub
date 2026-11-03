@@ -38,6 +38,7 @@ wait_healthy() {
 deploy_commit() {
   local commit="$1"
   git -C "$CHECKOUT" checkout --quiet --detach "$commit"
+  if [ -f "$CHECKOUT/deploy/ensure_secrets.sh" ]; then bash "$CHECKOUT/deploy/ensure_secrets.sh"; fi
   export PROXYHUB_GIT_COMMIT="$commit"
   compose build --quiet
   compose up -d --remove-orphans
