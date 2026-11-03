@@ -97,7 +97,7 @@ async def _read_json(request: Request) -> Any:
             raise HTTPException(status_code=413, detail="too_large")
     try:
         return json.loads(body)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         raise HTTPException(status_code=400, detail="invalid_json") from None
 
 

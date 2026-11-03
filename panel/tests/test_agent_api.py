@@ -618,6 +618,10 @@ async def test_report_needs_identity_and_size_limit(env: Env) -> None:
     assert resp.status_code == 413
     bad_json = await env.client.post("/agent/v1/report", content=b"{", headers=env.headers(fp))
     assert bad_json.status_code == 400
+    deep = b"[" * 100_000 + b"]" * 100_000
+    assert (
+        await env.client.post("/agent/v1/report", content=deep, headers=env.headers(fp))
+    ).status_code == 400
 
 
 # --- secrets ------------------------------------------------------------------------------------
