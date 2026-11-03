@@ -1,0 +1,140 @@
+# Alert rules (M1.7). Owner-facing text (summary/description) is Persian: these reach the owner's
+# private Telegram chat through Alertmanager. Unit tests: deploy/monitoring/prometheus/tests/.
+# Thresholds: worker heartbeat 90 s = WORKER_STALE_SECONDS in panel/proxyhub/api/app.py (a pytest
+# keeps both equal); disk 85 % (docs/06); backup 26 h (daily timer + slack); restore test weekly.
+groups:
+  - name: proxyhub-panel
+    rules:
+      - alert: PanelApiDown
+        expr: up{job="proxyhub-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API پنل از دسترس خارج است"
+          description: "Prometheus بیش از ۲ دقیقه نتوانسته متریک‌های API پنل را بخواند."
+
+      - alert: WorkerHeartbeatStale
+        expr: proxyhub_worker_heartbeat_age_seconds > 90
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "worker پنل از کار افتاده است"
+          description: "آخرین ضربان worker {{ $value | humanizeDuration }} پیش بوده است (حد مجاز ۹۰ ثانیه). چرخه‌های کنترل اجرا نمیشوند."
+
+      - alert: PanelDatabaseDown
+        expr: proxyhub_db_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "دیتابیس پنل پاسخ نمیدهد"
+          description: "API پنل بیش از ۱ دقیقه به PostgreSQL وصل نشده است."
+
+      - alert: PanelRedisDown
+        expr: proxyhub_redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis پنل پاسخ نمیدهد"
+          description: "API پنل بیش از ۱ دقیقه به Redis وصل نشده است."
+
+  - name: proxyhub-host
+    rules:
+      - alert: DiskAlmostFull
+        expr: |
+          100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|ramfs|overlay|squashfs|nsfs"}
+                   / node_filesystem_size_bytes{fstype!~"tmpfs|ramfs|overlay|squashfs|nsfs"}) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "دیسک سرور پنل نزدیک پر شدن است"
+          description: "{{ $value | printf \"%.0f\" }}٪ از دیسک {{ $labels.mountpoint }} پر است (حد هشدار ۸۵٪)."
+
+      - alert: MonitoringTargetDown
+        expr: up{job!="proxyhub-api"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "بخشی از پایش از کار افتاده است"
+          description: "سرویس {{ $labels.job }} بیش از ۵ دقیقه پاسخ نداده است."
+
+      - alert: TextfileMetricsError
+        expr: node_textfile_scrape_error > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "متریک‌های backup خوانده نمیشوند"
+          description: "node-exporter نمیتواند فایل‌های متریک backup را در /var/lib/proxy-hub/metrics بخواند."
+
+  - name: proxyhub-backup
+    rules:
+      - alert: BackupFailed
+        expr: proxyhub_backup_last_run_success == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "backup دیتابیس شکست خورد"
+          description: "آخرین اجرای backup روزانه موفق نبود. جزئیات: journalctl -u proxyhub-backup.service"
+
+      - alert: BackupTooOld
+        expr: time() - proxyhub_backup_last_success_timestamp_seconds > 26 * 3600
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "backup دیتابیس کهنه است"
+          description: "آخرین backup موفق {{ $value | humanizeDuration }} پیش بوده است (حد مجاز ۲۶ ساعت)."
+
+      - alert: BackupMetricsMissing
+        expr: absent(proxyhub_backup_last_run_timestamp_seconds)
+        for: 26h
+        labels:
+          severity: critical
+        annotations:
+          summary: "backup اصلاً اجرا نشده است"
+          description: "۲۶ ساعت است که هیچ نشانه‌ای از اجرای backup نیست (timer روشن است؟)."
+
+      - alert: RestoreTestFailing
+        expr: proxyhub_restore_test_last_run_success == 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "آزمون بازگردانی backup شکست خورد"
+          description: "آخرین backup به‌درستی بازگردانده نشد؛ ممکن است backupها قابل استفاده نباشند. جزئیات: journalctl -u proxyhub-restore-test.service"
+
+      - alert: RestoreTestTooOld
+        expr: time() - proxyhub_restore_test_last_success_timestamp_seconds > 8 * 86400
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "آزمون بازگردانی هفتگی اجرا نشده است"
+          description: "آخرین آزمون بازگردانی موفق {{ $value | humanizeDuration }} پیش بوده است (حد مجاز ۸ روز)."
+
+      - alert: RestoreTestMetricsMissing
+        expr: absent(proxyhub_restore_test_last_run_timestamp_seconds)
+        for: 8d
+        labels:
+          severity: warning
+        annotations:
+          summary: "آزمون بازگردانی اصلاً اجرا نشده است"
+          description: "۸ روز است که هیچ نشانه‌ای از آزمون بازگردانی هفتگی نیست."
+
+  - name: proxyhub-watchdog
+    rules:
+      # Always firing on purpose. Alertmanager forwards it every few minutes to healthchecks.io
+      # (optional secret healthchecks_watchdog_url). If the panel server, Prometheus or
+      # Alertmanager dies, the pings stop and healthchecks.io warns the owner from outside.
+      - alert: Watchdog
+        expr: vector(1)
+        labels:
+          severity: none
+        annotations:
+          summary: "نگهبان: زنجیره‌ی پایش زنده است"
+          description: "این هشدار همیشه روشن است و فقط به نگهبان بیرونی میرود، نه به تلگرام."
