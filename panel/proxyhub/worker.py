@@ -9,8 +9,10 @@ import signal
 from proxyhub.db.session import get_engine
 from proxyhub.reconcilers.account_guard import AccountGuardReconciler
 from proxyhub.reconcilers.base import Heartbeat, Reconciler
+from proxyhub.reconcilers.dns import DnsReconciler
 from proxyhub.reconcilers.fleet import FleetReconciler
 from proxyhub.reconcilers.pricing import PricingReconciler
+from proxyhub.reconcilers.probes import ProbesReconciler
 
 log = logging.getLogger(__name__)
 
@@ -18,7 +20,14 @@ log = logging.getLogger(__name__)
 def reconcilers() -> list[Reconciler]:
     # budget, sponsor, node_health, ... are added milestone by milestone (docs/10, docs/11).
     # The fleet loop is dry-run only (proxyhub.reconcilers.fleet.FLEET_LIVE_ENABLED).
-    return [Heartbeat(), AccountGuardReconciler(), PricingReconciler(), FleetReconciler()]
+    return [
+        Heartbeat(),
+        AccountGuardReconciler(),
+        PricingReconciler(),
+        FleetReconciler(),
+        DnsReconciler(),  # net: no-op until a verified Cloudflare token and an active domain exist
+        ProbesReconciler(),  # net: records reachability verdicts from Iran only
+    ]
 
 
 async def run() -> None:
