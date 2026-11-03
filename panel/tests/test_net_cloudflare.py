@@ -50,6 +50,7 @@ from proxyhub.cloudflare.client import (
 from proxyhub.cloudflare.pool import ALLOWED, PoolState, PoolTransitionError, check_pool_transition
 from proxyhub.cloudflare.records import (
     MARKER,
+    Change,
     Desired,
     OwnedRow,
     comment_ref,
@@ -634,3 +635,81 @@ async def test_status_lists_only_our_synced_records(client: AsyncClient, engine:
         "managed": True,
     }
     assert rec["updated_at"].endswith("Z")
+
+
+@pytest.mark.db
+async def test_apply_plan_local_steps_refusals_and_crash_safe_create(engine: AsyncEngine) -> None:
+    """Everything in apply_plan that needs no successful Cloudflare call, on the real database. The
+    client points at a closed local port: any call that did happen would fail as 'unavailable'."""
+    await add_zone(engine, ZONE_ID, "example.com", pool="active")
+    ours_rec, _ = ours("slot1.example.com", "203.0.113.1")
+    pending_ref = uuid.uuid4()
+    adopt_rec = remote("slot2.example.com", "203.0.113.2", comment=managed_comment(pending_ref))
+    gone_id = secrets.token_hex(16)
+    foreign = remote("slot5.example.com", "192.0.2.5", comment="owner's record")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO cf_records (id, zone_id, cf_record_id, name, type, content, ttl, proxied, "
+                "purpose) VALUES "
+                "(:r1, :z, :c1, 'slot1.example.com', 'A', '198.51.100.1', 60, false, 'slot'), "
+                "(:r2, :z, NULL, 'slot2.example.com', 'A', '203.0.113.2', 60, false, 'slot'), "
+                "(:r3, :z, :c3, 'slot3.example.com', 'A', '203.0.113.3', 60, false, 'slot')"
+            ),
+            {
+                "r1": comment_ref(ours_rec.comment),
+                "r2": pending_ref,
+                "r3": uuid.uuid4(),
+                "z": ZONE_ID,
+                "c1": ours_rec.id,
+                "c3": gone_id,
+            },
+        )
+    async with engine.connect() as conn:
+        rows = await service.owned_rows(conn, ZONE_ID, "slot")
+    desired = [
+        Desired("slot1.example.com", "A", "203.0.113.1"),
+        Desired("slot2.example.com", "A", "203.0.113.2"),
+        Desired("slot5.example.com", "A", "203.0.113.5"),
+    ]
+    changes = plan_zone(ZONE_ID, desired, [ours_rec, adopt_rec, foreign], rows)
+    assert sorted((c.op, c.name) for c in changes) == [
+        ("adopt", "slot2.example.com"),
+        ("conflict", "slot5.example.com"),
+        ("forget", "slot3.example.com"),
+        ("sync", "slot1.example.com"),
+    ]
+    known: set[tuple[str, str, str]] = set()
+    closed = "http://127.0.0.1:9"
+    async with CloudflareClient(SecretValue(secrets.token_urlsafe(30)), base_url=closed) as cf:
+
+        async def apply(steps: list[Change]) -> service.ApplyReport:
+            return await service.apply_plan(
+                engine, cf, steps, rows, purpose="slot", actor="dns", max_api_calls=5, known_conflicts=known
+            )
+
+        report = await apply(changes)
+        assert report.api_calls == 0 and report.failed == [] and len(report.conflicts) == 1
+        await apply(changes)
+        # A delete of a record we do not own is refused before any call (defence in depth).
+        forged = Change("delete", ZONE_ID, foreign.name, "A", remote=foreign, row=rows[0])
+        assert (await apply([forged])).failed == []
+        # A create whose call fails leaves its row behind, committed BEFORE the call.
+        want = Desired("slot4.example.com", "A", "203.0.113.4")
+        failed = await apply([Change("create", ZONE_ID, want.name, "A", desired=want)])
+        assert failed.failed == ["create:slot4.example.com"] and failed.stopped
+    async with engine.connect() as conn:
+        db_rows = {
+            r.name: (r.cf_record_id, r.content)
+            for r in (await conn.execute(text("SELECT name, cf_record_id, content FROM cf_records"))).all()
+        }
+    assert db_rows == {
+        "slot1.example.com": (ours_rec.id, "203.0.113.1"),  # synced from Cloudflare
+        "slot2.example.com": (adopt_rec.id, "203.0.113.2"),  # adopted by its ref
+        "slot4.example.com": (None, "203.0.113.4"),  # pending: the next run adopts or retries it
+    }
+    log = [(a["action"], a["allowed"], a["result"]) for a in await actions(engine)]
+    assert [x[0] for x in log].count("dns_conflict") == 1  # logged once, not every minute
+    assert ("dns_delete", False, "refused: not a record this panel manages") in log
+    assert ("dns_create", True, "failed: unavailable") in log
+    assert {"dns_sync", "dns_adopt", "dns_forget"} <= {x[0] for x in log}

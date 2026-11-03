@@ -291,7 +291,10 @@ async def refresh_token_and_zones(db: Db, cf: CloudflareClient, now: datetime, *
         check = await check_token(cf)
     except CfServiceError as exc:
         if exc.code == "cf_token_invalid":
-            await save_state(db, now, verified=False, checked_at=now, error=exc.code, missing=[])
+            # Checked again in an hour (or at once when the owner stores a new token).
+            await save_state(
+                db, now, verified=False, checked_at=now, error=exc.code, missing=[], zones_refreshed_at=now
+            )
             if was_verified:
                 await log_action(
                     db,
