@@ -2,10 +2,11 @@
 # Validate every monitoring config with the SAME pinned images the stack runs (no network needed
 # besides pulling them): Prometheus config + rules + rule unit tests, Alertmanager config in all
 # rendered variants (Telegram on/off x watchdog on/off, malformed), a REAL runtime check that the
-# Telegram bot token never reaches the Alertmanager log, Loki config, Alloy config.
+# Telegram bot token never reaches the Alertmanager log, a REAL delivery of an alert to the panel
+# webhook (http://api:8000/internal/alerts/alertmanager), Loki config, Alloy config.
 # Usage: bash deploy/monitoring/check_configs.sh
 # Image overrides (e.g. a registry mirror of the same digest): PROXYHUB_PROMETHEUS_IMAGE,
-# PROXYHUB_ALERTMANAGER_IMAGE, PROXYHUB_LOKI_IMAGE, PROXYHUB_ALLOY_IMAGE.
+# PROXYHUB_ALERTMANAGER_IMAGE, PROXYHUB_LOKI_IMAGE, PROXYHUB_ALLOY_IMAGE, PROXYHUB_PYTHON_IMAGE.
 set -euo pipefail
 
 MON="$(cd "$(dirname "$0")" && pwd)"
@@ -22,6 +23,7 @@ PROM="${PROXYHUB_PROMETHEUS_IMAGE:-$(pinned PROXYHUB_PROMETHEUS_IMAGE)}"
 AM="${PROXYHUB_ALERTMANAGER_IMAGE:-$(pinned PROXYHUB_ALERTMANAGER_IMAGE)}"
 LOKI="${PROXYHUB_LOKI_IMAGE:-$(pinned PROXYHUB_LOKI_IMAGE)}"
 ALLOY="${PROXYHUB_ALLOY_IMAGE:-$(pinned PROXYHUB_ALLOY_IMAGE)}"
+PYTHON="${PROXYHUB_PYTHON_IMAGE:-$(pinned PROXYHUB_PYTHON_IMAGE)}"
 
 run() { docker run --rm --network none --user 65534:65534 "$@"; }
 fail=0
@@ -48,11 +50,12 @@ check "prometheus rule unit tests" run -v "$MON/prometheus:/etc/prometheus:ro" -
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT  # replaced by cleanup() once the leak check can leave a container
 chmod 0755 "$work"
-# variant | expected receivers line. "malformed" must fall back to null receivers, never half-on.
+# variant | expected receivers line. "malformed" must fall back to the panel webhook alone, never
+# half-on. The panel webhook (receiver "owner") is on in every variant.
 for spec in "none|off;off" "telegram|on;off" "watchdog|off;on" "both|on;on" "malformed|off;off"; do
   variant="${spec%%|*}"
   want="${spec#*|}"
-  want="telegram receiver: ${want%%;*}; external watchdog: ${want#*;}"
+  want="panel webhook: on; telegram receiver: ${want%%;*}; external watchdog: ${want#*;}"
   sec="$work/$variant"
   mkdir -p "$sec"
   : > "$sec/alert_bot_token"
@@ -97,7 +100,10 @@ cleanup() {
   [ -z "$leak_ctr" ] || docker rm -f -v "$leak_ctr" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
-trap cleanup EXIT
+hook_net=""
+hook_am=""
+hook_rx=""
+trap 'cleanup; cleanup_hook' EXIT  # cleanup_hook: the panel webhook check below
 leak_check() {
   local sec="$work/leak" token half logs end t0 t1 code n
   mkdir -p "$sec"
@@ -182,6 +188,77 @@ leak_check() {
   leak_ctr=""
 }
 leak_check || fail=1
+
+# The panel webhook for REAL: Alertmanager (real entrypoint, no optional secrets) and a plain HTTP
+# receiver answering as "api:8000" on an internal network (no internet). An alert added with amtool
+# must arrive as POST /internal/alerts/alertmanager with a version 4 body, from Alertmanager itself.
+cleanup_hook() {
+  for c in "$hook_am" "$hook_rx"; do [ -z "$c" ] || docker rm -f -v "$c" >/dev/null 2>&1 || true; done
+  [ -z "$hook_net" ] || docker network rm "$hook_net" >/dev/null 2>&1 || true
+}
+webhook_check() {
+  local sec="$work/hook" end posted
+  mkdir -p "$sec"
+  : > "$sec/alert_bot_token"
+  : > "$sec/alert_chat_id"
+  : > "$sec/healthchecks_watchdog_url"
+  chmod -R a+rX "$sec"
+  hook_net="proxyhub-hookcheck-$$"
+  docker network create --internal --label proxyhub.purpose=config-check "$hook_net" >/dev/null
+  hook_rx="$(docker run -d --network "$hook_net" --network-alias api --user 65534:65534 --read-only \
+    --label proxyhub.purpose=config-check "$PYTHON" python -I -c '
+import http.server
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        print(self.command, self.path, self.headers.get("User-Agent"), body.decode(), flush=True)
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(("0.0.0.0", 8000), H).serve_forever()
+')"
+  hook_am="$(docker run -d --network "$hook_net" --user 65534:65534 --read-only \
+    --label proxyhub.purpose=config-check \
+    -v "$MON/alertmanager:/etc/alertmanager/proxyhub:ro" \
+    -v "$sec/alert_bot_token:/run/secrets/alert_bot_token:ro" \
+    -v "$sec/alert_chat_id:/run/secrets/alert_chat_id:ro" \
+    -v "$sec/healthchecks_watchdog_url:/run/secrets/healthchecks_watchdog_url:ro" \
+    --tmpfs /tmp:mode=1777,size=4m --tmpfs /alertmanager:mode=1777,size=16m \
+    --entrypoint /bin/sh "$AM" /etc/alertmanager/proxyhub/entrypoint.sh)"
+  end=$((SECONDS + 60))
+  until docker exec "$hook_am" wget -q -O /dev/null http://127.0.0.1:9093/-/ready 2>/dev/null; do
+    if [ $SECONDS -ge $end ]; then
+      echo "FAIL alertmanager panel webhook: not ready within 60s"
+      docker logs "$hook_am" 2>&1 | tail -20 | sed 's/^/  | /'
+      return 1
+    fi
+    sleep 1
+  done
+  docker exec "$hook_am" /bin/amtool --alertmanager.url=http://127.0.0.1:9093 alert add \
+    alertname=ProxyHubWebhookCheck severity=critical --annotation=summary=webhook-check >/dev/null 2>&1
+  # group_wait is 30 s for the owner route.
+  end=$((SECONDS + 120))
+  until docker logs "$hook_rx" 2>&1 | grep -q '^POST /internal/alerts/alertmanager Alertmanager/'; do
+    if [ $SECONDS -ge $end ]; then
+      echo "FAIL alertmanager panel webhook: nothing reached api:8000 within 120s"
+      docker logs "$hook_am" 2>&1 | tail -20 | sed 's/^/  | /'
+      return 1
+    fi
+    sleep 2
+  done
+  posted="$(docker logs "$hook_rx" 2>&1 | grep '^POST /internal/alerts/alertmanager' | head -1)"
+  if ! grep -q '"version":"4"' <<<"$posted" || ! grep -q '"alertname":"ProxyHubWebhookCheck"' <<<"$posted" ||
+    ! grep -q '"receiver":"owner"' <<<"$posted"; then
+    echo "FAIL alertmanager panel webhook: unexpected body"
+    cut -c1-300 <<<"$posted" | sed 's/^/  | /'
+    return 1
+  fi
+  echo "PASS alertmanager panel webhook: real alert POSTed to api:8000/internal/alerts/alertmanager (version 4)"
+}
+if webhook_check; then :; else fail=1; fi
+cleanup_hook
 
 check "loki config" run -v "$MON/loki:/etc/loki/proxyhub:ro" --entrypoint /usr/bin/loki "$LOKI" \
   -config.file=/etc/loki/proxyhub/loki.yml -verify-config
