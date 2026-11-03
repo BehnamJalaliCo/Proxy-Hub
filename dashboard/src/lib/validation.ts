@@ -4,13 +4,14 @@
 import { formatDecimal } from "./format";
 import type { FleetSettings } from "./types";
 
+/** Persian (۰-۹) and Arabic-Indic (٠-٩) digits -> ASCII digits; nothing else changes. */
+export function asciiDigits(input: string): string {
+  return input.replace(/[۰-۹]/g, (c) => String(c.charCodeAt(0) - 0x06f0)).replace(/[٠-٩]/g, (c) => String(c.charCodeAt(0) - 0x0660));
+}
+
 /** Persian (۰-۹) and Arabic-Indic (٠-٩) digits -> ASCII; Persian decimal separator -> "." */
 export function normalizeDigits(input: string): string {
-  return input
-    .replace(/[۰-۹]/g, (c) => String(c.charCodeAt(0) - 0x06f0))
-    .replace(/[٠-٩]/g, (c) => String(c.charCodeAt(0) - 0x0660))
-    .replace(/٫/g, ".")
-    .replace(/[٬\s]/g, "");
+  return asciiDigits(input).replace(/٫/g, ".").replace(/[٬\s]/g, "");
 }
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
