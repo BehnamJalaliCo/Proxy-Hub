@@ -10,6 +10,7 @@ from proxyhub.db.session import get_engine
 from proxyhub.reconcilers.account_guard import AccountGuardReconciler
 from proxyhub.reconcilers.base import Heartbeat, Reconciler
 from proxyhub.reconcilers.fleet import FleetReconciler
+from proxyhub.reconcilers.nodes import NodesReconciler
 from proxyhub.reconcilers.pricing import PricingReconciler
 
 log = logging.getLogger(__name__)
@@ -18,7 +19,13 @@ log = logging.getLogger(__name__)
 def reconcilers() -> list[Reconciler]:
     # budget, sponsor, node_health, ... are added milestone by milestone (docs/10, docs/11).
     # The fleet loop is dry-run only (proxyhub.reconcilers.fleet.FLEET_LIVE_ENABLED).
-    return [Heartbeat(), AccountGuardReconciler(), PricingReconciler(), FleetReconciler()]
+    return [
+        Heartbeat(),
+        AccountGuardReconciler(),
+        PricingReconciler(),
+        FleetReconciler(),
+        NodesReconciler(),  # owner-requested test nodes only (proxyhub.nodes.executor)
+    ]
 
 
 async def run() -> None:

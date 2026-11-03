@@ -35,9 +35,13 @@ x-panel: &panel
     # The owner dashboard sources: panel/Dockerfile builds them in its node stage (named context).
     additional_contexts:
       dashboard: ../dashboard
+      # The node agent binary is built reproducibly from these (panel/Dockerfile, agent-build stage).
+      agent: ../agent
+      node-image: ../node-image
     target: runtime
     args:
       GIT_COMMIT: ${PROXYHUB_GIT_COMMIT:-dev}
+      GO_IMAGE: ${PROXYHUB_GO_IMAGE:-golang:1.24.7-bookworm@sha256:b8bae5bd9ba9b1f89b635c91c24cc75cea335a16fb5076310f38566fc674b1ec}
       PYTHON_IMAGE: ${PROXYHUB_PYTHON_IMAGE:-python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f}
       NODE_IMAGE: ${PROXYHUB_NODE_IMAGE:-node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da}
   secrets: [db_password, redis_password, master_key, agent_ca_key]
@@ -99,6 +103,10 @@ services:
   api:
     <<: *panel
     command: ["python", "-m", "proxyhub", "api"]
+    # agent_proxy_secret: the agent API (/agent/v1) trusts only requests that carry it (agent site).
+    secrets: [db_password, redis_password, master_key, agent_ca_key, agent_proxy_secret]
+    environment:
+      PROXYHUB_AGENT_DOMAIN: ${AGENT_DOMAIN:-}  # node agents' site; empty = no node can be created
     ports: ["127.0.0.1:8000:8000"]  # loopback only: deployer health check. Public traffic goes via caddy.
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -107,6 +115,8 @@ services:
   worker:
     <<: *panel
     command: ["python", "-m", "proxyhub", "worker"]
+    environment:
+      PROXYHUB_AGENT_DOMAIN: ${AGENT_DOMAIN:-}  # written into each test node's user data
     healthcheck: {disable: true}
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -117,9 +127,16 @@ services:
     image: ${PROXYHUB_CADDY_IMAGE:-caddy:2-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5}
     environment:
       PANEL_DOMAIN: ${PANEL_DOMAIN:-}  # the deployer enables this profile only when the domain is set
+      # Node agents' mTLS site: "on" only when AGENT_DOMAIN is set (deploy/caddy/agent-on.caddy).
+      AGENT_DOMAIN: ${AGENT_DOMAIN:-}
+      PROXYHUB_AGENT_SITE: ${PROXYHUB_AGENT_SITE:-off}
+    secrets: [agent_proxy_secret]  # header_up for /agent/v1 (proves a request came through here)
     ports: ["80:80", "443:443"]
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy:/etc/caddy/agent:ro
+      # The PUBLIC agent CA certificate, exported by the deployer (python -m proxyhub.pki ca-pem).
+      - /var/lib/proxy-hub/caddy-agent:/etc/caddy/agent-trust:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on: [api]
@@ -285,6 +302,8 @@ secrets:
     file: /etc/proxy-hub/secrets/master_key
   agent_ca_key:
     file: /etc/proxy-hub/secrets/agent_ca_key
+  agent_proxy_secret:
+    file: /etc/proxy-hub/secrets/agent_proxy_secret
   grafana_admin_password:
     file: /etc/proxy-hub/secrets/grafana_admin_password
   # Optional (created empty by ensure_secrets.sh; empty = off). See deploy/monitoring/README.md.

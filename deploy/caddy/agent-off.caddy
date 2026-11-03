@@ -1,0 +1,3 @@
+# Node agent site switched off: AGENT_DOMAIN is not set in /etc/proxy-hub/deploy.env.
+# Nothing is served for agents, and Caddy requests no certificate for an agent domain.
+# See agent-on.caddy; deploy/deployer.sh chooses between the two (PROXYHUB_AGENT_SITE).

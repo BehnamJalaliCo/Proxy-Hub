@@ -1,0 +1,77 @@
+# Node agent site (docs/10 section 3.2): agent.<domain>, Cloudflare grey (DNS only), mTLS.
+# Imported by deploy/Caddyfile only when the deployer sets PROXYHUB_AGENT_SITE=on, which it does
+# only when AGENT_DOMAIN is set in /etc/proxy-hub/deploy.env.
+#
+# Trust: the TLS layer verifies a client certificate against the panel's agent CA when one is
+# sent (deploy/deployer.sh exports the PUBLIC CA certificate to the trust file). Caddy then sets
+# two headers itself, after deleting whatever the client sent under those names:
+#   X-ProxyHub-Agent-Proxy-Secret  the agent_proxy_secret file: "this came through this site";
+#   X-ProxyHub-Client-Cert-Sha256  the SHA-256 of the verified client certificate (or empty).
+# The API trusts the fingerprint only together with the secret (proxyhub/agent_api/__init__.py).
+
+(proxyhub_agent_upstream) {
+	# PROXYHUB_AGENT_UPSTREAM exists for tests only (Caddy in front of a test API); production
+	# always uses the compose service api:8000.
+	reverse_proxy {$PROXYHUB_AGENT_UPSTREAM:api:8000} {
+		header_up X-ProxyHub-Agent-Proxy-Secret {file./run/secrets/agent_proxy_secret}
+		header_up X-ProxyHub-Client-Cert-Sha256 {http.request.tls.client.fingerprint}
+	}
+}
+
+{$AGENT_DOMAIN} {
+	tls {
+		client_auth {
+			# A node has no certificate before it registers; any certificate it does send must
+			# chain to the panel's agent CA, or the TLS handshake fails.
+			mode verify_if_given
+			trust_pool file /etc/caddy/agent-trust/agent_ca.pem
+		}
+	}
+
+	# Nobody outside may set the headers the API uses to trust a request.
+	request_header -X-ProxyHub-Agent-Proxy-Secret
+	request_header -X-ProxyHub-Client-Cert-Sha256
+
+	# Agent bodies are small (a report or a CSR); the API refuses more than 512 KiB anyway.
+	request_body {
+		max_size 1MB
+	}
+
+	# Registration (one-time token) and the agent binary: the node has no certificate yet.
+	@open path /agent/v1/register /agent/v1/artifacts/proxyhub-agent
+	handle @open {
+		import proxyhub_agent_upstream
+	}
+
+	# Every other agent route only with a client certificate this site verified. Measured with this
+	# Caddy (2.11.7): WITHOUT a client certificate the fingerprint placeholder is not empty but the
+	# SHA-256 of zero bytes (an empty placeholder certificate), so that value is refused explicitly.
+	# The API refuses it as well: no certificate it issued has that fingerprint.
+	@verified {
+		path /agent/v1/*
+		vars_regexp {http.request.tls.client.fingerprint} ^[0-9a-f]{64}$
+		not vars {http.request.tls.client.fingerprint} e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+	}
+	handle @verified {
+		import proxyhub_agent_upstream
+	}
+	handle /agent/v1/* {
+		header Content-Type application/json
+		respond `{"error":"client_certificate_required"}` 401
+	}
+
+	# Only /agent/v1/* is ever proxied.
+	handle {
+		respond 404
+	}
+
+	header {
+		-Server
+		-Via
+	}
+
+	# No access log: nothing about who connected is kept (CLAUDE.md rule 7 spirit).
+	log {
+		output discard
+	}
+}

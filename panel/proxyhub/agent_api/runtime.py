@@ -33,6 +33,9 @@ class AgentApiSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PROXYHUB_", extra="ignore")
 
     agent_proxy_secret_file: Path = Path("/run/secrets/agent_proxy_secret")
+    # The node agent binary built reproducibly in panel/Dockerfile (served to nodes at
+    # GET /agent/v1/artifacts/proxyhub-agent only while its sha256 equals AGENT_SHA256).
+    agent_artifact_file: Path = Path("/app/artifacts/proxyhub-agent")
 
 
 @lru_cache(maxsize=1)
