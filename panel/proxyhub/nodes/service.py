@@ -524,3 +524,48 @@ async def node_events(db: AsyncSession, node_id: uuid.UUID) -> list[dict[str, An
         )
     ).all()
     return [{"at": iso(r.at), "kind": r.kind, "detail": dict(r.detail or {})} for r in rows]
+
+
+async def live_servers(
+    db: AsyncSession,
+    *,
+    vault_factory: Callable[[], Vault] = Vault.from_config,
+    reader_factory: ReaderFactory = HetznerReader,
+) -> list[dict[str, Any]]:
+    """Read-only look, LIVE, at every observed node account: our servers (label managed-by) by id,
+    name and labels, and only a COUNT of any other server (CLAUDE.md rule 4). For the runbook's
+    "nothing of ours is left" check; changes nothing anywhere."""
+    from proxyhub.accounts.hetzner_io import observe_servers
+    from proxyhub.accounts.state import OBSERVED_STATES
+    from proxyhub.db.models import HetznerAccount
+
+    accounts = (
+        await db.execute(
+            select(HetznerAccount.id, HetznerAccount.name).where(
+                HetznerAccount.state.in_([s.value for s in OBSERVED_STATES])
+            )
+        )
+    ).all()
+    vault = vault_factory()
+    out: list[dict[str, Any]] = []
+    for account_id, name in accounts:
+        reader = await account_reader(db, vault, account_id, reader_factory)
+        if reader is None:
+            out.append({"account": name, "error": "token_missing"})
+            continue
+        try:
+            obs = await call_hetzner(lambda r=reader: observe_servers(r))  # type: ignore[misc]
+        except HetznerFailure as failure:
+            out.append({"account": name, "error": f"{failure.kind}:{failure.code}"})
+            continue
+        out.append(
+            {
+                "account": name,
+                "ours": [
+                    {"hetzner_id": s.hetzner_id, "name": s.name, "labels": dict(s.labels)}
+                    for s in obs.managed
+                ],
+                "others": obs.foreign_count,
+            }
+        )
+    return out

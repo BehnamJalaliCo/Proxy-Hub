@@ -8,6 +8,8 @@ master key). Exactly the same service functions and safety gates as the API; act
     events NODE_ID               GET /api/nodes/{id}/events
     wait NODE_ID STATE [--timeout SECONDS]
                                  poll until the node is in STATE (exit 1 on timeout or deleted)
+    servers                      read-only, LIVE from Hetzner: our servers (managed-by=proxy-hub)
+                                 in each node account, and how many others there are (rule 4)
 
 Prints JSON only: ids, states and reason codes, never a token or any other secret.
 """
@@ -41,6 +43,10 @@ async def _run(args: argparse.Namespace) -> int:
         if args.cmd == "list":
             async with sm() as db:
                 _print(await service.list_nodes(db, datetime.now(UTC)))
+            return 0
+        if args.cmd == "servers":
+            async with sm() as db:
+                _print(await service.live_servers(db))
             return 0
         if args.cmd == "test-node":
             async with sm() as db:
@@ -89,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m proxyhub.nodes")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list")
+    sub.add_parser("servers")
     test_node = sub.add_parser("test-node")
     test_node.add_argument("--location", default=None)
     for name in ("retire", "events"):

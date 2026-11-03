@@ -45,6 +45,7 @@ from proxyhub.config import read_secret_file
 from proxyhub.hetzner.client import HetznerReader
 from proxyhub.nodes.executor import NodeExecutor
 from proxyhub.nodes.image import read_versions_lock
+from proxyhub.nodes.service import live_servers
 from proxyhub.nodes.settings import get_live_settings
 from proxyhub.pki.ca import build_ca_certificate, to_pem
 from proxyhub.vault import hcloud_secret_name
@@ -163,6 +164,13 @@ async def test_executor_creates_and_retires_one_real_test_server(
             # Second pass: nothing is created twice.
             await executor.run_once(world.engine)
             assert len(our_test_servers(token)) == 1
+            # The CLI's read-only live look ("servers") sees it, and nothing that is not ours.
+            async with world.sessions() as s:
+                look = await live_servers(s, vault_factory=lambda: world.vault)
+            assert look[0]["others"] == 0
+            assert [o["hetzner_id"] for o in look[0]["ours"] if o["labels"].get("purpose") == "test"] == [
+                hetzner_id
+            ]
 
             r = await api.post(f"/api/nodes/{node_id}/retire")
             assert r.status_code == 202, r.text
