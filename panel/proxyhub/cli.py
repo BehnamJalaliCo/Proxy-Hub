@@ -1,4 +1,4 @@
-"""Entry points: ``proxyhub migrate | worker | api``."""
+"""Entry points: ``proxyhub migrate | worker | api | setup-link``."""
 
 from __future__ import annotations
 
@@ -41,6 +41,8 @@ def main(argv: list[str] | None = None) -> int:
     api = sub.add_parser("api")
     api.add_argument("--host", default="0.0.0.0")  # noqa: S104 - inside the container network only
     api.add_argument("--port", type=int, default=8000)
+    setup_link = sub.add_parser("setup-link", help="print a one-time owner setup link (60 minutes)")
+    setup_link.add_argument("--base-url", required=True, help="e.g. https://panel.beyra-ai.com")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -57,6 +59,10 @@ def main(argv: list[str] | None = None) -> int:
         import uvicorn
 
         uvicorn.run("proxyhub.api.app:app", host=args.host, port=args.port, proxy_headers=True)
+    elif args.cmd == "setup-link":
+        from proxyhub.auth.setup_link import run as run_setup_link
+
+        return run_setup_link(args.base_url)
     return 0
 
 
