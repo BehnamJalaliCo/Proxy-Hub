@@ -44,9 +44,10 @@ var allowed = map[string]map[string]keyRule{
 		"metrics_listen":    loopbackHostPort,
 		"metrics_whitelist": loopbackCIDRs,
 	},
-	"server.api":   {"enabled": mustBool(false)},
-	"censorship":   {"tls_domain": isString, "tls_front_dir": isString},
-	"access.users": nil, // dynamic keys: user names, checked below
+	"server.api":               {"enabled": mustBool(false)},
+	"server.conntrack_control": {"inline_conntrack_control": mustBool(false)},
+	"censorship":               {"tls_domain": isString, "tls_front_dir": isString},
+	"access.users":             nil, // dynamic keys: user names, checked below
 }
 
 // Per-user maps under [access]; keys must be users from [access.users].

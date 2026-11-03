@@ -90,6 +90,9 @@ func Render(t *desired.Telemt, users []User, s Settings) ([]byte, error) {
 	w("metrics_whitelist = [\"127.0.0.1/32\"]\n")
 	w("\n[server.api]\n")
 	w("enabled = false\n")
+	// No CAP_NET_ADMIN is granted, so Telemt must not try to manage netfilter/conntrack itself.
+	w("\n[server.conntrack_control]\n")
+	w("inline_conntrack_control = false\n")
 	for _, p := range t.Ports {
 		w("\n[[server.listeners]]\nip = \"0.0.0.0\"\nport = %d\n", p)
 	}
