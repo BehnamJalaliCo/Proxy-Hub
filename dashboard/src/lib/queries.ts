@@ -1,9 +1,10 @@
-// TanStack Query hooks for read-only data. Calls that carry a secret (password, TOTP code, Hetzner
-// token) do NOT go through useMutation: its cache would keep the input ("variables") in memory.
+// TanStack Query hooks for read-only data. Calls that carry a secret (password, TOTP code, Hetzner,
+// Telegram or Cloudflare token) do NOT go through useMutation: its cache would keep the input
+// ("variables") in memory.
 
 import { QueryClient, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 
-import { isApiError } from "./api";
+import { isApiError, isEndpointMissing } from "./api";
 import * as api from "./endpoints";
 import type { AuditEvent } from "./types";
 
@@ -16,7 +17,18 @@ export const keys = {
   accounts: ["accounts"] as const,
   settings: ["settings", "fleet"] as const,
   events: (scope: string) => ["events", scope] as const,
+  telegram: ["telegram", "status"] as const,
+  telegramSettings: ["telegram", "settings"] as const,
+  nodes: ["nodes"] as const,
+  nodeEvents: (id: string) => ["nodes", id, "events"] as const,
+  cloudflare: ["cloudflare"] as const,
+  probes: ["probes"] as const,
 };
+
+/** Poll every `ms`, but stop while the route does not exist on this panel (no 404 every 15 s). */
+function pollUnlessMissing(ms: number) {
+  return (query: { state: { error: unknown } }) => (isEndpointMissing(query.state.error) ? false : ms);
+}
 
 /** Statuses that will not change by retrying. */
 const FINAL = new Set([400, 401, 403, 404, 409, 422, 429]);
@@ -82,4 +94,54 @@ export const useEventPages = () =>
       return Math.min(...ids);
     },
     refetchInterval: 30_000,
+  });
+
+// --- round 2 ---------------------------------------------------------------------------------------
+
+/** While a pairing code waits for the owner's /start (one the server shows, or `createdHere`), the
+ * page polls every 4 s so "connected" shows up soon after; otherwise every 20 s. */
+export const useTelegramStatus = (createdHere = false) =>
+  useQuery({
+    queryKey: keys.telegram,
+    queryFn: ({ signal }) => api.getTelegramStatus(signal),
+    refetchInterval: (query) => {
+      if (isEndpointMissing(query.state.error)) return false;
+      const d = query.state.data;
+      const waiting = d !== undefined && d.bot !== null && (d.pairing !== null || (createdHere && !d.owner_paired));
+      return waiting ? 4_000 : 20_000;
+    },
+  });
+
+/** The schedule editor edits a copy: background refetches must not overwrite what the owner types. */
+export const useTelegramSettings = () =>
+  useQuery({
+    queryKey: keys.telegramSettings,
+    queryFn: ({ signal }) => api.getTelegramSettings(signal),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+
+export const useNodes = () =>
+  useQuery({ queryKey: keys.nodes, queryFn: ({ signal }) => api.getNodes(signal), refetchInterval: pollUnlessMissing(15_000) });
+
+export const useNodeEvents = (id: string | null) =>
+  useQuery({
+    queryKey: keys.nodeEvents(id ?? "-"),
+    queryFn: ({ signal }) => api.getNodeEvents(id ?? "", signal),
+    enabled: id !== null,
+    refetchInterval: pollUnlessMissing(15_000),
+  });
+
+export const useCloudflareStatus = () =>
+  useQuery({
+    queryKey: keys.cloudflare,
+    queryFn: ({ signal }) => api.getCloudflareStatus(signal),
+    refetchInterval: pollUnlessMissing(60_000),
+  });
+
+export const useProbeSummary = () =>
+  useQuery({
+    queryKey: keys.probes,
+    queryFn: ({ signal }) => api.getProbeSummary(signal),
+    refetchInterval: pollUnlessMissing(60_000),
   });

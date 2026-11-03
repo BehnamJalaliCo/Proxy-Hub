@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { FlaskConical, LogOut, Menu, OctagonPause, UserRound, X } from "lucide-react";
+import { Ellipsis, FlaskConical, LogOut, Menu, OctagonPause, UserRound, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Dialog } from "radix-ui";
 import { useEffect, useState } from "react";
@@ -12,7 +12,7 @@ import { useMe, useOverview } from "../../lib/queries";
 import { toast } from "../../lib/toast";
 import { StatusDot } from "../ui/Card";
 import { Logo, ThemeSwitch, ThemeToggleButton } from "./Brand";
-import { NAV, titleFor } from "./nav";
+import { BOTTOM_NAV, NAV, titleFor } from "./nav";
 
 function useLogout(): [boolean, () => void] {
   const qc = useQueryClient();
@@ -190,6 +190,7 @@ export function AppShell() {
   const location = useLocation();
   const [drawer, setDrawer] = useState(false);
   const [busy, logout] = useLogout();
+  const moreActive = NAV.some((n) => !n.bottom && isActive(location.pathname, n.to));
 
   useEffect(() => {
     window.scrollTo({ top: 0 });
@@ -291,7 +292,7 @@ export function AppShell() {
         className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface/85 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl lg:hidden"
       >
         <ul className="mx-auto grid max-w-lg grid-cols-5">
-          {NAV.map((item) => {
+          {BOTTOM_NAV.map((item) => {
             const active = isActive(location.pathname, item.to);
             const Icon = item.icon;
             return (
@@ -314,6 +315,26 @@ export function AppShell() {
               </li>
             );
           })}
+          <li>
+            {/* Everything else (accounts, Cloudflare, events, security) is in the side menu. */}
+            <button
+              type="button"
+              onClick={() => setDrawer(true)}
+              title="بخش‌های دیگر پنل"
+              aria-haspopup="dialog"
+              className={cn("relative flex h-16 w-full flex-col items-center justify-center gap-1 text-[0.7rem] font-semibold", moreActive ? "text-brand" : "text-fg-faint")}
+            >
+              {moreActive ? (
+                <motion.span
+                  layoutId="bottom-active"
+                  className="absolute top-1.5 h-8 w-14 rounded-full bg-brand-soft"
+                  transition={{ type: "spring", stiffness: 480, damping: 36 }}
+                />
+              ) : null}
+              <Ellipsis className="relative size-5" />
+              <span className="relative">بیشتر</span>
+            </button>
+          </li>
         </ul>
       </nav>
     </div>

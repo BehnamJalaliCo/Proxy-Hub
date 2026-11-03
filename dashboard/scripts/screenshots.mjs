@@ -240,6 +240,9 @@ async function signedInPages(browser, combo, state) {
   watch(page, label);
   for (const [path, name, heading] of [
     ["/", "overview", "نمای کلی"],
+    ["/nodes", "nodes", "nodeها"],
+    ["/telegram", "telegram", "تلگرام"],
+    ["/cloudflare", "cloudflare", "Cloudflare و دامنه‌ها"],
     ["/accounts", "accounts", "حساب‌های هتزنر"],
     ["/settings", "settings", "تنظیمات ناوگان"],
     ["/events", "events", "رویدادها"],
@@ -253,6 +256,7 @@ async function signedInPages(browser, combo, state) {
   await visit(page, "/accounts?add=1", label);
   await page.getByRole("dialog").waitFor();
   await shot(page, "accounts-add", combo, { full: false });
+  await round2Dialogs(page, combo, label);
   if (combo.device.name === "mobile") {
     await visit(page, "/", label);
     await page.getByRole("button", { name: "منوی پنل" }).click();
@@ -260,6 +264,41 @@ async function signedInPages(browser, combo, state) {
     await shot(page, "drawer", combo, { full: false });
   }
   await ctx.close();
+}
+
+/** Round-2 dialogs and editors, only where the panel has the route (without it, the pages show a
+ * calm "not active yet" state, which the page shots above already cover). Nothing is confirmed or
+ * saved: no node is requested, no token or setting is sent. */
+async function round2Dialogs(page, combo, label) {
+  await visit(page, "/nodes", label);
+  await page.getByRole("heading", { name: "nodeها", level: 1 }).waitFor({ timeout: 15000 });
+  await settle(page);
+  const create = page.getByRole("button", { name: "ساخت node آزمایشی" }).first();
+  if (await create.isEnabled()) {
+    await create.click();
+    await page.getByRole("alertdialog").waitFor();
+    await shot(page, "nodes-test-confirm", combo, { full: false });
+    await page.getByRole("alertdialog").getByRole("button", { name: "انصراف" }).click();
+    await page.getByRole("alertdialog").waitFor({ state: "detached" });
+  }
+  const events = page.getByRole("button", { name: "رویدادها", exact: true }).first();
+  if ((await events.count()) > 0) {
+    await events.click();
+    await page.getByRole("dialog").waitFor();
+    await shot(page, "nodes-events", combo, { full: false });
+    await page.keyboard.press("Escape");
+  }
+
+  await visit(page, "/telegram", label);
+  await page.getByRole("heading", { name: "تلگرام", level: 1 }).waitFor({ timeout: 15000 });
+  await settle(page);
+  const add = page.getByRole("button", { name: "افزودن بازه" });
+  if ((await add.count()) > 0) {
+    await add.click();
+    await add.click();
+    await page.getByRole("button", { name: "ذخیره", exact: true }).waitFor();
+    await shot(page, "telegram-schedule-edit", combo);
+  }
 }
 
 async function loginError(browser, combo) {
