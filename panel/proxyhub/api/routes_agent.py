@@ -1,9 +1,11 @@
-"""Node agent API under ``/agent/v1`` (not ``/api``): register, renew, desired, report.
+"""Node agent API under ``/agent/v1`` (not ``/api``): register, renew, desired, report, and the
+pinned agent binary for provisioning (``artifacts/proxyhub-agent``).
 
 Trust model (details in :mod:`proxyhub.agent_api`): every request must carry the Caddy-to-API
 shared secret; ``desired``, ``report`` and ``renew`` additionally need the fingerprint of a client
 certificate that Caddy verified and that we issued (unrevoked, in validity). ``register`` is
-authenticated by a one-time token instead, because the node has no certificate yet.
+authenticated by a one-time token instead, because the node has no certificate yet; the agent
+binary is public code and needs only the proxy secret (deploy/caddy/agent-on.caddy).
 
 Responses never contain a token, key or secret except the desired state itself, which carries the
 node's own Telemt secrets to that node's authenticated agent only (``Cache-Control: no-store``).
@@ -24,6 +26,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from proxyhub.agent_api.artifacts import ArtifactUnavailable, load_agent_artifact
 from proxyhub.agent_api.desired import build_desired_state, canonical_json, etag_for
 from proxyhub.agent_api.identity import (
     AgentIdentity,
@@ -117,6 +120,30 @@ def _validate[M: BaseModel](model: type[M], data: Any) -> M:
         return model.model_validate(data)
     except ValidationError:
         raise HTTPException(status_code=422, detail="schema") from None
+
+
+@router.get("/artifacts/proxyhub-agent")
+async def agent_artifact(runtime: Runtime) -> Response:
+    """The pinned agent binary for node provisioning (no client certificate yet; proxy secret only).
+
+    Served only while its sha256 equals AGENT_SHA256 in versions.lock; never anything else.
+    """
+    try:
+        artifact = await load_agent_artifact()
+    except ArtifactUnavailable as exc:
+        REQUESTS.labels("artifact", exc.code).inc()
+        return _error(503, exc.code)
+    REQUESTS.labels("artifact", "ok").inc()
+    return Response(
+        content=artifact.data,
+        media_type="application/octet-stream",
+        headers={
+            **NO_STORE,
+            "X-ProxyHub-Artifact-Sha256": artifact.sha256,
+            "X-ProxyHub-Artifact-Version": artifact.version,
+            "Content-Disposition": 'attachment; filename="proxyhub-agent"',
+        },
+    )
 
 
 @router.post("/register")
