@@ -27,6 +27,7 @@ import { Link } from "react-router";
 import { ActivityChart, ActivityLegend } from "../components/charts/ActivityChart";
 import { BudgetMeter } from "../components/charts/BudgetMeter";
 import { EventRow } from "../components/EventRow";
+import { ServiceLinks } from "../components/ServiceLinks";
 import { Badge, Card, CardHeader, StatusDot } from "../components/ui/Card";
 import { AnimatedNumber, EmptyState, ErrorState, Skeleton, SkeletonLines } from "../components/ui/Feedback";
 import { IconButton } from "../components/ui/Button";
@@ -643,6 +644,8 @@ export default function OverviewPage() {
             <Card className="p-5 lg:col-span-4">{ov.isError ? <ErrorState error={ov.error} compact onRetry={() => void ov.refetch()} /> : <SkeletonLines lines={5} />}</Card>
           )}
         </div>
+
+        <ServiceLinks />
 
         {o ? (
           <>
