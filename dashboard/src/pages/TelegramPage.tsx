@@ -265,9 +265,13 @@ function PairingCard({ s, created, onCreated }: { s: TgStatus; created: TgPairin
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   const pairing = s.pairing ?? created;
-  const now = useNow(1000, pairing !== null && !s.owner_paired);
+  // An open code on the server is always shown (also when re-pairing to another chat). A code made
+  // here but no longer on the server was used, unless the server cannot show codes (no Redis): then
+  // it is shown until the owner is paired.
+  const open = pairing !== null && (s.pairing !== null || !s.owner_paired);
+  const now = useNow(1000, open);
   const left = pairing ? secondsLeft(pairing.expires_at, now) : 0;
-  const showCode = pairing !== null && left > 0 && !s.owner_paired;
+  const showCode = open && left > 0;
   const bot = s.bot;
 
   const create = () => {

@@ -107,7 +107,7 @@ export const useTelegramStatus = (createdHere = false) =>
     refetchInterval: (query) => {
       if (isEndpointMissing(query.state.error)) return false;
       const d = query.state.data;
-      const waiting = d !== undefined && !d.owner_paired && d.bot !== null && (d.pairing !== null || createdHere);
+      const waiting = d !== undefined && d.bot !== null && (d.pairing !== null || (createdHere && !d.owner_paired));
       return waiting ? 4_000 : 20_000;
     },
   });
