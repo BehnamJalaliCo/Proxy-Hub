@@ -119,6 +119,12 @@ def test_telemt_unit_never_runs_unconfigured_or_logs() -> None:
     ):
         assert line in unit.splitlines(), line
     assert "CAP_NET_ADMIN" not in unit
+    # Exactly the families of Telemt 3.5.16's own unit (src/service/mod.rs, which has a test for it):
+    # without AF_NETLINK its getifaddrs() calls fail silently.
+    families = [
+        ln.split("=", 1)[1].split() for ln in unit.splitlines() if ln.startswith("RestrictAddressFamilies=")
+    ]
+    assert families == [["AF_INET", "AF_INET6", "AF_UNIX", "AF_NETLINK"]]
 
 
 def test_host_hardening_files() -> None:

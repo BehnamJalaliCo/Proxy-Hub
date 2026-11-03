@@ -37,7 +37,11 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK as in Telemt's own unit (src/service/mod.rs): getifaddrs() needs it for interface
+# addresses (middle-proxy diagnostics, masking self-loop detection); without it those calls fail
+# silently. With no network-admin capability (see CapabilityBoundingSet) netlink can only read the
+# network setup, never change it.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
