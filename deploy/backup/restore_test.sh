@@ -137,7 +137,9 @@ need=$((1024 * 1024 * 1024 + 10 * $(stat -c %s "$dump")))
 docker_root="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
 avail="$(df -B1 --output=avail "$docker_root" | tail -1 | tr -d ' ')" ||
   fail "cannot read the free disk under $docker_root"
-[[ "$avail" =~ ^[0-9]+$ ]] && [ "$avail" -ge "$need" ] || fail "not enough free disk under $docker_root for the restore test (need $need bytes)"
+if ! [[ "$avail" =~ ^[0-9]+$ ]] || [ "$avail" -lt "$need" ]; then
+  fail "not enough free disk under $docker_root for the restore test (need $need bytes)"
+fi
 
 image="${PROXYHUB_RESTORE_IMAGE:-}"
 if [ -z "$image" ]; then

@@ -34,7 +34,7 @@ done
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 # shellcheck source=/dev/null
 . /etc/os-release
-[ "${ID:-}" = "ubuntu" ] && [ "${VERSION_ID:-}" = "24.04" ] || { echo "Ubuntu 24.04 only" >&2; exit 1; }
+if [ "${ID:-}" != "ubuntu" ] || [ "${VERSION_ID:-}" != "24.04" ]; then echo "Ubuntu 24.04 only" >&2; exit 1; fi
 [ "$(uname -m)" = "x86_64" ] || { echo "x86_64 only (versions.lock pins the x86_64 build)" >&2; exit 1; }
 
 lock() {
