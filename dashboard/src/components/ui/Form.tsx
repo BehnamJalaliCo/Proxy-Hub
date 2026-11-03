@@ -318,3 +318,40 @@ export function TagInput({
     </div>
   );
 }
+
+const FA = (n: number) => String(n).padStart(2, "0").replace(/[0-9]/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[Number(d)] ?? d);
+const HOUR_OPTIONS = Array.from({ length: 24 }, (_, h) => String(h).padStart(2, "0"));
+const MINUTE_STEP = 5;
+
+/** A 24-hour time of day ("HH:MM") as two native selects: always valid, the same on every phone
+ * (a browser <input type="time"> may show 12-hour AM/PM in a Persian locale). Hour on the left,
+ * as a clock reads. A minute off the 5-minute grid (set elsewhere) stays selectable. */
+export function TimeSelect({ value, onChange, label, invalid = false }: { value: string; onChange: (v: string) => void; label: string; invalid?: boolean }) {
+  const [h = "00", m = "00"] = value.split(":");
+  const minutes = Array.from({ length: 60 / MINUTE_STEP }, (_, i) => String(i * MINUTE_STEP).padStart(2, "0"));
+  if (!minutes.includes(m)) minutes.push(m);
+  minutes.sort();
+  const cls = cn(
+    "h-11 appearance-none rounded-xl border bg-surface px-3 text-center text-base font-semibold text-fg outline-none focus:border-brand focus:ring-4 focus:ring-[var(--ph-ring)]",
+    invalid ? "border-danger" : "border-line",
+  );
+  return (
+    <div role="group" aria-label={label} dir="ltr" className="flex items-center gap-1">
+      <select aria-label={`${label}: ساعت`} value={h} onChange={(e) => onChange(`${e.target.value}:${m}`)} className={cls}>
+        {HOUR_OPTIONS.map((x) => (
+          <option key={x} value={x}>
+            {FA(Number(x))}
+          </option>
+        ))}
+      </select>
+      <span className="font-bold text-fg-faint">:</span>
+      <select aria-label={`${label}: دقیقه`} value={m} onChange={(e) => onChange(`${h}:${e.target.value}`)} className={cls}>
+        {minutes.map((x) => (
+          <option key={x} value={x}>
+            {FA(Number(x))}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}

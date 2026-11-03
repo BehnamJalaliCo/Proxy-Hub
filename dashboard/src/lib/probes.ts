@@ -2,8 +2,7 @@
 // answer from this operator's network": a pass/fail fact, so it wears the status tones and always
 // carries its numbers and an icon, never colour alone. Networks are operators/ASNs, never people.
 
-import type { Tone } from "./labels";
-import { operatorName } from "./labels";
+import { operatorName, operatorRank, type Tone } from "./labels";
 import type { ProbeNetwork, ProbeTarget, ProbeVerdict } from "./types";
 
 export interface HeatColumn {
@@ -39,7 +38,7 @@ export function cellTone(ok: number, fail: number): Tone {
   return "warning";
 }
 
-/** Columns: well-known operators first, then the networks that measured the most nodes. Rows keep
+/** Columns: well-known operators first (همراه اول، ایرانسل، رایتل، مخابرات), then the networks that measured the most nodes. Rows keep
  * the node order by name (a colour follows its node, not its rank). */
 export function buildHeatmap(targets: ProbeTarget[]): { columns: HeatColumn[]; rows: HeatRow[] } {
   const cols = new Map<string, HeatColumn & { seen: number }>();
@@ -56,7 +55,7 @@ export function buildHeatmap(targets: ProbeTarget[]): { columns: HeatColumn[]; r
   const columns = [...cols.values()]
     .sort(
       (a, b) =>
-        Number(operatorName(b.asn) !== null) - Number(operatorName(a.asn) !== null) ||
+        (operatorRank(a.asn) ?? Infinity) - (operatorRank(b.asn) ?? Infinity) ||
         b.seen - a.seen ||
         a.label.localeCompare(b.label, "fa"),
     )

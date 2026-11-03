@@ -1,8 +1,8 @@
-import { Check, Copy, RefreshCw, TriangleAlert } from "lucide-react";
+import { Check, Copy, Hourglass, RefreshCw, TriangleAlert } from "lucide-react";
 import { animate, motion, useReducedMotion } from "motion/react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
-import { errorMessage, isApiError } from "../../lib/api";
+import { errorMessage, isApiError, isEndpointMissing } from "../../lib/api";
 import { cn, copyText } from "../../lib/browser";
 import { toast } from "../../lib/toast";
 import { Button } from "./Button";
@@ -87,6 +87,58 @@ export function ErrorState({
         </Button>
       ) : null}
     </div>
+  );
+}
+
+export interface NotYetActiveText {
+  title?: string;
+  description?: ReactNode;
+}
+
+/** The route does not exist on this panel yet (a part that arrives with a later panel update).
+ * Not an error the owner can fix: said calmly, with nothing to retry. */
+export function NotYetActive({
+  title = "این بخش هنوز روی پنل فعال نشده",
+  description = "سرور پنل هنوز این بخش را ندارد. با به‌روزرسانی بعدی پنل خودش فعال میشود؛ کاری از شما لازم نیست.",
+  compact = false,
+  className,
+}: NotYetActiveText & { compact?: boolean; className?: string }) {
+  return (
+    <div role="status" className={cn("flex flex-col items-center gap-3 text-center", compact ? "px-4 py-6" : "px-6 py-10", className)}>
+      <div className="grid size-14 place-items-center rounded-3xl bg-info-soft text-info ring-8 ring-info-soft/40">
+        <Hourglass className="size-6" />
+      </div>
+      <h3 className="text-base font-bold text-fg">{title}</h3>
+      <p className="max-w-md text-sm leading-7 text-fg-muted">{description}</p>
+    </div>
+  );
+}
+
+/** ErrorState, or NotYetActive when the error only says the route is not on this panel yet. */
+export function LoadError({
+  error,
+  onRetry,
+  title,
+  notYet,
+  compact = false,
+  className,
+}: {
+  error: unknown;
+  onRetry?: () => void;
+  title?: string;
+  notYet?: NotYetActiveText;
+  compact?: boolean;
+  className?: string;
+}) {
+  if (isEndpointMissing(error)) return <NotYetActive {...notYet} compact={compact} {...(className ? { className } : {})} />;
+  return (
+    <ErrorState
+      error={error}
+      compact={compact}
+      {...(onRetry ? { onRetry } : {})}
+      {...(title ? { title } : {})}
+      {...(className ? { className } : {})}
+    />
   );
 }
 

@@ -402,16 +402,24 @@ export const PROBE_SOURCE: Record<string, string> = {
   "check-host": "check-host.net",
 };
 
-/** Persian names of Iranian operators by ASN (only well-known ones; others keep their own name). */
-const OPERATOR_BY_ASN: Record<number, string> = {
-  197207: "همراه اول",
-  44244: "ایرانسل",
-  57218: "رایتل",
-  58224: "مخابرات ایران",
-};
+/** Persian names of Iranian operators by ASN, in a fixed display order (mobile operators first).
+ * Only well-known ASNs; any other network keeps its own name. */
+const OPERATORS: [number, string][] = [
+  [197207, "همراه اول"],
+  [44244, "ایرانسل"],
+  [57218, "رایتل"],
+  [58224, "مخابرات ایران"],
+];
+const OPERATOR_BY_ASN = new Map(OPERATORS);
 
 export function operatorName(asn: number | null): string | null {
-  return asn === null ? null : (OPERATOR_BY_ASN[asn] ?? null);
+  return asn === null ? null : (OPERATOR_BY_ASN.get(asn) ?? null);
+}
+
+/** Display rank of a well-known operator (lower first); null for any other network. */
+export function operatorRank(asn: number | null): number | null {
+  const i = OPERATORS.findIndex(([a]) => a === asn);
+  return i < 0 ? null : i;
 }
 
 /** Documented tg addition: why the bot is not usable right now. */

@@ -44,9 +44,9 @@ describe("probe heatmap", () => {
 
   it("puts known operators first, then the widest-measured networks", () => {
     const { columns } = buildHeatmap(TARGETS);
-    expect(columns.map((c) => c.key)).toEqual(["AS57218", "AS197207", "AS202468", "net:check-host ir1"]);
-    expect(columns[0]?.label).toBe("رایتل");
-    expect(columns[1]?.label).toBe("همراه اول");
+    expect(columns.map((c) => c.key)).toEqual(["AS197207", "AS57218", "AS202468", "net:check-host ir1"]);
+    expect(columns[0]?.label).toBe("همراه اول");
+    expect(columns[1]?.label).toBe("رایتل");
     expect(columns[2]?.label).toBe("Arvan");
   });
 
@@ -54,9 +54,9 @@ describe("probe heatmap", () => {
     const { rows } = buildHeatmap(TARGETS);
     expect(rows.map((r) => r.target.name)).toEqual(["ph-slot-1", "ph-slot-2"]);
     const [slot1, slot2] = rows;
-    expect(slot1?.cells[0]).toBeNull(); // slot 1 was not measured from Rightel
-    expect(slot1?.cells[1]).toEqual({ ok: 3, fail: 1, at: "2026-11-03T10:05:00Z", tone: "warning" });
-    expect(slot2?.cells[0]).toEqual({ ok: 0, fail: 3, at: "2026-11-03T10:00:00Z", tone: "danger" });
+    expect(slot1?.cells[1]).toBeNull(); // slot 1 was not measured from Rightel
+    expect(slot1?.cells[0]).toEqual({ ok: 3, fail: 1, at: "2026-11-03T10:05:00Z", tone: "warning" });
+    expect(slot2?.cells[1]).toEqual({ ok: 0, fail: 3, at: "2026-11-03T10:00:00Z", tone: "danger" });
     expect(slot2?.cells[3]).toBeNull();
   });
 

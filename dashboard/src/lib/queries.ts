@@ -98,12 +98,18 @@ export const useEventPages = () =>
 
 // --- round 2 ---------------------------------------------------------------------------------------
 
-/** While a pairing code is open the page polls faster, to show "connected" soon after /start. */
-export const useTelegramStatus = (fast = false) =>
+/** While a pairing code waits for the owner's /start (one the server shows, or `createdHere`), the
+ * page polls every 4 s so "connected" shows up soon after; otherwise every 20 s. */
+export const useTelegramStatus = (createdHere = false) =>
   useQuery({
     queryKey: keys.telegram,
     queryFn: ({ signal }) => api.getTelegramStatus(signal),
-    refetchInterval: pollUnlessMissing(fast ? 4_000 : 20_000),
+    refetchInterval: (query) => {
+      if (isEndpointMissing(query.state.error)) return false;
+      const d = query.state.data;
+      const waiting = d !== undefined && !d.owner_paired && d.bot !== null && (d.pairing !== null || createdHere);
+      return waiting ? 4_000 : 20_000;
+    },
   });
 
 /** The schedule editor edits a copy: background refetches must not overwrite what the owner types. */
