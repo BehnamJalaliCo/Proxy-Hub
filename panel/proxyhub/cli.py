@@ -58,7 +58,15 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "api":
         import uvicorn
 
-        uvicorn.run("proxyhub.api.app:app", host=args.host, port=args.port, proxy_headers=True)
+        # No access log and no X-Forwarded-For handling: the panel never needs a client IP (rule 7).
+        uvicorn.run(
+            "proxyhub.api.app:app",
+            host=args.host,
+            port=args.port,
+            access_log=False,
+            proxy_headers=False,
+            server_header=False,
+        )
     elif args.cmd == "setup-link":
         from proxyhub.auth.setup_link import run as run_setup_link
 

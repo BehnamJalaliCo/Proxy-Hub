@@ -96,7 +96,12 @@ def install_error_handlers(app: FastAPI) -> None:
         assert isinstance(exc, ApiError)
         return api_error_response(exc)
 
+    async def _invalid(request: Request, exc: Exception) -> Response:
+        # FastAPI's default 422 body echoes the submitted input; a token could come back (rule 3).
+        return api_error_response(ApiError("invalid_request", status_code=422))
+
     app.add_exception_handler(ApiError, _handle)
+    app.add_exception_handler(RequestValidationError, _invalid)
 
 
 async def db_session() -> AsyncIterator[AsyncSession]:

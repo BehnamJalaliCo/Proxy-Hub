@@ -16,6 +16,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_late
 from sqlalchemy import text
 
 from proxyhub import __version__
+from proxyhub.api.deps import install_error_handlers
 from proxyhub.api.registry import include_all
 from proxyhub.config import get_config
 from proxyhub.db.models import ACCOUNT_STATES
@@ -61,7 +62,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await get_engine().dispose()
 
 
-app = FastAPI(title="Proxy-Hub", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(
+    title="Proxy-Hub",
+    version=__version__,
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,  # the API schema is not published
+)
+install_error_handlers(app)
 
 
 @app.get("/livez", include_in_schema=False)
@@ -152,7 +161,7 @@ def _mark_db_down() -> None:
     OUTBOX_OLDEST_DUE_AGE.set(math.nan)
 
 
-async def collect_panel_metrics(redis: aioredis.Redis) -> None:
+async def collect_panel_metrics(redis: aioredis.Redis | None) -> None:
     """Refresh the panel gauges. Each part fails on its own; errors are counted, never raised."""
     cfg = get_config()
     BUILD_INFO.clear()
@@ -164,6 +173,8 @@ async def collect_panel_metrics(redis: aioredis.Redis) -> None:
         log.warning("metrics: database part failed (%s)", type(exc).__name__)
         _mark_db_down()
     try:
+        if redis is None:  # lifespan has not run (e.g. an app mounted without it)
+            raise ConnectionError("no redis client")
         async with asyncio.timeout(METRICS_TIMEOUT_SECONDS):
             REDIS_UP.set(1 if await redis.ping() else 0)
     except Exception as exc:
@@ -176,7 +187,7 @@ async def collect_panel_metrics(redis: aioredis.Redis) -> None:
 async def metrics() -> Response:
     """Prometheus scrape target. Caddy never exposes /internal/* publicly."""
     async with _metrics_lock:
-        await collect_panel_metrics(app.state.redis)
+        await collect_panel_metrics(getattr(app.state, "redis", None))
         body = generate_latest()
     return Response(body, media_type=CONTENT_TYPE_LATEST)
 
