@@ -56,7 +56,11 @@ def _node_id(raw: str) -> uuid.UUID:
 
 def _error(exc: service.NodeServiceError) -> ApiError:
     status = {"gate_refused": 409, "test_node_exists": 409, "not_found": 404}.get(exc.code, 400)
-    extra = {"reasons": exc.reasons} if isinstance(exc, service.GateRefused) else None
+    extra = (
+        {"reasons": exc.reasons, "reasons_fa": service.reasons_fa(exc.reasons)}
+        if isinstance(exc, service.GateRefused)
+        else None
+    )
     return ApiError(exc.code, status_code=status, message_fa=service.MESSAGES_FA.get(exc.code), extra=extra)
 
 

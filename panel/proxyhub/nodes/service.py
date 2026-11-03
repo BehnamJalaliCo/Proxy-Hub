@@ -65,6 +65,59 @@ MESSAGES_FA: dict[str, str] = {
     "not_found": "این node پیدا نشد.",
 }
 
+# Persian text of every reason code a node request or retirement can be refused with (the API adds
+# them as "reasons_fa", in the same order as "reasons"; an unknown code is shown as it is).
+REASONS_FA: dict[str, str] = {
+    # proxyhub.safety.gates.can_create
+    "kill_switch_on": "کلید توقف روشن است.",
+    "budget_cap_not_set": "سقف بودجه‌ی ماهانه تعیین نشده است.",
+    "node_cap_not_set": "سقف تعداد node تعیین نشده است.",
+    "node_cap_reached": "تعداد nodeها به سقف رسیده است.",
+    "budget_cap_reached": "با این سرور، خرج پیش‌بینی‌شده‌ی ماه از سقف بودجه بیشتر می‌شود.",
+    "creation_rate_cap_reached": "سقف تعداد ساخت در یک ساعت پر شده است.",
+    "account_not_usable": "حساب هتزنر در وضعیتی نیست که در آن سرور ساخته شود.",
+    "account_guard_failed": (
+        "نگهبان حساب سبز نیست؛ در project سروری هست که مال این سیستم نیست یا وارسی ناموفق بوده است."
+    ),
+    "account_server_limit_reached": "حساب هتزنر به سقف تعداد سرورش رسیده است.",
+    "invalid_cost_input": "محاسبه‌ی هزینه نامعتبر بود.",
+    # proxyhub.nodes
+    "settings_invalid": "تنظیمات ذخیره‌شده‌ی ناوگان خراب است.",
+    "agent_domain_not_set": "دامنه‌ی سایت عامل‌ها (AGENT_DOMAIN) تنظیم نشده است.",
+    "projection_incomplete": "قیمت زنده‌ی بعضی nodeها معلوم نیست؛ خرج ماه کامل محاسبه نمی‌شود.",
+    "prices_stale": "قیمت‌های هتزنر بیش از ۶ ساعت است تازه نشده‌اند.",
+    "location_not_allowed": "این location در فهرست locationهای مجاز تنظیمات نیست.",
+    "no_location_configured": "هیچ location مجازی در تنظیمات نیست.",
+    "no_usable_account": "هیچ حساب هتزنر فعالی برای ساخت نیست.",
+    "no_live_price": "برای نوع سرور مجاز در این location قیمت زنده یا موجودی نیست.",
+    "account_observation_stale": "آخرین وارسی زنده‌ی حساب هتزنر بیش از ۳۰ دقیقه پیش بوده است.",
+    "test_node_exists": "یک node آزمایشی زنده هست.",
+    "token_missing": "توکن این حساب هتزنر در گاوصندوق نیست.",
+    "user_data_failed": "ساختن cloud-init برای این node ناموفق بود.",
+    "vault_unavailable": "کلید رمزنگاری پنل در دسترس نیست.",
+    "node_changed_meanwhile": "وضعیت node هم‌زمان عوض شد؛ دوباره امتحان کنید.",
+    "node_deleted": "این node پیش‌تر حذف شده است.",
+    "fleet_not_live": "ناوگان ۹ جایگاهی هنوز فقط حالت خشک دارد؛ فقط node آزمایشی حذف‌شدنی است.",
+    "hetzner_unreachable": "API هتزنر پاسخ نداد.",
+    "hetzner_rate_limited": "سقف درخواست API هتزنر پر شده است.",
+    "hetzner_token_invalid": "هتزنر توکن این حساب را نپذیرفت.",
+    "hetzner_forbidden": "هتزنر دسترسی این توکن را رد کرد.",
+    "hetzner_read_only": "توکن این حساب فقط‌خواندنی است.",
+    "hetzner_api_error": "API هتزنر خطا داد.",
+    # proxyhub.safety.gates.can_delete (on a live read of the server)
+    "label_managed_by_missing": "برچسب managed-by=proxy-hub روی سرور نیست.",
+    "role_not_deletable": "نقش سرور (برچسب role) حذف‌شدنی نیست.",
+    "no_db_row": "این سرور در پایگاه‌داده‌ی پنل ثبت نیست.",
+    "db_row_hetzner_id_mismatch": "شناسه‌ی هتزنر سرور با ردیف پایگاه‌داده یکی نیست.",
+    "db_row_account_mismatch": "حساب سرور با ردیف پایگاه‌داده یکی نیست.",
+    "db_row_not_retiring": "ردیف پایگاه‌داده در وضعیت بازنشستگی نیست.",
+    "delete_protection_on": "حفاظت از حذف روی سرور روشن است.",
+}
+
+
+def reasons_fa(reasons: list[str] | tuple[str, ...]) -> list[str]:
+    return [REASONS_FA.get(r, r) for r in reasons]
+
 
 class NodeServiceError(Exception):
     code = "invalid_request"

@@ -220,7 +220,10 @@ async def test_api_refuses_with_the_gate_reasons(world: LiveWorld, reason: str, 
     assert r.status_code == 409, r.text
     body = r.json()
     assert body["error"] == "gate_refused" and reason in body["reasons"], body
-    assert body["message_fa"] and set(body) == {"error", "message_fa", "reasons"}
+    assert body["message_fa"] and set(body) == {"error", "message_fa", "reasons", "reasons_fa"}
+    # Every reason has its Persian sentence (the dashboard shows these to the owner).
+    assert len(body["reasons_fa"]) == len(body["reasons"])
+    assert all(fa != code for code, fa in zip(body["reasons"], body["reasons_fa"], strict=True))
     assert await world.rows("SELECT count(*) FROM nodes WHERE is_test") == [(0,)]
     log = await world.rows("SELECT allowed, reasons FROM actions_log WHERE action = 'test_node_request'")
     assert len(log) == 1 and log[0][0] is False and reason in log[0][1]["reasons"]
