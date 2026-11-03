@@ -15,3 +15,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .hypothesis/
+
+# Local git worktrees created by Claude Code agent teams (never committed)
+.claude/worktrees/
