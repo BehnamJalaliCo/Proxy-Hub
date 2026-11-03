@@ -84,13 +84,13 @@ def sign_node_csr(
     ca_key: ec.EllipticCurvePrivateKey,
     ca_cert: x509.Certificate,
     now: datetime,
-    lifetime: timedelta = LEAF_LIFETIME,
+    lifetime: timedelta | None = None,
 ) -> IssuedCertificate:
     public_key = csr.public_key()
     if not isinstance(public_key, ec.EllipticCurvePublicKey):
         raise CsrError("csr_key_not_p256")
     not_before = now - CLOCK_SKEW
-    not_after = now + lifetime
+    not_after = now + (lifetime if lifetime is not None else LEAF_LIFETIME)
     if not_after > ca_cert.not_valid_after_utc:
         raise CsrError("ca_expires_too_soon")
     builder = (

@@ -5,20 +5,28 @@
 //	proxyhub-agent [-config FILE] once           one full cycle, then exit
 //	proxyhub-agent [-config FILE] register       one-time registration only
 //	proxyhub-agent check-config TELEMT_TOML      refuse a Telemt config that breaks an invariant
+//	proxyhub-agent render-desired NODE_ID DESIRED_JSON OUT_TOML
+//	                                             render a saved desired state into a 0600 file
+//	                                             (it holds secrets, so it is never printed)
 //	proxyhub-agent version
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/agent"
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/config"
+	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/desired"
+	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/enforce"
+	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/fsutil"
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/telemt"
 )
 
@@ -56,6 +64,17 @@ func run(args []string) int {
 			return 1
 		}
 		if err := telemt.CheckInvariants(data); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		fmt.Println("ok")
+		return 0
+	case "render-desired":
+		if fs.NArg() != 4 {
+			fmt.Fprintln(os.Stderr, "usage: proxyhub-agent render-desired NODE_ID DESIRED_JSON OUT_TOML")
+			return 2
+		}
+		if err := renderDesired(fs.Arg(1), fs.Arg(2), fs.Arg(3)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
@@ -102,4 +121,30 @@ func run(args []string) int {
 		}
 	}
 	return 0
+}
+
+// renderDesired renders a desired-state document exactly as the agent would on a node (node paths,
+// local enforcement at the current time, no recorded usage) and writes it with WriteConfig, so the
+// result has passed the invariant check and is mode 0600.
+func renderDesired(nodeID, in, out string) error {
+	body, err := os.ReadFile(in)
+	if err != nil {
+		return err
+	}
+	doc, err := desired.Decode(body, nodeID)
+	if err != nil {
+		return err
+	}
+	if doc.Telemt == nil {
+		return errors.New("desired state has no Telemt configuration")
+	}
+	users, _ := enforce.Effective(doc.Telemt.Users, enforce.NewUsage(), time.Now())
+	if len(users) == 0 {
+		return errors.New("desired state has no users")
+	}
+	data, err := telemt.Render(doc.Telemt, users, telemt.Settings{DataDir: "/var/lib/telemt", MetricsListen: "127.0.0.1:9090"})
+	if err != nil {
+		return err
+	}
+	return telemt.WriteConfig(out, data, fsutil.KeepOwner)
 }

@@ -37,6 +37,7 @@ from proxyhub.agent_api.identity import (
 from proxyhub.agent_api.reports import ReportRejected, parse_report, store_report
 from proxyhub.agent_api.runtime import AgentRuntime, get_agent_runtime
 from proxyhub.agent_api.schemas import RegisterRequest, RenewRequest
+from proxyhub.agent_api.validation import find_ip_like
 from proxyhub.api.deps import db_session
 from proxyhub.db.models_agent import AgentNode
 
@@ -101,6 +102,9 @@ async def _read_json(request: Request) -> Any:
 
 
 def _validate[M: BaseModel](model: type[M], data: Any) -> M:
+    # Rule 7 holds for every body a node sends, not only reports.
+    if find_ip_like(data) is not None:
+        raise HTTPException(status_code=422, detail="ip_like_value")
     try:
         return model.model_validate(data)
     except ValidationError:
