@@ -13,7 +13,11 @@ Documented additions to the contract: status has ``bot_error`` (null, ``"bot_una
 and each Channel has ``chat_id``; the pairing answer has ``link`` (``https://t.me/<bot>?start=<code>``);
 ``PUT /channel`` also accepts a private channel's numeric id (``-100...``) as ``username`` and may
 answer 400 ``channel_in_use`` or ``bot_token_invalid``; Telegram being unreachable is 502
-``telegram_unavailable``; ``POST /pairing`` without a bot is 409 ``bot_not_set``.
+``telegram_unavailable``; ``POST /pairing`` without a bot is 409 ``bot_not_set``. A body of the
+wrong shape (no ``token`` string, a ``role`` other than main/test, unknown fields) is the API-wide
+422 ``invalid_request``; any token string that is not a Bot API token (empty, overlong, wrong
+characters) is 400 ``bot_token_invalid``, and a settings body that is not valid JSON is 422
+``invalid_settings``.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ import logging
 import re
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -174,7 +178,9 @@ async def get_status(admin: Admin, db: Db, request: Request) -> dict[str, Any]:
 
 class BotIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    token: SecretStr = Field(min_length=1, max_length=200)
+    # No length limits here: an empty or overlong token is a wrong token (400 bot_token_invalid,
+    # from the shape check below), not a malformed request.
+    token: SecretStr
 
 
 @api.put("/bot")
@@ -349,10 +355,12 @@ async def get_settings(admin: Admin, db: Db) -> dict[str, Any]:
 
 
 @api.put("/settings")
-async def put_settings(admin: Admin, db: Db, body: Annotated[Any, Body()] = None) -> dict[str, Any]:
+async def put_settings(admin: Admin, db: Db, request: Request) -> dict[str, Any]:
+    # The body is read here, not by FastAPI, so that a body that is not even JSON is also the
+    # contract's 422 invalid_settings (not the generic invalid_request).
     try:
-        settings = _parse_settings(body)
-    except InvalidSchedule:
+        settings = _parse_settings(json.loads(await request.body()))
+    except (ValueError, RecursionError):  # not JSON, too deeply nested, or InvalidSchedule
         raise _err("invalid_settings", 422) from None
     old = await store.posting_settings(db)
     await store.save_posting_settings(db, settings)

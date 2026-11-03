@@ -219,15 +219,32 @@ async def test_status_after_setup(client: AsyncClient, engine: AsyncEngine, vaul
 # --- bot token -----------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("bad", ["", "not-a-token", "123:abc", "12345:" + "x" * 31 + "/../getMe"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "   ",
+        "not-a-token",
+        "123:abc",
+        "12345:" + "x" * 31 + "/../getMe",
+        "1234567890:" + "x" * 190,  # longer than 200 characters
+        "1" * 5000,
+    ],
+)
 async def test_malformed_token_is_refused_without_a_request(
     client: AsyncClient, engine: AsyncEngine, bad: str
 ) -> None:
+    # The client factory points at a refused port: a request would have been a 502 instead.
     r = await client.put("/api/telegram/bot", json={"token": bad})
-    assert r.status_code in (400, 422)
-    assert r.json()["error"] in ("bot_token_invalid", "invalid_request")
+    assert r.status_code == 400 and r.json()["error"] == "bot_token_invalid"
     assert r.json()["message_fa"]
     assert await rows(engine, "SELECT name FROM secrets WHERE name LIKE 'telegram:%'") == []
+
+
+@pytest.mark.parametrize("body", [{}, {"token": 123}, {"token": "x", "extra": 1}, []])
+async def test_a_body_without_a_token_string_is_invalid_request(client: AsyncClient, body: Any) -> None:
+    r = await client.put("/api/telegram/bot", json=body)
+    assert r.status_code == 422 and r.json()["error"] == "invalid_request"
 
 
 async def test_unreachable_telegram_is_502_and_nothing_stored(
@@ -382,6 +399,15 @@ async def test_invalid_settings(client: AsyncClient, payload: Any) -> None:
     r = await client.put("/api/telegram/settings", json=payload)
     assert r.status_code == 422 and r.json()["error"] == "invalid_settings"
     assert "HH:MM" in r.json()["message_fa"]
+    assert (await client.get("/api/telegram/settings")).json()["post_interval_min"] == 60
+
+
+@pytest.mark.parametrize(
+    "raw", [b"", b"not json", b'{"quiet_windows": [', bytes([0xFF, 0xFE, 0x00]), b"[" * 100_000]
+)
+async def test_settings_body_that_is_not_json_is_invalid_settings(client: AsyncClient, raw: bytes) -> None:
+    r = await client.put("/api/telegram/settings", content=raw, headers={"Content-Type": "application/json"})
+    assert r.status_code == 422 and r.json()["error"] == "invalid_settings"
     assert (await client.get("/api/telegram/settings")).json()["post_interval_min"] == 60
 
 
