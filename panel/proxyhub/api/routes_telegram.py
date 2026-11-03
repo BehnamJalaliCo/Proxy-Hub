@@ -8,7 +8,8 @@ outbox, so a stopped worker cannot hold back the alert about the stopped worker.
 The bot token goes in once (``PUT /api/telegram/bot``), is checked with getMe, stored in the vault
 and never returned, logged or written to actions_log (CLAUDE.md rule 3).
 
-Documented additions to the contract: status has ``bot_error`` (null or ``"bot_unauthorized"``)
+Documented additions to the contract: status has ``bot_error`` (null, ``"bot_unauthorized"`` or
+``"updates_conflict"``)
 and each Channel has ``chat_id``; the pairing answer has ``link`` (``https://t.me/<bot>?start=<code>``);
 ``PUT /channel`` also accepts a private channel's numeric id (``-100...``) as ``username`` and may
 answer 400 ``channel_in_use`` or ``bot_token_invalid``; Telegram being unreachable is 502
@@ -139,6 +140,7 @@ async def telegram_status(db: AsyncSession, request: Request) -> dict[str, Any]:
     pending, failed = await store.outbox_counts(db)
     last_alert = await store.get_setting(db, store.KEY_LAST_ALERT) or {}
     health = await store.get_setting(db, store.KEY_HEALTH) or {}
+    updates = await store.get_setting(db, store.KEY_UPDATES) or {}
     await db.rollback()  # read only; leave no transaction open
     pairing_out = None
     if open_pairing is not None:
@@ -152,8 +154,14 @@ async def telegram_status(db: AsyncSession, request: Request) -> dict[str, Any]:
         "channels": {role: store.public_channel(channels.get(role)) for role in store.ROLES},
         "outbox": {"pending": pending, "failed": failed},
         "last_alert_at": last_alert.get("at"),
-        "bot_error": health.get("error") if bot else None,
+        # bot_unauthorized (token revoked) or updates_conflict (another poller/webhook: pairing
+        # cannot work) or null.
+        "bot_error": (health.get("error") or _conflict(updates)) if bot else None,
     }
+
+
+def _conflict(updates: dict[str, Any]) -> str | None:
+    return "updates_conflict" if updates.get("error") == "updates_conflict" else None
 
 
 @api.get("/status")

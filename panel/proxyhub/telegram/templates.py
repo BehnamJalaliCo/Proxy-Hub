@@ -134,7 +134,7 @@ def render_proxy_post(
     budget_html = MAX_MESSAGE_CHARS - len(tail) - len(joiner)
     budget_visible = MAX_MESSAGE_CHARS - utf16_len(visible_text(tail)) - utf16_len(joiner)
     content = sanitize_html(content_html.strip(), max_html=budget_html, max_visible=budget_visible)
-    if not content.strip():
+    if not visible_text(content).strip():
         return tail
     return f"{content}{joiner}{tail}"
 

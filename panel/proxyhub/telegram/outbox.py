@@ -282,7 +282,7 @@ async def record_success(
     return "sent"
 
 
-def _ambiguous(job: Job, exc: TelegramError) -> bool:
+def _ambiguous(exc: TelegramError) -> bool:
     """Telegram may have carried out the request although we got no clean answer."""
     if isinstance(exc, NetworkError):
         return exc.maybe_sent
@@ -304,7 +304,7 @@ async def record_failure(
     if isinstance(exc, Unauthorized):
         await store.set_health(conn, "bot_unauthorized", now)
         return await retry_at(conn, job, now + UNAUTHORIZED_PAUSE, "bot_unauthorized", counted=False, now=now)
-    if job.kind == "send_post" and _ambiguous(job, exc):
+    if job.kind == "send_post" and _ambiguous(exc):
         await finish_failed(conn, job.id, now, f"ambiguous_send: {error}")
         return "failed"
     if isinstance(exc, BadRequest):

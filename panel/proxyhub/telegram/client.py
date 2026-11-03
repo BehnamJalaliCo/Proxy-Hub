@@ -374,6 +374,7 @@ class BotClient:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._token = as_secret(token)
+        self._timeout = timeout
         install_log_redaction()
         self._http = httpx.AsyncClient(
             base_url=base_url,
@@ -401,7 +402,9 @@ class BotClient:
         """POST one Bot API method with JSON parameters; returns ``result`` or raises."""
         if not re.fullmatch(r"[A-Za-z]{3,40}", method):
             raise ValueError("invalid method name")
-        timeout = DEFAULT_TIMEOUT if read_timeout is None else httpx.Timeout(15.0, read=read_timeout)
+        timeout = self._timeout
+        if read_timeout is not None:  # long poll: the server holds the answer up to its own timeout
+            timeout = httpx.Timeout(self._timeout.connect or 10.0, read=read_timeout)
         try:
             response = await self._http.post(
                 f"/bot{self._token.reveal()}/{method}", json=params, timeout=timeout

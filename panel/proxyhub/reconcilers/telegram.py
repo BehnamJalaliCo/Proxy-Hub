@@ -39,6 +39,19 @@ ALLOWED_UPDATES: Final = ("message",)
 VaultFactory = Callable[[], Vault]
 
 
+class _VaultOnce:
+    """Reads the master key file once per loop (not every half second); retried until it works."""
+
+    def __init__(self, factory: VaultFactory) -> None:
+        self._factory = factory
+        self._vault: Vault | None = None
+
+    def __call__(self) -> Vault:
+        if self._vault is None:
+            self._vault = self._factory()
+        return self._vault
+
+
 async def run_locked(engine: AsyncEngine, name: str, step: Callable[[], Awaitable[None]]) -> bool:
     """Run ``step`` under the loop's session advisory lock, with no transaction held meanwhile."""
     async with engine.connect() as lock_conn:
@@ -107,7 +120,7 @@ class TelegramUpdatesReconciler(Reconciler):
         bot_factory: BotFactory = BotClient,
         long_poll_s: int = 25,
     ) -> None:
-        self.vault_factory = vault_factory
+        self.vault = _VaultOnce(vault_factory)
         self.bot_factory = bot_factory
         self.long_poll_s = long_poll_s
 
@@ -132,7 +145,7 @@ class TelegramUpdatesReconciler(Reconciler):
 
     async def poll(self, engine: AsyncEngine) -> int:
         """One getUpdates call; returns how many updates were handled."""
-        vault = self.vault_factory()
+        vault = self.vault()
         async with engine.begin() as conn:
             creds = await store.load_bot(conn, vault)
             state = await store.get_setting(conn, store.KEY_UPDATES) or {}
@@ -194,7 +207,7 @@ class TelegramOutboxReconciler(Reconciler):
     def __init__(
         self, *, vault_factory: VaultFactory = Vault.from_config, bot_factory: BotFactory = BotClient
     ) -> None:
-        self.vault_factory = vault_factory
+        self.vault = _VaultOnce(vault_factory)
         self.bot_factory = bot_factory
         self.last_outcome: str | None = None
 
@@ -203,7 +216,7 @@ class TelegramOutboxReconciler(Reconciler):
 
     async def try_run_once(self, engine: AsyncEngine) -> bool:
         async def step() -> None:
-            self.last_outcome = await outbox.process_one(engine, self.vault_factory(), self.bot_factory)
+            self.last_outcome = await outbox.process_one(engine, self.vault(), self.bot_factory)
             # Busy: next job at once (pacing is enforced per chat); nothing to do: wait a little.
             self.interval_seconds = 0.2 if self.last_outcome in ("sent", "retry", "failed") else 1.0
 
@@ -229,7 +242,7 @@ class ApiWatchdogReconciler(Reconciler):
         self.url = url
         self.failures_to_alert = failures_to_alert
         self.probe_timeout_s = probe_timeout_s
-        self.vault_factory = vault_factory
+        self.vault = _VaultOnce(vault_factory)
         self.bot_factory = bot_factory
         self.failures = 0
         self.alerted = False
@@ -244,7 +257,7 @@ class ApiWatchdogReconciler(Reconciler):
 
     async def notify(self, conn: AsyncConnection, message: str) -> bool:
         try:
-            creds = await store.load_bot(conn, self.vault_factory())
+            creds = await store.load_bot(conn, self.vault())
         except VaultError as exc:
             log.warning("api watchdog: vault unavailable (%s)", type(exc).__name__)
             return False
