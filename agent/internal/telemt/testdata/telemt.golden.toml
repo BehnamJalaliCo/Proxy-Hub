@@ -1,0 +1,69 @@
+# Managed by proxyhub-agent from the panel's desired state. Local edits are overwritten.
+# Privacy (CLAUDE.md rule 7): beobachten off, log_level silent, API off, no link printing.
+
+[general]
+use_middle_proxy = true
+beobachten = false
+log_level = "silent"
+disable_colors = true
+config_strict = true
+unknown_dc_file_log_enabled = false
+quota_state_path = "/var/lib/telemt/telemt.limit.json"
+proxy_secret_path = "/var/lib/telemt/proxy-secret"
+proxy_config_v4_cache_path = "/var/lib/telemt/cache/proxy-config-v4.txt"
+proxy_config_v6_cache_path = "/var/lib/telemt/cache/proxy-config-v6.txt"
+ad_tag = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[general.modes]
+classic = false
+secure = false
+tls = true
+
+[general.links]
+show = []
+
+[general.telemetry]
+core_enabled = true
+user_enabled = true
+
+[network]
+cache_public_ip_path = "/var/lib/telemt/cache/public_ip.txt"
+
+[server]
+port = 443
+metrics_listen = "127.0.0.1:9090"
+metrics_whitelist = ["127.0.0.1/32"]
+
+[server.api]
+enabled = false
+
+[[server.listeners]]
+ip = "0.0.0.0"
+port = 443
+
+[[server.listeners]]
+ip = "0.0.0.0"
+port = 8443
+
+[censorship]
+tls_domain = "cdn.example.com"
+tls_front_dir = "/var/lib/telemt/tlsfront"
+
+[access.users]
+alice = "0123456789abcdef0123456789abcdef"
+sponsor_b = "fedcba9876543210fedcba9876543210"
+
+[access.user_enabled]
+sponsor_b = false
+
+[access.user_ad_tags]
+sponsor_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+[access.user_expirations]
+alice = "2026-12-31T23:59:59Z"
+
+[access.user_data_quota]
+alice = 107374182400
+
+[access.user_max_tcp_conns]
+alice = 500
