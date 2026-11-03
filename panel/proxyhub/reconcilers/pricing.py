@@ -106,14 +106,31 @@ class PricingReconciler(Reconciler):
         reader_factory = self._reader_factory
         for account_id, account_name in due:
             self._fetched_since_start.add(account_id)
-            token = await vault.get(conn, hcloud_secret_name(account_id))
-            if token is None:
-                log.warning("pricing: account %s has no token in the vault", account_name)
-                continue
+            # One account per savepoint, as in the account guard: one bad account never undoes
+            # the prices stored for the others.
             try:
-                offers = await call_hetzner(partial(_fetch_offers, reader_factory, token))
-            except HetznerFailure as failure:
-                log.warning("pricing for %s failed: %s", account_name, failure)
-                continue
-            changes = await store_offers(conn, account_id, offers, now)
-            await log_price_changes(conn, account_id, account_name, changes)
+                async with conn.begin_nested():
+                    await self._fetch_one(conn, vault, reader_factory, account_id, account_name, now)
+            except Exception as exc:
+                log.warning("pricing for %s: internal error %s", account_name, type(exc).__name__)
+
+    async def _fetch_one(
+        self,
+        conn: AsyncConnection,
+        vault: Vault,
+        reader_factory: Callable[[str], HetznerReader],
+        account_id: uuid.UUID,
+        account_name: str,
+        now: datetime,
+    ) -> None:
+        token = await vault.get(conn, hcloud_secret_name(account_id))
+        if token is None:
+            log.warning("pricing: account %s has no token in the vault", account_name)
+            return
+        try:
+            offers = await call_hetzner(partial(_fetch_offers, reader_factory, token))
+        except HetznerFailure as failure:
+            log.warning("pricing for %s failed: %s", account_name, failure)
+            return
+        changes = await store_offers(conn, account_id, offers, now)
+        await log_price_changes(conn, account_id, account_name, changes)

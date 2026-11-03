@@ -110,6 +110,19 @@ async def test_open_caps_allow_creations_only_within_budget_and_rate(
     assert await q(engine, "SELECT count(*) FROM nodes") == 0
 
 
+async def test_stale_stored_prices_block_creations(engine: AsyncEngine, tmp_path: Path) -> None:
+    """The snapshot carries hetzner_offers.fetched_at into the planner (fail closed on old prices)."""
+    vault = make_vault(tmp_path)
+    await add_account(engine, vault, "nodes-old-prices")
+    await set_settings(engine, OPEN)
+    async with engine.begin() as conn:
+        await conn.execute(text("UPDATE hetzner_offers SET fetched_at = now() - interval '7 hours'"))
+    assert await FleetReconciler().try_run_once(engine)
+    plan = await q(engine, "SELECT actions FROM fleet_plans ORDER BY id DESC LIMIT 1")
+    assert isinstance(plan, list) and len(plan) == 9
+    assert all(not a["allowed"] and "prices_stale" in a["reasons"] for a in plan)
+
+
 async def test_dry_run_false_in_storage_still_plans_dry(engine: AsyncEngine, tmp_path: Path) -> None:
     """Even if dry_run=false reached the settings row, the loop stays dry (FLEET_LIVE_ENABLED)."""
     await add_account(engine, make_vault(tmp_path), "nodes-b")
@@ -204,6 +217,53 @@ async def test_pricing_skips_accounts_without_token(engine: AsyncEngine, tmp_pat
     assert await pricing.try_run_once(engine)
     assert await q(engine, "SELECT count(*) FROM hetzner_offers") == 0
     assert await q(engine, "SELECT count(*) FROM actions_log WHERE actor = 'pricing'") == 0
+
+
+async def _damage_first_token(engine: AsyncEngine, name: str) -> None:
+    """Flip a ciphertext byte of one account's stored token: decrypting it now fails (GCM tag)."""
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE secrets SET ciphertext = set_byte(ciphertext, 0, get_byte(ciphertext, 0) # 1) "
+                "WHERE name = (SELECT token_secret_name FROM hetzner_accounts WHERE name = :n)"
+            ),
+            {"n": name},
+        )
+
+
+async def test_account_guard_one_broken_account_does_not_undo_the_others(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    vault = make_vault(tmp_path)
+    await add_account(engine, vault, "damaged")
+    await _damage_first_token(engine, "damaged")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO hetzner_accounts (id, name, token_secret_name, state) "
+                "VALUES (gen_random_uuid(), 'no-token-2', 'hcloud:y', 'active')"
+            )
+        )
+        await conn.execute(text("DELETE FROM hetzner_account_observations"))
+    guard = AccountGuardReconciler(vault_factory=lambda: vault)
+    assert await guard.try_run_once(engine)  # no exception escapes the loop
+    rows = await q(
+        engine,
+        "SELECT json_object_agg(a.name, json_build_array(o.ok, o.error)) FROM hetzner_accounts a "
+        "JOIN hetzner_account_observations o ON o.account_id = a.id",
+    )
+    assert rows == {"damaged": [False, "internal:VaultDecryptError"], "no-token-2": [False, "token_missing"]}
+
+
+async def test_pricing_one_broken_account_does_not_stop_the_loop(engine: AsyncEngine, tmp_path: Path) -> None:
+    vault = make_vault(tmp_path)
+    await add_account(engine, vault, "damaged-p")
+    await _damage_first_token(engine, "damaged-p")
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM hetzner_offers"))
+    pricing = PricingReconciler(vault_factory=lambda: vault)
+    assert await pricing.try_run_once(engine)
+    assert await q(engine, "SELECT count(*) FROM hetzner_offers") == 0
 
 
 def test_worker_runs_every_fleet_loop() -> None:

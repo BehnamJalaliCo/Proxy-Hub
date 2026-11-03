@@ -126,7 +126,16 @@ class AccountGuardReconciler(Reconciler):
             return
         vault = self._vault_factory()
         for account in due:
-            await self.check(conn, vault, account, now)
+            # One account per savepoint: an unexpected error on one (a damaged vault row, a race
+            # with an owner action, an odd API answer) must not roll back what was recorded for
+            # the others, and is itself recorded so the owner sees it (fails closed: stale looks
+            # block creations).
+            try:
+                async with conn.begin_nested():
+                    await self.check(conn, vault, account, now)
+            except Exception as exc:
+                log.warning("account guard for %s: internal error %s", account.name, type(exc).__name__)
+                await store_observation_failure(conn, account.id, f"internal:{type(exc).__name__}", now)
 
     async def check(self, conn: AsyncConnection, vault: Vault, account: AccountRef, now: datetime) -> None:
         self._checked_since_start.add(account.id)
