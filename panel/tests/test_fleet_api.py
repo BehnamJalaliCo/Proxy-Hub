@@ -160,6 +160,7 @@ async def test_settings_update_validates_and_logs(client: AsyncClient, engine: A
     r = await client.put("/api/settings/fleet", json=body)
     assert r.status_code == 200, r.text
     saved = r.json()
+    assert saved["kill_switch"] is True  # only POST /api/kill-switch changes it
     assert saved["budget_cap_eur"] == "150.50" and isinstance(saved["budget_cap_eur"], str)
     assert saved["allowed_server_types"] == ["cpx02", "cpx12"]
     assert (await client.get("/api/settings/fleet")).json() == saved
@@ -167,7 +168,8 @@ async def test_settings_update_validates_and_logs(client: AsyncClient, engine: A
         changed = (
             await conn.execute(text("SELECT reasons FROM actions_log WHERE action = 'settings_update'"))
         ).scalar_one()
-    assert {"budget_cap_eur", "kill_switch", "locations"} <= set(changed["reasons"])
+    assert {"budget_cap_eur", "locations"} <= set(changed["reasons"])
+    assert "kill_switch" not in changed["reasons"]
 
     for bad in (
         {**body, "budget_cap_eur": "1.234"},

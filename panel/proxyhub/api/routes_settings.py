@@ -54,6 +54,9 @@ async def put_fleet_settings(admin: Admin, db: Db, payload: Annotated[Any, Body(
         old = await load_fleet_settings_for_update(db)
     except SettingsCorrupt:
         old = None  # a full, valid replacement repairs corrupt settings
+    # The kill switch is changed ONLY by POST /api/kill-switch: a stale settings form (another
+    # device, an old tab) must never turn it back off. Corrupt settings keep it on (fail closed).
+    new = new.model_copy(update={"kill_switch": old.kill_switch if old is not None else True})
     await save_fleet_settings(db, new)
     changed = settings_diff(old, new) if old is not None else {"*": ["corrupt", "replaced"]}
     await log_action(
