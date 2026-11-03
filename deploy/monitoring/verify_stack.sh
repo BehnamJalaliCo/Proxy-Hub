@@ -83,7 +83,9 @@ fi
 bind="$(docker port "$("${COMPOSE[@]}" ps -q grafana)" 3000/tcp || true)"
 if [ "$bind" = "127.0.0.1:3000" ]; then pass "grafana: published on 127.0.0.1:3000 only"; else bad "grafana published as: $bind"; fi
 
-# 6. Loki
+# 6. Loki reports "ready" only some seconds after a (re)start (ingester ring warm-up): poll.
+end=$((SECONDS + WAIT_S))
+until [ "$(iget http://loki:3100/ready 2>/dev/null || true)" = ready ] || [ $SECONDS -ge $end ]; do sleep 3; done
 if [ "$(iget http://loki:3100/ready 2>/dev/null || true)" = ready ]; then pass "loki: ready"; else bad "loki not ready"; fi
 
 # 7. Panel logs in Loki: present, only panel services, no IP address left.
