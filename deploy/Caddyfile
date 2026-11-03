@@ -18,9 +18,7 @@
 	request_header -X-ProxyHub-Agent-Proxy-Secret
 	request_header -X-ProxyHub-Client-Cert-Sha256
 
-	reverse_proxy api:8000 {
-		header_down -Via
-	}
+	reverse_proxy api:8000
 
 	header {
 		Strict-Transport-Security "max-age=31536000"
@@ -28,6 +26,9 @@
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"
 		-Server
+		# Caddy adds "Via: 1.1 Caddy" itself AFTER reverse_proxy's header_down runs; a deletion here
+		# is deferred to when the response is written, so it really removes it (seen on the server, P06).
+		-Via
 	}
 
 	# No access log (CLAUDE.md rule 7 spirit: we keep no visitor IPs anywhere).
