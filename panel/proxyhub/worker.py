@@ -9,9 +9,11 @@ import signal
 from proxyhub.db.session import get_engine
 from proxyhub.reconcilers.account_guard import AccountGuardReconciler
 from proxyhub.reconcilers.base import Heartbeat, Reconciler
+from proxyhub.reconcilers.dns import DnsReconciler
 from proxyhub.reconcilers.fleet import FleetReconciler
 from proxyhub.reconcilers.nodes import NodesReconciler
 from proxyhub.reconcilers.pricing import PricingReconciler
+from proxyhub.reconcilers.probes import ProbesReconciler
 from proxyhub.reconcilers.telegram import (
     ApiWatchdogReconciler,
     TelegramOutboxReconciler,
@@ -33,6 +35,8 @@ def reconcilers() -> list[Reconciler]:
         TelegramUpdatesReconciler(),
         TelegramOutboxReconciler(),
         ApiWatchdogReconciler(),
+        DnsReconciler(),  # net: no-op until a verified Cloudflare token and an active domain exist
+        ProbesReconciler(),  # net: records reachability verdicts from Iran only
     ]
 
 

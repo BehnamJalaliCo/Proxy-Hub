@@ -1,0 +1,568 @@
+"""Probes from Iran: parsers (real Globalping and check-host answers as data), verdict logic over
+rounds/sources/control, storage, API, and the reconciler on real PostgreSQL. Real API calls are in
+tests/test_net_probes_real.py.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
+from fastapi.routing import APIRoute
+from httpx import ASGITransport, AsyncClient
+from hypothesis import given, settings
+from hypothesis import strategies as st
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from test_fleet_support import ADMIN, CSRF
+from test_net_support import (
+    CH_LIMIT_EXCEEDED,
+    CH_NODES,
+    CH_TCP_CREATED,
+    CH_TCP_RESULT_FAIL,
+    CH_TCP_RESULT_OK,
+    CH_TCP_RESULT_PENDING,
+    GP_DNS_HIJACKED,
+    GP_TCP_CLOSED_PORT,
+    GP_TCP_HETZNER,
+    GP_TCP_ONE,
+    actions,
+    clean_net_tables,
+    deep,
+    make_node,
+)
+
+from proxyhub.api.deps import require_admin
+from proxyhub.probes import service
+from proxyhub.probes.checkhost import CheckHostClient, classify_start, parse_nodes, parse_tcp_result
+from proxyhub.probes.globalping import (
+    GlobalpingClient,
+    RateLimit,
+    dns_body,
+    parse_dns,
+    parse_ping,
+    parse_rate_limit,
+    tcp_body,
+)
+from proxyhub.probes.settings import ProbeSettings
+from proxyhub.probes.types import Measurement, NetworkObs
+from proxyhub.probes.verdict import RoundObs, SourceObservation, decide, observe
+from proxyhub.reconcilers.probes import ProbesReconciler
+
+ASNS = [197207, 57218, 44244, 58224]
+PROBE_PATHS = {("GET", "/api/probes/summary"), ("POST", "/api/probes/run")}
+T0 = datetime(2026, 11, 3, 21, 0, tzinfo=UTC)
+
+
+# --- parsers over real answers -------------------------------------------------------------------
+
+
+def test_parse_tcp_ping_real_measurement() -> None:
+    nets = {n.network_key: n for n in parse_ping(GP_TCP_HETZNER, ASNS)}
+    assert set(nets) == {"asn:197207", "asn:57218", "asn:44244", "asn:58224"}
+    mci, rightel = nets["asn:197207"], nets["asn:57218"]
+    assert (mci.network, mci.ok, mci.fail, mci.nodata, mci.state) == ("همراه اول", 0, 0, 1, "nodata")
+    assert mci.detail["failure"] == "internal"  # a probe-side failure is never a "fail"
+    assert (rightel.network, rightel.ok, rightel.fail, rightel.rtt_ms, rightel.state) == (
+        "رایتل",
+        3,
+        0,
+        108.8,
+        "up",
+    )
+    for asn in (44244, 58224):  # Irancell and TCI had no probe (recorded, not counted)
+        n = nets[f"asn:{asn}"]
+        assert not n.had_probe and n.detail == {"no_probe": True} and n.state == "nodata"
+    (closed,) = parse_ping(GP_TCP_CLOSED_PORT)
+    assert (closed.ok, closed.fail, closed.state, closed.rtt_ms) == (0, 3, "down", None)
+    target_fail = deep(GP_TCP_CLOSED_PORT)
+    target_fail["results"][0]["result"] = {"status": "failed", "rawOutput": "x", "failureSource": "target"}
+    assert parse_ping(target_fail)[0].state == "down"
+
+
+def test_parse_dns_hijack_signature() -> None:
+    nets = {n.network_key: n for n in parse_dns(GP_DNS_HIJACKED, None)}
+    assert nets["asn:57218"].state == "down" and nets["asn:57218"].detail["hijacked"] is True
+    assert nets["asn:202468"].detail["answers"] == ["10.10.34.36"]
+    clean = deep(GP_DNS_HIJACKED)
+    clean["results"][0]["result"]["answers"][0]["value"] = "203.0.113.10"
+    clean["results"][1]["result"]["answers"] = []
+    nets = {n.network_key: n for n in parse_dns(clean, "203.0.113.10")}
+    assert nets["asn:57218"].state == "up" and nets["asn:57218"].detail["matches"] is True
+    assert nets["asn:202468"].state == "nodata"
+
+
+def test_check_host_parsers() -> None:
+    nodes = parse_nodes(CH_NODES)
+    assert [(n.short, n.city, n.asn) for n in nodes] == [
+        ("ir1", "Tehran", 47430),
+        ("ir2", "Isfahan", 209279),
+        ("ir3", "Shiraz", 213953),
+    ]
+    assert all("ip" not in vars(n) for n in nodes)  # the node's own address is not kept
+    ok = {n.network_key: n for n in parse_tcp_result(CH_TCP_RESULT_OK, nodes)}
+    assert ok["ch:ir1"].state == "up" and ok["ch:ir1"].rtt_ms == 87.3 and ok["ch:ir3"].state == "up"
+    fail = parse_tcp_result(CH_TCP_RESULT_FAIL, nodes[:2])
+    assert [n.state for n in fail] == ["down", "down"] and fail[0].detail["error"] == "Connection timed out"
+    pending = parse_tcp_result(CH_TCP_RESULT_PENDING, nodes[:2])
+    assert [n.state for n in pending] == ["nodata", "down"]
+    assert classify_start(200, CH_TCP_CREATED) == ("ok", "555dc965k7ff")
+    assert classify_start(200, CH_LIMIT_EXCEEDED) == ("rate_limited", None)
+    assert classify_start(429, None) == ("rate_limited", None)
+    assert classify_start(503, None) == ("error", None)
+    assert classify_start(200, {"ok": 1, "request_id": "../x"}) == ("error", None)
+
+
+def test_request_bodies_and_rate_limit_headers() -> None:
+    body = tcp_body("203.0.113.10", 443, ASNS)
+    assert body["measurementOptions"] == {"protocol": "TCP", "port": 443, "packets": 3}
+    assert body["locations"][0] == {"asn": 197207, "limit": 1}
+    assert (
+        tcp_body("203.0.113.10", 443, "2sAWRLjWFTTMzEwt600021REC")["locations"] == "2sAWRLjWFTTMzEwt600021REC"
+    )
+    assert dns_body("slot1.example.com", ASNS)["measurementOptions"] == {"query": {"type": "A"}}
+    # Header names exactly as api.globalping.io sent them on 2026-11-03.
+    rate = parse_rate_limit(
+        {"x-ratelimit-limit": "250", "x-ratelimit-remaining": "245", "x-ratelimit-reset": "1395"}, T0
+    )
+    assert rate == RateLimit(250, 245, T0 + timedelta(seconds=1395))
+    assert parse_rate_limit({}, T0) is None
+
+
+# --- verdict logic -------------------------------------------------------------------------------
+
+
+def m(source: str, networks: list[NetworkObs], *, role: str = "node", status: str = "ok") -> Measurement:
+    return Measurement(source, "tcp", role, "x", 443, status, T0, networks=tuple(networks))  # type: ignore[arg-type]
+
+
+def up(key: str) -> NetworkObs:
+    return NetworkObs(key, key, None, ok=3)
+
+
+def down(key: str) -> NetworkObs:
+    return NetworkObs(key, key, None, fail=3)
+
+
+def nodata(key: str) -> NetworkObs:
+    return NetworkObs(key, key, None, nodata=1)
+
+
+def test_observe_pairs_each_network_with_its_own_control() -> None:
+    control = m("globalping", [up("a"), down("b"), nodata("c")], role="control")
+    # Only network a counts: b could not reach the control, c gave no data.
+    assert observe(m("globalping", [up("a"), down("b"), down("c")]), control).state == "reachable"
+    assert observe(m("globalping", [down("a"), up("b")]), control).state == "unreachable"
+    both = m("globalping", [up("a"), up("b")], role="control")
+    assert observe(m("globalping", [up("a"), down("b")]), both) == SourceObservation("partial", None, 2, 1)
+    assert (
+        observe(m("globalping", [up("a")]), m("globalping", [down("a")], role="control")).reason
+        == "control_failed"
+    )
+    assert observe(
+        m("globalping", [up("a")]), m("globalping", [], role="control", status="rate_limited")
+    ).reason == ("control_rate_limited")
+    assert observe(m("globalping", [up("a")], status="error"), both).reason == "node_error"
+    assert observe(None, both).reason == "source_missing"
+    assert observe(m("globalping", [nodata("a")]), both).reason == "no_valid_networks"
+
+
+def rnd(minutes: int, gp: str, ch: str) -> RoundObs:
+    def obs(state: str) -> SourceObservation:
+        return SourceObservation(state, "control_failed" if state == "invalid" else None)  # type: ignore[arg-type]
+
+    return RoundObs(T0 + timedelta(minutes=minutes), {"globalping": obs(gp), "check-host": obs(ch)})
+
+
+NOW = T0 + timedelta(minutes=30)
+
+
+@pytest.mark.parametrize(
+    ("rounds", "expected"),
+    [
+        ([rnd(20, "reachable", "reachable")], "unknown"),  # one round is never enough
+        ([rnd(10, "reachable", "reachable"), rnd(20, "reachable", "reachable")], "ok"),
+        ([rnd(10, "unreachable", "unreachable"), rnd(20, "unreachable", "unreachable")], "blocked"),
+        ([rnd(10, "unreachable", "reachable"), rnd(20, "unreachable", "reachable")], "suspect"),
+        ([rnd(10, "reachable", "reachable"), rnd(20, "unreachable", "unreachable")], "suspect"),
+        ([rnd(10, "partial", "partial"), rnd(20, "partial", "partial")], "suspect"),
+        (
+            [rnd(10, "unreachable", "unreachable"), rnd(20, "unreachable", "invalid")],
+            "unknown",
+        ),  # control failed
+        ([rnd(10, "reachable", "invalid"), rnd(20, "reachable", "reachable")], "unknown"),
+        ([rnd(-60, "unreachable", "unreachable"), rnd(20, "unreachable", "unreachable")], "unknown"),  # stale
+        (
+            [
+                rnd(0, "unreachable", "unreachable"),
+                rnd(10, "reachable", "reachable"),
+                rnd(20, "reachable", "reachable"),
+            ],
+            "ok",  # only the latest rounds count
+        ),
+    ],
+)
+def test_decide(rounds: list[RoundObs], expected: str) -> None:
+    verdict, reasons = decide(rounds, now=NOW, min_rounds=2, max_age=timedelta(hours=1))
+    assert verdict == expected, reasons
+    assert reasons
+
+
+def test_decide_never_accepts_fewer_than_two_rounds() -> None:
+    assert decide([rnd(20, "unreachable", "unreachable")], now=NOW, min_rounds=1)[0] == "unknown"
+    missing_source = RoundObs(T0 + timedelta(minutes=20), {"globalping": SourceObservation("unreachable")})
+    verdict, reasons = decide([missing_source, missing_source], now=NOW)
+    assert verdict == "unknown" and "round0:check-host:source_missing" in reasons
+
+
+_states = st.sampled_from(["reachable", "unreachable", "partial", "invalid"])
+
+
+@settings(max_examples=400)
+@given(st.lists(st.tuples(st.integers(0, 29), _states, _states), max_size=6), st.integers(1, 4))
+def test_property_ok_or_blocked_needs_both_sources_in_two_valid_rounds(
+    spec: list[tuple[int, str, str]], min_rounds: int
+) -> None:
+    rounds = [rnd(t, gp, ch) for t, gp, ch in spec]
+    verdict, _ = decide(rounds, now=NOW, min_rounds=min_rounds)
+    if verdict in ("ok", "blocked"):
+        latest = sorted(rounds, key=lambda r: r.at, reverse=True)[: max(min_rounds, 2)]
+        assert len(latest) >= 2
+        wanted = "reachable" if verdict == "ok" else "unreachable"
+        assert all(o.state == wanted for r in latest for o in r.observations.values())
+        assert all(set(r.observations) == {"globalping", "check-host"} for r in latest)
+
+
+def test_globalping_budget() -> None:
+    s = ProbeSettings()
+    one = [service.Target(uuid.uuid4(), "n", "203.0.113.1", 443, "slot1.example.com", "schedule")]
+    assert service.globalping_plan(s, one, None, T0) == (True, True, True)
+    plenty = RateLimit(250, 200, T0 + timedelta(minutes=30))
+    assert service.globalping_plan(s, one, plenty, T0) == (True, True, True)
+    # core = 4 x (control + node) = 8; +4 ICMP; +4 DNS
+    assert service.globalping_plan(s, one, RateLimit(250, 13, T0 + timedelta(minutes=5)), T0) == (
+        True,
+        True,
+        False,
+    )
+    assert service.globalping_plan(s, one, RateLimit(250, 9, T0 + timedelta(minutes=5)), T0) == (
+        True,
+        False,
+        False,
+    )
+    assert service.globalping_plan(s, one, RateLimit(250, 7, T0 + timedelta(minutes=5)), T0) == (
+        False,
+        False,
+        False,
+    )
+    # An expired window means the limit has been reset.
+    assert service.globalping_plan(s, one, RateLimit(250, 0, T0 - timedelta(seconds=1)), T0) == (
+        True,
+        True,
+        True,
+    )
+
+
+# --- database --------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def engine(migrated_db: str) -> AsyncIterator[AsyncEngine]:
+    eng = create_async_engine(migrated_db)
+    await clean_net_tables(eng)
+    yield eng
+    await clean_net_tables(eng)
+    await eng.dispose()
+
+
+def real_cycle(node_id: uuid.UUID, ip: str, *, at: datetime, node_up: bool) -> service.CycleResult:
+    """A cycle assembled from the real answers above: the control is www.hetzner.com:443 (Rightel
+    connected, MCI failed internally); the node either connects like 1.1.1.1:443 or fails like
+    1.1.1.1:9; check-host likewise."""
+    ch_nodes = parse_nodes(CH_NODES)[:2]
+    gp_ctrl = Measurement(
+        "globalping", "tcp", "control", "www.hetzner.com", 443, "ok", at,
+        ref=GP_TCP_HETZNER["id"], networks=tuple(parse_ping(GP_TCP_HETZNER, ASNS)),
+    )  # fmt: skip
+    ch_ctrl = Measurement(
+        "check-host", "tcp", "control", "www.hetzner.com", 443, "ok", at,
+        ref="555dc965k7ff", networks=tuple(parse_tcp_result(CH_TCP_RESULT_OK, ch_nodes)),
+    )  # fmt: skip
+    gp_raw = GP_TCP_ONE if node_up else GP_TCP_CLOSED_PORT
+    ch_raw = CH_TCP_RESULT_OK if node_up else CH_TCP_RESULT_FAIL
+    nodes = [
+        Measurement(
+            "globalping", "tcp", "node", ip, 443, "ok", at, ref=gp_raw["id"],
+            networks=tuple(parse_ping(gp_raw, ASNS)), node_id=node_id,
+        ),
+        Measurement(
+            "check-host", "tcp", "node", ip, 443, "ok", at, ref="555dcbc8k213",
+            networks=tuple(parse_tcp_result(ch_raw, ch_nodes)), node_id=node_id,
+        ),
+    ]  # fmt: skip
+    return service.CycleResult(
+        started_at=at,
+        finished_at=at + timedelta(seconds=40),
+        controls={"globalping": gp_ctrl, "check-host": ch_ctrl},
+        nodes=nodes,
+        gp_rate=RateLimit(250, 240, at + timedelta(minutes=50)),
+    )
+
+
+async def store(engine: AsyncEngine, result: service.CycleResult, target: service.Target) -> dict[Any, Any]:
+    async with engine.begin() as conn:
+        return await service.store_cycle(conn, result, [target], ProbeSettings())
+
+
+@pytest.mark.db
+async def test_verdicts_over_rounds_are_stored_and_logged_on_change(engine: AsyncEngine) -> None:
+    node_id = await make_node(engine, state="ready", ipv4="203.0.113.10")
+    target = service.Target(node_id, "net-test", "203.0.113.10", 443, None, "schedule")
+    now = datetime.now(UTC)
+    v1 = await store(
+        engine, real_cycle(node_id, target.ip, at=now - timedelta(minutes=20), node_up=False), target
+    )
+    assert v1[node_id][0] == "unknown" and v1[node_id][1] == ["not_enough_rounds:1/2"]
+    v2 = await store(
+        engine, real_cycle(node_id, target.ip, at=now - timedelta(minutes=10), node_up=False), target
+    )
+    assert v2[node_id] == ("blocked", ["all_unreachable"])
+    v3 = await store(engine, real_cycle(node_id, target.ip, at=now, node_up=True), target)
+    assert v3[node_id][0] == "suspect"  # recovered once: not yet ok
+    v4 = await store(
+        engine, real_cycle(node_id, target.ip, at=now + timedelta(seconds=30), node_up=True), target
+    )
+    assert v4[node_id] == ("ok", ["all_reachable"])
+    log = [
+        (a["action"], a["reasons"]["context"]["from"], a["reasons"]["context"]["to"])
+        for a in await actions(engine)
+    ]
+    assert log == [
+        ("probe_verdict", "unknown", "blocked"),
+        ("probe_verdict", "blocked", "suspect"),
+        ("probe_verdict", "suspect", "ok"),
+    ]
+    async with engine.connect() as conn:
+        rows = (
+            await conn.execute(text("SELECT count(*) FROM probe_rounds WHERE node_id = :n"), {"n": node_id})
+        ).scalar_one()
+        nets = (await conn.execute(text("SELECT count(*) FROM probe_network_results"))).scalar_one()
+        summary = await service.summary(conn)
+    assert rows == 4 and nets > 0
+    (t,) = [t for t in summary["targets"] if t["node_id"] == str(node_id)]
+    assert t["verdict"] == "ok" and t["ipv4"] == "203.0.113.10"
+    by_net = {(n["source"], n["network"]): n for n in t["networks"]}
+    assert by_net[("globalping", "رایتل")]["ok"] == 3 and by_net[("globalping", "همراه اول")]["ok"] == 3
+    assert by_net[("globalping", "ایرانسل")]["probe"] is False  # no probe there: recorded as such
+    assert by_net[("check-host", "check-host ir1 (Tehran)")]["ok"] == 1
+    assert all(set(n) >= {"network", "asn", "ok", "fail", "at"} for n in t["networks"])
+    sources = {s["name"]: s for s in summary["sources"]}
+    assert sources["globalping"]["ok"] and "ایرانسل" in sources["globalping"]["note"]
+    assert sources["check-host"]["ok"]
+    assert summary["last_run_at"].endswith("Z")
+
+
+@pytest.mark.db
+async def test_a_failed_control_gives_unknown_never_blocked(engine: AsyncEngine) -> None:
+    node_id = await make_node(engine, state="ready", ipv4="203.0.113.11")
+    target = service.Target(node_id, "net-test", "203.0.113.11", 443, None, "schedule")
+    now = datetime.now(UTC)
+    for minutes in (20, 10):
+        cycle = real_cycle(node_id, target.ip, at=now - timedelta(minutes=minutes), node_up=False)
+        # The control could not be reached from any network either: the probes prove nothing.
+        bad = cycle.controls["check-host"]
+        cycle.controls["check-host"] = Measurement(
+            bad.source, bad.kind, bad.role, bad.target, bad.port, "ok", bad.at,
+            networks=tuple(parse_tcp_result(CH_TCP_RESULT_FAIL, parse_nodes(CH_NODES)[:2])),
+        )  # fmt: skip
+        verdicts = await store(engine, cycle, target)
+    assert verdicts[node_id][0] == "unknown"
+    assert "round0:check-host:control_failed" in verdicts[node_id][1]
+    async with engine.connect() as conn:
+        sources = {s["name"]: s for s in (await service.summary(conn))["sources"]}
+    assert sources["check-host"]["ok"] is False and "کنترل" in sources["check-host"]["note"]
+
+
+@pytest.mark.db
+async def test_due_targets(engine: AsyncEngine) -> None:
+    ready = await make_node(engine, state="ready", ipv4="203.0.113.20", slot=2)
+    await make_node(engine, state="booting", ipv4="203.0.113.21")
+    await make_node(engine, state="ready", ipv4=None)
+    asked = await make_node(engine, state="unhealthy", ipv4="203.0.113.22")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO telemt_node_configs (node_id, ports, tls_domain, mode_classic, mode_secure, "
+                "mode_tls) VALUES (:n, '{8443,443}', 'a.example', false, false, true)"
+            ),
+            {"n": ready},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO probe_node_state (node_id, run_requested_at, verdict, verdict_reasons) "
+                "VALUES (:n, now(), 'unknown', '[]')"
+            ),
+            {"n": asked},
+        )
+    s = ProbeSettings()
+    now = datetime.now(UTC)
+    async with engine.connect() as conn:
+        targets = await service.due_targets(conn, s, now, "example.com")
+    by_id = {t.node_id: t for t in targets}
+    assert set(by_id) == {ready, asked}
+    assert by_id[asked].trigger == "manual" and targets[0].node_id == asked  # owner requests first
+    assert (by_id[ready].port, by_id[ready].dns_name, by_id[ready].trigger) == (
+        8443,
+        "slot2.example.com",
+        "schedule",
+    )
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO probe_node_state (node_id, last_round_at, verdict, verdict_reasons) "
+                "VALUES (:n, now(), 'ok', '[]')"
+            ),
+            {"n": ready},
+        )
+    async with engine.connect() as conn:
+        assert {t.node_id for t in await service.due_targets(conn, s, now, None)} == {asked}
+        later = now + timedelta(seconds=s.interval_s + 1)
+        assert {t.node_id for t in await service.due_targets(conn, s, later, None)} == {ready, asked}
+
+
+@pytest.mark.db
+async def test_reconciler_does_nothing_without_ready_nodes(engine: AsyncEngine) -> None:
+    await make_node(engine, state="booting", ipv4="203.0.113.30")
+    rec = ProbesReconciler(
+        gp_factory=lambda: GlobalpingClient(base_url="http://127.0.0.1:9"),
+        ch_factory=lambda: CheckHostClient(base_url="http://127.0.0.1:9"),
+    )
+    async with engine.begin() as conn:
+        await rec.run_once(conn)
+    async with engine.connect() as conn:
+        assert (await conn.execute(text("SELECT count(*) FROM probe_cycles"))).scalar_one() == 0
+        assert (await conn.execute(text("SELECT count(*) FROM probe_sources"))).scalar_one() == 0
+
+
+@pytest.mark.db
+async def test_reconciler_with_unreachable_sources_records_unknown(engine: AsyncEngine) -> None:
+    """Both services unreachable (a closed local port): the round is stored, every measurement says
+    'error', and the verdict stays unknown. Nothing is concluded from a failure of the probes."""
+    node_id = await make_node(engine, state="ready", ipv4="203.0.113.31")
+    rec = ProbesReconciler(
+        gp_factory=lambda: GlobalpingClient(base_url="http://127.0.0.1:9"),
+        ch_factory=lambda: CheckHostClient(base_url="http://127.0.0.1:9", poll_seconds=0.01),
+    )
+    for _ in range(2):
+        async with engine.begin() as conn:
+            await conn.execute(text("UPDATE probe_node_state SET last_round_at = now() - interval '1 day'"))
+            await rec.run_once(conn)
+    async with engine.connect() as conn:
+        statuses = (
+            (await conn.execute(text("SELECT DISTINCT status FROM probe_measurements"))).scalars().all()
+        )
+        state = (
+            await conn.execute(
+                text("SELECT verdict, verdict_reasons FROM probe_node_state WHERE node_id = :n"),
+                {"n": node_id},
+            )
+        ).one()
+        summary = await service.summary(conn)
+    assert set(statuses) == {"error"}
+    assert state.verdict == "unknown" and any("control_error" in r for r in state.verdict_reasons)
+    assert all(s["ok"] is False for s in summary["sources"])
+    assert await actions(engine) == []  # unknown -> unknown is not a change
+
+
+def test_worker_registers_the_net_loops() -> None:
+    from proxyhub.worker import reconcilers
+
+    loops = {r.name: r for r in reconcilers()}
+    assert {"dns", "probes"} <= set(loops)
+    assert loops["probes"].interval_seconds == 60 and loops["dns"].interval_seconds == 60
+
+
+# --- API ------------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def client(engine: AsyncEngine) -> AsyncIterator[AsyncClient]:
+    from proxyhub.api.app import app, lifespan
+
+    app.dependency_overrides[require_admin] = lambda: ADMIN
+    try:
+        async with lifespan(app):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://panel.test", headers=CSRF
+            ) as c:
+                yield c
+    finally:
+        app.dependency_overrides.pop(require_admin, None)
+
+
+@pytest.mark.db
+@pytest.mark.redis
+async def test_every_probe_route_requires_admin(engine: AsyncEngine) -> None:
+    from proxyhub.api import routes_probes
+    from proxyhub.api.app import app, lifespan
+
+    found = set()
+    for route in routes_probes.router.routes:
+        assert isinstance(route, APIRoute)
+        for method in route.methods:
+            found.add((method, route.path))
+            assert require_admin in {d.call for d in route.dependant.dependencies}
+    assert found == PROBE_PATHS
+    app.dependency_overrides.pop(require_admin, None)
+    async with lifespan(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t", headers=CSRF) as c:
+            for method, path in sorted(PROBE_PATHS):
+                r = await c.request(method, path, json={"node_id": str(uuid.uuid4())})
+                assert r.status_code == 401 and r.json()["error"] == "unauthenticated"
+            r = await c.post("/api/probes/run", json={"node_id": str(uuid.uuid4())})
+            r2 = await c.post("/api/probes/run", json={}, headers={"X-Requested-With": ""})
+            assert r.status_code == 401 and r2.status_code == 403 and r2.json()["error"] == "csrf"
+
+
+@pytest.mark.db
+@pytest.mark.redis
+async def test_summary_and_run_over_http(client: AsyncClient, engine: AsyncEngine) -> None:
+    r = await client.get("/api/probes/summary")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["last_run_at"] is None and [s["name"] for s in body["sources"]] == [
+        "globalping",
+        "check-host",
+    ]
+    assert all(s["ok"] is False and s["note"] for s in body["sources"])
+    node = await make_node(engine, state="ready", ipv4="203.0.113.40")
+    no_ip = await make_node(engine, state="booting", ipv4=None)
+    gone = await make_node(engine, state="deleted", ipv4="203.0.113.41")
+    targets = (await client.get("/api/probes/summary")).json()["targets"]
+    (t,) = [t for t in targets if t["node_id"] == str(node)]
+    assert t == {
+        "node_id": str(node),
+        "name": t["name"],
+        "ipv4": "203.0.113.40",
+        "verdict": "unknown",
+        "verdict_at": None,
+        "verdict_reasons": [],
+        "networks": [],
+    }
+    assert str(gone) not in {x["node_id"] for x in targets}
+    r = await client.post("/api/probes/run", json={"node_id": str(node)})
+    assert r.status_code == 202 and r.json() == {}
+    for missing in (uuid.uuid4(), gone):
+        r = await client.post("/api/probes/run", json={"node_id": str(missing)})
+        assert r.status_code == 404 and r.json()["error"] == "not_found" and r.json()["message_fa"]
+    r = await client.post("/api/probes/run", json={"node_id": str(no_ip)})
+    assert r.status_code == 409 and r.json()["error"] == "node_has_no_ip"
+    r = await client.post("/api/probes/run", json={"node_id": "not-a-uuid"})
+    assert r.status_code == 422 and r.json()["error"] == "invalid_request"
+    async with engine.connect() as conn:
+        targets = await service.due_targets(conn, ProbeSettings(), datetime.now(UTC), None)
+    assert [(x.node_id, x.trigger) for x in targets] == [(node, "manual")]
+    assert [a["action"] for a in await actions(engine)] == ["probe_run_requested"]
