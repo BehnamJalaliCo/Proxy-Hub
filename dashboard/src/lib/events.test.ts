@@ -75,6 +75,23 @@ describe("labels", () => {
     expect(actorLabel("account_guard")).toBe("نگهبان حساب");
   });
 
+  it("names every Cloudflare, DNS and probe action and loop in Persian", () => {
+    const actions = [
+      "cloudflare_token_set",
+      "cloudflare_token_check",
+      "cloudflare_pool_change",
+      "dns_create",
+      "dns_update",
+      "dns_delete",
+      "dns_conflict",
+      "dns_forget",
+      "probe_verdict",
+      "probe_run_requested",
+    ];
+    for (const a of actions) expect(actionLabel(a)).toMatch(/[آ-ی]/);
+    for (const actor of ["dns", "probes", "cli"]) expect(actorLabel(actor)).toMatch(/[آ-ی]/);
+  });
+
   it("explains account state reasons, with the foreign server count", () => {
     expect(stateReasonText("foreign_servers:2")).toContain("۲ سرور بیگانه");
     expect(stateReasonText("verified")).toContain("وارسی شد");

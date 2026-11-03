@@ -317,7 +317,11 @@ function RecordsCard({ records }: { records: CfRecord[] }) {
                   <div className="ltr mt-1 truncate text-right font-mono text-xs text-fg-muted">{r.content}</div>
                   <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-muted">
                     <span>TTL: {ttlText(r.ttl)}</span>
-                    <span>{r.proxied ? "ابر نارنجی (پروکسی)" : "ابر خاکستری (DNS-only)"}</span>
+                    {r.proxied ? (
+                      <span className="font-semibold text-danger">ابر نارنجی: باید خاکستری (DNS-only) باشد</span>
+                    ) : (
+                      <span>ابر خاکستری (DNS-only)</span>
+                    )}
                     <span>{r.updated_at ? `به‌روز ${formatRelative(r.updated_at)}` : "—"}</span>
                   </div>
                 </li>
@@ -348,7 +352,9 @@ function RecordsCard({ records }: { records: CfRecord[] }) {
                       </td>
                       <td className="px-3 py-2.5 text-fg">{ttlText(r.ttl)}</td>
                       <td className="px-3 py-2.5">
-                        <Badge tone={r.proxied ? "warning" : "success"}>{r.proxied ? "نارنجی" : "خاکستری (DNS-only)"}</Badge>
+                        <Badge tone={r.proxied ? "danger" : "success"}>
+                          {r.proxied ? "نارنجی: باید خاکستری باشد" : "خاکستری (DNS-only)"}
+                        </Badge>
                       </td>
                       <td className="px-4 py-2.5 text-fg-muted" title={r.updated_at ? formatJalali(r.updated_at, "datetime") : undefined}>
                         {r.updated_at ? formatRelative(r.updated_at) : "—"}

@@ -138,6 +138,14 @@ describe("channels", () => {
       if (!r.ok) expect(r.error).toMatch(/[آ-ی]/);
     }
   });
+
+  it("explains that invite links do not work", () => {
+    for (const invite of ["https://t.me/+AbCdEf", "t.me/joinchat/xyz"]) {
+      const r = normalizeChannel(invite);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("لینک دعوت");
+    }
+  });
 });
 
 describe("bot token and pairing", () => {

@@ -193,6 +193,17 @@ const ACTION: Record<string, string> = {
   "telegram.settings_set": "تغییر زمان‌بندی پست",
   "telegram.test_alert": "هشدار آزمایشی",
   "telegram.test_post": "پست آزمایشی",
+  // Cloudflare and probes (team net)
+  cloudflare_token_set: "ثبت توکن Cloudflare",
+  cloudflare_token_check: "بررسی توکن Cloudflare",
+  cloudflare_pool_change: "تغییر وضعیت دامنه",
+  dns_create: "ساخت رکورد DNS",
+  dns_update: "به‌روزرسانی رکورد DNS",
+  dns_delete: "حذف رکورد DNS خود پنل",
+  dns_conflict: "تداخل با رکوردی که مال پنل نیست",
+  dns_forget: "رکورد پنل در Cloudflare نبود؛ از فهرست برداشته شد",
+  probe_verdict: "نتیجه‌ی سنجش از ایران",
+  probe_run_requested: "درخواست سنجش دستی",
 };
 
 export function actionLabel(code: string): string {
@@ -222,6 +233,9 @@ const ACTOR: Record<string, string> = {
   node_executor: "چرخه‌ی nodeها",
   agent_api: "API عامل‌ها",
   telegram: "ربات تلگرام",
+  dns: "چرخه‌ی DNS",
+  probes: "چرخه‌ی سنجش از ایران",
+  cli: "فرمان روی سرور پنل",
 };
 
 /** "admin:owner" -> "مالک (owner)"; control loops get a Persian name. */
