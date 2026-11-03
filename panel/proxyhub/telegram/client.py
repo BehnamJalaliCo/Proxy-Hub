@@ -1,7 +1,9 @@
 """A small typed async client for the Telegram Bot API (https://core.telegram.org/bots/api).
 
 Only the methods Proxy-Hub needs: getMe, getUpdates, sendMessage, editMessageText, getChat and
-getChatMember. There is no method that removes a message or bans anyone (CLAUDE.md rule 6).
+getChatMember. Nothing else can be sent: the one request path (:meth:`BotClient._call`) refuses any
+method name outside :data:`ALLOWED_METHODS` before a request is built, so no message can be removed
+and nobody banned through this client, not even with a computed method name (CLAUDE.md rule 6).
 
 Token safety (CLAUDE.md rule 3). The Bot API puts the token in the URL path
 (``https://api.telegram.org/bot<token>/<method>``), so:
@@ -37,6 +39,12 @@ TOKEN_RE: Final = re.compile(r"^[0-9]{3,20}:[A-Za-z0-9_-]{30,100}$")
 _TOKEN_IN_PATH = re.compile(r"bot[0-9]{3,20}(?::|%3[Aa])[A-Za-z0-9_-]+")
 _BARE_TOKEN = re.compile(r"\b[0-9]{3,20}:[A-Za-z0-9_-]{30,100}")
 _RETRY_IN_TEXT = re.compile(r"retry after (\d+)", re.IGNORECASE)
+
+# The ONLY Bot API methods this client can call. Removing posts, banning, leaving a chat or
+# changing the webhook are deliberately absent (rule 6; and a webhook would stop getUpdates).
+ALLOWED_METHODS: Final = frozenset(
+    {"getMe", "getUpdates", "sendMessage", "editMessageText", "getChat", "getChatMember"}
+)
 
 DEFAULT_TIMEOUT: Final = httpx.Timeout(15.0, connect=10.0)
 MAX_LONG_POLL_SECONDS: Final = 25
@@ -398,10 +406,14 @@ class BotClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def call(self, method: str, params: dict[str, Any], *, read_timeout: float | None = None) -> Any:
-        """POST one Bot API method with JSON parameters; returns ``result`` or raises."""
-        if not re.fullmatch(r"[A-Za-z]{3,40}", method):
-            raise ValueError("invalid method name")
+    async def _call(self, method: str, params: dict[str, Any], *, read_timeout: float | None = None) -> Any:
+        """POST one Bot API method with JSON parameters; returns ``result`` or raises.
+
+        Private on purpose: callers use the typed methods below. A method outside
+        :data:`ALLOWED_METHODS` raises ``ValueError`` before any request is built or sent.
+        """
+        if method not in ALLOWED_METHODS:
+            raise ValueError("Bot API method not allowed in Proxy-Hub")
         timeout = self._timeout
         if read_timeout is not None:  # long poll: the server holds the answer up to its own timeout
             timeout = httpx.Timeout(self._timeout.connect or 10.0, read=read_timeout)
@@ -416,7 +428,7 @@ class BotClient:
         return parse_api_response(method, response.status_code, response.content)
 
     async def get_me(self) -> BotUser:
-        return BotUser.from_result(await self.call("getMe", {}))
+        return BotUser.from_result(await self._call("getMe", {}))
 
     async def get_updates(
         self, *, offset: int | None, long_poll_s: int, allowed_updates: Sequence[str], limit: int = 100
@@ -429,7 +441,7 @@ class BotClient:
         }
         if offset is not None:
             params["offset"] = offset
-        result = await self.call("getUpdates", params, read_timeout=wait + 15.0)
+        result = await self._call("getUpdates", params, read_timeout=wait + 15.0)
         if not isinstance(result, list):
             raise InvalidResponse("getUpdates", "result is not a list")
         return [Update.from_result(item) for item in result]
@@ -438,7 +450,7 @@ class BotClient:
         self, chat_id: int | str, text: str, *, disable_notification: bool = False
     ) -> SentMessage:
         """HTML text, link previews off."""
-        result = await self.call(
+        result = await self._call(
             "sendMessage",
             {
                 "chat_id": chat_id,
@@ -451,7 +463,7 @@ class BotClient:
         return SentMessage.from_result(result, "sendMessage")
 
     async def edit_message_text(self, chat_id: int | str, message_id: int, text: str) -> SentMessage:
-        result = await self.call(
+        result = await self._call(
             "editMessageText",
             {
                 "chat_id": chat_id,
@@ -464,9 +476,9 @@ class BotClient:
         return SentMessage.from_result(result, "editMessageText")
 
     async def get_chat(self, chat_id: int | str) -> ChatInfo:
-        return ChatInfo.from_result(await self.call("getChat", {"chat_id": chat_id}))
+        return ChatInfo.from_result(await self._call("getChat", {"chat_id": chat_id}))
 
     async def get_chat_member(self, chat_id: int | str, user_id: int) -> MemberRights:
         return MemberRights.from_result(
-            await self.call("getChatMember", {"chat_id": chat_id, "user_id": user_id})
+            await self._call("getChatMember", {"chat_id": chat_id, "user_id": user_id})
         )

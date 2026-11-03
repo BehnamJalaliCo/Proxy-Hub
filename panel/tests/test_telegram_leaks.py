@@ -50,7 +50,8 @@ async def test_refused_connection_error_has_no_token() -> None:
             with pytest.raises(NetworkError) as info:
                 await bot.send_message(-1001234567890, "x")
     assert info.value.maybe_sent is False and info.value.kind == "ConnectError"
-    assert info.value.__suppress_context__  # the httpx error (whose request has the URL) is not chained
+    # The httpx error (whose request holds the URL) is neither the cause nor shown as context.
+    assert info.value.__cause__ is None and info.value.__suppress_context__
     assert_no_token(token, logs.getvalue(), everything(info.value))
 
 

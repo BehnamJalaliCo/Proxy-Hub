@@ -1,5 +1,6 @@
 """Pure logic of the Telegram part: template, quiet windows, pacing, Bot API response parsing (real
-error JSON shapes as data), pairing codes, redaction. No network and no database here."""
+error JSON shapes as data), pairing codes, redaction, the method allowlist. No network (the allowlist
+test points the client at a refused local port, which it must never reach) and no database here."""
 
 from __future__ import annotations
 
@@ -12,10 +13,11 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import yaml
-from test_telegram_support import BOT_API_ERRORS, random_token
+from test_telegram_support import BOT_API_ERRORS, closed_port_bot, random_token
 
 from proxyhub.telegram import pairing
 from proxyhub.telegram.client import (
+    ALLOWED_METHODS,
     CAN_REMOVE_POSTS_FLAG,
     TOKEN_RE,
     BadRequest,
@@ -61,6 +63,7 @@ from proxyhub.telegram.templates import (
     utf16_len,
     visible_text,
 )
+from proxyhub.vault import SecretValue
 
 REPO = Path(__file__).resolve().parents[2]
 SECRET = "0123456789abcdef0123456789abcdef"
@@ -463,6 +466,50 @@ def test_token_shape_is_checked_before_any_request() -> None:
     ):
         with pytest.raises(InvalidToken):
             BotClient(bad)
+
+
+# --- rule 6: the client cannot remove a post or ban anyone ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "deleteMessage",
+        "deleteMessages",
+        "banChatMember",
+        "banChatSenderChat",
+        "leaveChat",
+        "setWebhook",
+        "restrictChatMember",
+        "unpinAllChatMessages",
+        "sendmessage",  # the allowlist is exact, not case-insensitive
+        "sendMessage/../deleteMessage",
+        "",
+    ],
+)
+async def test_only_allowed_methods_can_be_called(method: str) -> None:
+    # The client points at a refused port: had a request been sent, this would be a NetworkError.
+    async with closed_port_bot()(SecretValue(random_token())) as bot:
+        with pytest.raises(ValueError, match="not allowed"):
+            await bot._call(method, {"chat_id": -1001234567890, "message_id": 1})
+
+
+def test_the_allowlist_is_exactly_the_typed_methods() -> None:
+    assert (
+        frozenset({"getMe", "getUpdates", "sendMessage", "editMessageText", "getChat", "getChatMember"})
+        == ALLOWED_METHODS
+    )
+    assert not hasattr(BotClient, "call")  # no public "send any method" entry point
+    public = {name for name in vars(BotClient) if not name.startswith("_")}
+    assert public == {
+        "aclose",
+        "get_me",
+        "get_updates",
+        "send_message",
+        "edit_message_text",
+        "get_chat",
+        "get_chat_member",
+    }
 
 
 def test_redact_hides_tokens_in_urls_and_bare() -> None:
