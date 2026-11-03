@@ -16,7 +16,14 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from proxyhub.agent_api.validation import ERROR_CODE, ETAG, VERSION, find_ip_like, valid_user_name
+from proxyhub.agent_api.validation import (
+    ERROR_CODE,
+    ETAG,
+    VERSION,
+    JsonTooDeep,
+    find_ip_like,
+    valid_user_name,
+)
 from proxyhub.db.models import MtproxyStat
 from proxyhub.db.models_agent import AgentNode, AgentNodeReport, TelemtUser
 
@@ -94,7 +101,11 @@ def parse_report(data: Any) -> AgentReport:
     """Validate a decoded JSON report. Raises :class:`ReportRejected` (never echoes input)."""
     if not isinstance(data, dict):
         raise ReportRejected("not_an_object")
-    if find_ip_like(data) is not None:
+    try:
+        ip_like = find_ip_like(data)
+    except JsonTooDeep:
+        raise ReportRejected("too_deep") from None
+    if ip_like is not None:
         raise ReportRejected("ip_like_value")
     try:
         return AgentReport.model_validate(data)

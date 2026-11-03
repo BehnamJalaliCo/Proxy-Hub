@@ -33,6 +33,7 @@ from test_agent_support import (
     create_node,
     create_registration,
     reset_config_caches,
+    serve_panel,
     use_secret_files,
     write_secret_files,
 )
@@ -44,9 +45,17 @@ from proxyhub.agent_api.desired import (
     set_telemt_node_config,
     set_user_sponsor_tag,
 )
+from proxyhub.agent_api.reports import ReportRejected, parse_report
 from proxyhub.agent_api.sealing import SealError, load_seal_key, open_secret, seal_secret
 from proxyhub.agent_api.tokens import TokenRefused, issue_registration_token, token_digest
-from proxyhub.agent_api.validation import looks_like_ip, valid_domain
+from proxyhub.agent_api.validation import (
+    MAX_JSON_DEPTH,
+    JsonTooDeep,
+    check_json_depth,
+    find_ip_like,
+    looks_like_ip,
+    valid_domain,
+)
 from proxyhub.db.session import get_engine
 from proxyhub.pki.ca import build_ca_certificate, load_ca_key, to_pem
 
@@ -622,6 +631,118 @@ async def test_report_needs_identity_and_size_limit(env: Env) -> None:
     assert (
         await env.client.post("/agent/v1/report", content=deep, headers=env.headers(fp))
     ).status_code == 400
+
+
+# --- hostile nesting -----------------------------------------------------------------------------
+# json.loads accepts thousands of nesting levels (Python's recursion limit is 1000); none of that may
+# ever reach code that walks the document recursively, or anyone could turn a request into a 500.
+
+HOSTILE_DEPTH = 3000
+
+
+def _nested_json(depth: int, kind: str) -> bytes:
+    if kind == "array":
+        return b"[" * depth + b"]" * depth
+    return b'{"a":' * depth + b"1" + b"}" * depth
+
+
+@pytest.mark.parametrize("kind", ["array", "object"])
+async def test_register_with_only_the_proxy_secret_refuses_deep_nesting(env: Env, kind: str) -> None:
+    deep = _nested_json(HOSTILE_DEPTH, kind)
+    assert json.loads(deep)  # the parser accepts it: our guard, not json.loads, must refuse it
+    node_id = await create_node(env.engine)
+    token = await env.token(node_id)
+    # No token, no certificate: just the header Caddy adds to every /agent/v1 request.
+    resp = await env.client.post("/agent/v1/register", content=deep, headers=env.headers())
+    assert resp.status_code == 400, resp.text
+    assert "invalid_json" in resp.text
+    # Nothing was consumed: the real registration still works with the same token.
+    assert (await register(env, node_id, token)).status_code == 200
+
+
+async def test_deep_nesting_is_a_400_over_real_http(env: Env) -> None:
+    # The same 6 KB body against the real app under uvicorn on a loopback port.
+    deep = _nested_json(HOSTILE_DEPTH, "array")
+    async with serve_panel() as url, AsyncClient(base_url=url, trust_env=False) as client:
+        resp = await client.post("/agent/v1/register", content=deep, headers=env.headers())
+        assert resp.status_code == 400, resp.text
+        assert "invalid_json" in resp.text
+
+
+@pytest.mark.parametrize("kind", ["array", "object"])
+@pytest.mark.parametrize("path", ["report", "renew"])
+async def test_authenticated_endpoints_refuse_deep_nesting(env: Env, kind: str, path: str) -> None:
+    node_id, fp = await registered(env)
+    deep = _nested_json(HOSTILE_DEPTH, kind)
+    resp = await env.client.post(f"/agent/v1/{path}", content=deep, headers=env.headers(fp))
+    assert resp.status_code == 400, resp.text
+    assert "invalid_json" in resp.text
+    # Deep nesting inside an otherwise valid report is refused the same way, and stores nothing.
+    body = json.dumps(report_body()).encode()
+    nested_report = body[:-1] + b', "x": ' + _nested_json(HOSTILE_DEPTH, kind) + b"}"
+    resp = await env.client.post("/agent/v1/report", content=nested_report, headers=env.headers(fp))
+    assert resp.status_code == 400, resp.text
+    assert await env.rows("SELECT 1 FROM agent_node_reports WHERE node_id = :n", n=node_id) == []
+    assert (await env.client.get("/agent/v1/desired", headers=env.headers(fp))).status_code == 200
+
+
+async def test_nesting_limit_boundary(env: Env) -> None:
+    _, fp = await registered(env)
+
+    def with_extra(levels: int) -> dict[str, Any]:
+        extra: Any = 1
+        for _ in range(levels):
+            extra = [extra]
+        return {**report_body(), "x": extra}
+
+    # The report object itself is one level: MAX_JSON_DEPTH levels in all is still parsed (and
+    # refused by the strict schema), one more is not even looked at.
+    at_limit = await env.client.post(
+        "/agent/v1/report", json=with_extra(MAX_JSON_DEPTH - 1), headers=env.headers(fp)
+    )
+    assert at_limit.status_code == 422 and at_limit.json() == {"error": "schema"}
+    beyond = await env.client.post(
+        "/agent/v1/report", json=with_extra(MAX_JSON_DEPTH), headers=env.headers(fp)
+    )
+    assert beyond.status_code == 400 and "invalid_json" in beyond.text
+    # A real report is nowhere near the limit.
+    assert (
+        await env.client.post("/agent/v1/report", json=report_body(), headers=env.headers(fp))
+    ).status_code == 204
+
+
+def test_nesting_walks_are_iterative_and_bounded() -> None:
+    # Built directly (no json.loads limit applies): 50,000 levels, far past the recursion limit.
+    deep: Any = "10.0.0.1"
+    for _ in range(50_000):
+        deep = [{"k": deep}]
+    with pytest.raises(JsonTooDeep):
+        check_json_depth(deep)
+    with pytest.raises(JsonTooDeep):
+        find_ip_like(deep)
+    with pytest.raises(ReportRejected) as refused:
+        parse_report({**report_body(), "x": deep})
+    assert refused.value.code == "too_deep"
+
+    at_limit: Any = "10.0.0.1"
+    for _ in range(MAX_JSON_DEPTH):
+        at_limit = [at_limit]
+    check_json_depth(at_limit)
+    assert find_ip_like(at_limit) == "$" + "[0]" * MAX_JSON_DEPTH
+    for one_more in ([at_limit], {"k": at_limit}):
+        with pytest.raises(JsonTooDeep):
+            check_json_depth(one_more)
+        with pytest.raises(JsonTooDeep):
+            find_ip_like(one_more)
+
+    # Document order is kept, keys are checked too, and a clean report passes.
+    body = report_body()
+    check_json_depth(body)
+    assert find_ip_like(body) is None
+    body["telemt"]["users"][1]["name"] = "10.0.0.2"
+    body["system"] = {"192.0.2.1": 1}
+    assert find_ip_like(body) == "$.telemt.users[1].name"
+    assert find_ip_like({"ok": [{"192.0.2.1": 1}]}) == "$.ok[0].<key>"
 
 
 # --- secrets ------------------------------------------------------------------------------------

@@ -37,7 +37,7 @@ from proxyhub.agent_api.identity import (
 from proxyhub.agent_api.reports import ReportRejected, parse_report, store_report
 from proxyhub.agent_api.runtime import AgentRuntime, get_agent_runtime
 from proxyhub.agent_api.schemas import RegisterRequest, RenewRequest
-from proxyhub.agent_api.validation import find_ip_like
+from proxyhub.agent_api.validation import JsonTooDeep, check_json_depth, find_ip_like
 from proxyhub.api.deps import db_session
 from proxyhub.db.models_agent import AgentNode
 
@@ -96,14 +96,22 @@ async def _read_json(request: Request) -> Any:
         if len(body) > MAX_BODY_BYTES:
             raise HTTPException(status_code=413, detail="too_large")
     try:
-        return json.loads(body)
+        data = json.loads(body)
+        # json.loads accepts thousands of nesting levels; no agent body has more than a few, and
+        # nothing deeper may reach code that walks it (JsonTooDeep is a ValueError).
+        check_json_depth(data)
     except (ValueError, UnicodeDecodeError, RecursionError):
         raise HTTPException(status_code=400, detail="invalid_json") from None
+    return data
 
 
 def _validate[M: BaseModel](model: type[M], data: Any) -> M:
     # Rule 7 holds for every body a node sends, not only reports.
-    if find_ip_like(data) is not None:
+    try:
+        ip_like = find_ip_like(data)
+    except JsonTooDeep:  # _read_json refused it already; never a 500 either way
+        raise HTTPException(status_code=400, detail="invalid_json") from None
+    if ip_like is not None:
         raise HTTPException(status_code=422, detail="ip_like_value")
     try:
         return model.model_validate(data)
