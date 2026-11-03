@@ -1,0 +1,17 @@
+# Pinned components of a Proxy-Hub Telemt node image (docs/10 M2.4, docs/11 section 4).
+# KEY=value lines only (read by provision.sh and build-agent.sh with grep, never sourced).
+# Any change here is a reviewed commit; provision.sh refuses an artifact whose sha256 differs.
+
+# Telemt 3.5.16 (2026-10-31, commit 84e5b82), official release asset for Linux x86_64 (glibc).
+# Downloaded and hashed on 2026-11-03; the hash equals the release's own .sha256 file. Not executed.
+TELEMT_VERSION=3.5.16
+TELEMT_URL=https://github.com/telemt/telemt/releases/download/3.5.16/telemt-x86_64-linux-gnu.tar.gz
+TELEMT_TARBALL_SHA256=e6f46b2f3becf29bfd555cec8a059e429f7c082c1af402499b3a7940cf8ebd34
+# The single file inside the tarball ("telemt", 17075200 bytes).
+TELEMT_BINARY_SHA256=1954f18faeb9f5838e9444880f2ffb00704c6bd5b2836bc86dd64611537d49b8
+
+# proxyhub-agent, built from agent/ in this repository by node-image/build-agent.sh
+# (go1.24.7, CGO off, -trimpath, empty build id: reproducible). A test rebuilds it and compares.
+AGENT_VERSION=0.1.0
+AGENT_GO_VERSION=1.24.7
+AGENT_SHA256=deddc65be303f16ed637c3d83a7836a615c445d7147ab777db44505c687058c3

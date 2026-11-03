@@ -1,0 +1,125 @@
+# Fixture: Telemt 3.5.16 /metrics exposition, written line by line from the format strings in
+# src/metrics/render/process.rs, connections.rs and users.rs (telemt commit 84e5b82). Values are
+# illustrative; names, label layout, HELP/TYPE lines and number formats are Telemt's own.
+# HELP telemt_build_info Build information for the running telemt binary
+# TYPE telemt_build_info gauge
+telemt_build_info{version="3.5.16"} 1
+# HELP telemt_uptime_seconds Proxy uptime
+# TYPE telemt_uptime_seconds gauge
+telemt_uptime_seconds 3725.4
+# HELP telemt_telemetry_core_enabled Runtime core telemetry switch
+# TYPE telemt_telemetry_core_enabled gauge
+telemt_telemetry_core_enabled 1
+# HELP telemt_telemetry_user_enabled Runtime per-user telemetry switch
+# TYPE telemt_telemetry_user_enabled gauge
+telemt_telemetry_user_enabled 1
+# HELP telemt_stats_user_entries Retained per-user stats entries
+# TYPE telemt_stats_user_entries gauge
+telemt_stats_user_entries 2
+# HELP telemt_telemetry_me_level Runtime ME telemetry level flag
+# TYPE telemt_telemetry_me_level gauge
+telemt_telemetry_me_level{level="silent"} 0
+telemt_telemetry_me_level{level="normal"} 1
+telemt_telemetry_me_level{level="debug"} 0
+# HELP telemt_buffer_pool_buffers_total Snapshot of pooled and allocated buffers
+# TYPE telemt_buffer_pool_buffers_total gauge
+telemt_buffer_pool_buffers_total{kind="pooled"} 64
+telemt_buffer_pool_buffers_total{kind="allocated"} 128
+telemt_buffer_pool_buffers_total{kind="in_use"} 64
+# HELP telemt_tls_front_profile_domains TLS front configured profile domains by export status
+# TYPE telemt_tls_front_profile_domains gauge
+telemt_tls_front_profile_domains{status="configured"} 1
+telemt_tls_front_profile_domains{status="emitted"} 1
+telemt_tls_front_profile_domains{status="suppressed"} 0
+# HELP telemt_connections_total Total accepted connections
+# TYPE telemt_connections_total counter
+telemt_connections_total 1532
+# HELP telemt_connections_bad_total Bad/rejected connections
+# TYPE telemt_connections_bad_total counter
+telemt_connections_bad_total 17
+# HELP telemt_connections_bad_by_class_total Bad/rejected connections by class
+# TYPE telemt_connections_bad_by_class_total counter
+telemt_connections_bad_by_class_total{class="tls_handshake_bad_client"} 17
+# HELP telemt_handshake_timeouts_total Handshake timeouts
+# TYPE telemt_handshake_timeouts_total counter
+telemt_handshake_timeouts_total 4
+# HELP telemt_handshake_failures_by_class_total Handshake failures by class
+# TYPE telemt_handshake_failures_by_class_total counter
+telemt_handshake_failures_by_class_total{class="timeout"} 4
+# HELP telemt_auth_expensive_checks_total Expensive authentication candidate checks executed during handshake validation
+# TYPE telemt_auth_expensive_checks_total counter
+telemt_auth_expensive_checks_total 1549
+# HELP telemt_auth_budget_exhausted_total Handshake validations that hit authentication candidate budget limits
+# TYPE telemt_auth_budget_exhausted_total counter
+telemt_auth_budget_exhausted_total 0
+# HELP telemt_user_connections_total Per-user total connections
+# TYPE telemt_user_connections_total counter
+# HELP telemt_user_connections_current Per-user active connections
+# TYPE telemt_user_connections_current gauge
+# HELP telemt_user_octets_from_client_total Per-user total bytes received
+# TYPE telemt_user_octets_from_client_total counter
+# HELP telemt_user_octets_to_client_total Per-user total bytes sent
+# TYPE telemt_user_octets_to_client_total counter
+# HELP telemt_user_msgs_from_client_total Per-user total messages received
+# TYPE telemt_user_msgs_from_client_total counter
+# HELP telemt_user_msgs_to_client_total Per-user total messages sent
+# TYPE telemt_user_msgs_to_client_total counter
+# HELP telemt_ip_reservation_rollback_total IP reservation rollbacks caused by later limit checks
+# TYPE telemt_ip_reservation_rollback_total counter
+telemt_ip_reservation_rollback_total{reason="tcp_limit"} 0
+telemt_ip_reservation_rollback_total{reason="quota_limit"} 0
+# HELP telemt_ip_tracker_users Number of users tracked by IP limiter state
+# TYPE telemt_ip_tracker_users gauge
+telemt_ip_tracker_users{scope="active"} 2
+telemt_ip_tracker_users{scope="recent"} 2
+# HELP telemt_ip_tracker_entries Number of IP entries tracked by limiter state
+# TYPE telemt_ip_tracker_entries gauge
+telemt_ip_tracker_entries{scope="active"} 9
+telemt_ip_tracker_entries{scope="recent"} 14
+# HELP telemt_ip_tracker_cleanup_queue_len Deferred disconnect cleanup queue length
+# TYPE telemt_ip_tracker_cleanup_queue_len gauge
+telemt_ip_tracker_cleanup_queue_len 0
+# HELP telemt_ip_tracker_cleanup_total Release cleanups deferred through the cleanup queue
+# TYPE telemt_ip_tracker_cleanup_total counter
+telemt_ip_tracker_cleanup_total{path="deferred"} 0
+# HELP telemt_ip_tracker_cap_rejects_total New connection rejects caused by global IP tracker caps
+# TYPE telemt_ip_tracker_cap_rejects_total counter
+telemt_ip_tracker_cap_rejects_total{scope="active"} 0
+telemt_ip_tracker_cap_rejects_total{scope="recent"} 0
+telemt_user_connections_total{user="alice"} 1204
+telemt_user_connections_current{user="alice"} 37
+telemt_user_octets_from_client_total{user="alice"} 1048576
+telemt_user_octets_to_client_total{user="alice"} 52428800
+telemt_user_msgs_from_client_total{user="alice"} 9921
+telemt_user_msgs_to_client_total{user="alice"} 12011
+telemt_user_connections_total{user="sponsor_b"} 311
+telemt_user_connections_current{user="sponsor_b"} 0
+telemt_user_octets_from_client_total{user="sponsor_b"} 20480
+telemt_user_octets_to_client_total{user="sponsor_b"} 409600
+telemt_user_msgs_from_client_total{user="sponsor_b"} 201
+telemt_user_msgs_to_client_total{user="sponsor_b"} 340
+# HELP telemt_user_unique_ips_current Per-user current number of unique active IPs
+# TYPE telemt_user_unique_ips_current gauge
+# HELP telemt_user_unique_ips_recent_window Per-user unique IPs seen in configured observation window
+# TYPE telemt_user_unique_ips_recent_window gauge
+# HELP telemt_user_unique_ips_limit Effective per-user unique IP limit (0 means unlimited)
+# TYPE telemt_user_unique_ips_limit gauge
+# HELP telemt_user_unique_ips_utilization Per-user unique IP usage ratio (0 for unlimited)
+# TYPE telemt_user_unique_ips_utilization gauge
+telemt_user_unique_ips_current{user="alice"} 7
+telemt_user_unique_ips_recent_window{user="alice"} 11
+telemt_user_unique_ips_limit{user="alice"} 0
+telemt_user_unique_ips_utilization{user="alice"} 0.000000
+telemt_user_unique_ips_current{user="sponsor_b"} 2
+telemt_user_unique_ips_recent_window{user="sponsor_b"} 3
+telemt_user_unique_ips_limit{user="sponsor_b"} 0
+telemt_user_unique_ips_utilization{user="sponsor_b"} 0.000000
+# HELP telemt_telemetry_user_series_suppressed User-labeled metric series suppression flag
+# TYPE telemt_telemetry_user_series_suppressed gauge
+telemt_telemetry_user_series_suppressed 0
+# HELP telemt_telemetry_user_series_users User-labeled metric users by export status
+# TYPE telemt_telemetry_user_series_users gauge
+telemt_telemetry_user_series_users{family="stats",status="emitted"} 2
+telemt_telemetry_user_series_users{family="stats",status="suppressed"} 0
+telemt_telemetry_user_series_users{family="unique_ip",status="emitted"} 2
+telemt_telemetry_user_series_users{family="unique_ip",status="suppressed"} 0
