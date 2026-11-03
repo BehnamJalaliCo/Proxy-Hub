@@ -1,10 +1,24 @@
 #cloud-config
-# Per-node user data, filled in by the panel's fleet for one server (docs/10 section 3.5).
-# Placeholders: ${NODE_ID}, ${PANEL_AGENT_URL}, ${AGENT_CA_PEM_B64}, ${REGISTRATION_TOKEN_B64}.
-# The token is single-use and valid for one hour; the agent deletes its file after registering,
-# and the metadata service that serves this document is blocked once cloud-init has finished.
-# The image already holds Telemt, the agent and the hardening (node-image/provision.sh).
+# Per-node user data for a stock Hetzner Ubuntu 24.04 server, rendered by the panel
+# (panel/proxyhub/nodes/cloud_init.py) for ONE node. It provisions the node with the reviewed
+# node-image files (provision.sh downloads Telemt and the agent and refuses any artifact whose
+# sha256 differs from versions.lock) and starts the agent, which registers with the one-time token.
+#
+# Placeholders (each value is base64, or checked by the renderer before it is substituted):
+#   NODE_IMAGE_FILES        write_files entries for versions.lock, provision.sh and files/*
+#   PANEL_AGENT_URL         https://<agent domain> (the mTLS agent site, Cloudflare grey)
+#   NODE_ID                 this node's id in the panel database
+#   AGENT_CA_PEM_B64        the panel's agent CA certificate (public)
+#   REGISTRATION_TOKEN_B64  the one-time registration token (one hour, one use; only its SHA-256
+#                           is in the panel database). This document is never logged; the agent
+#                           deletes the token file after registering, and nothing on the node can
+#                           reach the metadata service once cloud-init has finished.
+#   AGENT_ARTIFACT_URL      https://<agent domain>/agent/v1/artifacts/proxyhub-agent
+# The Telemt version below must equal TELEMT_VERSION in versions.lock (the renderer checks it).
+# Hetzner accepts at most 32 KiB of user data; the renderer refuses more.
+ssh_pwauth: false
 write_files:
+${NODE_IMAGE_FILES}
   - path: /etc/proxyhub-agent/agent.json
     owner: root:root
     permissions: '0600'
@@ -34,4 +48,4 @@ write_files:
     encoding: b64
     content: ${REGISTRATION_TOKEN_B64}
 runcmd:
-  - [systemctl, start, --no-block, proxyhub-agent.service]
+  - [/bin/bash, /opt/proxyhub-node/provision.sh, --agent-url, '${AGENT_ARTIFACT_URL}', --start]

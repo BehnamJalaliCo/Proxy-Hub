@@ -2,10 +2,10 @@
 # Provision a Proxy-Hub Telemt node on Ubuntu 24.04 (docs/10 M2.4, docs/11). Run as root, either
 # while building the node image (Packer) or from cloud-init on a fresh server. Idempotent.
 #
-#   provision.sh --agent-binary FILE [--start]
+#   provision.sh (--agent-binary FILE | --agent-url https://AGENT_DOMAIN/agent/v1/artifacts/proxyhub-agent) [--start]
 #
 # Installs Telemt (pinned URL + sha256 from versions.lock) and the agent binary (sha256 pinned
-# too), and hardens the host:
+# too; with --agent-url it is downloaded from the panel's agent site first), and hardens the host:
 #   * nftables: outbound 25/465/587, private/special ranges and 169.254.169.254 dropped;
 #     inbound 22 and Telemt's local metrics/API ports dropped;
 #   * no SSH server; journald in memory only; rsyslog removed; no core dumps;
@@ -20,17 +20,26 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 LOCK="$HERE/versions.lock"
 FILES="$HERE/files"
 AGENT_BINARY=""
+AGENT_URL=""
 START=0
 
-usage() { echo "usage: $0 --agent-binary FILE [--start]" >&2; exit 2; }
+usage() { echo "usage: $0 (--agent-binary FILE | --agent-url HTTPS_URL) [--start]" >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --agent-binary) [ $# -ge 2 ] || usage; AGENT_BINARY="$2"; shift 2 ;;
+    --agent-url) [ $# -ge 2 ] || usage; AGENT_URL="$2"; shift 2 ;;
     --start) START=1; shift ;;
     *) usage ;;
   esac
 done
-[ -n "$AGENT_BINARY" ] || usage
+if [ -n "$AGENT_BINARY" ] && [ -n "$AGENT_URL" ]; then usage; fi
+if [ -z "$AGENT_BINARY" ] && [ -z "$AGENT_URL" ]; then usage; fi
+if [ -n "$AGENT_URL" ]; then
+  case "$AGENT_URL" in
+    https://*/agent/v1/artifacts/proxyhub-agent) ;;
+    *) echo "--agent-url must be https://<agent domain>/agent/v1/artifacts/proxyhub-agent" >&2; exit 2 ;;
+  esac
+fi
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 # shellcheck source=/dev/null
 . /etc/os-release
@@ -61,9 +70,10 @@ apt-get purge -y -q openssh-server rsyslog || true
 apt-get autoremove -y -q
 systemctl mask ssh.service ssh.socket >/dev/null 2>&1 || true
 
-echo "== telemt $(lock TELEMT_VERSION)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+echo "== telemt $(lock TELEMT_VERSION)"
 curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$WORK/telemt.tar.gz" "$(lock TELEMT_URL)"
 check_sha256 "$WORK/telemt.tar.gz" "$(lock TELEMT_TARBALL_SHA256)"
 mkdir "$WORK/x"
@@ -72,6 +82,13 @@ check_sha256 "$WORK/x/telemt" "$(lock TELEMT_BINARY_SHA256)"
 install -o root -g root -m 0755 "$WORK/x/telemt" /usr/local/bin/telemt
 
 echo "== proxyhub-agent $(lock AGENT_VERSION)"
+if [ -n "$AGENT_URL" ]; then
+  # From the panel's agent site (public ACME certificate). Integrity comes from AGENT_SHA256 in
+  # versions.lock, which reached this node inside its user data, not from the download itself.
+  AGENT_BINARY="$WORK/proxyhub-agent"
+  curl -fsSL --proto '=https' --tlsv1.2 --retry 10 --retry-all-errors --retry-delay 5 \
+    --max-time 120 -o "$AGENT_BINARY" "$AGENT_URL"
+fi
 check_sha256 "$AGENT_BINARY" "$(lock AGENT_SHA256)"
 install -o root -g root -m 0755 "$AGENT_BINARY" /usr/local/bin/proxyhub-agent
 
