@@ -2,6 +2,8 @@
 // carries "X-Requested-With: proxyhub" (the CSRF rule of the API contract). A 401 sends the owner to
 // /login. Nothing here ever logs a request body: it can hold a password, a TOTP code or a token.
 
+import { errorCodeText } from "./labels";
+
 export const CSRF_HEADER = "X-Requested-With";
 export const CSRF_VALUE = "proxyhub";
 
@@ -57,7 +59,8 @@ export function errorMessage(e: unknown): string {
 }
 
 /** Turns a non-2xx response body into an ApiError. Works for the contract shape and for plain
- * FastAPI errors ({"detail": ...}) that do not follow it yet. */
+ * FastAPI errors ({"detail": ...}) that do not follow it yet. The server's own Persian sentence
+ * wins; a known code without one gets the dashboard's sentence; anything else a sentence by status. */
 export function toApiError(status: number, payload: unknown): ApiError {
   if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
     const body = payload as Record<string, unknown>;
@@ -65,10 +68,23 @@ export function toApiError(status: number, payload: unknown): ApiError {
     const msg =
       typeof body["message_fa"] === "string" && body["message_fa"].trim() !== ""
         ? body["message_fa"]
-        : fallbackMessage(status);
+        : (errorCodeText(code) ?? fallbackMessage(status));
     return new ApiError(status, code, msg, body);
   }
   return new ApiError(status, `http_${String(status)}`, fallbackMessage(status));
+}
+
+/** A 404 WITHOUT a contract error code: the route does not exist on this panel (yet). A contract
+ * 404 such as {"error": "not_found"} is a real answer about the thing asked for, not this. */
+export function isEndpointMissing(e: unknown): boolean {
+  return isApiError(e) && e.status === 404 && e.code === "http_404";
+}
+
+/** String items of an array field of the error body ("reasons", "missing", ...). */
+export function errorList(e: unknown, key: string): string[] {
+  if (!isApiError(e)) return [];
+  const v = e.body[key];
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 }
 
 type Unauthorized = () => void;

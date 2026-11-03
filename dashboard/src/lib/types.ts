@@ -116,3 +116,158 @@ export interface AuditEvent {
   reasons: string[] | null;
   result: unknown;
 }
+
+// --- round 2: Telegram (team tg) --------------------------------------------------------------
+
+export type ChannelRole = "main" | "test";
+
+export interface TgChannel {
+  username: string;
+  title: string;
+  can_post: boolean;
+  can_edit: boolean;
+  /** Must be false: the bot is never allowed to delete posts (CLAUDE.md rule 6). */
+  can_delete: boolean;
+  checked_at: string;
+}
+
+export interface TgPairing {
+  code: string;
+  expires_at: string;
+}
+
+export interface TgStatus {
+  bot: { username: string; id: number } | null;
+  owner_paired: boolean;
+  pairing: TgPairing | null;
+  channels: { main: TgChannel | null; test: TgChannel | null };
+  outbox: { pending: number; failed: number };
+  last_alert_at: string | null;
+  /** Documented addition of the tg team (not in the round-2 contract): null, "bot_unauthorized" or
+   * "updates_conflict". Optional: the page works the same without it. */
+  bot_error?: string | null;
+}
+
+/** Asia/Tehran local times "HH:MM"; a window may cross midnight (end < start). */
+export interface QuietWindow {
+  start: string;
+  end: string;
+}
+
+export interface TgSettings {
+  quiet_windows: QuietWindow[];
+  post_interval_min: number;
+}
+
+export interface OutboxQueued {
+  outbox_id: number;
+}
+
+// --- round 2: nodes (team live) ---------------------------------------------------------------
+
+export type NodeState =
+  | "requested"
+  | "creating"
+  | "booting"
+  | "registering"
+  | "ready"
+  | "unhealthy"
+  | "repairing"
+  | "burned"
+  | "draining"
+  | "retiring"
+  | "deleted";
+
+export interface NodeAgent {
+  registered: boolean;
+  last_seen_at: string | null;
+  telemt_version: string | null;
+  /** Total open connections the node reports (a count, never who). */
+  connections: number | null;
+}
+
+export interface NodeInfo {
+  id: string;
+  name: string;
+  slot: number | null;
+  location: string;
+  server_type: string;
+  /** A NodeState; typed wide so a new state on the server is shown, not hidden. */
+  state: string;
+  is_test: boolean;
+  /** The node's own server address (ours, never a user's). */
+  ipv4: string | null;
+  created_at: string;
+  ready_at: string | null;
+  agent: NodeAgent;
+}
+
+export interface NodeEventItem {
+  at: string;
+  kind: string;
+  detail: Record<string, unknown>;
+}
+
+export interface TestNodeRequested {
+  node_id: string;
+}
+
+// --- round 2: Cloudflare and probes (team net) --------------------------------------------------
+
+export type PoolState = "none" | "active" | "standby" | "filtered" | "retired";
+
+export interface CfZone {
+  id: string;
+  name: string;
+  status: string;
+  pool_state: PoolState;
+}
+
+export interface CfRecord {
+  name: string;
+  type: string;
+  content: string;
+  ttl: number;
+  proxied: boolean;
+  managed: true;
+  updated_at: string | null;
+}
+
+export interface CfStatus {
+  token_set: boolean;
+  verified: boolean;
+  checked_at: string | null;
+  zones: CfZone[];
+  records: CfRecord[];
+}
+
+export type ProbeVerdict = "ok" | "suspect" | "blocked" | "unknown";
+
+export interface ProbeSource {
+  name: "globalping" | "check-host";
+  ok: boolean;
+  note: string | null;
+}
+
+/** One measurement network (an operator/ASN in Iran), never a person. */
+export interface ProbeNetwork {
+  network: string;
+  asn: number | null;
+  ok: number;
+  fail: number;
+  at: string;
+}
+
+export interface ProbeTarget {
+  node_id: string;
+  name: string;
+  ipv4: string;
+  verdict: ProbeVerdict;
+  networks: ProbeNetwork[];
+}
+
+export interface ProbeSummary {
+  last_run_at: string | null;
+  sources: ProbeSource[];
+  targets: ProbeTarget[];
+}

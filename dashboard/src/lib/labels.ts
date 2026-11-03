@@ -1,7 +1,7 @@
 // Persian labels for machine codes the API returns (states, reasons, actions). Unknown codes are
 // shown as they are, so a new code on the server is never hidden.
 
-import type { AccountState, FleetSettings, PlanActionKind } from "./types";
+import type { AccountState, FleetSettings, NodeState, PlanActionKind, PoolState, ProbeVerdict } from "./types";
 
 export type Tone = "neutral" | "brand" | "success" | "warning" | "danger" | "info";
 
@@ -99,6 +99,28 @@ const REASON: Record<string, string> = {
   // owner actions
   ...SETTINGS_LABEL,
   owner_request: "به درخواست مالک",
+  // nodes (team live): refusals of a test-node request or a retirement
+  agent_domain_not_set: "دامنه‌ی سایت عامل‌ها (AGENT_DOMAIN) تنظیم نشده",
+  location_not_allowed: "این location در فهرست مجاز تنظیمات نیست",
+  no_usable_account: "هیچ حساب هتزنر آماده‌ای برای ساخت نیست",
+  test_node_exists: "یک node آزمایشی زنده هست",
+  token_missing: "توکن این حساب هتزنر در گاوصندوق نیست",
+  user_data_failed: "ساختن cloud-init این node ناموفق بود",
+  vault_unavailable: "کلید رمزنگاری پنل در دسترس نیست",
+  node_changed_meanwhile: "وضعیت node هم‌زمان عوض شد؛ دوباره امتحان کنید",
+  node_deleted: "این node پیش‌تر حذف شده",
+  fleet_not_live: "ناوگان ۹ جایگاهی فقط حالت خشک دارد؛ فقط node آزمایشی حذف‌شدنی است",
+  hetzner_unreachable: "API هتزنر پاسخ نداد",
+  hetzner_rate_limited: "سقف درخواست API هتزنر پر شده",
+  hetzner_token_invalid: "هتزنر توکن این حساب را نپذیرفت",
+  hetzner_forbidden: "هتزنر دسترسی این توکن را رد کرد",
+  hetzner_read_only: "توکن این حساب فقط‌خواندنی است",
+  hetzner_api_error: "API هتزنر خطا داد",
+  unhealthy_test_node: "node آزمایشی یک ساعت ناسالم ماند",
+  owner_retire: "بازنشستگی به درخواست مالک",
+  // Telegram (team tg)
+  getme_ok: "ربات با getMe وارسی شد",
+  bot_can_delete: "ربات اجازه‌ی حذف پیام دارد؛ باید برداشته شود",
 };
 
 /** Reasons stored as {"key": value} come as "key:value" (auth audit, counts). */
@@ -155,6 +177,22 @@ const ACTION: Record<string, string> = {
   create: "ساخت سرور",
   delete: "حذف سرور",
   none: "بی کار",
+  // nodes (team live) and the node agents
+  test_node_request: "درخواست node آزمایشی",
+  node_retire_request: "درخواست بازنشستگی node",
+  node_create_failed: "ساخت node ناموفق",
+  node_ready: "آماده شدن node",
+  agent_register: "ثبت عامل node",
+  agent_renew: "تمدید گواهی عامل",
+  // Telegram (team tg)
+  "telegram.bot_set": "ثبت ربات تلگرام",
+  "telegram.pairing_created": "ساخت کد اتصال تلگرام",
+  "telegram.pairing_cancelled": "باطل شدن کد اتصال تلگرام",
+  "telegram.owner_paired": "وصل شدن چت مالک به ربات",
+  "telegram.channel_set": "ثبت کانال تلگرام",
+  "telegram.settings_set": "تغییر زمان‌بندی پست",
+  "telegram.test_alert": "هشدار آزمایشی",
+  "telegram.test_post": "پست آزمایشی",
 };
 
 export function actionLabel(code: string): string {
@@ -181,6 +219,9 @@ const ACTOR: Record<string, string> = {
   auth: "سیستم ورود",
   worker: "worker",
   system: "سیستم",
+  node_executor: "چرخه‌ی nodeها",
+  agent_api: "API عامل‌ها",
+  telegram: "ربات تلگرام",
 };
 
 /** "admin:owner" -> "مالک (owner)"; control loops get a Persian name. */
@@ -191,4 +232,194 @@ export function actorLabel(actor: string): string {
 
 export function isOwnerActor(actor: string): boolean {
   return actor.startsWith("admin:");
+}
+
+// --- round 2: error codes ---------------------------------------------------------------------
+
+/** Persian text of the round-2 error codes, used when a response carries no message_fa. */
+const ERROR_FA: Record<string, string> = {
+  // nodes
+  gate_refused: "قفل‌های ایمنی این کار را رد کردند. دلیل‌ها در فهرست آمده‌اند.",
+  test_node_exists: "یک node آزمایشی زنده هست. اول همان را بازنشسته کنید.",
+  not_found: "پیدا نشد؛ شاید پیش‌تر حذف شده است.",
+  // Telegram
+  bot_token_invalid: "توکن ربات درست نیست یا در BotFather باطل شده است.",
+  bot_not_set: "هنوز توکن ربات تلگرام وارد نشده است.",
+  owner_not_paired: "چت خصوصی شما هنوز به ربات وصل نشده است. اول کد اتصال بسازید.",
+  channel_not_found: "کانال پیدا نشد. نام کانال را درست وارد کنید (مثل ‎@ipoxxo‎).",
+  bot_not_admin: "ربات در این کانال ادمین نیست.",
+  bot_cannot_post: "ربات در این کانال اجازه‌ی ارسال پیام ندارد.",
+  bot_cannot_edit: "ربات در این کانال اجازه‌ی ویرایش پیام ندارد.",
+  channel_in_use: "این کانال برای نقش دیگر (اصلی یا آزمایشی) ثبت شده است.",
+  test_channel_not_set: "کانال آزمایشی هنوز تعیین نشده است.",
+  invalid_settings: "زمان‌بندی درست نیست؛ ساعت‌ها و فاصله‌ی پست‌ها را بررسی کنید.",
+  telegram_unavailable: "پاسخ تلگرام به دست نیامد. چند دقیقه‌ی دیگر دوباره امتحان کنید.",
+  vault_unavailable: "کلید رمزنگاری پنل در دسترس نیست؛ کار انجام نشد.",
+  // Cloudflare
+  cf_token_invalid: "Cloudflare این توکن را نپذیرفت.",
+  cf_permissions_missing: "توکن Cloudflare همه‌ی دسترسی‌های لازم را ندارد.",
+  cf_unavailable: "پاسخ Cloudflare به دست نیامد. کمی بعد دوباره امتحان کنید.",
+};
+
+export function errorCodeText(code: string): string | undefined {
+  return ERROR_FA[code];
+}
+
+// --- round 2: nodes -----------------------------------------------------------------------------
+
+export interface StateInfo {
+  label: string;
+  tone: Tone;
+  hint: string;
+  /** Moving on by itself (the badge pulses). */
+  moving: boolean;
+}
+
+export const NODE_STATE: Record<NodeState, StateInfo> = {
+  requested: { label: "درخواست‌شده", tone: "info", hint: "در صف ساخت؛ چرخه‌ی nodeها دوباره همه‌ی قفل‌های ایمنی را میسنجد.", moving: true },
+  creating: { label: "در حال ساخت", tone: "info", hint: "سرور در هتزنر ساخته میشود.", moving: true },
+  booting: { label: "در حال روشن شدن", tone: "info", hint: "سرور روشن شد؛ cloud-init در حال آماده‌سازی است.", moving: true },
+  registering: { label: "ثبت عامل", tone: "info", hint: "عامل node در پنل ثبت شد و اولین گزارش را میفرستد.", moving: true },
+  ready: { label: "آماده", tone: "success", hint: "node سالم است و پروکسی آن کار میکند.", moving: false },
+  unhealthy: { label: "ناسالم", tone: "danger", hint: "عامل گزارش سالم نفرستاده است؛ پنل خودش ترمیم یا جایگزین میکند.", moving: false },
+  repairing: { label: "در حال ترمیم", tone: "warning", hint: "پنل در حال ترمیم خودکار این node است.", moving: true },
+  burned: { label: "سوخته (فیلتر)", tone: "danger", hint: "IP این node از ایران بسته است و جایگزین میشود.", moving: false },
+  draining: { label: "در حال تخلیه", tone: "warning", hint: "کانفیگ تازه‌ای به این node نمیرود.", moving: true },
+  retiring: { label: "در حال بازنشستگی", tone: "warning", hint: "سرور با قفل حذف (برچسب و ثبت در پنل) حذف میشود.", moving: true },
+  deleted: { label: "حذف‌شده", tone: "neutral", hint: "سرور در هتزنر حذف شده و دیگر هزینه ندارد.", moving: false },
+};
+
+export function nodeStateInfo(state: string): StateInfo {
+  return (NODE_STATE as Record<string, StateInfo | undefined>)[state] ?? { label: state, tone: "neutral", hint: "", moving: false };
+}
+
+/** Hetzner locations by code; anything else is shown as its code. */
+const LOCATION_NAME: Record<string, string> = {
+  fsn1: "فالکنشتاین، آلمان",
+  nbg1: "نورنبرگ، آلمان",
+  hel1: "هلسینکی، فنلاند",
+  ash: "اَشبرن، آمریکا",
+  hil: "هیلزبورو، آمریکا",
+  sin: "سنگاپور",
+};
+
+export function locationName(code: string): string {
+  return LOCATION_NAME[code] ?? code;
+}
+
+const NODE_EVENT: Record<string, string> = {
+  state: "تغییر وضعیت",
+  create_started: "شروع ساخت سرور",
+  create_refused: "ساخت رد شد",
+  create_failed: "ساخت ناموفق",
+  server_created: "سرور ساخته شد",
+  server_adopted: "سرور با برچسب پیدا شد",
+  no_server_found: "سروری با برچسب پیدا نشد",
+  delete_started: "شروع حذف سرور",
+  delete_refused: "حذف رد شد",
+  server_deleted: "سرور حذف شد",
+  server_already_gone: "سرور پیش‌تر حذف شده بود",
+  executor_error: "خطای چرخه‌ی nodeها",
+  agent_registered: "عامل ثبت شد",
+  agent_cert_renewed: "گواهی عامل تمدید شد",
+};
+
+export function nodeEventLabel(kind: string): string {
+  return NODE_EVENT[kind] ?? kind;
+}
+
+/** Why a node changed state (node_events detail.reason). */
+const TRANSITION_REASON: Record<string, string> = {
+  gates_passed: "همه‌ی قفل‌های ایمنی سبز بود",
+  server_found_by_label: "سرور با برچسب پیدا شد",
+  server_created: "هتزنر ساخت را تأیید کرد",
+  agent_registered: "عامل ثبت شد",
+  agent_reported: "اولین گزارش سالم رسید",
+  agent_recovered: "عامل دوباره سالم شد",
+  boot_timeout: "روشن شدن بیش از حد طول کشید",
+  no_good_report: "گزارش سالمی نرسید",
+  heartbeat_lost: "ضربان عامل قطع شد",
+  report_not_good: "گزارش عامل سالم نبود",
+  create_refused: "قفل‌های ایمنی ساخت را رد کردند",
+  create_failed: "هتزنر ساخت را تأیید نکرد",
+  owner_retire: "به درخواست مالک",
+  server_deleted: "سرور در هتزنر حذف شد",
+  unhealthy_test_node: "node آزمایشی یک ساعت ناسالم ماند",
+};
+
+export function transitionReasonLabel(code: string): string {
+  return TRANSITION_REASON[code] ?? reasonLabel(code);
+}
+
+// --- round 2: Cloudflare and probes ---------------------------------------------------------------
+
+export const POOL_STATE: Record<PoolState, { label: string; tone: Tone; hint: string }> = {
+  active: { label: "فعال", tone: "success", hint: "نام‌های پروکسی پست‌های تازه روی این دامنه‌اند. فقط یک دامنه فعال است." },
+  standby: { label: "آماده‌به‌کار", tone: "info", hint: "اگر دامنه‌ی فعال فیلتر شد، خودکار جایش را میگیرد." },
+  none: { label: "بیرون از استخر", tone: "neutral", hint: "پنل از این دامنه استفاده نمیکند." },
+  filtered: { label: "فیلترشده", tone: "danger", hint: "از ایران بسته است؛ برای پست تازه استفاده نمیشود." },
+  retired: { label: "بازنشسته", tone: "neutral", hint: "کنار گذاشته شده و دیگر استفاده نمیشود." },
+};
+
+export const POOL_ORDER: PoolState[] = ["active", "standby", "none", "filtered", "retired"];
+
+export function poolStateInfo(state: string): { label: string; tone: Tone; hint: string } {
+  return (POOL_STATE as Record<string, { label: string; tone: Tone; hint: string } | undefined>)[state] ?? {
+    label: state,
+    tone: "neutral",
+    hint: "",
+  };
+}
+
+/** Cloudflare's own zone status (plus "gone": the token no longer lists the zone). */
+const ZONE_STATUS: Record<string, { label: string; tone: Tone }> = {
+  active: { label: "فعال در Cloudflare", tone: "success" },
+  pending: { label: "در انتظار nameserver", tone: "warning" },
+  initializing: { label: "در حال راه‌اندازی", tone: "info" },
+  moved: { label: "nameserver عوض شده", tone: "danger" },
+  deleted: { label: "حذف‌شده در Cloudflare", tone: "danger" },
+  deactivated: { label: "غیرفعال در Cloudflare", tone: "danger" },
+  gone: { label: "دیگر در دسترس توکن نیست", tone: "danger" },
+};
+
+export function zoneStatusInfo(status: string): { label: string; tone: Tone } {
+  return ZONE_STATUS[status] ?? { label: status, tone: "neutral" };
+}
+
+export const VERDICT: Record<ProbeVerdict, { label: string; tone: Tone; hint: string }> = {
+  ok: { label: "باز از ایران", tone: "success", hint: "از بیشتر شبکه‌های ایران وصل میشود." },
+  suspect: { label: "مشکوک", tone: "warning", hint: "از بعضی شبکه‌ها وصل نمیشود؛ دوباره سنجیده میشود." },
+  blocked: { label: "فیلتر", tone: "danger", hint: "از ایران بسته است." },
+  unknown: { label: "نامعلوم", tone: "neutral", hint: "هنوز سنجش کافی نیست." },
+};
+
+export function verdictInfo(v: string): { label: string; tone: Tone; hint: string } {
+  return (VERDICT as Record<string, { label: string; tone: Tone; hint: string } | undefined>)[v] ?? { label: v, tone: "neutral", hint: "" };
+}
+
+export const PROBE_SOURCE: Record<string, string> = {
+  globalping: "Globalping",
+  "check-host": "check-host.net",
+};
+
+/** Persian names of Iranian operators by ASN (only well-known ones; others keep their own name). */
+const OPERATOR_BY_ASN: Record<number, string> = {
+  197207: "همراه اول",
+  44244: "ایرانسل",
+  57218: "رایتل",
+  58224: "مخابرات ایران",
+};
+
+export function operatorName(asn: number | null): string | null {
+  return asn === null ? null : (OPERATOR_BY_ASN[asn] ?? null);
+}
+
+/** Documented tg addition: why the bot is not usable right now. */
+const BOT_ERROR: Record<string, string> = {
+  bot_unauthorized: "تلگرام توکن ربات را دیگر نمیپذیرد (در BotFather باطل یا عوض شده). توکن تازه وارد کنید.",
+  updates_conflict: "برنامه‌ی دیگری پیام‌های این ربات را میخواند (webhook یا polling دیگر)؛ تا قطع نشود، اتصال چت کار نمیکند.",
+};
+
+export function botErrorText(code: string): string {
+  return BOT_ERROR[code] ?? code;
 }

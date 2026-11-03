@@ -5,9 +5,32 @@ import type { AddressInfo } from "node:net";
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import { ApiError, request, safeNext, setUnauthorizedHandler, toApiError } from "./api";
+import { ApiError, errorList, isEndpointMissing, request, safeNext, setUnauthorizedHandler, toApiError } from "./api";
 
 describe("error bodies", () => {
+  it("gives round-2 codes a Persian sentence when the server sends none", () => {
+    expect(toApiError(409, { error: "gate_refused", reasons: ["kill_switch_on"] }).messageFa).toMatch(/قفل‌های ایمنی/);
+    expect(toApiError(400, { error: "bot_not_admin" }).messageFa).toMatch(/ادمین/);
+    expect(toApiError(400, { error: "cf_permissions_missing", missing: ["DNS Write"] }).messageFa).toMatch(/Cloudflare/);
+    // The server's own sentence always wins.
+    expect(toApiError(400, { error: "bot_not_admin", message_fa: "متن سرور" }).messageFa).toBe("متن سرور");
+  });
+
+  it("tells a missing route from a contract 404", () => {
+    expect(isEndpointMissing(toApiError(404, { detail: "Not Found" }))).toBe(true);
+    expect(isEndpointMissing(toApiError(404, null))).toBe(true);
+    expect(isEndpointMissing(toApiError(404, { error: "not_found", message_fa: "پیدا نشد" }))).toBe(false);
+    expect(isEndpointMissing(toApiError(500, null))).toBe(false);
+    expect(isEndpointMissing(new Error("x"))).toBe(false);
+  });
+
+  it("reads string lists of the error body", () => {
+    const e = toApiError(409, { error: "gate_refused", reasons: ["kill_switch_on", 3, "node_cap_not_set"] });
+    expect(errorList(e, "reasons")).toEqual(["kill_switch_on", "node_cap_not_set"]);
+    expect(errorList(e, "missing")).toEqual([]);
+    expect(errorList("nope", "reasons")).toEqual([]);
+  });
+
   it("reads the contract shape", () => {
     const e = toApiError(429, { error: "locked", message_fa: "بسته است", retry_after_s: 42 });
     expect(e.code).toBe("locked");
