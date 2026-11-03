@@ -70,6 +70,18 @@ def _unavailable(exc: CloudflareError) -> CfServiceError:
 # --- token -------------------------------------------------------------------------------------
 
 
+# Decision D34: the token is limited in Cloudflare to the ONE domain used for proxies. A token
+# that sees more zones (e.g. "All zones") is refused before any zone is read further or stored,
+# so the names of the owner's other domains never reach this panel. Raise this only with the
+# owner's decision (a second, standby domain in the pool).
+MAX_ZONES = 1
+
+
+def zone_scope_problem(zones: list[Zone]) -> str | None:
+    """``cf_token_too_broad`` when the token sees more domains than the owner allowed."""
+    return "cf_token_too_broad" if len(zones) > MAX_ZONES else None
+
+
 @dataclass(frozen=True)
 class TokenCheck:
     kind: str
@@ -115,6 +127,10 @@ async def check_token(cf: CloudflareClient) -> TokenCheck:
         if exc.kind == "denied":
             return TokenCheck(kind, [], {}, [PERM_ZONE_READ])
         raise _unavailable(exc) from None
+    problem = zone_scope_problem(zones)
+    if problem is not None:
+        # Refused before any record of those zones is read; their names are not kept or logged.
+        raise CfServiceError(problem, zones_seen=len(zones), zones_allowed=MAX_ZONES)
     missing: set[str] = set() if zones else {PERM_ZONE_READ}
     dns_edit: dict[str, bool] = {}
     for zone in zones:
@@ -284,14 +300,15 @@ async def _log_token_attempt(
 
 
 async def refresh_token_and_zones(db: Db, cf: CloudflareClient, now: datetime, *, actor: str) -> None:
-    """Periodic re-check of the stored token (new zones are found here, decision D13)."""
+    """Periodic re-check of the stored token (decision D13; one domain only, D34)."""
     previous = await load_state(db)
     was_verified = bool(previous and previous.verified)
     try:
         check = await check_token(cf)
     except CfServiceError as exc:
-        if exc.code == "cf_token_invalid":
-            # Checked again in an hour (or at once when the owner stores a new token).
+        if exc.code in ("cf_token_invalid", "cf_token_too_broad"):
+            # Checked again in an hour (or at once when the owner stores a new token). A token
+            # widened in Cloudflare to more domains stops DNS changes just like a revoked one.
             await save_state(
                 db, now, verified=False, checked_at=now, error=exc.code, missing=[], zones_refreshed_at=now
             )
@@ -304,7 +321,7 @@ async def refresh_token_and_zones(db: Db, cf: CloudflareClient, now: datetime, *
                     dry_run=False,
                     allowed=False,
                     reasons=[exc.code],
-                    result="the stored Cloudflare token is no longer valid; DNS changes stopped",
+                    result="the stored Cloudflare token is no longer usable; DNS changes stopped",
                 )
         else:
             await save_state(db, now, error=exc.code)

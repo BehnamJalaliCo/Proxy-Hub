@@ -75,7 +75,7 @@ function TokenCard({ s }: { s: CfStatus }) {
       <CardHeader
         icon={<KeyRound className="size-5" />}
         title="توکن Cloudflare"
-        subtitle="فقط دو دسترسی: Zone Read و DNS Edit، برای همه‌ی دامنه‌های حساب."
+        subtitle="فقط دو دسترسی: Zone Read و DNS Edit، و فقط روی یک دامنه: دامنه‌ی پروکسی. پنل دامنه‌های دیگرتان را نمی‌بیند."
         action={
           <Badge tone={state.tone} dot>
             {state.label}
@@ -105,10 +105,13 @@ function TokenCard({ s }: { s: CfStatus }) {
               <ol className="flex list-inside list-[persian] flex-col gap-1 text-[0.84rem] leading-7 text-fg-muted marker:font-bold marker:text-brand">
                 <li>در Cloudflare به My Profile و بعد API Tokens بروید و Create Token را بزنید.</li>
                 <li>
-                  دو دسترسی بدهید: <b className="ltr inline-block">Zone · Zone · Read</b> و <b className="ltr inline-block">Zone · DNS · Edit</b>؛
-                  Zone Resources: <b className="ltr inline-block">All zones</b>.
+                  دو دسترسی بدهید: <b className="ltr inline-block">Zone · Zone · Read</b> و <b className="ltr inline-block">Zone · DNS · Edit</b>.
                 </li>
-                <li>توکن را اینجا بچسبانید. پنل خودش دامنه‌ها را پیدا میکند.</li>
+                <li>
+                  در Zone Resources: <b className="ltr inline-block">Include · Specific zone</b> و فقط دامنه‌ی پروکسی را انتخاب کنید. توکنی که
+                  بیش از یک دامنه را ببیند، پذیرفته نمیشود.
+                </li>
+                <li>توکن را اینجا بچسبانید. پنل همان یک دامنه را پیدا میکند.</li>
               </ol>
             ) : null}
             <Field label="توکن API" htmlFor="cf-token" hint="پس از ذخیره، توکن هرگز دوباره نشان داده نمیشود." error={error?.field ? error.text : null}>

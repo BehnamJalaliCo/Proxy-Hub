@@ -7,7 +7,8 @@ managed-record rule (proxyhub/cloudflare/records.py): a record is changed or del
 carries the ``managed-by=proxy-hub`` comment AND our table lists it. Records the panel created on
 a zone that is no longer active are removed (their names moved with the active domain). Every
 change, conflict and refusal is written to actions_log. Once an hour the token is re-verified and
-the zone list refreshed, so a domain the owner adds to Cloudflare shows up by itself.
+the zone list refreshed. The token sees only the one proxy domain (decision D34): a token widened
+to more domains in Cloudflare stops all DNS changes until the owner narrows it again.
 """
 
 from __future__ import annotations

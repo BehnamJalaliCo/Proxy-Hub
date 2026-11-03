@@ -272,6 +272,7 @@ const ERROR_FA: Record<string, string> = {
   // Cloudflare
   cf_token_invalid: "Cloudflare این توکن را نپذیرفت.",
   cf_permissions_missing: "توکن Cloudflare همه‌ی دسترسی‌های لازم را ندارد.",
+  cf_token_too_broad: "این توکن بیش از یک دامنه را می‌بیند. در Cloudflare آن را فقط به دامنه‌ی پروکسی محدود کنید (Specific zone).",
   cf_unavailable: "پاسخ Cloudflare به دست نیامد. کمی بعد دوباره امتحان کنید.",
 };
 

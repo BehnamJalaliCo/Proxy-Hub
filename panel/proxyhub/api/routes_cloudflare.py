@@ -28,8 +28,12 @@ MESSAGES_FA: dict[str, str] = {
         "توکن Cloudflare معتبر نیست، باطل شده یا زمانش گذشته است. یک توکن تازه بسازید و دوباره وارد کنید."
     ),
     "cf_permissions_missing": (
-        "این توکن همه‌ی دسترسی‌های لازم را ندارد و ذخیره نشد. توکن باید برای همه‌ی zoneهای حساب "
+        "این توکن همه‌ی دسترسی‌های لازم را ندارد و ذخیره نشد. توکن باید روی دامنه‌ی پروکسی "
         "دو دسترسی «Zone → Zone → Read» و «Zone → DNS → Edit» داشته باشد."
+    ),
+    "cf_token_too_broad": (
+        "این توکن بیش از یک دامنه را می‌بیند و ذخیره نشد. در Cloudflare، در بخش Zone Resources "
+        "گزینه‌ی «Specific zone» را بزنید و فقط دامنه‌ی پروکسی را انتخاب کنید."
     ),
     "cf_unavailable": "پاسخ API کلودفلر به دست نیامد. چند دقیقه‌ی دیگر دوباره امتحان کنید.",
     "vault_unavailable": "کلید رمزنگاری پنل در دسترس نیست؛ توکن ذخیره نشد.",
@@ -43,6 +47,7 @@ MESSAGES_FA: dict[str, str] = {
 STATUS: dict[str, int] = {
     "cf_token_invalid": 400,
     "cf_permissions_missing": 400,
+    "cf_token_too_broad": 400,
     "cf_unavailable": 502,
     "vault_unavailable": 503,
     "not_found": 404,
@@ -91,8 +96,8 @@ async def put_token(
             db, vault, body.token.get_secret_value(), actor=_actor(admin), now=datetime.now(UTC)
         )
     except service.CfServiceError as exc:
-        missing = exc.extra.get("missing")
-        raise _error(exc.code, **({"missing": missing} if missing is not None else {})) from None
+        extra = {k: v for k, v in exc.extra.items() if k in ("missing", "zones_seen", "zones_allowed")}
+        raise _error(exc.code, **extra) from None
 
 
 @router.put("/pool")

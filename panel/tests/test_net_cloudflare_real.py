@@ -97,6 +97,7 @@ async def test_real_token_check_and_managed_record_lifecycle(
     async with CloudflareClient(token) as cf:
         check = await service.check_token(cf)
         assert check.missing == [], check.missing
+        assert [z.name for z in check.zones] == [TEST_ZONE]  # D34: the token sees one domain only
         zone = next(z for z in check.zones if z.name == TEST_ZONE)
         assert check.dns_edit[zone.id] is True
         async with engine.begin() as conn:

@@ -98,6 +98,24 @@ def ours(name: str, content: str) -> tuple[DnsRecord, OwnedRow]:
 # --- parsing real shapes ------------------------------------------------------------------------
 
 
+def test_a_token_that_sees_more_than_one_domain_is_refused() -> None:
+    """D34: the owner limits the token to the one proxy domain; seeing more is refused."""
+    one = [parse_zone(cf_zone_json(ZONE_ID, "example.com"))]
+    two = [*one, parse_zone(cf_zone_json(ZONE_ID_2, "example.net"))]
+    assert service.MAX_ZONES == 1
+    assert service.zone_scope_problem([]) is None  # reported separately as missing Zone:Read
+    assert service.zone_scope_problem(one) is None
+    assert service.zone_scope_problem(two) == "cf_token_too_broad"
+
+
+def test_too_broad_token_has_a_persian_message_and_a_400() -> None:
+    from proxyhub.api import routes_cloudflare
+
+    assert routes_cloudflare.STATUS["cf_token_too_broad"] == 400
+    text = routes_cloudflare.MESSAGES_FA["cf_token_too_broad"]
+    assert "Specific zone" in text and "دامنه" in text
+
+
 def test_parse_zone_and_record_shapes() -> None:
     zone = parse_zone(cf_zone_json(name="Example.COM"))
     assert (zone.id, zone.name, zone.status, zone.account_id) == (
