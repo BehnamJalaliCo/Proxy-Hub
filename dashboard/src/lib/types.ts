@@ -247,6 +247,8 @@ export interface ProbeSource {
   name: "globalping" | "check-host";
   ok: boolean;
   note: string | null;
+  /** False until the source was used once (then "not measured yet", not "unreachable"). */
+  checked?: boolean;
 }
 
 /** One measurement network (an operator/ASN in Iran), never a person. */

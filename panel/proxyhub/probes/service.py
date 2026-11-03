@@ -538,6 +538,8 @@ async def summary(db: Db) -> dict[str, Any]:
             "name": name,
             "ok": bool(sources_rows[name].ok) if name in sources_rows else False,
             "note": sources_rows[name].note if name in sources_rows else "هنوز سنجشی انجام نشده است.",
+            # False until the source was used once: "not measured yet", not "unreachable".
+            "checked": name in sources_rows,
         }
         for name in SOURCES
     ]

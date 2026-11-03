@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildHeatmap, cellTone, networkKey, targetOf, verdictCounts } from "./probes";
+import { buildHeatmap, cellTone, networkKey, sourceStatus, targetOf, verdictCounts } from "./probes";
 import type { ProbeTarget } from "./types";
 
 // Shapes as the contract defines them (GET /api/probes/summary "targets").
@@ -68,5 +68,14 @@ describe("probe heatmap", () => {
     expect(verdictCounts(TARGETS)).toEqual({ ok: 1, suspect: 0, blocked: 1, unknown: 0 });
     expect(targetOf(TARGETS, "n2")?.name).toBe("ph-slot-2");
     expect(targetOf(undefined, "n2")).toBeUndefined();
+  });
+});
+
+describe("measuring services", () => {
+  it("shows a never-used service as not measured yet, not as unreachable", () => {
+    expect(sourceStatus({ ok: false, checked: false })).toEqual({ tone: "neutral", text: "هنوز سنجیده نشده", showNote: false });
+    expect(sourceStatus({ ok: false, checked: true }).tone).toBe("danger");
+    expect(sourceStatus({ ok: true, checked: true }).tone).toBe("success");
+    expect(sourceStatus({ ok: false }).tone).toBe("danger"); // an older panel without the field
   });
 });

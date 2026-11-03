@@ -7,7 +7,7 @@ import { cn } from "../lib/browser";
 import * as api from "../lib/endpoints";
 import { formatJalali, formatNumber, formatRelative } from "../lib/format";
 import { PROBE_SOURCE, verdictInfo, type Tone } from "../lib/labels";
-import { buildHeatmap, verdictCounts, type HeatCell, type HeatColumn } from "../lib/probes";
+import { buildHeatmap, sourceStatus, verdictCounts, type HeatCell, type HeatColumn } from "../lib/probes";
 import { keys } from "../lib/queries";
 import { toast } from "../lib/toast";
 import { TONE_SOFT } from "../lib/tones";
@@ -58,18 +58,21 @@ export function ProbeGrid({ summary }: { summary: ProbeSummary }) {
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2 px-1">
         {summary.sources.length === 0 ? <span className="text-xs text-fg-faint">هنوز منبع سنجشی گزارش نداده</span> : null}
-        {summary.sources.map((s) => (
-          <span
-            key={s.name}
-            className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 py-1 text-xs font-semibold text-fg"
-            title={s.note ?? undefined}
-          >
-            <StatusDot tone={s.ok ? "success" : "danger"} />
-            <span className="ltr">{PROBE_SOURCE[s.name] ?? s.name}</span>
-            <span className="font-normal text-fg-muted">{s.ok ? "در دسترس" : "در دسترس نیست"}</span>
-            {s.note ? <span className="max-w-48 truncate font-normal text-fg-faint">· {s.note}</span> : null}
-          </span>
-        ))}
+        {summary.sources.map((s) => {
+          const status = sourceStatus(s);
+          return (
+            <span
+              key={s.name}
+              className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 py-1 text-xs font-semibold text-fg"
+              title={s.note ?? undefined}
+            >
+              <StatusDot tone={status.tone} />
+              <span className="ltr">{PROBE_SOURCE[s.name] ?? s.name}</span>
+              <span className="font-normal text-fg-muted">{status.text}</span>
+              {status.showNote && s.note ? <span className="max-w-48 truncate font-normal text-fg-faint">· {s.note}</span> : null}
+            </span>
+          );
+        })}
         <span className="ms-auto flex flex-wrap gap-1.5">
           {(Object.keys(counts) as ProbeVerdict[])
             .filter((v) => counts[v] > 0)

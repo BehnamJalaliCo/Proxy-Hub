@@ -362,6 +362,7 @@ async def test_verdicts_over_rounds_are_stored_and_logged_on_change(engine: Asyn
     sources = {s["name"]: s for s in summary["sources"]}
     assert sources["globalping"]["ok"] and "ایرانسل" in sources["globalping"]["note"]
     assert sources["check-host"]["ok"]
+    assert all(s["checked"] is True for s in sources.values())
     assert summary["last_run_at"].endswith("Z")
 
 
@@ -537,7 +538,7 @@ async def test_summary_and_run_over_http(client: AsyncClient, engine: AsyncEngin
         "globalping",
         "check-host",
     ]
-    assert all(s["ok"] is False and s["note"] for s in body["sources"])
+    assert all(s["ok"] is False and s["note"] and s["checked"] is False for s in body["sources"])
     node = await make_node(engine, state="ready", ipv4="203.0.113.40")
     no_ip = await make_node(engine, state="booting", ipv4=None)
     gone = await make_node(engine, state="deleted", ipv4="203.0.113.41")

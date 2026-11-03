@@ -3,7 +3,7 @@
 // carries its numbers and an icon, never colour alone. Networks are operators/ASNs, never people.
 
 import { operatorName, operatorRank, type Tone } from "./labels";
-import type { ProbeNetwork, ProbeTarget, ProbeVerdict } from "./types";
+import type { ProbeNetwork, ProbeSource, ProbeTarget, ProbeVerdict } from "./types";
 
 export interface HeatColumn {
   key: string;
@@ -91,4 +91,10 @@ export function verdictCounts(targets: ProbeTarget[]): Record<ProbeVerdict, numb
 /** The probe target of a node, if the summary has one. */
 export function targetOf(targets: ProbeTarget[] | undefined, nodeId: string): ProbeTarget | undefined {
   return targets?.find((t) => t.node_id === nodeId);
+}
+
+/** A measuring service's state: never used yet is neutral, not "unreachable". */
+export function sourceStatus(s: Pick<ProbeSource, "ok" | "checked">): { tone: Tone; text: string; showNote: boolean } {
+  if (s.checked === false) return { tone: "neutral", text: "هنوز سنجیده نشده", showNote: false };
+  return s.ok ? { tone: "success", text: "در دسترس", showNote: true } : { tone: "danger", text: "در دسترس نیست", showNote: true };
 }
