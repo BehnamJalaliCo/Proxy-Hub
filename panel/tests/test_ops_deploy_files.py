@@ -93,6 +93,21 @@ def test_monitoring_is_not_public() -> None:
     assert all(not ports for ports in published.values()), published
     for name in MONITORING_SERVICES:
         assert services[name].get("network_mode") != "host", name
+        assert "pid" not in services[name], f"{name}: no host PID namespace"
+
+
+def test_node_exporter_reads_the_host_procfs_without_host_pid() -> None:
+    """No host PID namespace; the host's /proc and /sys come through the read-only bind of / instead.
+
+    With the container's own /proc, the filesystem collector would read the container's mount table
+    (found for real: /etc/hosts and friends showed up as disks and fired DiskAlmostFull twice).
+    """
+    svc = _compose()["services"]["node-exporter"]
+    assert "pid" not in svc
+    assert svc["volumes"] == ["/:/host:ro,rslave"]
+    assert {"--path.rootfs=/host", "--path.procfs=/host/proc", "--path.sysfs=/host/sys"} <= set(
+        svc["command"]
+    )
 
 
 def test_only_panel_containers_are_labelled_for_log_shipping() -> None:

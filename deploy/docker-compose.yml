@@ -243,6 +243,11 @@ services:
     # container they would only see the container's own interface. textfile = backup/restore status.
     command:
       - --path.rootfs=/host
+      # The HOST's /proc and /sys (inside the recursive read-only bind of /), not the container's own:
+      # the filesystem collector reads <procfs>/1/mountinfo, so with the container's procfs it would
+      # list the container's mounts (/etc/hosts, ...) instead of the host's. This replaces "pid: host".
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
       - --collector.disable-defaults
       - --collector.cpu
       - --collector.diskstats
@@ -257,7 +262,7 @@ services:
       - --collector.vmstat
       - --collector.textfile
       - --collector.textfile.directory=/host/var/lib/proxy-hub/metrics
-    pid: host
+    # No "pid: host": --path.procfs above gives the host's view without joining its PID namespace.
     volumes: ["/:/host:ro,rslave"]
     read_only: true
     mem_limit: 64m
