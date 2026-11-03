@@ -14,6 +14,7 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.routing import APIRoute
@@ -421,12 +422,28 @@ async def test_desired_slot_records_prefer_ready_and_hold_through_unhealthy(engi
     assert all(d.ttl == 60 and d.proxied is False and d.type == "A" for d in desired)
 
 
+class _CountingClient(CloudflareClient):
+    """The real client pointed at a closed local port; it only counts the requests it attempts, so
+    a test can prove that NO Cloudflare request was even tried (a failed call is only logged)."""
+
+    attempts = 0
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        type(self).attempts += 1
+        return await super()._request(method, path, **kwargs)
+
+
+def _counting_factory() -> tuple[type[_CountingClient], Any]:
+    cls = type("Counting", (_CountingClient,), {"attempts": 0})
+    return cls, lambda token: cls(token, base_url="http://127.0.0.1:9")
+
+
 @pytest.mark.db
 async def test_dns_reconciler_is_a_safe_no_op_today(engine: AsyncEngine, vault: Vault) -> None:
-    """No token: nothing happens. Token + verified + active zone but no slot node: nothing is read
-    or changed. Any Cloudflare call would go to a closed local port and leave an error behind."""
-    closed = lambda token: CloudflareClient(token, base_url="http://127.0.0.1:9")  # noqa: E731
-    rec = DnsReconciler(vault_factory=lambda: vault, client_factory=closed)
+    """No token: nothing happens. Token + verified + active zone but no slot node: no Cloudflare
+    request is even attempted, and nothing is changed."""
+    counting, factory = _counting_factory()
+    rec = DnsReconciler(vault_factory=lambda: vault, client_factory=factory)
     async with engine.begin() as conn:
         await rec.run_once(conn)
     assert await actions(engine) == []
@@ -442,6 +459,27 @@ async def test_dns_reconciler_is_a_safe_no_op_today(engine: AsyncEngine, vault: 
         state = await service.load_state(conn)
     assert state is not None and state.error is None and state.verified
     assert await actions(engine) == []
+    assert counting.attempts == 0
+    async with engine.connect() as conn:
+        assert (await conn.execute(text("SELECT count(*) FROM cf_records"))).scalar_one() == 0
+
+
+@pytest.mark.db
+async def test_dns_reconciler_never_uses_an_unverified_token(engine: AsyncEngine, vault: Vault) -> None:
+    """A stored token that failed verification is never used for DNS, even with an active domain
+    and a slot node waiting for its record."""
+    counting, factory = _counting_factory()
+    now = datetime.now(UTC)
+    async with engine.begin() as conn:
+        await vault.put(conn, service.TOKEN_SECRET, secrets.token_urlsafe(30))
+        await service.save_state(
+            conn, now, verified=False, checked_at=now, zones_refreshed_at=now, missing=[]
+        )
+    await add_zone(engine, ZONE_ID, "example.com", pool="active")
+    await make_node(engine, state="ready", slot=1, ipv4="203.0.113.1")
+    async with engine.begin() as conn:
+        await DnsReconciler(vault_factory=lambda: vault, client_factory=factory).run_once(conn)
+    assert counting.attempts == 0
     async with engine.connect() as conn:
         assert (await conn.execute(text("SELECT count(*) FROM cf_records"))).scalar_one() == 0
 
