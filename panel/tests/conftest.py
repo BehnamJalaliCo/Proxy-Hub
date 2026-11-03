@@ -4,8 +4,9 @@ skipped when PROXYHUB_DATABASE_URL / PROXYHUB_REDIS_URL are not set; CI and the 
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 
@@ -33,6 +34,20 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(
                 pytest.mark.skip(reason="real Globalping API calls (set PROXYHUB_GLOBALPING_TESTS=1)")
             )
+
+
+@pytest.fixture(autouse=True)
+def _http_library_logs_open() -> Iterator[None]:
+    """proxyhub.cli quiets httpx to WARNING in production, and a test that runs the CLI changes
+    that process-wide. Leak tests must see every line the HTTP libraries can print, so each test
+    starts with those loggers inheriting the root level again."""
+    libs = [logging.getLogger(name) for name in ("httpx", "httpcore")]
+    old = [lib.level for lib in libs]
+    for lib in libs:
+        lib.setLevel(logging.NOTSET)
+    yield
+    for lib, level in zip(libs, old, strict=True):
+        lib.setLevel(level)
 
 
 @pytest.fixture(scope="session")

@@ -174,19 +174,28 @@ async def clean_telegram_tables(engine: AsyncEngine) -> None:
 
 @contextmanager
 def all_logs(level: int = logging.DEBUG) -> Iterator[StringIO]:
-    """Every log line of every logger at ``level`` (formatted with arguments), into a buffer."""
+    """Every log line of every logger at ``level`` (formatted with arguments), into a buffer.
+
+    The HTTP library loggers are opened too: production quiets httpx to WARNING (proxyhub.cli), but
+    the redaction must hold at any level, so the tests look at everything they could ever print."""
     buffer = StringIO()
     handler = logging.StreamHandler(buffer)
     handler.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
     root = logging.getLogger()
     old_level = root.level
+    libs = [logging.getLogger(name) for name in ("httpx", "httpcore")]
+    old_lib_levels = [lib.level for lib in libs]
     root.addHandler(handler)
     root.setLevel(level)
+    for lib in libs:
+        lib.setLevel(logging.NOTSET)
     try:
         yield buffer
     finally:
         root.removeHandler(handler)
         root.setLevel(old_level)
+        for lib, old in zip(libs, old_lib_levels, strict=True):
+            lib.setLevel(old)
 
 
 def assert_no_token(token: str, *texts: str) -> None:

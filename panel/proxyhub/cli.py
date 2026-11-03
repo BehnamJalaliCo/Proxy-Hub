@@ -49,6 +49,9 @@ def main(argv: list[str] | None = None) -> int:
         level=get_config().log_level,
         format='{"t":"%(asctime)s","lvl":"%(levelname)s","log":"%(name)s","msg":"%(message)s"}',
     )
+    # httpx logs every request at INFO (one line per Telegram long poll). Their URLs are already
+    # redacted (proxyhub.telegram.client); WARNING keeps Loki free of that noise.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     if args.cmd == "migrate":
         migrate()
     elif args.cmd == "worker":
