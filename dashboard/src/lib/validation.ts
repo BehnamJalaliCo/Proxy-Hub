@@ -1,6 +1,7 @@
 // Client-side checks that mirror the server's rules, so the owner sees a clear Persian hint before
 // sending. The server is always the authority; these never replace its checks.
 
+import { formatDecimal } from "./format";
 import type { FleetSettings } from "./types";
 
 /** Persian (۰-۹) and Arabic-Indic (٠-٩) digits -> ASCII; Persian decimal separator -> "." */
@@ -17,7 +18,11 @@ export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
 const ok = <T>(value: T): Parsed<T> => ({ ok: true, value });
 const fail = <T>(error: string): Parsed<T> => ({ ok: false, error });
 
-/** Budget cap in euros: empty means "not set" (null). Decimal string with up to 2 decimals, > 0. */
+/** Server maximum for the budget cap (MAX_BUDGET_EUR in fleet/settings_store.py). */
+export const MAX_BUDGET_EUR = 1_000_000;
+
+/** Budget cap in euros: empty means "not set" (null). Decimal string with up to 2 decimals,
+ * > 0 and at most MAX_BUDGET_EUR. */
 export function parseBudget(raw: string): Parsed<string | null> {
   const s = normalizeDigits(raw);
   if (s === "") return ok(null);
@@ -26,6 +31,7 @@ export function parseBudget(raw: string): Parsed<string | null> {
   const intPart = i.replace(/^0+(?=\d)/, "");
   const value = f !== undefined ? `${intPart}.${f}` : intPart;
   if (Number(value) <= 0) return fail("سقف بودجه باید بیشتر از صفر باشد.");
+  if (Number(value) > MAX_BUDGET_EUR) return fail(`سقف بودجه حداکثر ${formatDecimal(String(MAX_BUDGET_EUR), 0)} یورو است.`);
   return ok(value);
 }
 
@@ -39,13 +45,26 @@ export function parseIntIn(raw: string, min: number, max: number, allowEmpty: bo
   return ok(n);
 }
 
-/** Hetzner server type or location name: lower-case letters, digits, dashes. */
-export const SLUG = /^[a-z0-9][a-z0-9-]{1,30}$/;
+/** A Hetzner name rule, exactly as the server checks it (fleet/settings_store.py). */
+export interface NameRule {
+  pattern: RegExp;
+  hint: string;
+}
 
-export function parseSlugList(items: string[], what: string): Parsed<string[]> {
+export const SERVER_TYPE: NameRule = {
+  pattern: /^[a-z][a-z0-9-]{1,39}$/,
+  hint: "مثل cpx22: با حرف کوچک انگلیسی شروع میشود و فقط حرف کوچک، رقم و خط تیره دارد.",
+};
+
+export const LOCATION: NameRule = {
+  pattern: /^[a-z]{3}\d?$/,
+  hint: "مثل fsn1 یا hel1: سه حرف کوچک انگلیسی و حداکثر یک رقم.",
+};
+
+export function parseSlugList(items: string[], what: string, rule: NameRule): Parsed<string[]> {
   if (items.length === 0) return fail(`دست‌کم یک ${what} لازم است.`);
-  const bad = items.find((x) => !SLUG.test(x));
-  if (bad !== undefined) return fail(`«${bad}» درست نیست: فقط حروف کوچک انگلیسی، رقم و خط تیره.`);
+  const bad = items.find((x) => !rule.pattern.test(x));
+  if (bad !== undefined) return fail(`«${bad}» درست نیست؛ ${rule.hint}`);
   return ok(Array.from(new Set(items)));
 }
 
@@ -84,8 +103,8 @@ export function settingsFromDraft(
   const nodeCap = parseIntIn(draft.node_cap_total, 0, 200, true);
   const perHour = parseIntIn(draft.creations_per_hour_cap, 0, 20, false);
   const slots = parseIntIn(draft.target_slots, 0, 200, false);
-  const types = parseSlugList(draft.allowed_server_types, "نوع سرور");
-  const locs = parseSlugList(draft.locations, "location");
+  const types = parseSlugList(draft.allowed_server_types, "نوع سرور", SERVER_TYPE);
+  const locs = parseSlugList(draft.locations, "location", LOCATION);
   if (!budget.ok) errors.budget_cap_eur = budget.error;
   if (!nodeCap.ok) errors.node_cap_total = nodeCap.error;
   if (!perHour.ok) errors.creations_per_hour_cap = perHour.error;

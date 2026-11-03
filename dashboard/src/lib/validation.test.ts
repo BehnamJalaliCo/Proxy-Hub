@@ -4,6 +4,8 @@ import type { FleetSettings } from "./types";
 import {
   draftFromSettings,
   isTotp,
+  LOCATION,
+  MAX_BUDGET_EUR,
   normalizeDigits,
   normalizeTotp,
   parseBudget,
@@ -12,6 +14,7 @@ import {
   passwordError,
   passwordScore,
   sameSettings,
+  SERVER_TYPE,
   settingsFromDraft,
   usernameError,
 } from "./validation";
@@ -48,6 +51,16 @@ describe("budget cap", () => {
       expect(parseBudget(bad).ok, bad).toBe(false);
     }
   });
+  it("stops at the server maximum (MAX_BUDGET_EUR = 1000000)", () => {
+    expect(MAX_BUDGET_EUR).toBe(1_000_000);
+    expect(parseBudget("1000000")).toEqual({ ok: true, value: "1000000" });
+    expect(parseBudget("۱۰۰۰۰۰۰٫۰۰")).toEqual({ ok: true, value: "1000000.00" });
+    for (const bad of ["1000000.01", "1000001", "9999999.99"]) {
+      const r = parseBudget(bad);
+      expect(r.ok, bad).toBe(false);
+      if (!r.ok) expect(r.error).toContain("۱٬۰۰۰٬۰۰۰");
+    }
+  });
 });
 
 describe("integer fields", () => {
@@ -62,10 +75,26 @@ describe("integer fields", () => {
 
 describe("slug lists", () => {
   it("needs at least one valid Hetzner name and removes duplicates", () => {
-    expect(parseSlugList(["fsn1", "fsn1", "hel1"], "location")).toEqual({ ok: true, value: ["fsn1", "hel1"] });
-    expect(parseSlugList([], "location").ok).toBe(false);
-    expect(parseSlugList(["FSN1"], "location").ok).toBe(false);
-    expect(parseSlugList(["fsn 1"], "location").ok).toBe(false);
+    expect(parseSlugList(["fsn1", "fsn1", "hel1"], "location", LOCATION)).toEqual({ ok: true, value: ["fsn1", "hel1"] });
+    expect(parseSlugList([], "location", LOCATION).ok).toBe(false);
+    expect(parseSlugList(["FSN1"], "location", LOCATION).ok).toBe(false);
+    expect(parseSlugList(["fsn 1"], "location", LOCATION).ok).toBe(false);
+  });
+
+  it("uses the server's exact rule for each field", () => {
+    // fleet/settings_store.py: server types ^[a-z][a-z0-9-]{1,39}$, locations ^[a-z]{3}\d?$
+    for (const good of ["fsn1", "nbg1", "hel1", "ash", "hil", "sin"]) {
+      expect(parseSlugList([good], "location", LOCATION).ok, good).toBe(true);
+    }
+    for (const bad of ["fsn12", "fs1", "1fsn", "fsn-1", "eu-central"]) {
+      expect(parseSlugList([bad], "location", LOCATION).ok, bad).toBe(false);
+    }
+    for (const good of ["cpx22", "cax11", "ccx13", "cx22", "c".repeat(40)]) {
+      expect(parseSlugList([good], "نوع سرور", SERVER_TYPE).ok, good).toBe(true);
+    }
+    for (const bad of ["1cpx", "c", "CPX22", "cpx_22", "c".repeat(41)]) {
+      expect(parseSlugList([bad], "نوع سرور", SERVER_TYPE).ok, bad).toBe(false);
+    }
   });
 });
 
