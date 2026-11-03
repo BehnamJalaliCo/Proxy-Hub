@@ -35,19 +35,21 @@ wait_healthy() {
   return 1
 }
 
+# Called as "if deploy_commit ...", where bash ignores errexit: every step checks its own status,
+# so a failed build or pull (e.g. a registry 429) is a failed deploy, never a silent "ok".
 deploy_commit() {
   local commit="$1"
-  git -C "$CHECKOUT" checkout --quiet --detach "$commit"
-  if [ -f "$CHECKOUT/deploy/ensure_secrets.sh" ]; then bash "$CHECKOUT/deploy/ensure_secrets.sh"; fi
+  git -C "$CHECKOUT" checkout --quiet --detach "$commit" || return 1
+  if [ -f "$CHECKOUT/deploy/ensure_secrets.sh" ]; then bash "$CHECKOUT/deploy/ensure_secrets.sh" || return 1; fi
   export PROXYHUB_GIT_COMMIT="$commit"
-  compose build --quiet
-  compose up -d --remove-orphans
+  compose build --quiet || { log "compose build failed"; return 1; }
+  compose up -d --remove-orphans || { log "compose up failed"; return 1; }
   # Caddyfile is bind-mounted and Caddy's admin API is off: restart Caddy when the file changed.
   if [ -n "${PANEL_DOMAIN:-}" ]; then
     local caddy_hash
     caddy_hash="$(sha256sum "$CHECKOUT/deploy/Caddyfile" | cut -d" " -f1)"
     if [ "$caddy_hash" != "$(cat "$STATE/caddyfile_hash" 2>/dev/null || echo none)" ]; then
-      compose restart caddy
+      compose restart caddy || { log "caddy restart failed"; return 1; }
       echo "$caddy_hash" > "$STATE/caddyfile_hash"
     fi
   fi
