@@ -692,7 +692,8 @@ function ScheduleForm({ initial, onSaved }: { initial: TgSettings; onSaved: () =
                     <span className="text-xs font-semibold text-fg-muted">تا</span>
                     <TimeSelect value={w.end} onChange={(v) => update(w.key, { end: v })} label={`پایان بازه‌ی ${toFaDigits(i + 1)}`} invalid={Boolean(err)} />
                   </div>
-                  <div className="flex min-h-11 flex-1 flex-wrap items-center gap-1.5">
+                  {/* Phone: length and badge on their own line under the times; wider: between them and the button. */}
+                  <div className="order-last flex w-full flex-wrap items-center gap-1.5 sm:order-none sm:min-h-11 sm:w-auto sm:flex-1">
                     {errors.windows[i] === null ? <span className="text-sm font-semibold text-fg">{windowLengthText(w)}</span> : null}
                     {crossesMidnight(w) ? <Badge tone="info">از نیمه‌شب میگذرد</Badge> : null}
                   </div>
@@ -702,7 +703,7 @@ function ScheduleForm({ initial, onSaved }: { initial: TgSettings; onSaved: () =
                       setWindows((ws) => ws.filter((x) => x.key !== w.key));
                       setServerError(null);
                     }}
-                    className="grid size-11 place-items-center rounded-xl text-fg-faint hover:bg-danger-soft hover:text-danger"
+                    className="ms-auto grid size-11 place-items-center rounded-xl text-fg-faint hover:bg-danger-soft hover:text-danger sm:ms-0"
                     aria-label={`حذف بازه‌ی ${toFaDigits(i + 1)}`}
                     title="برداشتن این بازه"
                   >
