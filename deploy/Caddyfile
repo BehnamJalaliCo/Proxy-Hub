@@ -5,8 +5,8 @@
 {$PANEL_DOMAIN} {
 	encode zstd gzip
 
-	# Internal endpoints (metrics) are never public.
-	@internal path /internal/*
+	# Internal endpoints (metrics, health) are never public; the deployer uses 127.0.0.1:8000.
+	@internal path /internal/* /healthz /livez
 	respond @internal 404
 
 	reverse_proxy api:8000

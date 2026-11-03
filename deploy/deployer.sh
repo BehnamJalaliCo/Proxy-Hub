@@ -47,16 +47,20 @@ deploy_commit() {
 git -C "$CHECKOUT" fetch --quiet origin "$DEPLOY_BRANCH"
 target="$(git -C "$CHECKOUT" rev-parse "origin/$DEPLOY_BRANCH")"
 current="$(cat "$STATE/deployed_commit" 2>/dev/null || echo none)"
+# deploy.env changes (e.g. PANEL_DOMAIN) must also be applied, not only new commits.
+cfg_hash="$(sha256sum "$ETC/deploy.env" | cut -d" " -f1)"
+deployed_cfg="$(cat "$STATE/deployed_config_hash" 2>/dev/null || echo none)"
 failed="$(cat "$STATE/failed_commit" 2>/dev/null || echo none)"
 
 if [ "${FORCE:-0}" != 1 ]; then
-  [ "$target" = "$current" ] && exit 0
-  [ "$target" = "$failed" ] && exit 0   # do not retry a known-bad commit every 2 minutes
+  [ "$target" = "$current" ] && [ "$cfg_hash" = "$deployed_cfg" ] && exit 0
+  [ "$target" = "$failed" ] && [ "$cfg_hash" = "$deployed_cfg" ] && exit 0  # no retry of a known-bad commit
 fi
 
 log "deploying $target (current: $current)"
 if deploy_commit "$target"; then
   echo "$target" > "$STATE/deployed_commit"
+  echo "$cfg_hash" > "$STATE/deployed_config_hash"
   rm -f "$STATE/failed_commit"
   install -m 0755 "$CHECKOUT/deploy/deployer.sh" /usr/local/sbin/proxyhub-deploy
   install -m 0644 "$CHECKOUT/deploy/known_hosts.github" "$ETC/known_hosts"
