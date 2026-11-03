@@ -118,6 +118,7 @@ services:
     environment:
       PROXYHUB_AGENT_DOMAIN: ${AGENT_DOMAIN:-}  # written into each test node's user data
     healthcheck: {disable: true}
+    stop_grace_period: 30s  # loops finish their current step (an outbox send, a Hetzner call) on stop
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}

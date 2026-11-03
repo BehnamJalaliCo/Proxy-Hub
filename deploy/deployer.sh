@@ -78,6 +78,11 @@ deploy_commit() {
       || [ "$AGENT_DOMAIN" = "${PANEL_DOMAIN:-}" ]; then
       log "AGENT_DOMAIN must be a lower-case DNS name other than PANEL_DOMAIN"; return 1
     fi
+    # Without PANEL_DOMAIN Caddy (edge profile) does not run, so no node could ever register and a
+    # test node would only burn money until its boot timeout.
+    if [ -z "${PANEL_DOMAIN:-}" ]; then
+      log "AGENT_DOMAIN needs PANEL_DOMAIN (Caddy serves the agent site)"; return 1
+    fi
   fi
   compose build --quiet || { log "compose build failed"; return 1; }
   if [ -n "${AGENT_DOMAIN:-}" ]; then export_agent_ca || return 1; fi
