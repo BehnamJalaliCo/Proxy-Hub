@@ -70,4 +70,7 @@ markers = [
     "db: needs a real PostgreSQL (PROXYHUB_DATABASE_URL)",
     "redis: needs a real Redis (PROXYHUB_REDIS_URL)",
     "hetzner: talks to a real Hetzner account; runs only on the panel server",
+    "telegram: talks to a real Telegram test bot/channel; needs PROXYHUB_TELEGRAM_TEST_TOKEN_FILE",
+    "cloudflare: talks to a real Cloudflare account; needs PROXYHUB_CLOUDFLARE_TEST_TOKEN_FILE",
+    "globalping: real Globalping API measurements; needs PROXYHUB_GLOBALPING_TESTS=1",
 ]
