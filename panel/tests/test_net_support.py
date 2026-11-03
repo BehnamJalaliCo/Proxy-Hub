@@ -372,6 +372,8 @@ CH_TCP_RESULT_FAIL = {
     "ir1.node.check-host.net": [{"error": "Connection timed out"}],
     "ir2.node.check-host.net": [{"error": "Connection timed out"}],
 }
+# /check-tcp for a target that was checked a few times within the last minute (HTTP 200).
+CH_LIMIT_EXCEEDED = {"error": "limit_exceeded"}
 # While a node has not answered yet, check-host reports null for it.
 CH_TCP_RESULT_PENDING = {
     "ir1.node.check-host.net": None,
