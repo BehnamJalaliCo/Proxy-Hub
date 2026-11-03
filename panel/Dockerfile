@@ -1,6 +1,8 @@
 # Proxy-Hub panel image (api, worker, migrate). Tests run in the "test" target against real
 # PostgreSQL/Redis containers (deploy/docker-compose.test.yml); decision D10: no fakes.
-FROM python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f AS base
+# Pinned by digest; a registry mirror of the SAME digest may be passed as PYTHON_IMAGE.
+ARG PYTHON_IMAGE=python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f
+FROM ${PYTHON_IMAGE} AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/app/.venv PATH="/app/.venv/bin:$PATH"
 RUN pip install --no-cache-dir uv==0.11.32 \

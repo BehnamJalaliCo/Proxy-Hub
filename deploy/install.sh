@@ -66,8 +66,11 @@ if ! git ls-remote "$REPO_SSH" >/dev/null 2>&1; then
 fi
 
 if [ ! -d "$CHECKOUT/.git" ]; then
-  git clone --quiet "$REPO_SSH" "$CHECKOUT"
+  git clone --quiet --branch "$BRANCH" "$REPO_SSH" "$CHECKOUT"
 fi
+# Always install from the requested branch, also when the checkout already existed.
+git -C "$CHECKOUT" fetch --quiet origin "$BRANCH"
+git -C "$CHECKOUT" checkout --quiet --detach "origin/$BRANCH"
 
 install -m 0755 "$CHECKOUT/deploy/deployer.sh" /usr/local/sbin/proxyhub-deploy
 install -m 0644 "$CHECKOUT/deploy/systemd/proxyhub-deployer.service" /etc/systemd/system/
