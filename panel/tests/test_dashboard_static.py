@@ -69,6 +69,7 @@ async def test_spa_paths_get_index_with_strict_headers(client: AsyncClient, path
     csp = r.headers["content-security-policy"]
     assert "script-src 'self'" in csp and "frame-ancestors 'none'" in csp and "object-src 'none'" in csp
     assert "unsafe-eval" not in csp and "http:" not in csp and "https:" not in csp
+    assert "worker-src 'none'" in csp
     assert r.headers["cache-control"] == "no-cache"
     assert r.headers["x-frame-options"] == "DENY"
     assert r.headers["referrer-policy"] == "no-referrer"

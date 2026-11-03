@@ -50,7 +50,8 @@ CSP = "; ".join(
         "form-action 'self'",
         "frame-ancestors 'none'",
         "manifest-src 'self'",
-        "worker-src 'self' blob:",
+        # The dashboard starts no web/service workers; a script that tries is refused.
+        "worker-src 'none'",
     )
 )
 
