@@ -37,6 +37,25 @@ jobs:
       - run: uv run --frozen mypy proxyhub
       - run: uv run --frozen pytest -q
 
+  dashboard:
+    # Owner dashboard (dashboard/): exact lockfile install, lint, strict typecheck, unit tests, build.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.4"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
   deploy-files:
     runs-on: ubuntu-24.04
     steps:
