@@ -7,10 +7,14 @@ x-panel: &panel
   image: proxyhub/panel:${PROXYHUB_GIT_COMMIT:-dev}
   build:
     context: ../panel
+    # The owner dashboard sources: panel/Dockerfile builds them in its node stage (named context).
+    additional_contexts:
+      dashboard: ../dashboard
     target: runtime
     args:
       GIT_COMMIT: ${PROXYHUB_GIT_COMMIT:-dev}
       PYTHON_IMAGE: ${PROXYHUB_PYTHON_IMAGE:-python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f}
+      NODE_IMAGE: ${PROXYHUB_NODE_IMAGE:-node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da}
   secrets: [db_password, redis_password, master_key, agent_ca_key]
   restart: unless-stopped
   networks: [backend]
