@@ -2,8 +2,12 @@
 
 panel/Dockerfile builds it with node-image/build-agent.sh (pinned Go image, reproducible flags) and
 fails the build unless its sha256 equals ``AGENT_SHA256`` in node-image/versions.lock. The API
-checks again on every request and serves exactly the bytes it hashed: a binary that differs from
+checks again before serving and serves exactly the bytes it hashed: a binary that differs from
 the lock (or a missing lock) is never served. The node checks the same hash before installing.
+
+The route is public (a node has no certificate yet), so the verified bytes are kept in memory and
+hashed again only when the file (inode, size, mtime) or the pinned hash changes: a request costs a
+stat and a small file read, not a multi-megabyte hash.
 """
 
 from __future__ import annotations
@@ -34,22 +38,36 @@ class Artifact:
     version: str
 
 
+# (path, inode, size, mtime_ns, pinned sha256, version) -> the artifact verified for exactly that.
+_verified: dict[tuple[str, int, int, int, str, str], Artifact] = {}
+
+
 def _load(path: Path) -> Artifact:
     try:
         lock = read_versions_lock()
     except NodeImageError:
         raise ArtifactUnavailable("versions_lock_unavailable") from None
     try:
-        size = path.stat().st_size
-        if size > MAX_ARTIFACT_BYTES:
-            raise ArtifactUnavailable("artifact_too_large")
+        st = path.stat()
+    except OSError:
+        raise ArtifactUnavailable("artifact_missing") from None
+    if st.st_size > MAX_ARTIFACT_BYTES:
+        raise ArtifactUnavailable("artifact_too_large")
+    key = (str(path), st.st_ino, st.st_size, st.st_mtime_ns, lock["AGENT_SHA256"], lock["AGENT_VERSION"])
+    cached = _verified.get(key)
+    if cached is not None:
+        return cached
+    try:
         data = path.read_bytes()
     except OSError:
         raise ArtifactUnavailable("artifact_missing") from None
     digest = hashlib.sha256(data).hexdigest()
     if digest != lock["AGENT_SHA256"]:
         raise ArtifactUnavailable("artifact_hash_mismatch")
-    return Artifact(data=data, sha256=digest, version=lock["AGENT_VERSION"])
+    artifact = Artifact(data=data, sha256=digest, version=lock["AGENT_VERSION"])
+    _verified.clear()  # one binary at a time
+    _verified[key] = artifact
+    return artifact
 
 
 async def load_agent_artifact() -> Artifact:

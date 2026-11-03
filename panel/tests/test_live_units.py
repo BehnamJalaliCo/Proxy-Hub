@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import requests
@@ -120,6 +121,54 @@ async def test_artifact_route_refuses_a_missing_or_different_binary(
     r = await client.get(path, headers={PROXY_HEADER: secret})
     assert r.status_code == 503 and r.json() == {"error": "artifact_hash_mismatch"}
     assert b"ELF" not in r.content
+
+
+def test_verified_artifact_is_reused_until_the_file_or_the_pin_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The public route must not hash megabytes per request, yet never serve unverified bytes."""
+    import hashlib
+
+    from proxyhub.agent_api import artifacts
+    from proxyhub.nodes.image import REPO_NODE_IMAGE
+    from proxyhub.nodes.settings import get_live_settings
+
+    pinned = os.urandom(4096)
+    image = tmp_path / "node-image"
+    image.mkdir()
+    lock = (REPO_NODE_IMAGE / "versions.lock").read_text(encoding="ascii").splitlines()
+    sha = hashlib.sha256(pinned).hexdigest()
+    lock = [f"AGENT_SHA256={sha}" if line.startswith("AGENT_SHA256=") else line for line in lock]
+    (image / "versions.lock").write_text("\n".join(lock) + "\n", encoding="ascii")
+    monkeypatch.setenv("PROXYHUB_NODE_IMAGE_DIR", str(image))
+    get_live_settings.cache_clear()
+    binary = tmp_path / "proxyhub-agent"
+    binary.write_bytes(pinned)
+    os.utime(binary, ns=(1_000_000_000, 1_000_000_000))
+
+    try:
+        _check_artifact_reuse(artifacts, binary, pinned, sha)
+    finally:
+        get_live_settings.cache_clear()
+
+
+def _check_artifact_reuse(artifacts: Any, binary: Path, pinned: bytes, sha: str) -> None:
+    first = artifacts._load(binary)
+    assert first.sha256 == sha and first.data == pinned
+    assert artifacts._load(binary) is first  # served from memory, not hashed again
+
+    # Same size, other bytes, new mtime: verified again and refused.
+    binary.write_bytes(os.urandom(4096))
+    os.utime(binary, ns=(2_000_000_000, 2_000_000_000))
+    with pytest.raises(artifacts.ArtifactUnavailable) as info:
+        artifacts._load(binary)
+    assert info.value.code == "artifact_hash_mismatch"
+
+    # The pinned bytes again: accepted again (a new verification, not the old object).
+    binary.write_bytes(pinned)
+    os.utime(binary, ns=(3_000_000_000, 3_000_000_000))
+    again = artifacts._load(binary)
+    assert again.data == pinned and again is not first
 
 
 # --- operator CLI (python -m proxyhub.nodes), against the real database ------------------------------
