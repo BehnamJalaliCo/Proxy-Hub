@@ -64,10 +64,22 @@ check_sha256() {  # check_sha256 FILE EXPECTED
 export DEBIAN_FRONTEND=noninteractive
 
 echo "== packages"
-apt-get update -q
-apt-get install -y -q --no-install-recommends nftables curl ca-certificates
-apt-get purge -y -q openssh-server rsyslog || true
-apt-get autoremove -y -q
+# On first boot apt-daily / unattended-upgrades may hold the dpkg lock: wait for it (up to 10
+# minutes) instead of failing, and retry a failed index update a few times.
+APT=(apt-get -o DPkg::Lock::Timeout=600)
+updated=0
+for attempt in 1 2 3 4 5; do
+  if "${APT[@]}" update -q; then updated=1; break; fi
+  echo "apt-get update failed (attempt $attempt), retrying" >&2
+  sleep $((attempt * 10))
+done
+if [ "$updated" -ne 1 ]; then
+  echo "apt-get update kept failing: refusing to continue" >&2
+  exit 1
+fi
+"${APT[@]}" install -y -q --no-install-recommends nftables curl ca-certificates
+"${APT[@]}" purge -y -q openssh-server rsyslog || true
+"${APT[@]}" autoremove -y -q
 systemctl mask ssh.service ssh.socket >/dev/null 2>&1 || true
 
 WORK="$(mktemp -d)"

@@ -139,7 +139,8 @@ def test_host_hardening_files() -> None:
         assert line in sysctl
     provision = (NODE_IMAGE / "provision.sh").read_text()
     for snippet in (
-        "apt-get purge -y -q openssh-server rsyslog",
+        "purge -y -q openssh-server rsyslog",
+        "DPkg::Lock::Timeout=600",
         "systemctl mask ssh.service ssh.socket",
         'check_sha256 "$WORK/telemt.tar.gz" "$(lock TELEMT_TARBALL_SHA256)"',
         'check_sha256 "$WORK/x/telemt" "$(lock TELEMT_BINARY_SHA256)"',
