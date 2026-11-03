@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly Proxy-Hub restore test
+
+[Timer]
+# Sunday, after the daily backup (02:47 + up to 10 min), so the tested backup is fresh.
+OnCalendar=Sun *-*-* 04:17:00 UTC
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

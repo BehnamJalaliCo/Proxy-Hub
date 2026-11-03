@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Proxy-Hub database backup
+
+[Timer]
+OnCalendar=*-*-* 02:47:00 UTC
+RandomizedDelaySec=10min
+# A run missed while the server was off runs at the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,8 @@
+{{/* Telegram message to the owner (Persian; parse_mode HTML, so every value is HTML-escaped). */}}
+{{ define "proxyhub.telegram.message" -}}
+{{ if eq .Status "firing" }}<b>هشدار Proxy-Hub</b>{{ else }}<b>برطرف شد (Proxy-Hub)</b>{{ end }}
+{{ range .Alerts -}}
+{{ if eq .Status "firing" }}●{{ else }}○{{ end }} <b>{{ .Annotations.summary | html }}</b>
+{{ .Annotations.description | html }}
+{{ end -}}
+{{- end }}

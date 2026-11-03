@@ -3,7 +3,8 @@
 #   sudo bash deploy/install.sh <git-branch>
 # - creates /etc/proxy-hub (0700) with generated secrets (never printed),
 # - creates a read-only GitHub deploy key and prints ONLY its public half,
-# - clones the repo to /opt/proxy-hub and installs the GitOps deployer timer.
+# - clones the repo to /opt/proxy-hub and installs the GitOps deployer timer,
+# - installs "age" and the daily backup + weekly restore-test timers (M1.7).
 set -euo pipefail
 
 BRANCH="${1:-main}"
@@ -19,6 +20,14 @@ docker compose version >/dev/null || { echo "docker compose plugin is not instal
 
 install -d -m 0700 -o root -g root "$ETC" "$SECRETS"
 install -d -m 0755 -o root -g root "$STATE"
+install -d -m 0700 -o root -g root "$STATE/backups"   # encrypted backups (deploy/backup/backup.sh)
+install -d -m 0755 -o root -g root "$STATE/metrics"   # node-exporter textfile metrics (no secrets)
+
+# age encrypts backups; ensure_secrets.sh needs age-keygen for the backup key (Ubuntu package).
+if ! command -v age >/dev/null || ! command -v age-keygen >/dev/null; then
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends age
+fi
 
 bash "$(dirname "$0")/ensure_secrets.sh"
 
@@ -65,8 +74,12 @@ git -C "$CHECKOUT" checkout --quiet --detach "origin/$BRANCH"
 install -m 0755 "$CHECKOUT/deploy/deployer.sh" /usr/local/sbin/proxyhub-deploy
 install -m 0644 "$CHECKOUT/deploy/systemd/proxyhub-deployer.service" /etc/systemd/system/
 install -m 0644 "$CHECKOUT/deploy/systemd/proxyhub-deployer.timer" /etc/systemd/system/
+for unit in proxyhub-backup.service proxyhub-backup.timer proxyhub-restore-test.service proxyhub-restore-test.timer; do
+  install -m 0644 "$CHECKOUT/deploy/systemd/$unit" /etc/systemd/system/
+done
 systemctl daemon-reload
 systemctl enable --now proxyhub-deployer.timer
+systemctl enable --now proxyhub-backup.timer proxyhub-restore-test.timer
 
 echo "first deploy (this builds images; it can take a few minutes)..."
 FORCE=1 /usr/local/sbin/proxyhub-deploy

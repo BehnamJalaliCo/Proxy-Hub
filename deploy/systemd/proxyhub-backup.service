@@ -1,0 +1,18 @@
+[Unit]
+Description=Proxy-Hub encrypted database backup (pg_dump + age)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Runs the deployed checkout's script, so the backup logic always matches the running stack.
+ExecStart=/usr/bin/bash /opt/proxy-hub/deploy/backup/backup.sh
+TimeoutStartSec=1800
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectHome=read-only

@@ -1,7 +1,32 @@
-# Proxy-Hub panel: core stack (docs/10 section 3.2). Monitoring stack (Prometheus, Alertmanager,
-# Loki, Grafana) is added in M1.7. Images are pinned by digest (resolved 2026-11-03). Secrets are files under /etc/proxy-hub/secrets (root-only 0700
+# Proxy-Hub panel: core stack (docs/10 section 3.2) + monitoring (M1.7: Prometheus, Alertmanager,
+# Loki, Alloy, Grafana, node-exporter). Images are pinned by digest (resolved 2026-11-03). Secrets are files under /etc/proxy-hub/secrets (root-only 0700
 # directory) and are mounted read-only at /run/secrets; nothing secret is in env vars or the repo.
+# Nothing of the monitoring stack is public: only Grafana is published, on 127.0.0.1:3000.
 name: proxyhub
+
+# Log rotation for every container (the json-file default never rotates and can fill the disk).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+# Panel containers only: the io.proxyhub.logs label is copied into each log line, and Alloy ships
+# ONLY lines that carry it (deploy/monitoring/alloy/config.alloy). Nothing from nodes or users.
+x-panel-logging: &panel-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+    labels: "io.proxyhub.logs,com.docker.compose.service,com.docker.compose.project"
+
+# Hardening shared by the monitoring containers.
+x-monitoring: &monitoring
+  restart: unless-stopped
+  logging: *logging
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  networks: [monitoring]
 
 x-panel: &panel
   image: proxyhub/panel:${PROXYHUB_GIT_COMMIT:-dev}
@@ -18,6 +43,9 @@ x-panel: &panel
   secrets: [db_password, redis_password, master_key, agent_ca_key]
   restart: unless-stopped
   networks: [backend]
+  labels:
+    io.proxyhub.logs: panel
+  logging: *panel-logging
 
 services:
   postgres:
@@ -98,6 +126,156 @@ services:
     restart: unless-stopped
     networks: [backend]
 
+  # --- Monitoring (M1.7). Configs are baked into the pinned images by deploy/monitoring/*/Dockerfile,
+  # so the deployer's "compose build + up -d" recreates a service when its config changes.
+  prometheus:
+    <<: *monitoring
+    image: proxyhub/prometheus:local
+    build:
+      context: ./monitoring/prometheus
+      args:
+        BASE_IMAGE: ${PROXYHUB_PROMETHEUS_IMAGE:-prom/prometheus:v3.15.1@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2}
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=5GB
+      - --web.listen-address=:9090
+    volumes: [prometheus_data:/prometheus]
+    read_only: true
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks: [backend, monitoring]  # backend: scrape api:8000/internal/metrics
+
+  alertmanager:
+    <<: *monitoring
+    image: proxyhub/alertmanager:local
+    build:
+      context: ./monitoring/alertmanager
+      args:
+        BASE_IMAGE: ${PROXYHUB_ALERTMANAGER_IMAGE:-prom/alertmanager:v0.34.2@sha256:39d8bb3966c694a124428a3a88fbcffd40bd069129ecd47c059f8a3f17c55f3b}
+    # Optional secrets, created EMPTY by ensure_secrets.sh: empty = that receiver is a null receiver.
+    secrets: [alert_bot_token, alert_chat_id, healthchecks_watchdog_url]
+    volumes: [alertmanager_data:/alertmanager]
+    tmpfs: ["/tmp:size=4m,mode=1777"]  # rendered config + trimmed secret copies live in memory only
+    read_only: true
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9093/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  loki:
+    <<: *monitoring
+    image: proxyhub/loki:local
+    build:
+      context: ./monitoring/loki
+      args:
+        BASE_IMAGE: ${PROXYHUB_LOKI_IMAGE:-grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28}
+    volumes: [loki_data:/loki]
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    mem_limit: 768m
+
+  alloy:
+    <<: *monitoring
+    image: proxyhub/alloy:local
+    build:
+      context: ./monitoring/alloy
+      args:
+        BASE_IMAGE: ${PROXYHUB_ALLOY_IMAGE:-grafana/alloy:v1.21.3@sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4}
+    # Read-only json-file logs; no Docker socket. Root in the container only to read root-owned
+    # log files (all capabilities dropped). Lines of non-panel containers are dropped unshipped.
+    # Storage is /alloy-data, not the image's /var/lib/alloy (0770 uid 473: root without caps
+    # cannot enter it).
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/alloy-data
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --disable-reporting
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - alloy_data:/alloy-data
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    mem_limit: 256m
+    depends_on: [loki]
+
+  grafana:
+    <<: *monitoring
+    image: proxyhub/grafana:local
+    build:
+      context: ./monitoring/grafana
+      args:
+        BASE_IMAGE: ${PROXYHUB_GRAFANA_IMAGE:-grafana/grafana:13.2.5@sha256:9f7aa1e1e3246aade5792d35a738049f7f32f89cd51d1956cf426a4e86268a84}
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_SERVER_ROOT_URL: http://127.0.0.1:3000/
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_ANALYTICS_FEEDBACK_LINKS_ENABLED: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_SNAPSHOTS_EXTERNAL_ENABLED: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_LOG_MODE: console
+      GF_LOG_LEVEL: warn
+    secrets: [grafana_admin_password]
+    volumes: [grafana_data:/var/lib/grafana]
+    ports: ["127.0.0.1:3000:3000"]  # loopback only (SSH tunnel); never public
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    depends_on: [prometheus, loki]
+
+  node-exporter:
+    <<: *monitoring
+    image: ${PROXYHUB_NODE_EXPORTER_IMAGE:-prom/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0}
+    # Host CPU/memory/disk via the read-only host root. Network collectors are off on purpose: in a
+    # container they would only see the container's own interface. textfile = backup/restore status.
+    command:
+      - --path.rootfs=/host
+      # The HOST's /proc and /sys (inside the recursive read-only bind of /), not the container's own:
+      # the filesystem collector reads <procfs>/1/mountinfo, so with the container's procfs it would
+      # list the container's mounts (/etc/hosts, ...) instead of the host's. This replaces "pid: host".
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --collector.disable-defaults
+      - --collector.cpu
+      - --collector.diskstats
+      - --collector.filesystem
+      - --collector.filefd
+      - --collector.loadavg
+      - --collector.meminfo
+      - --collector.pressure
+      - --collector.stat
+      - --collector.time
+      - --collector.uname
+      - --collector.vmstat
+      - --collector.textfile
+      - --collector.textfile.directory=/host/var/lib/proxy-hub/metrics
+    # No "pid: host": --path.procfs above gives the host's view without joining its PID namespace.
+    volumes: ["/:/host:ro,rslave"]
+    read_only: true
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9100/metrics"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
 secrets:
   db_password:
     file: /etc/proxy-hub/secrets/db_password
@@ -107,11 +285,26 @@ secrets:
     file: /etc/proxy-hub/secrets/master_key
   agent_ca_key:
     file: /etc/proxy-hub/secrets/agent_ca_key
+  grafana_admin_password:
+    file: /etc/proxy-hub/secrets/grafana_admin_password
+  # Optional (created empty by ensure_secrets.sh; empty = off). See deploy/monitoring/README.md.
+  alert_bot_token:
+    file: /etc/proxy-hub/secrets/alert_bot_token
+  alert_chat_id:
+    file: /etc/proxy-hub/secrets/alert_chat_id
+  healthchecks_watchdog_url:
+    file: /etc/proxy-hub/secrets/healthchecks_watchdog_url
 
 volumes:
   pgdata:
   caddy_data:
   caddy_config:
+  prometheus_data:
+  alertmanager_data:
+  loki_data:
+  alloy_data:
+  grafana_data:
 
 networks:
   backend:
+  monitoring:
