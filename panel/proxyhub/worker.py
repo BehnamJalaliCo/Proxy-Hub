@@ -12,6 +12,11 @@ from proxyhub.reconcilers.base import Heartbeat, Reconciler
 from proxyhub.reconcilers.fleet import FleetReconciler
 from proxyhub.reconcilers.nodes import NodesReconciler
 from proxyhub.reconcilers.pricing import PricingReconciler
+from proxyhub.reconcilers.telegram import (
+    ApiWatchdogReconciler,
+    TelegramOutboxReconciler,
+    TelegramUpdatesReconciler,
+)
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +30,9 @@ def reconcilers() -> list[Reconciler]:
         PricingReconciler(),
         FleetReconciler(),
         NodesReconciler(),  # owner-requested test nodes only (proxyhub.nodes.executor)
+        TelegramUpdatesReconciler(),
+        TelegramOutboxReconciler(),
+        ApiWatchdogReconciler(),
     ]
 
 

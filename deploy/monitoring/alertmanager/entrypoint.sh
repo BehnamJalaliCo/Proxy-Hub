@@ -1,10 +1,13 @@
 #!/bin/sh
 # Alertmanager entrypoint (busybox sh): renders the config at container start, then runs Alertmanager.
 #
-# Receivers depend on optional secret files (created EMPTY by deploy/ensure_secrets.sh; empty = off):
-#   alert_bot_token + alert_chat_id  -> "owner": Telegram message to the owner's private chat.
-#                                       If either is empty or malformed: a null receiver (alerts are
-#                                       still visible in Alertmanager/Grafana, just not sent).
+# Receiver "owner" always POSTs to the panel API (http://api:8000/internal/alerts/alertmanager, the
+# backend network; Caddy never exposes /internal/* publicly). The panel sends the Persian message to
+# the owner's private chat with the bot the owner entered in the dashboard (panel/proxyhub/telegram).
+# Optional secret files (created EMPTY by deploy/ensure_secrets.sh; empty = off) add more receivers:
+#   alert_bot_token + alert_chat_id  -> "owner" also sends a Telegram message DIRECTLY (a fallback
+#                                       for when the panel API itself is down). If either is empty or
+#                                       malformed, only the panel webhook is used.
 #   healthchecks_watchdog_url        -> "watchdog": the always-firing Watchdog alert is POSTed there
 #                                       every 5 minutes (external dead man's switch). Empty: null.
 # Secret values are never printed. They are copied (trimmed) to /tmp, a tmpfs, and Alertmanager reads
@@ -69,6 +72,10 @@ route:
       repeat_interval: 5m
 receivers:
   - name: owner
+    webhook_configs:
+      - url: http://api:8000/internal/alerts/alertmanager
+        send_resolved: true
+        timeout: 30s
 YAML
   if [ "$telegram" = on ]; then
     chat_id="$(cat "$RUNDIR/secrets/alert_chat_id")"
@@ -99,7 +106,7 @@ for name in alert_bot_token healthchecks_watchdog_url; do
     exit 1
   fi
 done
-echo "alertmanager-entrypoint: telegram receiver: $telegram; external watchdog: $watchdog"
+echo "alertmanager-entrypoint: panel webhook: on; telegram receiver: $telegram; external watchdog: $watchdog"
 
 if [ "${PROXYHUB_RENDER_ONLY:-0}" = 1 ]; then
   exec /bin/amtool check-config "$CONFIG"
