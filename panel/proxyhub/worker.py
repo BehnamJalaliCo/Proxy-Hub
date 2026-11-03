@@ -11,6 +11,11 @@ from proxyhub.reconcilers.account_guard import AccountGuardReconciler
 from proxyhub.reconcilers.base import Heartbeat, Reconciler
 from proxyhub.reconcilers.fleet import FleetReconciler
 from proxyhub.reconcilers.pricing import PricingReconciler
+from proxyhub.reconcilers.telegram import (
+    ApiWatchdogReconciler,
+    TelegramOutboxReconciler,
+    TelegramUpdatesReconciler,
+)
 
 log = logging.getLogger(__name__)
 
@@ -18,7 +23,15 @@ log = logging.getLogger(__name__)
 def reconcilers() -> list[Reconciler]:
     # budget, sponsor, node_health, ... are added milestone by milestone (docs/10, docs/11).
     # The fleet loop is dry-run only (proxyhub.reconcilers.fleet.FLEET_LIVE_ENABLED).
-    return [Heartbeat(), AccountGuardReconciler(), PricingReconciler(), FleetReconciler()]
+    return [
+        Heartbeat(),
+        AccountGuardReconciler(),
+        PricingReconciler(),
+        FleetReconciler(),
+        TelegramUpdatesReconciler(),
+        TelegramOutboxReconciler(),
+        ApiWatchdogReconciler(),
+    ]
 
 
 async def run() -> None:
