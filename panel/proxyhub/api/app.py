@@ -32,6 +32,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Proxy-Hub", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
 
 
+@app.get("/livez", include_in_schema=False)
+async def livez() -> dict[str, str]:
+    """Process liveness only (Docker healthcheck). Deploy health is /healthz."""
+    return {"status": "alive"}
+
+
 @app.get("/healthz")
 async def healthz(response: Response) -> dict[str, Any]:
     """Liveness for the deployer: DB, Redis and worker heartbeat must all be fine."""

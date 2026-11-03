@@ -1,0 +1,26 @@
+{
+	admin off
+}
+
+{$PANEL_DOMAIN} {
+	encode zstd gzip
+
+	# Internal endpoints (metrics) are never public.
+	@internal path /internal/*
+	respond @internal 404
+
+	reverse_proxy api:8000
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# No access log (CLAUDE.md rule 7 spirit: we keep no visitor IPs anywhere).
+	log {
+		output discard
+	}
+}

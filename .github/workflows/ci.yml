@@ -1,0 +1,55 @@
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+
+jobs:
+  panel:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_USER: proxyhub
+          POSTGRES_PASSWORD: throwaway-ci-db
+          POSTGRES_DB: proxyhub
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U proxyhub -d proxyhub"
+          --health-interval 2s --health-retries 30
+      redis:
+        image: redis:7-bookworm
+        ports: ["6379:6379"]
+    defaults:
+      run:
+        working-directory: panel
+    env:
+      PROXYHUB_DATABASE_URL: postgresql+asyncpg://proxyhub:throwaway-ci-db@127.0.0.1:5432/proxyhub
+      PROXYHUB_REDIS_URL: redis://127.0.0.1:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install uv==0.11.32
+      - run: uv sync --frozen
+      - run: uv run --frozen ruff check proxyhub tests
+      - run: uv run --frozen ruff format --check proxyhub tests
+      - run: uv run --frozen mypy proxyhub
+      - run: uv run --frozen pytest -q
+
+  deploy-files:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck deploy/*.sh ops/scripts/*.sh
+      - run: docker compose -p proxyhub -f deploy/docker-compose.yml config -q
+      - run: docker compose -f deploy/docker-compose.test.yml config -q
+      - run: docker build --target runtime panel
+
+  secrets:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 detect --source /repo --no-banner --redact

@@ -1,0 +1,96 @@
+# Proxy-Hub panel: core stack (docs/10 section 3.2). Monitoring stack (Prometheus, Alertmanager,
+# Loki, Grafana) is added in M1.7. Secrets are files under /etc/proxy-hub/secrets (root-only 0700
+# directory) and are mounted read-only at /run/secrets; nothing secret is in env vars or the repo.
+name: proxyhub
+
+x-panel: &panel
+  image: proxyhub/panel:${PROXYHUB_GIT_COMMIT:-dev}
+  build:
+    context: ../panel
+    target: runtime
+    args:
+      GIT_COMMIT: ${PROXYHUB_GIT_COMMIT:-dev}
+  secrets: [db_password, redis_password]
+  restart: unless-stopped
+  networks: [backend]
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: proxyhub
+      POSTGRES_DB: proxyhub
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proxyhub -d proxyhub"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    networks: [backend]
+
+  redis:
+    image: redis:7-bookworm
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$(cat /run/secrets/redis_password)\" --save '' --appendonly no"]
+    secrets: [redis_password]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$(cat /run/secrets/redis_password)\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    networks: [backend]
+
+  migrate:
+    <<: *panel
+    command: ["python", "-m", "proxyhub", "migrate"]
+    restart: "no"
+    healthcheck: {disable: true}
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    <<: *panel
+    command: ["python", "-m", "proxyhub", "api"]
+    ports: ["127.0.0.1:8000:8000"]  # loopback only: deployer health check. Public traffic goes via caddy.
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  worker:
+    <<: *panel
+    command: ["python", "-m", "proxyhub", "worker"]
+    healthcheck: {disable: true}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
+  caddy:
+    profiles: ["edge"]  # enabled by the deployer once PANEL_DOMAIN is set in /etc/proxy-hub/deploy.env
+    image: caddy:2-alpine
+    environment:
+      PANEL_DOMAIN: ${PANEL_DOMAIN:-}  # the deployer enables this profile only when the domain is set
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api]
+    restart: unless-stopped
+    networks: [backend]
+
+secrets:
+  db_password:
+    file: /etc/proxy-hub/secrets/db_password
+  redis_password:
+    file: /etc/proxy-hub/secrets/redis_password
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+
+networks:
+  backend:
