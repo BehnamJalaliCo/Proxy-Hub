@@ -340,6 +340,7 @@ def upgrade() -> None:
         sa.Column("edits", sa.Integer(), server_default="0", nullable=False),
         sa.Column("edit_failures", sa.Integer(), server_default="0", nullable=False),
         sa.Column("edit_retry_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("shown_sha256", sa.String(length=64), nullable=True),
         sa.CheckConstraint("edits >= 0 AND edit_failures >= 0", name=op.f("ck_posts_edit_counts")),
         sa.CheckConstraint("plan_slot >= 0", name=op.f("ck_posts_plan_slot")),
         sa.CheckConstraint("role IN ('main', 'test')", name=op.f("ck_posts_role")),

@@ -110,6 +110,9 @@ class Post(Base):
     edits: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     edit_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     edit_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # sha256 of the text of the post's last edit that finished without an error, i.e. what the
+    # channel shows ("message is not modified" also counts; channel_posts.text_sha256 is not set then).
+    shown_sha256: Mapped[str | None] = mapped_column(String(64))
 
 
 class PostLink(Base):

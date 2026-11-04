@@ -277,6 +277,33 @@ async def deliver(engine: AsyncEngine, job_id: int, *, message_id: int, at: date
         await outbox.record_success(conn, job, target, message_id if job.kind == "send_post" else None, at)
 
 
+async def edit_not_modified(engine: AsyncEngine, job_id: int, at: datetime | None = None) -> None:
+    """The edit's first try reached Telegram but its answer was lost; the retry gets "message is
+    not modified" (Telegram's real 400 description), recorded by the real outbox code."""
+    from proxyhub.telegram.client import BadRequest
+
+    at = at or datetime.now(UTC)
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT kind, payload, attempts FROM outbox WHERE id = :i"), {"i": job_id}
+            )
+        ).one()
+        assert row.kind == "edit_post"
+        cp = (
+            await conn.execute(
+                text("SELECT chat_id, message_id FROM channel_posts WHERE id = :i"),
+                {"i": row.payload["post_id"]},
+            )
+        ).one()
+        job = outbox.Job(
+            id=job_id, kind=row.kind, payload=dict(row.payload), attempts=row.attempts, last_error=None
+        )
+        target = outbox.Target(chat_id=cp.chat_id, post_id=row.payload["post_id"], message_id=cp.message_id)
+        exc = BadRequest("editMessageText", 400, "Bad Request: message is not modified")
+        assert await outbox.record_failure(conn, job, target, exc, at) == "sent"
+
+
 async def fail_job(engine: AsyncEngine, job_id: int, reason: str = "bad_request: test") -> None:
     async with engine.begin() as conn:
         await outbox.finish_failed(conn, job_id, datetime.now(UTC), reason)

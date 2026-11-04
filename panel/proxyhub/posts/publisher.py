@@ -13,11 +13,11 @@ owner hears it at most once a day (not while the fleet's kill switch is on: noth
 rendered again from what it carries: a link the provider now REPORTS expired/full/burned (or whose
 own expiry passed) gets its status mark and loses its link; a live link takes its provider's current
 URL, so a new active domain (proxyhub.cloudflare.rotation) or a node's slot name replaces the old
-host. When the text differs from the one in the channel (``channel_posts.text_sha256``) an
-``edit_post`` job is queued, through the poster that sent the post. Bounds: one edit job per post at
-a time, :data:`EDIT_MIN_GAP` between two edits of a post, :data:`MAX_EDITS_PER_RUN` per step and
-:data:`MAX_PENDING_EDITS` waiting at once; the outbox paces every message per channel (3 s, 429). A
-failed edit is retried with backoff and given up after
+host. When the text differs from the one the channel shows (the last edit that finished without an
+error, else ``channel_posts.text_sha256``) an ``edit_post`` job is queued, through the poster that
+sent the post. Bounds: one edit job per post at a time, :data:`EDIT_MIN_GAP` between two edits of a
+post, :data:`MAX_EDITS_PER_RUN` per step and :data:`MAX_PENDING_EDITS` waiting at once; the outbox
+paces every message per channel (3 s, 429). A failed edit is retried with backoff and given up after
 :data:`MAX_EDIT_FAILURES` (owner alerted). A link's status in a post never goes back to active, so
 only a REPORTED status (or the link's own expiry) ends a link in a post.
 
@@ -316,6 +316,13 @@ class _Sent:
     edit_retry_at: datetime | None
     channel_post_id: int
     live_sha: str
+    shown_sha: str | None
+
+    @property
+    def showing(self) -> str:
+        """sha256 of the text the channel shows: the last edit that finished without an error
+        (also when Telegram answered "message is not modified"), else what the outbox recorded."""
+        return self.shown_sha or self.live_sha
 
 
 def edit_backoff(failures: int) -> timedelta:
@@ -337,6 +344,7 @@ async def _sent_posts(db: AsyncConnection, since: datetime) -> list[_Sent]:
                 Post.last_edit_at,
                 Post.edit_failures,
                 Post.edit_retry_at,
+                Post.shown_sha256,
                 ChannelPost.id.label("cp_id"),
                 ChannelPost.text_sha256,
             )
@@ -359,6 +367,7 @@ async def _sent_posts(db: AsyncConnection, since: datetime) -> list[_Sent]:
             edit_retry_at=r.edit_retry_at,
             channel_post_id=int(r.cp_id),
             live_sha=r.text_sha256,
+            shown_sha=r.shown_sha256,
         )
         for r in rows
     ]
@@ -370,19 +379,30 @@ async def _settle(db: AsyncConnection, post: _Sent, now: datetime) -> bool:
         return False
     job = (
         await db.execute(
-            select(Outbox.done_at, Outbox.last_error).where(Outbox.id == post.last_edit_outbox_id)
+            select(Outbox.done_at, Outbox.last_error, Outbox.payload).where(
+                Outbox.id == post.last_edit_outbox_id
+            )
         )
     ).first()
     if job is not None and job.done_at is None:
         return True
     failed = job is not None and job.last_error is not None
+    if job is not None and not failed:  # Telegram shows this text now (sent, or "not modified")
+        text = job.payload.get("text") if isinstance(job.payload, dict) else None
+        if isinstance(text, str):
+            post.shown_sha = tg_store.text_sha256(text)
     post.edit_failures = post.edit_failures + 1 if failed else 0
     post.edit_retry_at = now + edit_backoff(post.edit_failures) if failed else None
     post.last_edit_outbox_id = None
     await db.execute(
         update(Post)
         .where(Post.id == post.id)
-        .values(last_edit_outbox_id=None, edit_failures=post.edit_failures, edit_retry_at=post.edit_retry_at)
+        .values(
+            last_edit_outbox_id=None,
+            edit_failures=post.edit_failures,
+            edit_retry_at=post.edit_retry_at,
+            shown_sha256=post.shown_sha,
+        )
     )
     if failed and post.edit_failures == MAX_EDIT_FAILURES:
         await tg_store.enqueue_owner_alert(db, EDITS_GIVEN_UP_FA.format(post_id=post.id))
@@ -548,7 +568,7 @@ async def refresh_posts(
                 .where(and_(PostLink.id == c.id, PostLink.status == "active"))
                 .values(status=new_status, status_at=now)
             )
-        if tg_store.text_sha256(text) == post.live_sha:
+        if tg_store.text_sha256(text) == post.showing:
             continue
         job = await poster.queue_edit(db, channel_post_id=post.channel_post_id, text_html=text)
         await db.execute(

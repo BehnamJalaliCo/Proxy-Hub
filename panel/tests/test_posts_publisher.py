@@ -20,6 +20,7 @@ from test_posts_support import (
     PROVIDERS,
     clean_posts_tables,
     deliver,
+    edit_not_modified,
     fail_job,
     failing_provider,
     fleet_kill_switch,
@@ -485,6 +486,27 @@ async def test_no_edit_without_any_provider(engine: AsyncEngine, vault: Vault) -
     for minutes in (1, 60, 600):  # no provider registered: no picture at all, nothing changes
         assert await refresh(engine, now + timedelta(minutes=minutes), []) == 0
     assert {v for v in (await carried_links(engine, post_id)).values()} == {("active", None)}
+
+
+async def test_an_edit_retried_after_it_reached_telegram_is_not_queued_again(
+    engine: AsyncEngine, vault: Vault
+) -> None:
+    nodes = await ready_fleet(engine, 2)
+    await setup_telegram(engine, vault)
+    now = slot_time(2)
+    post_id, _ = await posted(engine, vault, now)
+    await set_node(engine, nodes[0], state="burned")
+    t = now + timedelta(minutes=1)
+    assert await refresh(engine, t) == 1
+    [edit] = await jobs(engine, "edit_post")
+    await edit_not_modified(engine, edit.id, t + timedelta(seconds=10))
+    for i in range(1, 7):  # every round after the gap: the channel already shows that text
+        assert await refresh(engine, t + i * (publisher.EDIT_MIN_GAP + timedelta(minutes=1))) == 0
+    assert len(await jobs(engine, "edit_post")) == 1
+    [p] = await rows(engine, "SELECT shown_sha256, edit_failures FROM posts WHERE id = :p", p=post_id)
+    assert p.shown_sha256 == store.text_sha256(edit.payload["text"]) and p.edit_failures == 0
+    await set_node(engine, nodes[1], state="burned")  # a real change is still edited
+    assert await refresh(engine, t + timedelta(hours=3)) == 1
 
 
 async def test_everything_dead_gets_the_closing_line(engine: AsyncEngine, vault: Vault) -> None:
