@@ -71,7 +71,7 @@ async def preview(db: AsyncConnection, now: datetime, h: links.Harvest) -> dict[
     cfg = await settings.load(db)
     channels = await tg_store.channels(db)
     tag = publisher.channel_tag_for(channels)
-    chosen = await publisher.choose_links(db, h, now, cfg)
+    chosen = await publisher.choose_links(db, h, now, cfg, cfg.target_role)
     item, recycled = await content.next_item(db, now, cfg.recycle_after_days)
     rendered, chosen = publisher.fit(publisher.content_for(item), chosen, tag, cfg.texts())
     where = await publisher.target(db, cfg)

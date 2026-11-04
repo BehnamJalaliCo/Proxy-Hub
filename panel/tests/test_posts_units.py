@@ -350,6 +350,20 @@ def test_selection_spreads_over_slots_turns_with_each_post_and_prefers_the_newes
     assert links.spread([], 3) == [] and links.spread(many, 0) == []
 
 
+def test_the_main_channel_never_gets_a_test_nodes_link() -> None:
+    # The fleet gives each of its nodes a slot; a test node has none (proxyhub/nodes/service.py).
+    now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+    slot = link(kind="mtproto", key="mtproto:slot", slot=3)
+    test_mt = link(kind="mtproto", key="mtproto:test", slot=None, label="پروکسی آزمایشی")
+    test_re = link(kind="reality", key="reality:9", slot=None, url="vless://a@b:1", label="ریلیتی",
+                   expires_at=now + timedelta(hours=20))  # fmt: skip
+    h = links.Harvest(links={x.key: x for x in (slot, test_mt, test_re)})
+    main = links.for_new_post(h, now, max_mtproto=12, max_reality=3, slots_only=True)
+    assert [x.key for x in main] == ["mtproto:slot"]
+    test = links.for_new_post(h, now, max_mtproto=12, max_reality=3)
+    assert {x.key for x in test} == {"mtproto:slot", "mtproto:test", "reality:9"}
+
+
 def test_selection_orders_by_slot_caps_and_skips_ending_configs() -> None:
     now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
     h = links.Harvest(

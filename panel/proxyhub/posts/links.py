@@ -152,13 +152,30 @@ def spread(items: Sequence[ProxyLink], limit: int, rotate: int = 0) -> list[Prox
 
 
 def for_new_post(
-    h: Harvest, now: datetime, *, max_mtproto: int, max_reality: int, rotate: int = 0
+    h: Harvest,
+    now: datetime,
+    *,
+    max_mtproto: int,
+    max_reality: int,
+    rotate: int = 0,
+    slots_only: bool = False,
 ) -> list[ProxyLink]:
     """Active links for a new post (see the module doc): MTProto links, then Reality configs that
-    still have at least :data:`MIN_REMAINING` left. ``rotate``: how many posts went before."""
-    mtproto = spread(h.active("mtproto"), max_mtproto, rotate)
+    still have at least :data:`MIN_REMAINING` left. ``rotate``: how many posts went before.
+    ``slots_only`` (MAIN channel): only links of the fleet's slots 1-9. A link without a slot comes
+    from a test node (the fleet gives every node of its own a slot), and a test node's proxy is
+    never published in the main channel."""
+
+    def ours(x: ProxyLink) -> bool:
+        return x.slot is not None or not slots_only
+
+    mtproto = spread([x for x in h.active("mtproto") if ours(x)], max_mtproto, rotate)
     reality = spread(
-        [x for x in h.active("reality") if x.expires_at is None or x.expires_at - now >= MIN_REMAINING],
+        [
+            x
+            for x in h.active("reality")
+            if ours(x) and (x.expires_at is None or x.expires_at - now >= MIN_REMAINING)
+        ],
         max_reality,
         rotate,
     )
