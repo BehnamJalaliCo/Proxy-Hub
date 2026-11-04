@@ -152,6 +152,19 @@ groups:
           summary: "آزمون بازگردانی اصلاً اجرا نشده است"
           description: "۸ روز است که هیچ نشانه‌ای از آزمون بازگردانی هفتگی نیست."
 
+  - name: proxyhub-deploy
+    rules:
+      - alert: DeployRefused
+        expr: proxyhub_deploy_refused == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "استقرار رد شد: کدی بیرون از PR روی main آمد"
+          description: >-
+            سرور تازه‌ترین commit شاخه‌ی main را اجرا نکرد، چون ادغام امضاشده‌ی یک PR در گیت‌هاب نبود.
+            ممکن است کسی مستقیم روی main کد فرستاده باشد. نسخه‌ی قبلی همچنان در حال کار است.
+            جزئیات: journalctl -u proxyhub-deployer.service
+
   - name: proxyhub-watchdog
     rules:
       # Always firing on purpose. Alertmanager forwards it every few minutes to healthchecks.io

@@ -246,3 +246,26 @@ tests:
             exp_annotations:
               summary: "نگهبان: زنجیره‌ی پایش زنده است"
               description: "این هشدار همیشه روشن است و فقط به نگهبان بیرونی میرود، نه به تلگرام."
+
+  # The deploy guard refused the newest commit of main: alert at once; cleared by a good deploy.
+  - interval: 1m
+    input_series:
+      - series: 'proxyhub_deploy_refused{job="node", instance="node-exporter:9100"}'
+        values: "0x5 1x5 0x5"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: DeployRefused
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: DeployRefused
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node
+              instance: "node-exporter:9100"
+            exp_annotations:
+              summary: "استقرار رد شد: کدی بیرون از PR روی main آمد"
+              description: "سرور تازه‌ترین commit شاخه‌ی main را اجرا نکرد، چون ادغام امضاشده‌ی یک PR در گیت‌هاب نبود. ممکن است کسی مستقیم روی main کد فرستاده باشد. نسخه‌ی قبلی همچنان در حال کار است. جزئیات: journalctl -u proxyhub-deployer.service"
+      - eval_time: 14m
+        alertname: DeployRefused
+        exp_alerts: []

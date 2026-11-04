@@ -99,6 +99,23 @@ deploy_commit() {
   wait_healthy
 }
 
+# node-exporter textfile: 1 while the newest commit of main was refused by the merge guard.
+write_guard_metric() {
+  local dir="${PROXYHUB_METRICS_DIR:-/var/lib/proxy-hub/metrics}" tmp
+  [ -d "$dir" ] || return 0
+  tmp="$(mktemp "$dir/.proxyhub_deploy.prom.XXXXXX")"
+  cat >"$tmp" <<PROM
+# HELP proxyhub_deploy_refused 1 if the newest commit was refused: not a GitHub-signed PR merge.
+# TYPE proxyhub_deploy_refused gauge
+proxyhub_deploy_refused $1
+# HELP proxyhub_deploy_guard_timestamp_seconds When the merge guard last ran.
+# TYPE proxyhub_deploy_guard_timestamp_seconds gauge
+proxyhub_deploy_guard_timestamp_seconds $(date +%s)
+PROM
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$dir/proxyhub_deploy.prom"
+}
+
 git -C "$CHECKOUT" fetch --quiet origin "$DEPLOY_BRANCH"
 target="$(git -C "$CHECKOUT" rev-parse "origin/$DEPLOY_BRANCH")"
 current="$(cat "$STATE/deployed_commit" 2>/dev/null || echo none)"
@@ -112,12 +129,28 @@ if [ "${FORCE:-0}" != 1 ]; then
   [ "$target" = "$failed" ] && [ "$cfg_hash" = "$deployed_cfg" ] && exit 0  # no retry of a known-bad commit
 fi
 
+# Protected main without GitHub Pro (D31/D36): from main, only pull-request merges made and signed
+# by GitHub are deployed (deploy/verify_main.sh, installed copy from the last good deploy). A commit
+# pushed straight to main is refused, recorded as failed (no retry) and raised as an alert.
+if [ "$DEPLOY_BRANCH" = main ] || [ "${REQUIRE_GITHUB_MERGE:-0}" = 1 ]; then
+  guard=/usr/local/sbin/proxyhub-verify-main
+  if [ -x "$guard" ] && "$guard" "$CHECKOUT" "$current" "$target" "$ETC/github-web-flow.gpg"; then
+    write_guard_metric 0
+  else
+    echo "$target" > "$STATE/failed_commit"
+    write_guard_metric 1
+    log "REFUSED: $target is not a GitHub-signed pull-request merge on $DEPLOY_BRANCH; nothing deployed"
+    exit 1
+  fi
+fi
+
 log "deploying $target (current: $current)"
 if deploy_commit "$target"; then
   echo "$target" > "$STATE/deployed_commit"
   echo "$cfg_hash" > "$STATE/deployed_config_hash"
   rm -f "$STATE/failed_commit"
   install -m 0755 "$CHECKOUT/deploy/deployer.sh" /usr/local/sbin/proxyhub-deploy
+  install -m 0755 "$CHECKOUT/deploy/verify_main.sh" /usr/local/sbin/proxyhub-verify-main
   install -m 0644 "$CHECKOUT/deploy/known_hosts.github" "$ETC/known_hosts"
   log "ok: $target is healthy"
 else
