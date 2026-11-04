@@ -9,7 +9,16 @@ from proxyhub.config import get_config
 
 @lru_cache(maxsize=1)
 def get_engine() -> AsyncEngine:
-    return create_async_engine(get_config().async_database_url(), pool_pre_ping=True, pool_size=5)
+    # The worker runs ~18 loops; each tick holds two connections (advisory lock + work), so the
+    # pool allows 30 per process (API and worker: 60 of PostgreSQL's 100). hide_parameters keeps
+    # bound values (tags, sealed secrets, names) out of every SQL error message and log line.
+    return create_async_engine(
+        get_config().async_database_url(),
+        pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=20,
+        hide_parameters=True,
+    )
 
 
 def get_sessionmaker() -> async_sessionmaker:  # type: ignore[type-arg]
