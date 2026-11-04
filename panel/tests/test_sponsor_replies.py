@@ -200,6 +200,11 @@ def test_labels_with_emoji_or_a_domain_name_still_match_exactly() -> None:
         job, Step.SENT_MYPROXIES, _list("🟢 slot3.example.com:8443", "slot33.example.com:8443")
     )
     assert isinstance(pick, Press) and pick.data == "cb:🟢 slot3.example.com:8443".encode()
+    # A delete button with the same address next to it is never the one pressed.
+    pick = next_action(
+        job, Step.SENT_MYPROXIES, _list("🗑 Delete slot3.example.com:8443", "slot3.example.com:8443")
+    )
+    assert isinstance(pick, Press) and pick.data == b"cb:slot3.example.com:8443"
     menu = Observation(messages=(bot("slot3.example.com:8443", buttons=(row("⭐️ Set Promotion"),)),))
     assert isinstance(next_action(job, Step.PRESSED_PROXY, menu), Press)
 
@@ -250,6 +255,18 @@ def test_labels_with_emoji_or_a_domain_name_still_match_exactly() -> None:
         (Step.SENT_CHANNEL, seen("You must be an administrator of this channel."), "channel_refused"),
         (Step.SENT_CHANNEL, seen("Channel not found."), "channel_refused"),
         (Step.SENT_CHANNEL, seen("Hmm."), "channel_refused"),
+        # A success word next to a refusal is a refusal (a paid campaign must never be reported
+        # as delivered when it was not) ...
+        (Step.SENT_CHANNEL, seen("Sorry, channel not found. Done."), "channel_refused"),
+        (Step.SENT_CHANNEL, seen("Success! But this channel is private."), "channel_refused"),
+        (Step.SENT_CHANNEL, seen("Done.", answer="Error: try again later"), "channel_refused"),
+        # ... and so is anything that took something away.
+        (Step.SENT_CHANNEL, seen("Done! Proxy deleted"), "channel_refused"),
+        (Step.SENT_CHANNEL, seen("Saved. The proxy was removed."), "channel_refused"),
+        (Step.SENT_CHANNEL, seen("Success! Promotion disabled."), "channel_refused"),
+        # A /myproxies button is pressed only when its whole label is our address.
+        (Step.SENT_MYPROXIES, _list("🗑 Delete 1.2.3.4:443"), "proxy_not_in_list"),
+        (Step.SENT_MYPROXIES, _list("1.2.3.4:443 remove"), "proxy_not_in_list"),
     ],
 )
 def test_any_other_promotion_reply_stops_the_flow(step: Step, observation: Observation, reason: str) -> None:

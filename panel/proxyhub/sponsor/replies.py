@@ -14,9 +14,11 @@ people have published (kept word for word as test data in tests/test_sponsor_rep
   proxy, and the proxy's menu has a "Set promotion" button (telemt docs/FAQ.en.md).
 
 The channel prompt and the confirmation after the channel link are not published anywhere: they
-are matched by meaning (channel + link; success words without refusal words), and the first real
-run records them in actions_log (docs/11 F11). Anything not recognised is "unknown": the flow stops
-there (proxyhub/sponsor/conversation.py). Every text that leaves the flow goes through :func:`mask`.
+are matched by meaning (channel + link; success words without refusal or removal words), and the
+first real run records them in actions_log (docs/11 F11): the runbook checks them against these
+patterns before the module is relied on. A /myproxies button is pressed only when its whole label
+is the proxy's ``host:port``. Anything not recognised is "unknown": the flow stops there
+(proxyhub/sponsor/conversation.py). Every text that leaves the flow goes through :func:`mask`.
 """
 
 from __future__ import annotations
@@ -61,6 +63,8 @@ REFUSAL: Final = re.compile(
     re.IGNORECASE,
 )
 HARD_ERROR: Final = re.compile(r"\b(?:error|invalid|incorrect|wrong|sorry|failed|unable)\b", re.IGNORECASE)
+# Something taken away: never read as "the promotion is set", whatever success word comes with it.
+DESTRUCTIVE: Final = re.compile(r"\b(?:delet|remov|revok|disabl|cancel|clear|reset|stopp?)\w*", re.IGNORECASE)
 # "Set promotion" is the published label; the others are the same action worded for a proxy that
 # already has one (assumed, never seen). "Remove/Delete ..." can never match.
 PROMOTION_LABELS: Final = frozenset(
@@ -105,13 +109,14 @@ def is_proxy_list(text: str) -> bool:
 
 
 def address_buttons(messages: Iterable[BotMessage], host: str, port: int) -> list[tuple[int, BotButton]]:
-    """Pressable buttons whose label is exactly this proxy's ``host:port`` (spaces and emoji aside)."""
+    """Pressable buttons whose label is exactly this proxy's ``host:port`` (spaces and emoji aside):
+    a label with any other word ("Delete 1.2.3.4:443") is never pressed."""
     want = f"{host}:{port}".lower()
     found: list[tuple[int, BotButton]] = []
     for message in messages:
         for row in message.buttons:
             for button in row:
-                if button.data is not None and want in normalize_label(button.text).split():
+                if button.data is not None and normalize_label(button.text) == want:
                     found.append((message.id, button))
     return found
 
@@ -140,7 +145,8 @@ def asks_channel(text: str) -> bool:
 
 
 def promotion_done(text: str) -> bool:
-    return bool(PROMOTION_DONE.search(text)) and not REFUSAL.search(text)
+    """Success words, and neither a refusal nor something taken away ("Done! Proxy deleted")."""
+    return bool(PROMOTION_DONE.search(text)) and not REFUSAL.search(text) and not DESTRUCTIVE.search(text)
 
 
 def refusal_hint(text: str) -> str | None:
