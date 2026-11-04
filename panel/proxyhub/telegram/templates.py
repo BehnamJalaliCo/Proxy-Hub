@@ -304,10 +304,12 @@ MAX_LABEL_CHARS: Final = 32
 MAX_TITLE_CHARS: Final = 120
 MAX_VLESS_CHARS: Final = 2048
 # Tags an owner may use in a content body. A blockquote or pre would nest inside the post's own
-# blockquote, which Telegram does not allow, so their text is kept and the tag dropped.
+# blockquote, which Telegram does not allow, so their text is kept and the tag dropped. No
+# tg-emoji: a bot may only send custom emoji in some cases (core.telegram.org/bots/api#html-style),
+# and a post the bot cannot send is never sent again (at most once); a later operator-account
+# poster (proxyhub/posts/poster.py) may allow it for its own posts.
 BODY_TAGS: Final = frozenset(
     {"b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "a", "tg-spoiler", "span"}
-    | {"tg-emoji"}
 )
 _VLESS_RE = re.compile(r"^vless://[\x21-\x7e]+$")
 _SPACES = re.compile(r"\s+")
@@ -410,8 +412,19 @@ def compose_content(title: str | None, body_html: str | None) -> str:
     return "\n\n".join(parts)
 
 
+# datetime.weekday(): Monday is 0.
+WEEKDAYS_FA: Final = ("دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه")
+
+
 def _tehran_clock(at: datetime) -> str:
     return fa_digits(at.astimezone(TEHRAN).strftime("%H:%M"))
+
+
+def tehran_until(at: datetime) -> str:
+    """Weekday and clock in Tehran ("سه‌شنبه ساعت ۰۹:۰۰"): a config lasts at most a day or so,
+    so the weekday makes the end unambiguous for whoever reads the post later."""
+    local = at.astimezone(TEHRAN)
+    return f"{WEEKDAYS_FA[local.weekday()]} ساعت {_tehran_clock(local)}"
 
 
 def _label(link: PostLink) -> str:
@@ -439,7 +452,7 @@ def _reality_block(links: Sequence[PostLink], texts: StatusTexts) -> str:
             assert link.url is not None
             head = f"<b>{_label(link)}</b>"
             if link.expires_at is not None:
-                head += f" — ⏳ اعتبار تا ساعت {_tehran_clock(link.expires_at)}"
+                head += f" — ⏳ اعتبار تا {tehran_until(link.expires_at)}"
             lines.append(f"{head}\n<code>{html.escape(link.url, quote=False)}</code>")
         elif link.status == "paused":
             lines.append(f"<b>{_label(link)}</b> — {PAUSED_LINE}")

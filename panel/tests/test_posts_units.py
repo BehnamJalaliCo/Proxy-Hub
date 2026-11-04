@@ -20,6 +20,7 @@ from proxyhub.posts.publisher import MISSING_GRACE, _Carried, current_view, fit
 from proxyhub.telegram.schedule import TEHRAN, QuietWindow
 from proxyhub.telegram.templates import (
     ALL_DEAD_LINE,
+    BODY_TAGS,
     MAX_MESSAGE_CHARS,
     PAUSED_LINE,
     PostLink,
@@ -60,7 +61,7 @@ CONTENT = compose_content("💡 عنوان <آزمایشی>", "متن <b>پرر�
 
 def test_post_has_content_links_and_tag_in_that_order() -> None:
     sec = secret()
-    exp = datetime(2026, 11, 5, 15, 0, tzinfo=UTC)  # 18:30 Tehran
+    exp = datetime(2026, 11, 5, 15, 0, tzinfo=UTC)  # Thursday 18:30 Tehran
     post = render_post(CONTENT, [mt(1, sec=sec), mt(2), rl(1, expires=exp)], "@ipoxxo").text
     assert post.startswith("<b>💡 عنوان &lt;آزمایشی&gt;</b>\n\n<blockquote>متن <b>پررنگ</b>")
     assert (
@@ -74,7 +75,7 @@ def test_post_has_content_links_and_tag_in_that_order() -> None:
         in post
     )
     assert " • " in post
-    assert "<b>ریلیتی 1</b> — ⏳ اعتبار تا ساعت ۱۸:۳۰\n<code>vless://" in post
+    assert "<b>ریلیتی 1</b> — ⏳ اعتبار تا پنجشنبه ساعت ۱۸:۳۰\n<code>vless://" in post
     assert ALL_DEAD_LINE not in post
     assert fits(post)
     assert "·" not in post  # a middle dot next to Persian digits reads as a zero
@@ -119,6 +120,19 @@ def test_all_dead_gets_the_closing_line_and_owner_texts() -> None:
     assert post.index(ALL_DEAD_LINE) < post.index("🔗 \u200e@ipoxxo")
 
 
+def test_expiry_names_the_tehran_weekday() -> None:
+    # 23:00 UTC on Thursday is 02:30 on Friday in Tehran: the weekday follows Tehran, not UTC.
+    late = render_post(None, [rl(1, expires=datetime(2026, 11, 5, 23, 0, tzinfo=UTC))], "@ipoxxo").text
+    assert "اعتبار تا جمعه ساعت ۰۲:۳۰" in late
+    days = {
+        render_post(None, [rl(1, expires=datetime(2026, 11, d, 9, 0, tzinfo=UTC))], "@ipoxxo")
+        .text.split("اعتبار تا ", 1)[1]
+        .split(" ساعت", 1)[0]
+        for d in range(2, 9)
+    }
+    assert days == {"دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه"}
+
+
 def test_paused_links_keep_their_label_without_a_link_and_are_not_dead() -> None:
     sec = secret()
     items = [
@@ -132,6 +146,12 @@ def test_paused_links_keep_their_label_without_a_link_and_are_not_dead() -> None
     assert ALL_DEAD_LINE not in post  # paused is not dead: it may come back
     dead_and_paused = [PostLink(kind="mtproto", label="پروکسی 2", status="burned"), items[0]]
     assert ALL_DEAD_LINE not in render_post(None, dead_and_paused, "@ipoxxo").text
+
+
+def test_body_tags_have_no_custom_emoji_for_the_bot() -> None:
+    assert "tg-emoji" not in BODY_TAGS
+    out = compose_content("t", 'a <tg-emoji emoji-id="5368324170671202286">👍</tg-emoji> b')
+    assert "tg-emoji" not in out and "👍" in out
 
 
 def test_active_link_without_url_is_never_a_link() -> None:
