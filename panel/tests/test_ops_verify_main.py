@@ -180,7 +180,7 @@ def test_a_merge_signed_by_another_key_is_refused(world: tuple[Repo, Key, Key]) 
     target = repo.merge_pr("a", 1, key=impostor)
     # The impostor's key in the keyring does not help: its fingerprint is not pinned.
     r = verify(repo, start, target, impostor.public, github.fpr)
-    assert r.returncode == 1 and "not the pinned GitHub key" in r.stdout
+    assert r.returncode == 1 and "does not contain the pinned GitHub key" in r.stdout
     # With GitHub's key in the keyring the impostor's signature cannot be verified at all.
     r = verify(repo, start, target, github.public, github.fpr)
     assert r.returncode == 1 and "no valid GitHub signature" in r.stdout
@@ -197,6 +197,21 @@ def test_the_signer_of_each_commit_must_be_the_pinned_key(
     target = repo.merge_pr("a", 1, key=impostor)
     r = verify(repo, start, target, both, github.fpr)
     assert r.returncode == 1 and f"signed by {impostor.fpr}" in r.stdout, r.stdout
+
+
+def test_the_pinned_key_may_come_after_other_keys_in_the_file(
+    world: tuple[Repo, Key, Key], tmp_path: Path
+) -> None:
+    """Found on the panel server (P08): github.com/web-flow.gpg lists GitHub's expired 2017 key
+    FIRST and the current key second. The guard must find the pinned key anywhere in the file."""
+    repo, github, old = world
+    both = tmp_path / "web-flow.asc"
+    both.write_text(old.public.read_text() + github.public.read_text())  # another key first
+    start = repo.head()
+    target = repo.merge_pr("a", 1, key=github)
+    r = verify(repo, start, target, both, github.fpr)
+    assert r.returncode == 0, r.stdout
+    assert "OK (1 merge commit(s)" in r.stdout
 
 
 def test_missing_keyring_or_unknown_target_is_refused(world: tuple[Repo, Key, Key], tmp_path: Path) -> None:

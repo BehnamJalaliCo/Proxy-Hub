@@ -37,11 +37,15 @@ GNUPGHOME="$(mktemp -d)"
 export GNUPGHOME
 trap 'rm -rf "$GNUPGHOME"' EXIT
 gpg --batch --quiet --import "$keyring" 2>/dev/null || refuse "cannot read the GitHub signing key file"
-imported="$(gpg --batch --with-colons --fingerprint 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
-case " $PINNED " in
-  *" $imported "*) ;;
-  *) refuse "the key file's fingerprint ${imported:-?} is not the pinned GitHub key" ;;
-esac
+# github.com/web-flow.gpg holds every key GitHub has used (in 2026: the expired 2017 key first, then
+# the current one), so the pinned key must be AMONG them. Each commit's signer is checked below on
+# its own, and a signature by an expired key is refused (EXPKEYSIG).
+imported="$(gpg --batch --with-colons --fingerprint 2>/dev/null | awk -F: '$1=="fpr"{print $10}')"
+found=0
+for p in $PINNED; do
+  if grep -qx "$p" <<<"$imported"; then found=1; fi
+done
+[ "$found" = 1 ] || refuse "the key file does not contain the pinned GitHub key"
 
 commits="$(git -C "$checkout" rev-list --first-parent "${range[@]}")"
 count=0
