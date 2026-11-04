@@ -26,6 +26,12 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(
                 pytest.mark.skip(reason="needs a real test bot (PROXYHUB_TELEGRAM_TEST_TOKEN_FILE)")
             )
+        if "telegram_user" in item.keywords and not os.environ.get("PROXYHUB_TELEGRAM_USER_TEST_FILE"):
+            item.add_marker(
+                pytest.mark.skip(
+                    reason="real MTProto as the operator account (PROXYHUB_TELEGRAM_USER_TEST_FILE)"
+                )
+            )
         if "cloudflare" in item.keywords and not os.environ.get("PROXYHUB_CLOUDFLARE_TEST_TOKEN_FILE"):
             item.add_marker(
                 pytest.mark.skip(reason="needs a real Cloudflare token (PROXYHUB_CLOUDFLARE_TEST_TOKEN_FILE)")

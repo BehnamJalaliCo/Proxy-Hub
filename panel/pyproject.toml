@@ -18,6 +18,9 @@ dependencies = [
     "pyotp==2.10.0",
     "cryptography>=46.0",
     "httpx==0.28.1",  # Telegram Bot API, Cloudflare and Globalping clients
+    # MTProto user client for the operator account (D37, docs/11 section 2.1). Imported ONLY by
+    # proxyhub/mtproxy/userclient.py (pinned by tests/test_architecture.py).
+    "telethon==1.45.0",
 ]
 
 [dependency-groups]
@@ -58,7 +61,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["hcloud.*"]
+module = ["hcloud.*", "telethon.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -71,6 +74,7 @@ markers = [
     "redis: needs a real Redis (PROXYHUB_REDIS_URL)",
     "hetzner: talks to a real Hetzner account; runs only on the panel server",
     "telegram: talks to a real Telegram test bot/channel; needs PROXYHUB_TELEGRAM_TEST_TOKEN_FILE",
+    "telegram_user: real MTProto to Telegram as the operator account (D37); needs PROXYHUB_TELEGRAM_USER_TEST_FILE",
     "cloudflare: talks to a real Cloudflare account; needs PROXYHUB_CLOUDFLARE_TEST_TOKEN_FILE",
     "globalping: real Globalping API measurements; needs PROXYHUB_GLOBALPING_TESTS=1",
 ]
