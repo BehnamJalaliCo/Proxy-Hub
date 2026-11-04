@@ -22,10 +22,12 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     Numeric,
+    SmallInteger,
     String,
+    UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import CIDR, INET, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from proxyhub.db.models import Base
@@ -125,3 +127,100 @@ class FleetPlan(Base):
     logged: Mapped[bool] = mapped_column(Boolean, nullable=False)
     actions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+# --- round 3: the live fleet (D14) and lost domain delegations --------------------------------
+
+BURN_REASONS = ("probe_blocked",)
+DELEGATION_RESULTS = ("ok", "nxdomain", "not_cloudflare", "ns_changed", "no_answer", "servfail", "error")
+DELEGATION_VERDICTS = ("ok", "lost", "unknown")
+
+
+def _in(values: tuple[str, ...]) -> str:
+    return ", ".join(f"'{v}'" for v in values)
+
+
+class IpHistory(Base):
+    """Every public IPv4 one of OUR servers got, and every one that burned (blocked from Iran),
+    with its /24 (docs/10 section 3.11, decision D14). A new server that gets a burned IP, or an IP
+    in a burned /24, is deleted at once and the creation is retried elsewhere.
+
+    Only our own servers' addresses are here (Hetzner assigned them to us); nothing about any user
+    (CLAUDE.md rule 7)."""
+
+    __tablename__ = "ip_history"
+    __table_args__ = (
+        UniqueConstraint("node_id", "ip", name="uq_ip_history_node_ip"),
+        CheckConstraint("family(ip) = 4 AND masklen(ip) = 32", name="ipv4_host"),
+        CheckConstraint("prefix24 = network(set_masklen(ip, 24))", name="prefix24"),
+        CheckConstraint("(burned_at IS NULL) = (burned_reason IS NULL)", name="burn_pair"),
+        CheckConstraint(
+            f"burned_reason IS NULL OR burned_reason IN ({_in(BURN_REASONS)})", name="burn_reason"
+        ),
+        Index("ix_ip_history_ip", "ip"),
+        Index("ix_ip_history_prefix24_burned", "prefix24", postgresql_where="burned_at IS NOT NULL"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ip: Mapped[str] = mapped_column(INET, nullable=False)
+    prefix24: Mapped[str] = mapped_column(CIDR, nullable=False)
+    node_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("nodes.id", ondelete="SET NULL")
+    )
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("hetzner_accounts.id", ondelete="SET NULL")
+    )
+    location: Mapped[str] = mapped_column(String(20), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    burned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    burned_reason: Mapped[str | None] = mapped_column(String(30))
+
+
+class FleetAlert(Base):
+    """One kind of owner alert of the live fleet (a cap blocks a needed action, ...): when it was
+    first and last seen and when the owner was last told, so an alert is repeated rarely."""
+
+    __tablename__ = "fleet_alerts"
+    code: Mapped[str] = mapped_column(String(40), primary_key=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    since: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    detail: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class DelegationCheck(Base):
+    """One DNS-over-HTTPS NS lookup of a pool domain (proxyhub/cloudflare/delegation.py): is the
+    domain still registered and delegated to Cloudflare? Only public name-server names are kept."""
+
+    __tablename__ = "domain_delegation_checks"
+    __table_args__ = (
+        CheckConstraint(f"result IN ({_in(DELEGATION_RESULTS)})", name="result"),
+        CheckConstraint(f"verdict IN ({_in(DELEGATION_VERDICTS)})", name="verdict"),
+        Index("ix_domain_delegation_checks_zone_at", "zone_id", "at"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    zone_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("cf_zones.id", ondelete="CASCADE"), nullable=False
+    )
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    pool_state: Mapped[str] = mapped_column(String(10), nullable=False)
+    result: Mapped[str] = mapped_column(String(20), nullable=False)
+    rcode: Mapped[int | None] = mapped_column(SmallInteger)  # the DNS answer's Status (RCODE)
+    nameservers: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    verdict: Mapped[str] = mapped_column(String(10), nullable=False)
+
+
+class DelegationState(Base):
+    """Per zone: the Cloudflare name servers first seen while the delegation was good (a later,
+    different set means someone else's zone), and whether the panel took the zone out of the pool
+    because its delegation was lost (it puts it back by itself when the delegation returns)."""
+
+    __tablename__ = "domain_delegation_state"
+    zone_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("cf_zones.id", ondelete="CASCADE"), primary_key=True
+    )
+    baseline_ns: Mapped[list[Any] | None] = mapped_column(JSONB)
+    baseline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rotated_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rotated_from: Mapped[str | None] = mapped_column(String(10))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
