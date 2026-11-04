@@ -259,7 +259,7 @@ async def test_registrations_show_state_and_the_masked_last_reply_and_can_be_ret
     assert await service.run_once(d) == "no_account"
     async with engine.connect() as conn:
         live = {p.key: p for p in await provider.proxies_to_register(conn)}
-    first, second = await regs(engine)
+    first, second = sorted(await regs(engine), key=lambda r: r["host"])  # found in the same pass
 
     async def work(row: dict[str, Any]) -> Work:
         async with engine.connect() as conn:
@@ -283,6 +283,7 @@ async def test_registrations_show_state_and_the_masked_last_reply_and_can_be_ret
     assert ok["state"] == "registered" and ok["has_tag"] is True and ok["tag_hint"] == "ecfe…e999"
     assert ok["sponsor_channel"] is None and ok["wanted_channel"] == "ipoxxo" and ok["in_sync"] is False
     assert ok["stuck"] is None and ok["node_state"] == "ready" and ok["in_use"] is True
+    assert ok["tag_on_node"] is True and bad["tag_on_node"] is None and bad["has_tag"] is False
     assert bad["state"] == "failed" and bad["stuck"]["bot_text"] == bot_text
     assert bad["stuck"]["reason"] == "no_tag_in_reply" and bad["stuck"]["reason_fa"]
     assert bad["stuck"]["hint_fa"] and bad["stuck"]["step_fa"] == "پس از فرستادن secret"
@@ -315,8 +316,19 @@ async def test_a_retired_registration_cannot_be_retried(
     node = await create_proxy_node(engine, seal_key, ipv4="203.0.113.42")
     d = Deps(engine=engine, vault=make_vault(tmp_path), provider=provider)
     await service.run_once(d)
+    (row,) = await regs(engine)
+    async with engine.connect() as conn:
+        (proxy,) = await provider.proxies_to_register(conn)
+        reg = await load_reg(conn, row["id"])
+    assert reg is not None
+    work = Work(reg=reg, job=RegisterJob(host=reg.host, port=reg.port, secret_hex=proxy.secret_hex),
+                key=reg.proxy_key, priority=1)  # fmt: skip
+    await service._record(d, work, FlowResult(result=Registered(tag=TAG), last_step=Step.SENT_SECRET))
     await set_node_state(engine, node, "deleted")
     await service.run_once(d)
     (row,) = await regs(engine)
     assert row["state"] == "retired"
     assert_error(await client.post(f"{BASE}/registrations/{row['id']}/retry"), 409, "registration_retired")
+    body = (await client.get(BASE)).json()
+    (view,) = body["registrations"]
+    assert view["in_use"] is False and view["wanted_channel"] is None and view["tag_on_node"] is None

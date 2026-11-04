@@ -2,24 +2,34 @@
 (decision D37) with the wanted channel as Proxy Sponsor: @ipoxxo (D23) by default, a paying
 customer's public channel during a campaign (docs/11 section 2, rows 1, 3, 4, 5 and 7).
 
+What "registered" means (cross-team SPONSOR contract): a proxy has a registration once @MTProxybot
+gave it a tag. Only then is its ``mtproxy_registrations`` row written. Before that the proxy is a
+*candidate* (a ``sponsor_flows`` row alone), so team mtproto's ``proxies_to_register`` ("live
+proxies without a registration") keeps listing it, with the secret the conversation needs, for as
+many passes as it takes: a pass without a conversation, a failed try or «ثبت دوباره» never hides it.
+
 One step of :func:`run_once` (the reconciler calls it every minute):
 
 1. In ONE short transaction: stop if the kill switch is ON (docs/11 lock 6); move campaigns that are
    due (scheduled -> active ``lead`` minutes before the start, -> finished at the end); ask the
-   provider (team mtproto's ``sponsor_api``) for the live proxies without a registration and match
-   each to a registration by ``host:port`` and user name (a new row, or the existing one whose tag
-   is put on the node again with ``apply_ad_tag``); retire registrations whose node was deleted.
+   provider (team mtproto's ``sponsor_api``) for the live proxies without a registration. Each one
+   is a candidate (new, or the one it already is, following its address), or, when a registration
+   with the same ``host:port`` and user exists, gets that registration's tag back with
+   ``apply_ad_tag``. A candidate whose node was deleted is dropped and a registration whose node
+   was deleted is retired. A tag that did not reach its node is tried again every
+   :data:`TAG_RETRY` (the provider never lists a registered proxy again). An owner alert that
+   could not be queued before (no chat was paired) is queued now.
 2. Pick at most ONE conversation: a campaign switch first, then a new registration, then setting
-   the default sponsor. Nothing is picked while two or more registrations are stuck (the bot is
-   probably saying something new; the owner was alerted), while the hour's message budget cannot
-   hold the whole conversation, or while the operator account is not connected.
+   the default sponsor. Nothing is picked while two or more are stuck (the bot is probably saying
+   something new; the owner was alerted), while the hour's message budget cannot hold the whole
+   conversation, or while the operator account is not connected.
 3. Under the operator account's lock (``mtproxy_account``, shared with its login and session check;
    one flow at a time) connect, open the chat with @MTProxybot (only if it still resolves to the
-   user id stored at login) and run the conversation (proxyhub/sponsor/driver.py). Every message
-   and reply goes to actions_log with secrets masked.
-4. Record the outcome in a short transaction: the tag (and ``apply_ad_tag``), the sponsor channel,
-   a retry time with backoff, or "stuck": the bot's last reply (masked) is kept for the dashboard
-   and ONE Persian alert goes to the owner.
+   user id stored at login) and run the conversation (proxyhub/sponsor/driver.py). Every message is
+   written to actions_log before it is sent, and every reply after it, with secrets masked.
+4. Record the outcome in a short transaction: the tag (the registration row, then
+   ``apply_ad_tag``), the sponsor channel, a retry time with backoff, or "stuck": the bot's last
+   reply (masked) is kept for the dashboard and ONE Persian alert goes to the owner.
 
 No database transaction is open while Telegram is called. No proxy secret is stored or logged.
 """
@@ -77,6 +87,7 @@ STUCK_ERRORS: Final = frozenset({"mtproxybot_changed", "mtproxybot_not_found", "
 # Failures that are nobody's fault and do not count as an attempt.
 NOT_COUNTED: Final = frozenset({"kill_switch", "hourly_cap", "hold", "pace_timeout"})
 BACKOFF_MIN: Final = (5, 15, 30, 60, 120, 240, 360)
+TAG_RETRY: Final = timedelta(minutes=10)
 
 
 @dataclass(frozen=True)
@@ -137,7 +148,7 @@ def in_use(reg: Reg, nodes: dict[uuid.UUID, str]) -> bool:
 
 
 def stuck_count(regs: Sequence[Reg]) -> int:
-    return sum(1 for r in regs if r.state == FAILED)
+    return sum(1 for r in regs if r.stuck)
 
 
 def choose(
@@ -151,20 +162,26 @@ def choose(
     now: datetime,
 ) -> Work | None:
     """The one conversation to have now, or None. Priority: a switch to or from a campaign's
-    channel (0), a new registration (1), the default sponsor for a registered proxy (2)."""
+    channel (0), a new registration (1), the default sponsor for a registered proxy (2). A
+    candidate is registered only while the provider lists it (its secret comes from there)."""
     if stuck_count(regs) >= PAUSE_AFTER_STUCK:
         return None
     found: list[tuple[int, datetime, str, Work]] = []
     for reg in regs:
-        if not reg.due(now):
+        if not reg.due(now) or reg.stuck:
             continue
-        if reg.state == REGISTERED and reg.ad_tag is not None and reg.sponsor_channel != wanted:
+        if (
+            not reg.candidate
+            and reg.state == REGISTERED
+            and reg.ad_tag is not None
+            and reg.sponsor_channel != wanted
+        ):
             if not in_use(reg, nodes):
                 continue
             campaign = wanted != default or reg.sponsor_channel in campaign_channels
             priority = 0 if campaign else 2
             job: RegisterJob | PromoteJob = PromoteJob(host=reg.host, port=reg.port, channel=wanted)
-        elif reg.state == PENDING and reg.ad_tag is None and reg.proxy_key in live:
+        elif reg.candidate and reg.state == PENDING and reg.proxy_key in live:
             proxy = live[reg.proxy_key]
             if (proxy.host, proxy.port) != (reg.host, reg.port):
                 continue
@@ -211,24 +228,34 @@ async def _advance_campaigns(db: AsyncConnection, settings: store.SponsorSetting
 
 
 async def _apply_tag(
-    db: AsyncConnection, provider: SponsorProvider, key: str, tag: str, address: str, *, announce: bool
-) -> None:
+    db: AsyncConnection,
+    provider: SponsorProvider,
+    flow_id: uuid.UUID,
+    key: str,
+    tag: str,
+    *,
+    address: str,
+    announce: bool,
+    now: datetime,
+) -> bool:
     """Put the tag into the node's desired Telemt state (the provider's own transaction rules
-    apply; a failure is logged and retried on the next pass, and never loses the tag)."""
+    apply). A failure is logged and tried again after :data:`TAG_RETRY`; the tag is never lost."""
     try:
         async with db.begin_nested():
             await provider.apply_ad_tag(db, key, tag)
     except Exception as exc:
         log.warning("sponsor: apply_ad_tag failed (%s)", type(exc).__name__)
+        await store.update_flow(db, flow_id, now, tag_applied_at=None, tag_failed_at=now)
         await _log(
             db,
             "sponsor.tag_apply_failed",
             address,
             allowed=False,
             reasons=[type(exc).__name__],
-            context={"key": key, "tag": short_tag(tag)},
+            context={"key": key, "tag": short_tag(tag), "next_try_at": iso(now + TAG_RETRY)},
         )
-        return
+        return False
+    await store.update_flow(db, flow_id, now, tag_applied_at=now, tag_failed_at=None)
     if announce:
         await _log(
             db,
@@ -237,6 +264,11 @@ async def _apply_tag(
             reasons=["apply_ad_tag"],
             context={"key": key, "tag": short_tag(tag)},
         )
+    return True
+
+
+def _tag_retry_due(reg: Reg, now: datetime) -> bool:
+    return reg.tag_failed_at is None or reg.tag_failed_at <= now - TAG_RETRY
 
 
 Identity = tuple[str, int, str]
@@ -244,25 +276,112 @@ Identity = tuple[str, int, str]
 
 def identity(host: str, port: int, secret_name: str) -> Identity:
     """A registration is ``host:port`` plus the Telemt user name (the unique key of
-    ``mtproxy_registrations``): a replacement node answering at the same slot name and port with
-    the same user name reuses the registration and its tag."""
+    ``mtproxy_registrations``). Team mtproto names users per node (``mt_<node>``), so a new node is
+    a new registration; a provider that lists the same user at the same address again gets the
+    existing registration and its tag back."""
     return (host, port, secret_name[:64])
 
 
 def _best_by_identity(regs: Sequence[Reg]) -> dict[Identity, Reg]:
+    """The registrations that hold a tag, the best one per identity (candidates never count)."""
     rank = {REGISTERED: 0, FAILED: 1, PENDING: 2, RETIRED: 3}
     best: dict[Identity, Reg] = {}
     for reg in regs:
+        if reg.candidate or reg.ad_tag is None:
+            continue
         key = identity(reg.host, reg.port, reg.secret_name)
         if key not in best or rank.get(reg.state, 9) < rank.get(best[key].state, 9):
             best[key] = reg
     return best
 
 
+async def _match(
+    db: AsyncConnection,
+    provider: SponsorProvider,
+    proxy: Registrable,
+    current: Reg | None,
+    by_identity: dict[Identity, Reg],
+    now: datetime,
+) -> None:
+    """One listed proxy: follow it as a candidate, or give it back the tag of its registration."""
+    address = f"{proxy.host}:{proxy.port}"
+    known = by_identity.get(identity(proxy.host, proxy.port, user_of(proxy.key)))
+    if current is not None and current.candidate:
+        if known is None:
+            if current.address != address:  # nothing is registered yet: the candidate follows it
+                await store.update_flow(db, current.id, now, host=proxy.host, port=proxy.port)
+                await _log(
+                    db,
+                    "sponsor.candidate_moved",
+                    address,
+                    reasons=["address_changed"],
+                    context={"key": proxy.key, "was": current.address},
+                )
+            return
+        await store.delete_flow(db, current.id)
+        await _log(
+            db,
+            "sponsor.candidate_dropped",
+            current.address,
+            reasons=["registration_exists"],
+            context={"key": proxy.key, "registration": address},
+        )
+        current = None
+    if current is not None and current.address != address:
+        await store.update_reg(
+            db, current.registration_id, now, state=RETIRED, state_reason="address_changed"
+        )
+        await store.update_flow(db, current.id, now, proxy_key=None, next_attempt_at=None, **CLEAR_STUCK)
+        await _log(
+            db,
+            "sponsor.registration_retired",
+            current.address,
+            reasons=["address_changed"],
+            context={"key": proxy.key, "now_at": address},
+        )
+    if known is None:
+        await store.insert_candidate(
+            db, host=proxy.host, port=proxy.port, user_name=user_of(proxy.key), proxy_key=proxy.key, now=now
+        )
+        await _log(
+            db, "sponsor.proxy_found", address, reasons=["no_registration"], context={"key": proxy.key}
+        )
+        return
+    assert known.ad_tag is not None  # _best_by_identity keeps the registrations with a tag only
+    revived = known.state == RETIRED
+    moved = known.proxy_key != proxy.key
+    if revived:
+        await store.update_reg(db, known.registration_id, now, state=REGISTERED, state_reason=None)
+        await _log(
+            db,
+            "sponsor.registration_reused",
+            address,
+            reasons=["same_address_and_user"],
+            context={"key": proxy.key, "tag": short_tag(known.ad_tag)},
+        )
+    if moved:
+        await store.update_flow(
+            db, known.id, now, proxy_key=proxy.key, tag_applied_at=None, tag_failed_at=None
+        )
+    if revived or moved or _tag_retry_due(known, now):
+        # Listed although it has a registration: the node does not carry the tag.
+        await _apply_tag(
+            db,
+            provider,
+            known.id,
+            proxy.key,
+            known.ad_tag,
+            address=address,
+            announce=revived or moved,
+            now=now,
+        )
+
+
 async def sync(
     db: AsyncConnection, provider: SponsorProvider, proxies: Sequence[Registrable], now: datetime
 ) -> tuple[list[Reg], dict[uuid.UUID, str], dict[str, Registrable]]:
-    """Match the provider's live proxies to registrations (see the module docstring, step 1)."""
+    """Match the provider's live proxies to candidates and registrations (module docstring,
+    step 1)."""
     live: dict[str, Registrable] = {}
     skipped = 0
     for proxy in proxies:
@@ -272,107 +391,112 @@ async def sync(
             skipped += 1
     if skipped:
         log.warning("sponsor: %d proxies from the provider do not have the contract's shape", skipped)
+    await store.adopt_registrations(db, now)
     regs = await store.load_regs(db, for_update=True)
     by_identity = _best_by_identity(regs)
     by_key = {r.proxy_key: r for r in regs if r.state != RETIRED and r.proxy_key is not None}
     for proxy in live.values():
-        address = f"{proxy.host}:{proxy.port}"
-        moved = by_key.get(proxy.key)
-        if moved is not None and (moved.host, moved.port) != (proxy.host, proxy.port):
-            await store.update_reg(db, moved.id, now, state=RETIRED, state_reason="address_changed")
-            await store.update_flow(db, moved.id, now, proxy_key=None, next_attempt_at=None, **CLEAR_STUCK)
-            await _log(
-                db,
-                "sponsor.registration_retired",
-                moved.address,
-                reasons=["address_changed"],
-                context={"key": proxy.key, "now_at": address},
-            )
-        wanted_id = identity(proxy.host, proxy.port, user_of(proxy.key))
-        reg = by_identity.get(wanted_id)
-        if reg is None:
-            reg_id = await store.insert_reg(
-                db,
-                host=proxy.host,
-                port=proxy.port,
-                secret_name=user_of(proxy.key),
-                proxy_key=proxy.key,
-                now=now,
-            )
-            by_identity[wanted_id] = Reg(**_blank(reg_id, proxy, now))
-            await _log(
-                db, "sponsor.proxy_found", address, reasons=["no_registration"], context={"key": proxy.key}
-            )
-            continue
-        revived = reg.state == RETIRED
-        if revived:
-            await store.update_reg(
-                db, reg.id, now, state=REGISTERED if reg.ad_tag else PENDING, state_reason=None
-            )
-            await _log(
-                db,
-                "sponsor.registration_reused",
-                address,
-                reasons=["same_address_and_user"],
-                context={"key": proxy.key, "tag": short_tag(reg.ad_tag)},
-            )
-        if reg.proxy_key != proxy.key:
-            await store.update_flow(db, reg.id, now, proxy_key=proxy.key)
-        if reg.ad_tag is not None:
-            await _apply_tag(
-                db, provider, proxy.key, reg.ad_tag, address, announce=revived or reg.proxy_key != proxy.key
-            )
+        await _match(db, provider, proxy, by_key.get(proxy.key), by_identity, now)
     regs = await store.load_regs(db)
     nodes = await store.node_states(db, {n for r in regs if (n := node_of(r.proxy_key)) is not None})
     for reg in regs:
         node = node_of(reg.proxy_key)
         if reg.state == RETIRED or node is None or reg.proxy_key in live:
             continue
-        if nodes.get(node, "deleted") in GONE_STATES:
-            await store.update_reg(db, reg.id, now, state=RETIRED, state_reason="node_gone")
-            await store.update_flow(db, reg.id, now, next_attempt_at=None, **CLEAR_STUCK)
+        if nodes.get(node, "deleted") not in GONE_STATES:
+            continue
+        if reg.candidate:  # nothing was registered for it
+            await store.delete_flow(db, reg.id)
             await _log(
                 db,
-                "sponsor.registration_retired",
+                "sponsor.candidate_dropped",
                 reg.address,
                 reasons=["node_gone"],
                 context={"key": reg.proxy_key},
             )
+            continue
+        await store.update_reg(db, reg.registration_id, now, state=RETIRED, state_reason="node_gone")
+        await store.update_flow(db, reg.id, now, next_attempt_at=None, **CLEAR_STUCK)
+        await _log(
+            db,
+            "sponsor.registration_retired",
+            reg.address,
+            reasons=["node_gone"],
+            context={"key": reg.proxy_key},
+        )
+    for reg in await store.load_regs(db):
+        if (
+            not reg.candidate
+            and reg.ad_tag is not None
+            and reg.state != RETIRED
+            and reg.proxy_key is not None
+            and reg.proxy_key not in live
+            and reg.tag_applied_at is None
+            and node_of(reg.proxy_key) is not None
+            and in_use(reg, nodes)
+            and _tag_retry_due(reg, now)
+        ):
+            await _apply_tag(
+                db,
+                provider,
+                reg.id,
+                reg.proxy_key,
+                reg.ad_tag,
+                address=reg.address,
+                announce=True,
+                now=now,
+            )
     return await store.load_regs(db), nodes, live
 
 
-def _blank(reg_id: uuid.UUID, proxy: Registrable, now: datetime) -> dict[str, Any]:
-    return {
-        "id": reg_id,
-        "host": proxy.host,
-        "port": proxy.port,
-        "secret_name": user_of(proxy.key),
-        "ad_tag": None,
-        "sponsor_channel": None,
-        "state": PENDING,
-        "state_reason": None,
-        "registered_at": None,
-        "created_at": now,
-        "proxy_key": proxy.key,
-        "attempts": 0,
-        "next_attempt_at": None,
-        "last_error": None,
-        "last_step": None,
-        "stuck_reason": None,
-        "stuck_hint": None,
-        "stuck_at": None,
-        "last_bot_text": None,
-        "alerted_at": None,
-        "promotion_set_at": None,
-    }
+# --- the owner alert ----------------------------------------------------------------------------------
+
+
+async def _alert(
+    db: AsyncConnection,
+    reg: Reg,
+    *,
+    step: str,
+    reason: str,
+    hint: str | None,
+    bot_text: str | None,
+    paused: bool,
+    now: datetime,
+) -> bool:
+    """ONE Persian alert per stuck flow. ``alerted_at`` is set only when the alert was queued: with
+    no owner chat paired yet it is queued on a later pass (:func:`_late_alerts`)."""
+    alert = stuck_alert(
+        address=reg.address, step=step, reason=reason, hint=hint, bot_text=bot_text, paused=paused
+    )
+    if await enqueue_owner_alert(db, alert) is None:
+        return False
+    await store.update_flow(db, reg.id, now, alerted_at=now)
+    return True
+
+
+async def _late_alerts(db: AsyncConnection, regs: Sequence[Reg], now: datetime) -> None:
+    paused = stuck_count(regs) >= PAUSE_AFTER_STUCK
+    for reg in regs:
+        if reg.stuck and reg.alerted_at is None:
+            await _alert(
+                db,
+                reg,
+                step=reg.last_step or "start",
+                reason=reg.stuck_reason or "unknown",
+                hint=reg.stuck_hint,
+                bot_text=reg.last_bot_text,
+                paused=paused,
+                now=now,
+            )
 
 
 # --- step 3: the conversation -------------------------------------------------------------------------
 
 
 class _Recorder:
-    """Every message and reply of a conversation: one actions_log line each (secrets masked by
-    the driver before they get here)."""
+    """Every message and reply of a conversation: one actions_log line each, in its own short
+    transaction (secrets masked by the driver before they get here). A message is written BEFORE
+    it goes out, so one that Telegram received while the call failed is on record too (lock 5)."""
 
     def __init__(self, engine: AsyncEngine, target: str) -> None:
         self._engine = engine
@@ -384,11 +508,11 @@ class _Recorder:
                 db, action, self._target, reasons=[step.value], context={"step": step.value, **context}
             )
 
-    async def sent(self, step: Step, shown: str) -> None:
+    async def sending(self, step: Step, shown: str) -> None:
         await self._line("sponsor.bot_sent", step, {"text": shown})
 
-    async def pressed(self, step: Step, label: str, answer: str | None) -> None:
-        await self._line("sponsor.bot_pressed", step, {"button": label, "answer": answer})
+    async def pressing(self, step: Step, label: str) -> None:
+        await self._line("sponsor.bot_pressed", step, {"button": label})
 
     async def reply(self, step: Step, text: str, buttons: list[str]) -> None:
         await self._line("sponsor.bot_reply", step, {"text": text, "buttons": buttons})
@@ -445,7 +569,7 @@ async def _stuck(
     rpc: str | None,
     now: datetime,
 ) -> str:
-    await store.update_reg(db, reg.id, now, state=FAILED, state_reason=reason)
+    await store.update_reg(db, reg.registration_id, now, state=FAILED, state_reason=reason)
     await store.update_flow(
         db,
         reg.id,
@@ -461,16 +585,16 @@ async def _stuck(
     )
     stuck_now = stuck_count(await store.load_regs(db))
     if reg.alerted_at is None:
-        alert = stuck_alert(
-            address=reg.address,
+        await _alert(
+            db,
+            reg,
             step=step,
             reason=reason,
             hint=hint,
             bot_text=bot_text,
             paused=stuck_now >= PAUSE_AFTER_STUCK,
+            now=now,
         )
-        await enqueue_owner_alert(db, alert)
-        await store.update_flow(db, reg.id, now, alerted_at=now)
     context: dict[str, Any] = {"step": step, "stuck_registrations": stuck_now}
     if rpc:
         context["telegram_error"] = rpc
@@ -485,46 +609,69 @@ async def _stuck(
     return f"stuck:{reason}"
 
 
+async def _registered(
+    db: AsyncConnection, deps: Deps, work: Work, reg: Reg | None, tag: str, step: str, now: datetime
+) -> str:
+    """@MTProxybot gave a tag: the registration row is written now, and the tag goes to the node.
+    If the proxy's row went away meanwhile (its node was deleted), the entry still exists in
+    @MTProxybot: it stays on record, retired, with its tag, and no node gets it."""
+    gone = reg is None
+    base = work.reg if reg is None else reg
+    if reg is None:
+        flow_id = await store.insert_candidate(
+            db, host=base.host, port=base.port, user_name=base.secret_name, proxy_key=None, now=now
+        )
+    else:
+        flow_id = reg.id
+    await store.create_registration(
+        db,
+        flow_id,
+        host=base.host,
+        port=base.port,
+        secret_name=base.secret_name,
+        ad_tag=tag,
+        now=now,
+        state=RETIRED if gone else REGISTERED,
+        state_reason="proxy_gone" if gone else None,
+    )
+    await store.update_flow(
+        db,
+        flow_id,
+        now,
+        attempts=0,
+        next_attempt_at=None,
+        last_error=None,
+        last_step=step,
+        tag_applied_at=None,
+        tag_failed_at=None,
+        **CLEAR_STUCK,
+    )
+    await _log(
+        db,
+        "sponsor.registered",
+        base.address,
+        reasons=["tag_received", *(["proxy_gone"] if gone else [])],
+        context={"tag": short_tag(tag), "key": work.key},
+    )
+    if not gone and work.key is not None and deps.provider is not None:
+        await _apply_tag(
+            db, deps.provider, flow_id, work.key, tag, address=base.address, announce=True, now=now
+        )
+    return "registered"
+
+
 async def _record(deps: Deps, work: Work, outcome: driver.FlowResult) -> str:
     now = deps.clock()
     async with deps.engine.begin() as db:
         reg = await store.load_reg(db, work.reg.id, for_update=True)
-        if reg is None:
-            return "gone"
         step = outcome.last_step.value if outcome.last_step is not None else "start"
         result = outcome.result
         if isinstance(result, Registered):
-            # Never lose a tag the bot gave, even if the row was retired meanwhile.
-            await store.update_reg(
-                db,
-                reg.id,
-                now,
-                ad_tag=result.tag,
-                registered_at=now,
-                **({} if reg.state == RETIRED else {"state": REGISTERED, "state_reason": None}),
-            )
-            await store.update_flow(
-                db,
-                reg.id,
-                now,
-                attempts=0,
-                next_attempt_at=None,
-                last_error=None,
-                last_step=step,
-                **CLEAR_STUCK,
-            )
-            await _log(
-                db,
-                "sponsor.registered",
-                reg.address,
-                reasons=["tag_received"],
-                context={"tag": short_tag(result.tag), "key": work.key},
-            )
-            if work.key is not None and deps.provider is not None and reg.state != RETIRED:
-                await _apply_tag(db, deps.provider, work.key, result.tag, reg.address, announce=True)
-            return "registered"
+            return await _registered(db, deps, work, reg, result.tag, step, now)
+        if reg is None:
+            return "gone"
         if isinstance(result, PromotionSet):
-            await store.update_reg(db, reg.id, now, sponsor_channel=result.channel)
+            await store.update_reg(db, reg.registration_id, now, sponsor_channel=result.channel)
             await store.update_flow(
                 db,
                 reg.id,
@@ -606,6 +753,7 @@ async def run_once(deps: Deps) -> str:
         except Exception as exc:
             log.warning("sponsor: the provider failed to list proxies (%s)", type(exc).__name__)
         regs, nodes, live = await sync(db, deps.provider, proxies, now)
+        await _late_alerts(db, regs, now)
         windows = [c.window for c in await store.load_campaigns(db)]
         account = await account_store.load_row(db)
         pace = await pacing.load(db)
@@ -639,7 +787,7 @@ async def run_once(deps: Deps) -> str:
 def _reg_view(reg: Reg, *, wanted: str, nodes: dict[uuid.UUID, str], now: datetime) -> dict[str, Any]:
     node = node_of(reg.proxy_key)
     stuck = None
-    if reg.state == FAILED:
+    if reg.stuck:
         stuck = {
             "reason": reg.stuck_reason,
             "reason_fa": REASON_FA.get(reg.stuck_reason or "", reg.stuck_reason),
@@ -663,6 +811,10 @@ def _reg_view(reg: Reg, *, wanted: str, nodes: dict[uuid.UUID, str], now: dateti
         "state_reason": reg.state_reason,
         "has_tag": reg.ad_tag is not None,
         "tag_hint": short_tag(reg.ad_tag),
+        # The tag is in the node's desired Telemt state (None: no tag, or no node uses it).
+        "tag_on_node": (reg.tag_applied_at is not None)
+        if reg.ad_tag is not None and reg.state != RETIRED and reg.proxy_key is not None
+        else None,
         "sponsor_channel": reg.sponsor_channel,
         "wanted_channel": wanted if reg.state != RETIRED else None,
         "in_sync": reg.ad_tag is not None and reg.sponsor_channel == wanted,
@@ -744,30 +896,36 @@ class SponsorError(Exception):
 
 
 async def retry(engine: AsyncEngine, reg_id: uuid.UUID, *, actor: str, now: datetime) -> None:
-    """«ثبت دوباره»: a stuck registration goes back to work (registering again if it has no tag,
-    else setting its sponsor again); a registered one has its sponsor set again; the alert may fire
-    again if it gets stuck again."""
+    """«ثبت دوباره»: a stuck proxy goes back to work. One without a tag is registered again: it has
+    no registration row, so the provider keeps listing it with its secret. One with a tag (stuck or
+    not) has its sponsor set again. The alert may fire again if it gets stuck again."""
     async with engine.begin() as db:
         reg = await store.load_reg(db, reg_id, for_update=True)
         if reg is None:
             raise SponsorError("not_found")
         if reg.state == RETIRED:
             raise SponsorError("registration_retired")
-        values: dict[str, Any] = {"state_reason": None}
-        if reg.ad_tag is None:
-            values["state"] = PENDING
-        else:
-            values.update(state=REGISTERED, sponsor_channel=None)
-        await store.update_reg(db, reg.id, now, **values)
+        if reg.ad_tag is not None:
+            await store.update_reg(
+                db, reg.registration_id, now, state=REGISTERED, state_reason=None, sponsor_channel=None
+            )
+        # A tag that did not reach its node is tried again on the next pass, without the pause.
         await store.update_flow(
-            db, reg.id, now, attempts=0, next_attempt_at=None, last_error=None, **CLEAR_STUCK
+            db,
+            reg.id,
+            now,
+            attempts=0,
+            next_attempt_at=None,
+            last_error=None,
+            tag_failed_at=None,
+            **CLEAR_STUCK,
         )
         await _log(
             db,
             "sponsor.retry_requested",
             reg.address,
             reasons=[f"from:{reg.state}"],
-            context={"stuck_reason": reg.stuck_reason},
+            context={"stuck_reason": reg.stuck_reason, "has_tag": reg.ad_tag is not None},
             actor=actor,
         )
 

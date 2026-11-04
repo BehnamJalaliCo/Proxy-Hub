@@ -53,6 +53,7 @@ import {
   sortRegistrations,
   sponsorKey,
   sponsorLine,
+  tagNote,
   updateCampaign,
   useSponsor,
   windowText,
@@ -194,6 +195,7 @@ function StuckBox({ r }: { r: SponsorRegistration }) {
 function RegistrationRow({ r, index, now, onRetry }: { r: SponsorRegistration; index: number; now: Date; onRetry: () => void }) {
   const st = regStateInfo(r.state);
   const line = sponsorLine(r, now);
+  const tag = tagNote(r);
   const node = r.node_state ? nodeStateInfo(r.node_state) : null;
   const err = r.state !== "failed" ? lastErrorText(r.last_error) : null;
   const retired = r.state === "retired";
@@ -236,6 +238,7 @@ function RegistrationRow({ r, index, now, onRetry }: { r: SponsorRegistration; i
         ) : null}
       </div>
       <p className={cn("text-[0.84rem] leading-6", TONE_TEXT[line.tone])}>{line.text}</p>
+      {tag ? <p className={cn("text-xs leading-6", TONE_TEXT.warning)}>{tag}</p> : null}
       {err ? (
         <p className="text-xs leading-6 text-fg-muted">
           {err}

@@ -17,7 +17,7 @@ from proxyhub.sponsor.campaigns import CampaignError, Window
 from proxyhub.sponsor.conversation import PromoteJob, RegisterJob
 from proxyhub.sponsor.driver import changes
 from proxyhub.sponsor.provider import node_of, user_of, valid
-from proxyhub.sponsor.service import PAUSE_AFTER_STUCK, backoff, choose, in_use
+from proxyhub.sponsor.service import PAUSE_AFTER_STUCK, backoff, choose, in_use, stuck_count
 from proxyhub.sponsor.store import FAILED, PENDING, REGISTERED, RETIRED, Reg
 
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
@@ -114,6 +114,8 @@ NODE_A, NODE_B = uuid.uuid4(), uuid.uuid4()
 def reg(state: str, *, node: uuid.UUID | None = NODE_A, **kw: object) -> Reg:
     base: dict[str, object] = {
         "id": uuid.uuid4(),
+        # A candidate (no tag yet) has no registration row; anything else has one.
+        "registration_id": None if state == PENDING else uuid.uuid4(),
         "host": "1.2.3.4",
         "port": 8443,
         "secret_name": "s1",
@@ -134,6 +136,8 @@ def reg(state: str, *, node: uuid.UUID | None = NODE_A, **kw: object) -> Reg:
         "last_bot_text": None,
         "alerted_at": None,
         "promotion_set_at": None,
+        "tag_applied_at": None,
+        "tag_failed_at": None,
     }
     base.update(kw)
     return Reg(**base)  # type: ignore[arg-type]
@@ -176,6 +180,10 @@ def test_a_new_proxy_is_registered_with_its_secret_from_the_provider() -> None:
     assert pick([pending]) is None
     moved = Proxy(key=proxy.key, host="5.6.7.8", port=8443, secret_hex=SECRET)
     assert pick([pending], live={proxy.key: moved}) is None
+    # Only a candidate is registered: a tagless row written elsewhere is never worked on, and a
+    # stuck candidate waits for the owner.
+    assert pick([replace(pending, registration_id=uuid.uuid4())], live={proxy.key: proxy}) is None
+    assert pick([replace(pending, stuck_reason="unexpected_reply")], live={proxy.key: proxy}) is None
 
 
 def test_a_registered_proxy_gets_the_wanted_sponsor_and_campaigns_come_first() -> None:
@@ -204,9 +212,17 @@ def test_nothing_is_picked_for_proxies_not_in_use_not_due_or_while_paused() -> N
     assert pick([replace(registered, next_attempt_at=NOW + timedelta(minutes=1))]) is None
     assert pick([replace(registered, next_attempt_at=NOW)]) is not None
     assert pick([reg(FAILED, ad_tag=TAG), reg(RETIRED, ad_tag=TAG)]) is None
-    stuck = [reg(FAILED, node=uuid.uuid4()) for _ in range(PAUSE_AFTER_STUCK)]
+    stuck = [
+        reg(FAILED, node=uuid.uuid4(), stuck_reason="unexpected_reply") for _ in range(PAUSE_AFTER_STUCK)
+    ]
     assert pick([registered, *stuck]) is None  # the bot probably says something new: wait for the owner
     assert pick([registered, *stuck[:-1]]) is not None
+    # Stuck means stuck_reason (a candidate has no registration state of its own); a failed row
+    # with none (written elsewhere) or a retired one never pauses anything.
+    candidates = [replace(r, registration_id=None) for r in stuck]
+    assert stuck_count(candidates) == PAUSE_AFTER_STUCK and pick([registered, *candidates]) is None
+    quiet = [reg(FAILED, node=uuid.uuid4()), reg(RETIRED, node=uuid.uuid4(), stuck_reason="x")]
+    assert stuck_count(quiet) == 0 and pick([registered, *quiet]) is not None
     # A key without the contract's shape is not judged by node state.
     odd = replace(registered, proxy_key="something-else")
     assert in_use(odd, {}) and pick([odd], nodes={}) is not None
