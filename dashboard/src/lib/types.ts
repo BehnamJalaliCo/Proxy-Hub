@@ -159,6 +159,33 @@ export interface TgSettings {
   post_interval_min: number;
 }
 
+// --- the operator account for @MTProxybot (D37: a SECOND Telegram account) -------------------------
+
+export type MtpState = "none" | "code_sent" | "password_needed" | "connected" | "disconnected" | "error";
+
+/** GET /api/mtproxy/account. Never a secret and never the full phone number. */
+export interface MtpAccount {
+  state: MtpState;
+  /** "+44•••••23": the first two and the last two digits only. */
+  phone_masked: string | null;
+  account: { first_name: string; user_id: number } | null;
+  /** While a login waits for its code or two-step password. */
+  login: { code_via: string | null; code_length: number | null; code_sent_at: string | null; expires_at: string | null } | null;
+  /** The account could resolve @MTProxybot (null when there is no session). */
+  mtproxybot_ok: boolean | null;
+  connected_at: string | null;
+  last_check_at: string | null;
+  last_check_error: string | null;
+  disconnected_at: string | null;
+  disconnect_reason: string | null;
+  error: string | null;
+  /** "login_expired": the last login ran out of time. */
+  notice: string | null;
+  /** While ON, the automatic session check is paused. */
+  kill_switch: boolean;
+  check_interval_min: number;
+}
+
 export interface OutboxQueued {
   outbox_id: number;
 }

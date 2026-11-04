@@ -22,6 +22,7 @@ import {
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState, type ReactNode, type SubmitEvent } from "react";
 
+import { MtproxyAccountCard } from "../components/MtproxyAccountCard";
 import { Button } from "../components/ui/Button";
 import { Badge, Card, CardHeader, StatusDot } from "../components/ui/Card";
 import { CopyButton, LoadError, Skeleton, SkeletonLines } from "../components/ui/Feedback";
@@ -845,7 +846,7 @@ export default function TelegramPage() {
     <>
       <PageHeader
         title="تلگرام"
-        subtitle="ربات پست‌گذار، اتصال چت شما برای هشدار، کانال‌ها و زمان‌بندی پست. توکن ربات پس از ذخیره هرگز نشان داده نمیشود."
+        subtitle="ربات پست‌گذار، اتصال چت شما برای هشدار، حساب عملیاتی ‎@MTProxybot‎، کانال‌ها و زمان‌بندی پست. توکن‌ها و رمزها پس از ذخیره هرگز نشان داده نمیشوند."
       />
       {status.isPending ? (
         <div className="flex flex-col gap-4">
@@ -873,6 +874,9 @@ export default function TelegramPage() {
           <div className="grid items-start gap-4 sm:gap-5 lg:grid-cols-12">
             <BotCard s={s} />
             <PairingCard s={s} created={created} onCreated={setCreated} />
+          </div>
+          <div className="grid gap-4 sm:gap-5 lg:grid-cols-12">
+            <MtproxyAccountCard />
           </div>
           <div className="grid gap-4 sm:gap-5 lg:grid-cols-12">
             <Card className="lg:col-span-7">
