@@ -517,6 +517,17 @@ async def test_apply_ad_tag_puts_the_tag_on_the_proxys_own_user(env: Env) -> Non
     async with env.engine.begin() as conn:
         await apply_ad_tag(conn, key, None)
     assert [(u.ad_tag, u.registration_id) for u in await users(env.engine, node)] == [(None, None)]
+    # Inside the caller's SAVEPOINT the tag is kept too (the savepoint and the transaction commit).
+    async with env.engine.begin() as conn:
+        async with conn.begin_nested():
+            await apply_ad_tag(conn, key, TAG_A)
+    assert [(u.ad_tag, u.registration_id) for u in await users(env.engine, node)] == [(TAG_A, reg)]
+    # And a SAVEPOINT the caller rolls back takes it away again, with the registration link.
+    async with env.engine.begin() as conn:
+        nested = await conn.begin_nested()
+        await apply_ad_tag(conn, key, None)
+        await nested.rollback()
+    assert [(u.ad_tag, u.registration_id) for u in await users(env.engine, node)] == [(TAG_A, reg)]
 
 
 @pytest.mark.parametrize("tag", ["A1" * 16, "a1" * 15, "x" * 32, ""])

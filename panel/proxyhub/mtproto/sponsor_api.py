@@ -97,10 +97,13 @@ async def apply_ad_tag(db: AsyncConnection, key: str, ad_tag: str | None) -> Non
     ).scalar_one_or_none()
     if known is None:
         raise UnknownProxy("no such MTProto proxy")
-    session = AsyncSession(bind=db)
+    # create_savepoint: the session works in a SAVEPOINT of the caller's transaction, and commit()
+    # only releases it. Without the commit, a caller already inside a SAVEPOINT (begin_nested) would
+    # lose the tag when the session closes while the registration link below still got written.
+    session = AsyncSession(bind=db, join_transaction_mode="create_savepoint")
     try:
         await set_user_sponsor_tag(session, node_id, user, ad_tag)
-        await session.flush()
+        await session.commit()
     finally:
         await session.close()
     # Node counters flow into mtproxy_stats once the user points at its registration.
