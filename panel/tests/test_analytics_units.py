@@ -138,9 +138,9 @@ def test_classify_and_samples_needed() -> None:
     assert sampling.classify(10.0, 80.0, s) == "hot"
     assert sampling.classify(95.0, 99.0, s) == "near_traffic_limit"  # traffic costs money: it wins
     assert (
-        sampling.samples_needed(60) == 3
+        sampling.samples_needed(60) == 2
         and sampling.samples_needed(15) == 1
-        and sampling.samples_needed(30) == 1
+        and sampling.samples_needed(180) == 6
     )
     assert sampling.traffic_pct(5 * TB, 20 * TB) == pytest.approx(25.0)
     assert sampling.traffic_pct(5, 0) is None and sampling.traffic_pct(None, 20) is None

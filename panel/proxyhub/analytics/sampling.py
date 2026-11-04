@@ -231,8 +231,10 @@ def classify(traffic_pct: float | None, cpu_window_avg: float | None, s: Analyti
 
 
 def samples_needed(window_min: int) -> int:
-    """How many 15-minute samples must lie in the window before its CPU average counts (3 of 4 for 1 h)."""
-    return max(1, window_min // 15 - 1)
+    """How many 15-minute samples must lie in the window before its CPU average counts: at least half
+    of the window (2 of the 4 in one hour), so one missed look neither hides a hot node nor lets a
+    single spike raise an alert."""
+    return max(1, window_min // 30)
 
 
 @dataclass(frozen=True)

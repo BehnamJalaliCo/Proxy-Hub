@@ -1,7 +1,7 @@
-"""analytics: server traffic/load samples, channel growth (D7), proxy usage counters (D39),
-channel statistics of the operator account (D38), threshold alerts, @MTProxybot stub
+"""analytics: server samples, channel growth, proxy usage counters, channel statistics, alerts
 
-Aggregates only (CLAUDE.md rule 7): no table here has a column for an IP, a name, a username or a
+Server traffic/load samples, channel growth (D7), proxy usage counters (D39), channel statistics of
+the operator account (D38), threshold alerts, and a stub for @MTProxybot numbers. Aggregates only (CLAUDE.md rule 7): no table here has a column for an IP, a name, a username or a
 phone number. ``analytics_member_events`` holds exactly the Telegram user id, the time, join/leave
 and the invite link NAME; ``analytics_usage_dims`` refuses any bucket under 3 users except "other".
 No foreign key to ``nodes``: a node's history outlives its row.
