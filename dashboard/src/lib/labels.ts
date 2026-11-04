@@ -1,6 +1,7 @@
 // Persian labels for machine codes the API returns (states, reasons, actions). Unknown codes are
 // shown as they are, so a new code on the server is never hidden.
 
+import { FLEET_ACTION, FLEET_NODE_EVENT, FLEET_REASON, FLEET_TRANSITION } from "./fleetLabels";
 import type { AccountState, DomainVerdict, FleetSettings, NodeState, OwnerPoolState, PlanActionKind, PoolState, ProbeVerdict } from "./types";
 
 export type Tone = "neutral" | "brand" | "success" | "warning" | "danger" | "info";
@@ -61,6 +62,7 @@ export const SETTINGS_LABEL: Record<keyof FleetSettings, string> = {
 };
 
 const REASON: Record<string, string> = {
+  ...FLEET_REASON,
   // safety gates (proxyhub/safety/gates.py)
   kill_switch_on: "کلید توقف روشن است",
   budget_cap_not_set: "سقف بودجه تعیین نشده",
@@ -301,7 +303,7 @@ const ACTION: Record<string, string> = {
 };
 
 export function actionLabel(code: string): string {
-  return ACTION[code] ?? code;
+  return ACTION[code] ?? FLEET_ACTION[code] ?? code;
 }
 
 export const PLAN_ACTION: Record<PlanActionKind, { label: string; tone: Tone }> = {
@@ -465,11 +467,12 @@ const NODE_EVENT: Record<string, string> = {
 };
 
 export function nodeEventLabel(kind: string): string {
-  return NODE_EVENT[kind] ?? kind;
+  return NODE_EVENT[kind] ?? FLEET_NODE_EVENT[kind] ?? kind;
 }
 
 /** Why a node changed state (node_events detail.reason). */
 const TRANSITION_REASON: Record<string, string> = {
+  ...FLEET_TRANSITION,
   gates_passed: "همه‌ی قفل‌های ایمنی سبز بود",
   server_found_by_label: "سرور با برچسب پیدا شد",
   server_created: "هتزنر ساخت را تأیید کرد",

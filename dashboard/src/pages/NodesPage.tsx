@@ -3,16 +3,20 @@ import {
   Activity,
   Archive,
   ArrowLeft,
+  BellRing,
   CircleCheck,
   CircleX,
   Cpu,
   FlaskConical,
+  Gauge,
   History,
+  LayoutGrid,
   ListChecks,
   MapPin,
   PlugZap,
   Radar,
   RefreshCw,
+  Repeat,
   Server,
   ShieldX,
   Wallet,
@@ -29,13 +33,24 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { errorList, errorMessage, isApiError } from "../lib/api";
 import { cn } from "../lib/browser";
 import * as api from "../lib/endpoints";
+import {
+  modeInfo,
+  planNote,
+  slotCounts,
+  slotStatusInfo,
+  spareText,
+  useFleetSlots,
+  type FleetSlot,
+  type FleetSlots,
+  type SlotNode,
+} from "../lib/fleet";
 import { formatDecimal, formatJalali, formatNumber, formatRelative } from "../lib/format";
 import { locationName, nodeEventLabel, nodeStateInfo, reasonLabel, verdictInfo } from "../lib/labels";
 import { agentHealth, canRetire, countByState, eventView, isLiveNode, liveTestNode, sortEvents, sortNodes } from "../lib/nodes";
 import { targetOf } from "../lib/probes";
 import { keys, useFleetSettings, useNodeEvents, useNodes, useOverview, useProbeSummary } from "../lib/queries";
 import { toast } from "../lib/toast";
-import { TONE_SOFT } from "../lib/tones";
+import { TONE_SOFT, TONE_TEXT } from "../lib/tones";
 import type { NodeInfo, Overview, ProbeTarget } from "../lib/types";
 
 const fadeUp = (i: number) => ({
@@ -315,7 +330,8 @@ function NodeCard({
           <Button variant="secondary" size="sm" icon={<History className="size-4" />} onClick={onEvents}>
             رویدادها
           </Button>
-          {canRetire(node) ? (
+          {/* Slot nodes are replaced and retired by the fleet itself (the server refuses: fleet_managed). */}
+          {node.is_test && canRetire(node) ? (
             <Button variant="ghost" size="sm" className="text-danger" icon={<Archive className="size-4" />} onClick={onRetire}>
               بازنشسته کردن
             </Button>
@@ -398,6 +414,196 @@ function NodeEventsDrawer({ node, onClose }: { node: NodeInfo | null; onClose: (
   );
 }
 
+// --- the 9 slots + 1 spare (D14) -----------------------------------------------------------------------
+
+function SlotNodeLine({ node, label }: { node: SlotNode; label?: string }) {
+  const st = nodeStateInfo(node.state);
+  const verdict = node.verdict ? verdictInfo(node.verdict) : null;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {label ? <span className="text-[0.72rem] font-semibold text-fg-faint">{label}</span> : null}
+        <Badge tone={st.tone} dot pulse={st.moving}>
+          {st.label}
+        </Badge>
+        {node.blocked ? (
+          <Badge tone="danger">بسته از ایران</Badge>
+        ) : verdict ? (
+          <Badge tone={verdict.tone}>{verdict.label}</Badge>
+        ) : null}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[0.8rem] text-fg-muted">
+        <span className="inline-flex items-center gap-1">
+          <MapPin className="size-3.5 shrink-0 text-brand" />
+          {locationName(node.location)}
+        </span>
+        <span className="ltr font-mono text-fg" title="IP سرور (مال خود node)">
+          {node.ipv4 ?? "—"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function SlotCard({ slot, mode, index }: { slot: FleetSlot; mode: string; index: number }) {
+  const info = slotStatusInfo(slot.status);
+  const shown = slot.node;
+  const note = planNote(slot, mode);
+  const moving = slot.status === "starting" || slot.status === "replacing" || slot.status === "settling";
+  return (
+    <motion.li {...fadeUp(Math.min(index, 10))} layout>
+      <Card className={cn("flex h-full flex-col gap-3 p-4", info.tone === "danger" && "border-danger/30")}>
+        <div className="flex items-start gap-3">
+          <span className={cn("grid size-10 shrink-0 place-items-center rounded-2xl text-base font-extrabold", TONE_SOFT[info.tone])}>
+            {formatNumber(slot.slot)}
+          </span>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-[0.95rem] font-bold text-fg">جایگاه {formatNumber(slot.slot)}</h3>
+            <p className="ltr truncate text-right font-mono text-[0.75rem] text-fg-muted" title={slot.dns_name ?? undefined}>
+              {slot.dns_name ?? "بی دامنه‌ی فعال: لینک‌ها با IP"}
+            </p>
+          </div>
+          <Badge tone={info.tone} dot pulse={moving}>
+            {info.label}
+          </Badge>
+        </div>
+        {shown ? <SlotNodeLine node={shown} /> : <p className="text-sm text-fg-muted">{info.hint}</p>}
+        {slot.replacement ? (
+          <div className="rounded-2xl border border-info/25 bg-info-soft/60 p-2.5">
+            <SlotNodeLine node={slot.replacement} label="جایگزین در راه" />
+          </div>
+        ) : null}
+        {slot.others.map((n) => (
+          <div key={n.id} className="rounded-2xl border border-line bg-surface-2/70 p-2.5">
+            <SlotNodeLine node={n} label="سرور دیگر جایگاه" />
+          </div>
+        ))}
+        {slot.leaving.length > 0 ? (
+          <ul className="flex flex-col gap-1 text-[0.78rem] text-fg-muted">
+            {slot.leaving.map((n) => (
+              <li key={n.id} className="flex items-center gap-1.5">
+                <Archive className="size-3.5 shrink-0 text-warning" />
+                <span className="ltr font-mono">{n.name}</span>
+                <span>· {n.retire_reason ? reasonLabel(n.retire_reason) : nodeStateInfo(n.state).label}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {note ? <p className="mt-auto border-t border-line pt-2.5 text-[0.78rem] leading-6 text-fg-muted">{note}</p> : null}
+      </Card>
+    </motion.li>
+  );
+}
+
+function FleetSlotsSection() {
+  const q = useFleetSlots();
+  const data = q.data;
+  return (
+    <Card>
+      <CardHeader
+        icon={<LayoutGrid className="size-5" />}
+        title="جایگاه‌ها: ۹ + ۱ جای خالی"
+        subtitle={
+          data ? (
+            <>
+              {formatNumber(data.target_slots)} جایگاه و {formatNumber(data.spare_slots)} جای خالی برای جایگزینی ·{" "}
+              {data.active_domain ? (
+                <>
+                  دامنه‌ی فعال <span className="ltr inline-block font-mono">{data.active_domain}</span>
+                </>
+              ) : (
+                "بی دامنه‌ی فعال"
+              )}
+            </>
+          ) : (
+            "هر جایگاه یک نام ثابت دارد؛ اگر سروری سوخت، اول جایگزینش ساخته میشود و بعد قدیمی حذف میشود."
+          )
+        }
+        action={
+          data ? (
+            <Badge tone={modeInfo(data.mode).tone} dot pulse={data.mode === "live"}>
+              {modeInfo(data.mode).label}
+            </Badge>
+          ) : null
+        }
+      />
+      <div className="flex flex-col gap-4 p-3 sm:p-5">
+        {q.isError ? (
+          <LoadError
+            error={q.error}
+            compact
+            onRetry={() => void q.refetch()}
+            notYet={{
+              title: "جایگاه‌های ناوگان هنوز روی پنل فعال نشده",
+              description: "نمای جایگاه‌ها با به‌روزرسانی بعدی پنل فعال میشود.",
+            }}
+          />
+        ) : !data ? (
+          <SkeletonLines lines={5} className="p-2" />
+        ) : (
+          <>
+            <div className={cn("flex gap-3 rounded-2xl p-3.5 text-[0.84rem] leading-7", TONE_SOFT[modeInfo(data.mode).tone])}>
+              <Gauge className="mt-1 size-5 shrink-0" />
+              <p className="text-fg">{modeInfo(data.mode).hint}</p>
+            </div>
+            <SlotTiles data={data} />
+            <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {data.slots.map((s, i) => (
+                <SlotCard key={s.slot} slot={s} mode={data.mode} index={i} />
+              ))}
+            </ul>
+            <div className="flex flex-col gap-2 rounded-2xl border border-line bg-surface-2/70 p-3.5 text-sm">
+              <span className="flex items-center gap-1.5 font-semibold text-fg">
+                <Repeat className="size-4 text-brand" />
+                جای خالی (سرور دهم)
+              </span>
+              <span className="text-fg-muted">{spareText(data, formatNumber)}</span>
+              {data.excess.length > 0 ? (
+                <span className="text-fg-muted">
+                  بیرون از جایگاه‌ها: {data.excess.map((n) => n.name).join("، ")}
+                </span>
+              ) : null}
+            </div>
+            {data.alerts.length > 0 ? (
+              <ul className="flex flex-col gap-1.5 rounded-2xl border border-warning/25 bg-warning-soft p-3.5 text-sm" role="status">
+                {data.alerts.map((a) => (
+                  <li key={a.code} className="flex flex-wrap items-center gap-1.5 text-fg">
+                    <BellRing className="size-4 shrink-0 text-warning" />
+                    <span className="font-semibold">{reasonLabel(a.code)}</span>
+                    {a.since ? <span className="text-xs text-fg-muted">از {formatRelative(a.since)}</span> : null}
+                    {a.last_sent_at ? <span className="text-xs text-fg-muted">· به تلگرام شما خبر داده شد</span> : null}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function SlotTiles({ data }: { data: FleetSlots }) {
+  const c = slotCounts(data);
+  const items = [
+    { label: "سالم", value: c.healthy, tone: "success" as const },
+    { label: "در حال ساخت یا جایگزینی", value: c.working, tone: "info" as const },
+    { label: "ناسالم یا سوخته", value: c.trouble, tone: "danger" as const },
+    { label: "IP سوخته", value: data.burned_ips, tone: "neutral" as const, sub: `${formatNumber(data.burned_prefixes)} رنج /24` },
+  ];
+  return (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      {items.map((t) => (
+        <div key={t.label} className="rounded-2xl bg-surface-2/70 px-3 py-2.5">
+          <div className="text-[0.72rem] text-fg-muted">{t.label}</div>
+          <div className={cn("num text-xl font-extrabold", t.value > 0 ? TONE_TEXT[t.tone] : "text-fg")}>{formatNumber(t.value)}</div>
+          {t.sub ? <div className="text-[0.7rem] text-fg-faint">{t.sub}</div> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // --- page ----------------------------------------------------------------------------------------------
 
 function Tile({ icon, label, value, sub, index }: { icon: ReactNode; label: string; value: string; sub?: string; index: number }) {
@@ -473,6 +679,7 @@ export default function NodesPage() {
       />
 
       <div className="flex flex-col gap-4 sm:gap-5">
+        <FleetSlotsSection />
         {nodes.isPending ? (
           <>
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
