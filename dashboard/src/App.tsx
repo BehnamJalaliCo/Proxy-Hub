@@ -21,6 +21,7 @@ const TelegramPage = lazy(() => import("./pages/TelegramPage"));
 const CloudflarePage = lazy(() => import("./pages/CloudflarePage"));
 const StatsPage = lazy(() => import("./pages/StatsPage"));
 const MtprotoPage = lazy(() => import("./pages/MtprotoPage"));
+const SponsorPage = lazy(() => import("./pages/SponsorPage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
 const SetupPage = lazy(() => import("./pages/SetupPage"));
 const NotFoundPage = lazy(() => import("./pages/NotFoundPage"));
@@ -147,6 +148,14 @@ export default function App() {
                     element={
                       <Suspense fallback={<PageFallback />}>
                         <CloudflarePage />
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="sponsor"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <SponsorPage />
                       </Suspense>
                     }
                   />

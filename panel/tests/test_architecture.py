@@ -42,6 +42,18 @@ TELETHON_MODULE = PANEL / "mtproxy" / "userclient.py"
 USER_ACCOUNT_READS = re.compile(
     r"get_dialogs|iter_dialogs|GetDialogsRequest|get_contacts|GetContactsRequest|iter_messages|get_messages"
 )
+# proxyhub/sponsor talks to @MTProxybot, and only through userclient.BotChat: the raw requests that
+# write to or read a chat are named in userclient.py alone (where the allowlist pins their peer to
+# the bot), and no other request of Telegram's messages namespace is named anywhere.
+BOT_CHAT_REQUEST_NAMES = re.compile(r"SendMessageRequest|GetHistoryRequest|GetBotCallbackAnswerRequest")
+MESSAGES_NAMESPACE = re.compile(r"functions\.messages\.(\w+)")
+BOT_CHAT_ONLY = {"SendMessageRequest", "GetHistoryRequest", "GetBotCallbackAnswerRequest"}
+# Telethon's high-level helpers that write to, or read, any chat (the sponsor code must not reach
+# around the allowlisted BotChat).
+USER_ACCOUNT_WRITES = re.compile(
+    r"\.send_message\(|\.send_file\(|\.forward_messages\(|\.edit_message\(|\.click\(|\.conversation\("
+    r"|\.inline_query\(|\.get_entity\(|\.get_input_entity\("
+)
 # mutations.py does the hcloud calls; the node executor is the single caller, holding gate permits
 # (test nodes only; tests/test_live_units.py::test_only_the_executor_reaches_server_mutations_and_permits).
 ALLOWED_MUTATION_FILES = {PANEL / "hetzner" / "mutations.py", PANEL / "nodes" / "executor.py"}
@@ -83,6 +95,19 @@ def test_negative_controls_match() -> None:
         "await client.get_messages(peer, limit=5)",
     ):
         assert USER_ACCOUNT_READS.search(bad), bad
+    assert BOT_CHAT_REQUEST_NAMES.search("functions.messages.SendMessageRequest(peer=p, message=m)")
+    assert BOT_CHAT_REQUEST_NAMES.search("GetBotCallbackAnswerRequest(peer, msg_id=1, data=b'x')")
+    assert MESSAGES_NAMESPACE.findall("functions.messages.ReadHistoryRequest(peer)") == ["ReadHistoryRequest"]
+    for bad in (
+        "await client.send_message('durov', 'hi')",
+        "await msg.click(0)",
+        "async with client.conversation(bot) as conv:",
+        "await client.get_entity('someone')",
+        "await client.get_input_entity(peer)",
+    ):
+        assert USER_ACCOUNT_WRITES.search(bad), bad
+    assert not USER_ACCOUNT_WRITES.search("await chat.send('/newproxy')")
+    assert not USER_ACCOUNT_WRITES.search("await chat.press(message_id, data)")
 
 
 def test_no_telegram_delete_anywhere() -> None:
@@ -133,3 +158,64 @@ def test_no_call_that_reads_chats_or_contacts_is_named_anywhere() -> None:
         if USER_ACCOUNT_READS.search(p.read_text(encoding="utf-8"))
     }
     assert not hits, f"docs/11 section 2.1 lock 1 violated: {hits}"
+
+
+def test_chat_requests_are_named_only_by_the_operator_client() -> None:
+    # Comments and docstrings included: only userclient.py builds a request that writes to or reads
+    # a chat, and its allowlist pins every one of them to @MTProxybot.
+    named = {p for p in PANEL.rglob("*.py") if BOT_CHAT_REQUEST_NAMES.search(p.read_text(encoding="utf-8"))}
+    assert named == {TELETHON_MODULE}, f"chat requests named outside userclient.py: {named}"
+    used = set()
+    for p in _sources():
+        used |= set(MESSAGES_NAMESPACE.findall(_strip_comments(p.read_text(encoding="utf-8"))))
+    assert used == BOT_CHAT_ONLY, f"messages.* requests in the panel: {sorted(used)}"
+
+
+def _operator_account_code() -> list[Path]:
+    """Every module that can hold the operator account's client: the mtproxy and sponsor packages
+    and anything that imports from them (the panel's own Bot API client has its own send_message)."""
+    found = []
+    for p in _sources():
+        text = p.read_text(encoding="utf-8")
+        if {"mtproxy", "sponsor"} & set(p.relative_to(PANEL).parts[:1]) or re.search(
+            r"from proxyhub\.(mtproxy|sponsor)\b|import proxyhub\.(mtproxy|sponsor)\b", text
+        ):
+            found.append(p)
+    return found
+
+
+def test_no_high_level_chat_helper_is_called_by_operator_account_code() -> None:
+    files = _operator_account_code()
+    assert TELETHON_MODULE in files and PANEL / "reconcilers" / "mtproxy_account.py" in files
+    hits = {
+        p: USER_ACCOUNT_WRITES.findall(_strip_comments(p.read_text(encoding="utf-8")))
+        for p in files
+        if USER_ACCOUNT_WRITES.search(_strip_comments(p.read_text(encoding="utf-8")))
+    }
+    assert not hits, f"docs/11 section 2.1 lock 1: use userclient.BotChat only: {hits}"
+
+
+def test_the_bot_chat_allowlist_is_exactly_three_requests_pinned_to_the_bot() -> None:
+    from telethon import functions, types
+
+    from proxyhub.mtproxy.userclient import (
+        ALLOWED_REQUESTS,
+        BOT_CHAT_REQUESTS,
+        MAX_HISTORY_LIMIT,
+        RequestNotAllowed,
+        check_request,
+    )
+
+    assert {k.__name__ for k in BOT_CHAT_REQUESTS} == BOT_CHAT_ONLY
+    assert not BOT_CHAT_REQUESTS & ALLOWED_REQUESTS
+    assert not any(k.__module__.endswith(".messages") for k in ALLOWED_REQUESTS)
+    assert MAX_HISTORY_LIMIT <= 10
+    bot = types.InputPeerUser(user_id=93_372_553, access_hash=1)
+    send = functions.messages.SendMessageRequest(peer=bot, message="/myproxies")
+    check_request(send, bot_id=93_372_553)  # the bot's chat, once it is open
+    for bot_id in (None, 777_000):  # chat not open on this connection, or another user id stored
+        try:
+            check_request(send, bot_id=bot_id)
+        except RequestNotAllowed:
+            continue
+        raise AssertionError(f"sendMessage passed with bot_id={bot_id}")

@@ -1,6 +1,7 @@
 // Persian labels for machine codes the API returns (states, reasons, actions). Unknown codes are
 // shown as they are, so a new code on the server is never hidden.
 
+import { SPONSOR_ACTION } from "./sponsorLabels";
 import type { AccountState, DomainVerdict, FleetSettings, NodeState, OwnerPoolState, PlanActionKind, PoolState, ProbeVerdict } from "./types";
 
 export type Tone = "neutral" | "brand" | "success" | "warning" | "danger" | "info";
@@ -301,7 +302,7 @@ const ACTION: Record<string, string> = {
 };
 
 export function actionLabel(code: string): string {
-  return ACTION[code] ?? code;
+  return ACTION[code] ?? SPONSOR_ACTION[code] ?? code;
 }
 
 export const PLAN_ACTION: Record<PlanActionKind, { label: string; tone: Tone }> = {

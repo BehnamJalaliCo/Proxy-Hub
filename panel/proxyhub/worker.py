@@ -18,6 +18,7 @@ from proxyhub.reconcilers.mtproxy_account import MtproxyAccountReconciler
 from proxyhub.reconcilers.nodes import NodesReconciler
 from proxyhub.reconcilers.pricing import PricingReconciler
 from proxyhub.reconcilers.probes import ProbesReconciler
+from proxyhub.reconcilers.sponsor import SponsorReconciler
 from proxyhub.reconcilers.telegram import (
     ApiWatchdogReconciler,
     TelegramOutboxReconciler,
@@ -46,6 +47,7 @@ def reconcilers() -> list[Reconciler]:
         AnalyticsReconciler(),  # read-only: server traffic/CPU every 15 min, channel size hourly, alerts
         ChannelStatsReconciler(),  # D38: channel statistics via the operator account (kill switch OFF only)
         MtprotoReconciler(),  # Telemt settings + one long-lived proxy secret per node (proxyhub.mtproto)
+        SponsorReconciler(),  # D25/D37: @MTProxybot registration and sponsor channel (kill switch OFF only)
     ]
 
 
