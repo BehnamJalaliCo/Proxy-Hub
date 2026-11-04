@@ -1,5 +1,5 @@
 """Cloudflare API v4 client (httpx), limited to what the panel needs: verify the token, list zones,
-list/create/update/delete DNS records.
+list/create/update/delete DNS records, and delete a filtered zone (decision D35).
 
 Rule 3: the token is a :class:`~proxyhub.vault.SecretValue`, revealed only while building the
 Authorization header of each request. URLs never contain it (httpx logs request URLs at INFO), and
@@ -313,6 +313,14 @@ class CloudflareClient:
         self._check_id(zone_id)
         self._check_id(record_id)
         await self._request("DELETE", f"/zones/{zone_id}/dns_records/{record_id}")
+
+    async def delete_zone(self, zone_id: str) -> None:
+        """``DELETE /zones/{zone_id}``: removes the whole zone from Cloudflare. Needs the token
+        permission "Zone Write" (dashboard: Zone · Zone · Edit). Exactly one caller,
+        proxyhub/cloudflare/deletion.py, after every condition was re-checked
+        (tests/test_architecture.py pins this)."""
+        self._check_id(zone_id)
+        await self._request("DELETE", f"/zones/{zone_id}")
 
     @staticmethod
     def _check_id(value: str) -> None:

@@ -34,7 +34,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from proxyhub.db.models import Base
 
-POOL_STATES = ("none", "active", "standby", "filtered", "retired")
+POOL_STATES = ("none", "active", "standby", "filtered", "retired", "deleted")
 RECORD_TYPES = ("A", "AAAA", "TXT")
 RECORD_PURPOSES = ("slot", "test")
 PROBE_SOURCES = ("globalping", "check-host")
@@ -43,6 +43,12 @@ PROBE_ROLES = ("node", "control")
 MEASUREMENT_STATUSES = ("ok", "no_probes", "rate_limited", "error", "timeout", "skipped")
 VERDICTS = ("ok", "suspect", "blocked", "unknown")
 ROUND_TRIGGERS = ("schedule", "manual")
+DOMAIN_VERDICTS = ("filtered", "clear", "unknown")
+DOMAIN_CHECK_STATUSES = ("ok", "no_probes", "rate_limited", "error", "timeout")
+DOMAIN_CHECK_COUNTS = (
+    "probes_asked >= 0 AND probes >= 0 AND answered >= 0 AND hijacked >= 0 AND hijacked <= answered"
+    " AND networks_answered >= 0 AND networks_hijacked >= 0 AND networks_hijacked <= networks_answered"
+)
 
 
 def _in(values: tuple[str, ...]) -> str:
@@ -73,11 +79,20 @@ class CfState(Base):
     missing: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     token_kind: Mapped[str | None] = mapped_column(String(10))
     zones_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set when the pool ran out of usable standby domains and the owner was told; the reminder is
+    # repeated at most once a day while it stays empty, and cleared when a standby exists again.
+    standby_alert_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = _now()
 
 
 class CfZone(Base):
-    """A Cloudflare zone the token can see, with its place in the domain pool (set by the owner)."""
+    """A Cloudflare zone the token can see, with its place in the domain pool (decision D35).
+
+    ``created_at`` is when the panel first saw the zone (promotion order). A zone that is still
+    ``none`` and was never moved (``pool_changed_at`` NULL) joins the pool by itself once
+    Cloudflare serves it; the filter checks move it to ``filtered``; a filtered zone is deleted from
+    Cloudflare after a grace period and ends as ``deleted`` (proxyhub/cloudflare/deletion.py).
+    """
 
     __tablename__ = "cf_zones"
     __table_args__ = (
@@ -101,6 +116,19 @@ class CfZone(Base):
     # DNS:Edit confirmed for this zone without changing anything (see cloudflare/client.py).
     dns_edit: Mapped[bool | None] = mapped_column(Boolean)
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # When the zone entered 'filtered' (the deletion grace period starts here).
+    filtered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When the panel deleted the zone from Cloudflare (pool_state 'deleted').
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A deletion attempt that is in flight (committed before the API call; expires after a while).
+    delete_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Cloudflare refused the deletion for good (zone_edit_denied, cf_refused:<codes>): not retried
+    # until a token is stored again.
+    delete_blocked: Mapped[str | None] = mapped_column(String(60))
+    # Transient failures: error kind, count, and when to try again (backoff).
+    delete_error: Mapped[str | None] = mapped_column(String(30))
+    delete_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    delete_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _now()
     updated_at: Mapped[datetime] = _now()
 
@@ -133,6 +161,39 @@ class CfRecord(Base):
     node_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("nodes.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = _now()
     updated_at: Mapped[datetime] = _now()
+
+
+class DomainCheck(Base):
+    """One filter check of a domain from Iran: a Globalping DNS (A) query of the zone's apex name
+    through Iranian probes' own resolvers. An answer in 10.10.34.0/24 is the Iranian filter's
+    hijack signature. Only counts per measurement network are kept (rule 7): no answer addresses,
+    no probe addresses, nothing about any user."""
+
+    __tablename__ = "domain_checks"
+    __table_args__ = (
+        CheckConstraint(f"status IN ({_in(DOMAIN_CHECK_STATUSES)})", name="status"),
+        CheckConstraint(f"verdict IN ({_in(DOMAIN_VERDICTS)})", name="verdict"),
+        CheckConstraint(f"pool_state IN ({_in(POOL_STATES)})", name="pool_state"),
+        CheckConstraint(DOMAIN_CHECK_COUNTS, name="counts"),
+        Index("ix_domain_checks_zone_at", "zone_id", "at"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    zone_id: Mapped[str] = mapped_column(ForeignKey("cf_zones.id", ondelete="CASCADE"), nullable=False)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)  # measurement start
+    pool_state: Mapped[str] = mapped_column(String(10), nullable=False)  # the zone's state when checked
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    ref: Mapped[str | None] = mapped_column(String(64))  # Globalping measurement id
+    probes_asked: Mapped[int] = mapped_column(Integer, nullable=False)
+    probes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    answered: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    hijacked: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    networks_answered: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    networks_hijacked: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # [{"asn": 197207, "network": "...", "answered": 1, "hijacked": 1}, ...]
+    detail: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    # The domain's verdict computed right after this round (proxyhub/cloudflare/filtering.py).
+    verdict: Mapped[str] = mapped_column(String(10), nullable=False)
+    verdict_reasons: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
 
 
 # --- Probes from Iran ---------------------------------------------------------------------------
