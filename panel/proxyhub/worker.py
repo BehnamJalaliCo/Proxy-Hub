@@ -12,6 +12,7 @@ from proxyhub.reconcilers.base import Heartbeat, Reconciler
 from proxyhub.reconcilers.dns import DnsReconciler
 from proxyhub.reconcilers.domains import DomainsReconciler
 from proxyhub.reconcilers.fleet import FleetReconciler
+from proxyhub.reconcilers.mtproto import MtprotoReconciler
 from proxyhub.reconcilers.mtproxy_account import MtproxyAccountReconciler
 from proxyhub.reconcilers.nodes import NodesReconciler
 from proxyhub.reconcilers.pricing import PricingReconciler
@@ -41,6 +42,7 @@ def reconcilers() -> list[Reconciler]:
         ProbesReconciler(),  # net: records reachability verdicts from Iran only
         DomainsReconciler(),  # D35: filter checks of the pool domains, rotation, deletion of filtered zones
         MtproxyAccountReconciler(),  # D37: the operator account's session check (kill switch OFF only)
+        MtprotoReconciler(),  # Telemt settings + one long-lived proxy secret per node (proxyhub.mtproto)
     ]
 
 
