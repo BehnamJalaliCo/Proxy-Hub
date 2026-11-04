@@ -6,8 +6,8 @@ at all while the kill switch is ON.
 
 It runs under its own advisory lock ``sponsor`` (two workers never both act) with no transaction
 open while Telegram answers. The live proxies come from team mtproto's provider
-(:data:`proxyhub.sponsor.provider.MTPROTO_PROVIDER`); while that is not wired, the loop only keeps
-the campaign states up to date.
+(:data:`proxyhub.sponsor.provider.MTPROTO_PROVIDER`); with no provider (tests only), the loop only
+keeps the campaign states up to date.
 """
 
 from __future__ import annotations

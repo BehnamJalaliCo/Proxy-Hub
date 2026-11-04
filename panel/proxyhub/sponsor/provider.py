@@ -8,7 +8,7 @@ Team mtproto implements ``proxyhub/mtproto/sponsor_api.py``::
     async def apply_ad_tag(db: AsyncConnection, key: str, ad_tag: str | None) -> None
 
 This module only describes that shape (:class:`SponsorProvider`, which the module itself satisfies)
-and holds :data:`MTPROTO_PROVIDER`, which the integrator points at that module. While it is None the
+and holds :data:`MTPROTO_PROVIDER`, which points at that module. If it is None (tests only), the
 sponsor reconciler registers nothing (it still keeps campaign states up to date).
 
 * ``key``: a stable id, ``"mtproto:<node_id>:<user>"``.
@@ -25,6 +25,8 @@ from collections.abc import Sequence
 from typing import Final, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncConnection
+
+from proxyhub.mtproto import sponsor_api as _mtproto_sponsor_api
 
 KEY_RE: Final = re.compile(r"mtproto:(?P<node>[0-9a-fA-F-]{36}):(?P<user>[A-Za-z0-9_]{1,32})")
 SECRET_RE: Final = re.compile(r"[0-9a-f]{32}")
@@ -50,8 +52,8 @@ class SponsorProvider(Protocol):
     async def apply_ad_tag(self, db: AsyncConnection, key: str, ad_tag: str | None) -> None: ...
 
 
-# Wired by the integrator: ``from proxyhub.mtproto import sponsor_api as MTPROTO_PROVIDER``.
-MTPROTO_PROVIDER: SponsorProvider | None = None
+# The live MTProto proxies (round-3 integration). Tests may point this at another provider or None.
+MTPROTO_PROVIDER: SponsorProvider | None = _mtproto_sponsor_api
 
 
 def valid(proxy: Registrable) -> bool:
