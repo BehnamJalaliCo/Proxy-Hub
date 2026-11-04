@@ -8,6 +8,10 @@
   (the MTProto link is rebuilt in canonical form). A link that fails is left out and its key is
   remembered in :attr:`Harvest.doubtful`, so posts that carry it are not edited this round.
 * Nothing here logs or returns a URL: a log line names the provider and the link key only.
+* A new post takes at most ``max_mtproto`` / ``max_reality`` links (:func:`for_new_post`): one per
+  slot before a second one of any slot, the one that lasts longest first within a slot, and each new
+  post starts one slot further (``rotate``), so the posts spread the users over the slots instead of
+  sending everyone to the lowest ones (a Reality config ends at its traffic cap).
 """
 
 from __future__ import annotations
@@ -110,16 +114,52 @@ async def harvest(db: AsyncConnection, providers: Sequence[Provider] | None = No
     return Harvest(links=links, complete=complete, doubtful=frozenset(doubtful), providers=len(providers))
 
 
-def _order(link: ProxyLink) -> tuple[int, str, str]:
-    return (link.slot if link.slot is not None else 1_000_000, link.label, link.key)
+SlotKey = tuple[int, int, str]
 
 
-def for_new_post(h: Harvest, now: datetime, *, max_mtproto: int, max_reality: int) -> list[ProxyLink]:
-    """Active links for a new post: MTProto by slot, then Reality configs that still have at least
-    :data:`MIN_REMAINING` left."""
-    mtproto = sorted(h.active("mtproto"), key=_order)[:max_mtproto]
-    reality = sorted(
-        (x for x in h.active("reality") if x.expires_at is None or x.expires_at - now >= MIN_REMAINING),
-        key=_order,
-    )[:max_reality]
+def _slot_key(link: ProxyLink) -> SlotKey:
+    """Links of one slot together, slots in order; a link without a slot is a group of its own."""
+    return (0, link.slot, "") if link.slot is not None else (1, 0, link.key)
+
+
+def _longest_first(link: ProxyLink) -> tuple[int, float, str]:
+    """Within a slot: a link that never ends, then the one that ends last (not by label: Persian
+    digits do not sort as numbers)."""
+    if link.expires_at is None:
+        return (0, 0.0, link.key)
+    return (1, -link.expires_at.timestamp(), link.key)
+
+
+def spread(items: Sequence[ProxyLink], limit: int, rotate: int = 0) -> list[ProxyLink]:
+    """Up to ``limit`` of ``items``: one per slot before a second of any slot, the longest-lasting
+    first within a slot, starting at the slot ``rotate`` points to. Returned in slot order."""
+    if limit <= 0 or not items:
+        return []
+    groups: dict[SlotKey, list[ProxyLink]] = {}
+    for x in items:
+        groups.setdefault(_slot_key(x), []).append(x)
+    for group in groups.values():
+        group.sort(key=_longest_first)
+    order = sorted(groups)
+    start = rotate % len(order)
+    turned = order[start:] + order[:start]
+    picked: list[ProxyLink] = []
+    for depth in range(max(len(g) for g in groups.values())):
+        for key in turned:
+            if len(picked) < limit and depth < len(groups[key]):
+                picked.append(groups[key][depth])
+    return sorted(picked, key=lambda x: (_slot_key(x), _longest_first(x)))
+
+
+def for_new_post(
+    h: Harvest, now: datetime, *, max_mtproto: int, max_reality: int, rotate: int = 0
+) -> list[ProxyLink]:
+    """Active links for a new post (see the module doc): MTProto links, then Reality configs that
+    still have at least :data:`MIN_REMAINING` left. ``rotate``: how many posts went before."""
+    mtproto = spread(h.active("mtproto"), max_mtproto, rotate)
+    reality = spread(
+        [x for x in h.active("reality") if x.expires_at is None or x.expires_at - now >= MIN_REMAINING],
+        max_reality,
+        rotate,
+    )
     return [*mtproto, *reality]

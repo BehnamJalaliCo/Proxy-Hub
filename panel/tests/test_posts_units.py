@@ -300,6 +300,36 @@ def test_checked_refuses_non_links() -> None:
     assert links.checked({"kind": "mtproto"}) is None
 
 
+def test_selection_spreads_over_slots_turns_with_each_post_and_prefers_the_newest() -> None:
+    now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+
+    def cfg(key: str, slot: int | None, hours: float) -> ProxyLink:
+        return link(kind="reality", key=key, slot=slot, url="vless://a@b:1", label="ریلیتی",
+                    expires_at=now + timedelta(hours=hours))  # fmt: skip
+
+    many = [cfg(f"s{i}", i, 10) for i in range(1, 10)]
+    # Slot 2 has an older and a newer config ("ریلیتی ۱۰" would sort before "ریلیتی ۲" by label).
+    older, newer = cfg("old2", 2, 3), cfg("new2", 2, 20)
+    h = links.Harvest(links={x.key: x for x in [*many, older, newer]})
+    first = links.for_new_post(h, now, max_mtproto=0, max_reality=3, rotate=0)
+    assert [x.key for x in first] == ["s1", "new2", "s3"]
+    second = links.for_new_post(h, now, max_mtproto=0, max_reality=3, rotate=1)
+    assert [x.key for x in second] == ["new2", "s3", "s4"]
+    wrapped = links.for_new_post(h, now, max_mtproto=0, max_reality=3, rotate=8)
+    assert [x.key for x in wrapped] == ["s1", "new2", "s9"]  # slot order, whatever the start
+    # Over 9 posts every slot is carried equally often.
+    counts: dict[int | None, int] = {}
+    for r in range(9):
+        for x in links.for_new_post(h, now, max_mtproto=0, max_reality=3, rotate=r):
+            counts[x.slot] = counts.get(x.slot, 0) + 1
+    assert set(counts.values()) == {3} and len(counts) == 9
+    # Fewer slots than places: a second config of a slot is taken only after one of every slot.
+    two = links.Harvest(links={x.key: x for x in [cfg("a1", 1, 5), cfg("a2", 1, 9), older, newer]})
+    got = links.for_new_post(two, now, max_mtproto=0, max_reality=3)
+    assert [x.key for x in got] == ["a2", "a1", "new2"]
+    assert links.spread([], 3) == [] and links.spread(many, 0) == []
+
+
 def test_selection_orders_by_slot_caps_and_skips_ending_configs() -> None:
     now = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
     h = links.Harvest(

@@ -295,6 +295,21 @@ async def test_content_order_recycling_and_fallback(engine: AsyncEngine, vault: 
     ].content_item_id is None
 
 
+async def test_posts_take_turns_over_the_slots(engine: AsyncEngine, vault: Vault) -> None:
+    nodes = await ready_fleet(engine, 4)
+    await setup_telegram(engine, vault)
+    await quiet(engine, [], interval=0)
+    carried: list[list[int]] = []
+    for i in range(2):
+        post_id, _ = await posted(engine, vault, slot_time(i), message_id=40 + i)
+        got = await rows(engine, "SELECT slot FROM post_links WHERE post_id = :p AND kind = 'reality' "
+                                 "ORDER BY position", p=post_id)  # fmt: skip
+        carried.append([r.slot for r in got])
+    assert carried == [[1, 2, 3], [2, 3, 4]]  # max_reality 3 of 4 slots: the second post starts one further
+    body = (await jobs(engine, "send_post"))[-1].payload["text"]
+    assert all(node_secret(n) in body for n in nodes)  # every MTProto link fits (max_mtproto 12)
+
+
 async def test_a_failing_provider_costs_only_its_own_links(engine: AsyncEngine, vault: Vault) -> None:
     nodes = await ready_fleet(engine, 2)
     await setup_telegram(engine, vault)

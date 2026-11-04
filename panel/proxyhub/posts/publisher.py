@@ -150,6 +150,14 @@ async def last_post_at(db: AsyncConnection) -> datetime | None:
     return value if isinstance(value, datetime) else None
 
 
+async def choose_links(
+    db: AsyncConnection, h: links.Harvest, now: datetime, cfg: settings.PostingConfig
+) -> list[ProxyLink]:
+    """The links of the next post; the slots turn by one with every post made so far."""
+    made = int((await db.execute(select(func.count()).select_from(Post))).scalar_one())
+    return links.for_new_post(h, now, max_mtproto=cfg.max_mtproto, max_reality=cfg.max_reality, rotate=made)
+
+
 async def post_waiting(db: AsyncConnection) -> bool:
     """An earlier post is still in the outbox (e.g. the bot is paused): queue nothing more."""
     row = (
@@ -229,7 +237,7 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
     if await post_waiting(db):
         return "waiting"
     h = await harvest()
-    chosen = links.for_new_post(h, now, max_mtproto=cfg.max_mtproto, max_reality=cfg.max_reality)
+    chosen = await choose_links(db, h, now, cfg)
     if not chosen:
         if not await _kill_switch_on(db):
             await _alert_once(db, now, "no_links_alert_at", NO_LINKS_REPEAT, NO_LINKS_ALERT_FA)
