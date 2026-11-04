@@ -8,6 +8,7 @@ import {
   parseTags,
   parseTgHtml,
   plainText,
+  postsThatFit,
   sameSettings,
   toDraft,
   validateContent,
@@ -113,6 +114,10 @@ describe("Telegram HTML reader", () => {
     expect(plainText(parseTgHtml("a < b <b>c</i> d"))).toBe("a < b c d");
     expect(plainText(parseTgHtml("<br>x<br/>"))).toBe("\nx\n");
     expect(decodeEntities("&#1588;&#x634;&unknown;")).toBe("شش&unknown;");
+    // Out of range or surrogate references never throw (the live preview must not break).
+    expect(decodeEntities("a&#9999999;b&#xFFFFFF;c&#0;d&#xD800;e")).toBe("a\uFFFDb\uFFFDc\uFFFDd\uFFFDe");
+    expect(decodeEntities("&#x10FFFF;")).toBe(String.fromCodePoint(0x10ffff));
+    expect(() => parseTgHtml("<b>&#9999999;</b>")).not.toThrow();
   });
 
   it("measures and shortens visible text", () => {
@@ -124,6 +129,21 @@ describe("Telegram HTML reader", () => {
   it("wraps a selection for the toolbar", () => {
     expect(wrapSelection("سلام دنیا", 5, 9, "<b>", "</b>")).toEqual({ text: "سلام <b>دنیا</b>", start: 8, end: 12 });
     expect(wrapSelection("abc", 3, 3, "<i>", "</i>").text).toBe("abc<i></i>");
+  });
+});
+
+describe("posts that fit the posting hours", () => {
+  it("counts the gaps of the posting hours, also past midnight", () => {
+    expect(postsThatFit("08:00", "00:00", 60)).toBe(16);
+    expect(postsThatFit("22:00", "02:00", 30)).toBe(8);
+    expect(postsThatFit("۰۸:۰۰", "۱۰:۰۰", 120)).toBe(1);
+    expect(postsThatFit("08:00", "08:30", 60)).toBe(1);
+  });
+
+  it("has no limit without a gap or with hours that are not valid", () => {
+    expect(postsThatFit("08:00", "00:00", 0)).toBeNull();
+    expect(postsThatFit("08:00", "08:00", 60)).toBeNull();
+    expect(postsThatFit("25:00", "08:00", 60)).toBeNull();
   });
 });
 

@@ -5,7 +5,7 @@
 
 import { request } from "./api";
 import type { Tone } from "./labels";
-import { normalizeHHMM } from "./telegram";
+import { minutesOf, normalizeHHMM } from "./telegram";
 import { asciiDigits } from "./validation";
 
 // --- types ------------------------------------------------------------------------------------------
@@ -267,6 +267,19 @@ export function validateSettings(d: SettingsDraft): { settings: PostingSettings 
   };
 }
 
+/** About how many posts the posting hours hold when two posts must be `gapMin` minutes apart
+ * (telegram.posting). The publisher posts a slot only within its 45-minute grace, so slots beyond
+ * this number are skipped. null: no limit (no gap) or the hours are not valid. */
+export function postsThatFit(dayStart: string, dayEnd: string, gapMin: number): number | null {
+  const start = normalizeHHMM(dayStart);
+  const end = normalizeHHMM(dayEnd);
+  if (start === null || end === null || start === end || !(gapMin > 0)) return null;
+  const a = minutesOf(start);
+  const b = minutesOf(end);
+  const span = b > a ? b - a : b + 24 * 60 - a;
+  return Math.max(1, Math.floor(span / gapMin));
+}
+
 export function sameSettings(a: PostingSettings, b: PostingSettings): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
@@ -341,12 +354,19 @@ const TAG_ALIASES: Record<string, TgTag> = {
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", "#39": "'", "#x27": "'" };
 
+/** A numeric reference as browsers read it: no code point, a surrogate or beyond U+10FFFF is U+FFFD
+ * (String.fromCodePoint would throw past U+10FFFF and break the live preview). */
+function codePoint(n: number): string {
+  if (!Number.isInteger(n) || n <= 0 || n > 0x10ffff || (n >= 0xd800 && n <= 0xdfff)) return "�";
+  return String.fromCodePoint(n);
+}
+
 export function decodeEntities(s: string): string {
   return s.replace(/&(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,6});/gi, (m, name: string) => {
     const known = ENTITIES[name.toLowerCase()];
     if (known !== undefined) return known;
-    if (name.startsWith("#x") || name.startsWith("#X")) return String.fromCodePoint(parseInt(name.slice(2), 16));
-    if (name.startsWith("#")) return String.fromCodePoint(Number(name.slice(1)));
+    if (name.startsWith("#x") || name.startsWith("#X")) return codePoint(parseInt(name.slice(2), 16));
+    if (name.startsWith("#")) return codePoint(Number(name.slice(1)));
     return m;
   });
 }

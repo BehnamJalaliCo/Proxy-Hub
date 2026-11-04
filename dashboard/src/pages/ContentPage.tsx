@@ -49,6 +49,7 @@ import {
   LINK_STATUS,
   parseTgHtml,
   POST_STATE,
+  postsThatFit,
   putPostingSettings,
   ROLE_LABEL,
   sameSettings,
@@ -332,6 +333,7 @@ function SettingsForm({ saved, s }: { saved: PostingSettings; s: PostsStatus }) 
     );
   };
   const mainSet = s.channels.main !== null;
+  const fit = settings ? postsThatFit(settings.day_start, settings.day_end, s.post_interval_min) : null;
 
   return (
     <form onSubmit={save} noValidate className="flex flex-col gap-4 p-5">
@@ -379,6 +381,15 @@ function SettingsForm({ saved, s }: { saved: PostingSettings; s: PostsStatus }) 
           </p>
         </div>
       </div>
+      {settings && fit !== null && settings.posts_per_day > fit ? (
+        <div className="flex gap-3 rounded-2xl border border-warning/25 bg-warning-soft p-3.5 text-[0.84rem] leading-7 text-fg" role="status">
+          <CircleAlert className="mt-1 size-5 shrink-0 text-warning" />
+          <p>
+            با فاصله‌ی دست‌کم {toFaDigits(s.post_interval_min)} دقیقه میان دو پست (صفحه‌ی تلگرام)، در این ساعت‌ها حدود {toFaDigits(fit)} پست جا میشود؛
+            نوبت‌های بیشتر بی‌صدا جا میمانند. ساعت‌های پست را بازتر یا آن فاصله را کمتر کنید.
+          </p>
+        </div>
+      ) : null}
 
       <button
         type="button"
