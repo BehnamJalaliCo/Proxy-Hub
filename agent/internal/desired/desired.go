@@ -36,6 +36,8 @@ type Document struct {
 	NodeID    string    `json:"node_id"`
 	Intervals Intervals `json:"intervals"`
 	Telemt    *Telemt   `json:"telemt"`
+	// Xray is present only for nodes that serve VLESS Reality (an older agent refuses the key).
+	Xray *Xray `json:"xray,omitempty"`
 }
 
 // Intervals tells the agent how often to poll and report.
@@ -102,10 +104,17 @@ func (d *Document) Validate(nodeID string) error {
 	if d.Intervals.PollS < 5 || d.Intervals.PollS > 3600 || d.Intervals.ReportS < 10 || d.Intervals.ReportS > 3600 {
 		return errors.New("desired state: intervals out of range")
 	}
-	if d.Telemt == nil {
-		return nil
+	var telemtPorts []int
+	if d.Telemt != nil {
+		if err := d.Telemt.Validate(); err != nil {
+			return err
+		}
+		telemtPorts = d.Telemt.Ports
 	}
-	return d.Telemt.Validate()
+	if d.Xray != nil {
+		return d.Xray.Validate(telemtPorts)
+	}
+	return nil
 }
 
 // Validate checks the Telemt part, including the non-negotiable privacy and sponsor invariants.
