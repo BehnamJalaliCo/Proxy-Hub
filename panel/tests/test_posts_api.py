@@ -84,7 +84,7 @@ async def client(engine: AsyncEngine) -> AsyncIterator[AsyncClient]:
         app.dependency_overrides.pop(require_admin, None)
 
 
-SETTINGS = {
+SETTINGS: dict[str, Any] = {
     "enabled": True,
     "main_enabled": False,
     "posts_per_day": 10,
@@ -112,8 +112,9 @@ async def test_every_posts_route_requires_admin_and_none_deletes(engine: AsyncEn
     found = set()
     for route in routes_posts.api.routes:
         assert isinstance(route, APIRoute)
-        assert "DELETE" not in route.methods
-        for method in route.methods:
+        methods = route.methods or set()
+        assert "DELETE" not in methods
+        for method in methods:
             found.add((method, route.path))
         assert require_admin in {d.call for d in route.dependant.dependencies}, route.path
     assert found == POSTS_PATHS

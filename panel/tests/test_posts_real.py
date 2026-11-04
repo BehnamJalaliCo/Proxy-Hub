@@ -3,7 +3,8 @@
 Same environment as tests/test_telegram_real.py (PROXYHUB_TELEGRAM_TEST_TOKEN_FILE and
 PROXYHUB_TELEGRAM_TEST_CHANNEL). It sends one post in the publisher's full layout (bold title,
 blockquote, MTProto link words, a Reality config in <code>, the channel tag) to the private TEST
-channel, then edits it to the all-dead state, proving Telegram accepts both HTML texts. The links
+channel, then edits it to a paused/ended state and to the all-dead state, proving Telegram accepts
+every HTML text. The links
 point at documentation addresses (RFC 5737, example.com) and a random secret, so nobody can use
 them. Nothing is ever removed (rule 6).
 """
@@ -61,14 +62,21 @@ async def test_publisher_layout_is_accepted_and_edited_by_telegram() -> None:
             expires_at=datetime.now(UTC) + timedelta(hours=24),
         )
     ]
+    mixed = [
+        PostLink(kind=x.kind, label=x.label, status="paused" if i % 2 else "expired")
+        for i, x in enumerate(live)
+    ]
     dead = [PostLink(kind=x.kind, label=x.label, status="burned") for x in live]
     with all_logs(logging.DEBUG) as logs:
         async with BotClient(token) as bot:
             chat = await bot.get_chat(channel)
             sent = await bot.send_message(chat.id, render_post(content, live, "@ipoxxo").text)
+            middle = await bot.edit_message_text(
+                chat.id, sent.message_id, render_post(content, mixed, "@ipoxxo").text
+            )
             edited = await bot.edit_message_text(
                 chat.id, sent.message_id, render_post(content, dead, "@ipoxxo").text
             )
-    assert edited.message_id == sent.message_id
+    assert middle.message_id == edited.message_id == sent.message_id
     assert_no_token(token, logs.getvalue())
     assert sec not in logs.getvalue()
