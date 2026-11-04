@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -145,6 +147,25 @@ async def idle_in_transaction(engine: AsyncEngine) -> int:
             )
         )
         return int(found.scalar_one())
+
+
+async def open_transactions_during_hang(
+    engine: AsyncEngine, task: asyncio.Future[Any], silent: Any, deadline_s: float, margin_s: float = 0.6
+) -> list[int]:
+    """Sample other open transactions while the hung Telegram call is surely still waiting:
+    from the first connection to the silent server until shortly before the call's deadline.
+    After the deadline the code records the failure in a short transaction of its own, which is
+    allowed, so those moments are not sampled (a sample there would make the test flaky)."""
+    seen: list[int] = []
+    started: float | None = None
+    while not task.done():
+        await asyncio.sleep(0.2)
+        if not silent.connections:
+            continue
+        started = started if started is not None else time.monotonic()
+        if time.monotonic() - started < deadline_s - margin_s:
+            seen.append(await idle_in_transaction(engine))
+    return seen
 
 
 async def redis_values(redis: Redis) -> list[bytes]:

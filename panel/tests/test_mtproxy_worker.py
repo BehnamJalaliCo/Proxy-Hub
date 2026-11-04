@@ -19,8 +19,8 @@ from test_mtproxy_support import (
     USER_ID,
     actions,
     clean,
-    idle_in_transaction,
     load_row,
+    open_transactions_during_hang,
     secret_names,
     seed_connected,
 )
@@ -205,11 +205,7 @@ async def test_no_transaction_stays_open_during_a_hung_check(engine: AsyncEngine
             options=ClientOptions(endpoint=Endpoint("127.0.0.1", silent.port), deadline_s=2),
         )
         task = asyncio.create_task(loop.try_run_once(engine))
-        seen: list[int] = []
-        while not task.done():
-            await asyncio.sleep(0.2)
-            if silent.connections:
-                seen.append(await idle_in_transaction(engine))
+        seen = await open_transactions_during_hang(engine, task, silent, deadline_s=2)
         assert await task is True
     assert seen and max(seen) == 0
     assert loop.last_outcome == "failed:telegram_unavailable"
