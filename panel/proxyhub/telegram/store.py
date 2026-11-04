@@ -328,6 +328,15 @@ async def enqueue(db: Db, kind: str, payload: dict[str, Any], *, not_before: dat
     return int((await db.execute(insert(Outbox).values(**values).returning(Outbox.id))).scalar_one())
 
 
+async def enqueue_owner_alert(db: Db, text_html: str) -> int | None:
+    """Queue a Persian alert for the owner's private chat (outbox job ``alert``), in the caller's
+    transaction. Nothing is queued while no chat is paired: nobody could receive it, and the job
+    would only fail after its retries. The event itself is always in actions_log."""
+    if await owner_chat_id(db) is None:
+        return None
+    return await enqueue(db, "alert", {"text": text_html})
+
+
 async def outbox_counts(db: Db) -> tuple[int, int]:
     pending, failed = (
         await db.execute(

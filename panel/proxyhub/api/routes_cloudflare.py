@@ -2,6 +2,11 @@
 
 GET /api/cloudflare/status, PUT /api/cloudflare/token, PUT /api/cloudflare/pool. The token is
 verified for real against Cloudflare, stored only in the vault, and never returned or logged.
+
+The status also carries the automatic pool (decision D35): per zone the last filter check from
+Iran, when a filtered zone is deleted from Cloudflare (or why it cannot be), and a pool summary.
+The owner may move a zone between none/active/standby/filtered/retired; ``deleted`` is reached
+only by the panel deleting the zone.
 """
 
 from __future__ import annotations
@@ -29,7 +34,8 @@ MESSAGES_FA: dict[str, str] = {
     ),
     "cf_permissions_missing": (
         "این توکن همه‌ی دسترسی‌های لازم را ندارد و ذخیره نشد. توکن باید روی همه‌ی دامنه‌های حساب "
-        "Cloudflare مخصوص Proxy-Hub دسترسی «Zone → Zone → Edit» و «Zone → DNS → Edit» داشته باشد."
+        "Cloudflare مخصوص Proxy-Hub دست‌کم دسترسی «Zone → DNS → Edit» داشته باشد. «Zone → Zone → Edit» "
+        "هم بدهید تا دامنه‌ی فیلترشده خودکار از Cloudflare پاک شود."
     ),
     "cf_token_multiple_accounts": (
         "این توکن دامنه‌های بیش از یک حساب Cloudflare را می‌بیند و ذخیره نشد. در بخش Zone Resources "
@@ -43,6 +49,9 @@ MESSAGES_FA: dict[str, str] = {
         "این دامنه هنوز در Cloudflare فعال نیست (nameserverهای دامنه هنوز روی Cloudflare نیستند) "
         "یا توکن روی آن دسترسی ویرایش DNS ندارد؛ پس نمی‌شود آن را دامنه‌ی فعال کرد."
     ),
+    "zone_delete_in_progress": (
+        "این دامنه همین حالا در حال پاک شدن از Cloudflare است. چند دقیقه‌ی دیگر صفحه را دوباره ببینید."
+    ),
 }
 STATUS: dict[str, int] = {
     "cf_token_invalid": 400,
@@ -53,6 +62,7 @@ STATUS: dict[str, int] = {
     "not_found": 404,
     "pool_transition_invalid": 409,
     "zone_not_ready": 409,
+    "zone_delete_in_progress": 409,
 }
 
 

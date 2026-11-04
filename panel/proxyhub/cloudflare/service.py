@@ -20,24 +20,42 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import delete, select, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.postgresql import distinct_on, insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
+from proxyhub.cloudflare import TOKEN_SECRET as TOKEN_SECRET  # re-exported (the vault entry name)
 from proxyhub.cloudflare.client import CloudflareClient, CloudflareError, Zone, valid_token_format
-from proxyhub.cloudflare.pool import PoolState, check_pool_transition, displaced_state
+from proxyhub.cloudflare.deletion import (
+    CLAIM_TTL,
+    DeletionContext,
+    allow_deletion_retries,
+    delete_after,
+    deletion_blockers,
+    deletion_context,
+    kill_switch_on,
+)
+from proxyhub.cloudflare.filtering import STANDBY_EVERY
+from proxyhub.cloudflare.pool import OWNER_TARGETS, PoolState, check_pool_transition, displaced_state
 from proxyhub.cloudflare.records import Change, Desired, OwnedRow, owned_row, plan_zone
+from proxyhub.cloudflare.rotation import (
+    DELETE_GRACE,
+    GONE,
+    PoolZone,
+    auto_pool,
+    load_zones,
+    log_pool_change,
+    usable_standby,
+)
 from proxyhub.db.models import Node
-from proxyhub.db.models_net import CfRecord, CfState, CfZone
+from proxyhub.db.models_net import CfRecord, CfState, CfZone, DomainCheck
 from proxyhub.fleet.actions import iso, log_action
 from proxyhub.fleet.lifecycle import NodeState
 from proxyhub.vault import SecretValue, Vault, secret_exists
 
 log = logging.getLogger(__name__)
 
-TOKEN_SECRET = "cloudflare:token"  # noqa: S105 - the vault entry name, not a secret
 PERM_ZONE_READ = "Zone:Read"
 PERM_DNS_EDIT = "DNS:Edit"
-GONE = "gone"
 
 # Nodes whose IP a slot name keeps pointing at. READY is preferred; the others still hold their
 # server and IP, so a short unhealthy spell never turns a working name into NXDOMAIN.
@@ -206,8 +224,9 @@ async def save_state(db: Db, now: datetime, **values: Any) -> None:
 
 async def store_zones(db: Db, zones: Sequence[Zone], dns_edit: dict[str, bool], now: datetime) -> list[str]:
     """Upsert the zones the token lists; zones it no longer lists become 'gone' (pool state kept).
-    Returns the names of zones that just became gone."""
-    for zone in zones:
+    Returns the names of zones that just became gone. Rows are written in id order, the order every
+    pool decision locks them in (proxyhub/cloudflare/rotation.py)."""
+    for zone in sorted(zones, key=lambda z: z.id):
         values: dict[str, Any] = {
             "name": zone.name,
             "status": zone.status,
@@ -266,6 +285,8 @@ async def set_token(
         token_kind=check.kind,
         zones_refreshed_at=now,
     )
+    await allow_deletion_retries(session)  # maybe now with Zone Edit
+    await auto_pool(session, now)
     await log_action(
         session,
         actor=actor,
@@ -338,6 +359,9 @@ async def refresh_token_and_zones(db: Db, cf: CloudflareClient, now: datetime, *
         token_kind=check.kind,
         zones_refreshed_at=now,
     )
+    if verified:
+        # A domain the owner just added to the account joins the pool here (D35).
+        await auto_pool(db, now)
     if gone or was_verified != verified:
         await log_action(
             db,
@@ -355,10 +379,83 @@ async def refresh_token_and_zones(db: Db, cf: CloudflareClient, now: datetime, *
 # --- status and pool ---------------------------------------------------------------------------
 
 
+async def _last_checks(db: Db) -> dict[str, Any]:
+    """The latest filter check of every zone (one row per zone)."""
+    rows = (
+        await db.execute(
+            select(
+                DomainCheck.zone_id,
+                DomainCheck.at,
+                DomainCheck.status,
+                DomainCheck.verdict,
+                DomainCheck.verdict_reasons,
+                DomainCheck.probes,
+                DomainCheck.answered,
+                DomainCheck.hijacked,
+                DomainCheck.networks_answered,
+                DomainCheck.networks_hijacked,
+                DomainCheck.detail,
+            )
+            .ext(distinct_on(DomainCheck.zone_id))
+            .order_by(DomainCheck.zone_id, DomainCheck.at.desc(), DomainCheck.id.desc())
+        )
+    ).all()
+    return {r.zone_id: r for r in rows}
+
+
+def _check_json(r: Any) -> dict[str, Any] | None:
+    if r is None:
+        return None
+    return {
+        "at": iso(r.at),
+        "status": r.status,
+        "verdict": r.verdict,
+        "reasons": [str(x) for x in (r.verdict_reasons or [])],
+        "probes": int(r.probes),
+        "answered": int(r.answered),
+        "hijacked": int(r.hijacked),
+        "networks_answered": int(r.networks_answered),
+        "networks_hijacked": int(r.networks_hijacked),
+        "networks": [
+            {
+                "network": str(n.get("network") or ""),
+                "asn": n.get("asn") if isinstance(n.get("asn"), int) else None,
+                "answered": int(n.get("answered") or 0),
+                "hijacked": int(n.get("hijacked") or 0),
+            }
+            for n in (r.detail or [])
+            if isinstance(n, dict)
+        ],
+    }
+
+
+async def _zone_json(db: Db, z: PoolZone, check: Any, now: datetime) -> dict[str, Any]:
+    waiting: list[str] = []
+    if z.pool_state == PoolState.FILTERED.value:
+        ctx: DeletionContext = await deletion_context(db, z.id)
+        hidden = {"not_filtered", "grace_period", "delete_blocked"}
+        waiting = [b for b in deletion_blockers(z, ctx, now) if b not in hidden]
+    return {
+        "id": z.id,
+        "name": z.name,
+        "status": z.status,
+        "pool_state": z.pool_state,
+        "dns_edit": z.dns_edit,
+        "filtered_at": iso(z.filtered_at),
+        "delete_after": iso(delete_after(z)),
+        "delete_blocked": z.delete_blocked,
+        "delete_waiting": waiting,
+        "deleted_at": iso(z.deleted_at),
+        "last_check": _check_json(check),
+    }
+
+
 async def status(db: Db) -> dict[str, Any]:
+    now = datetime.now(UTC)
     token_set = await secret_exists(db, TOKEN_SECRET)
     state = await load_state(db)
-    zones = [_zone_view(r) for r in (await db.execute(select(*_ZONE_COLS).order_by(CfZone.name))).all()]
+    zones = sorted(await load_zones(db), key=lambda z: z.name)
+    checks = await _last_checks(db)
     records = (
         await db.execute(
             select(
@@ -373,21 +470,21 @@ async def status(db: Db) -> dict[str, Any]:
             .order_by(CfRecord.name, CfRecord.type)
         )
     ).all()
+    in_pool = [z for z in zones if z.pool_state in (PoolState.ACTIVE.value, PoolState.STANDBY.value)]
     return {
         "token_set": token_set,
         "verified": bool(token_set and state is not None and state.verified),
         "checked_at": iso(state.checked_at) if state is not None else None,
         "error": state.error if state is not None else None,
-        "zones": [
-            {
-                "id": z.id,
-                "name": z.name,
-                "status": z.status,
-                "pool_state": z.pool_state,
-                "dns_edit": z.dns_edit,
-            }
-            for z in zones
-        ],
+        "zones": [await _zone_json(db, z, checks.get(z.id), now) for z in zones],
+        "pool": {
+            "standby_usable": sum(1 for z in zones if usable_standby(z)),
+            # The warning card shows once the pool is in use (an active or a filtered domain exists).
+            "in_use": bool(in_pool) or any(z.pool_state == PoolState.FILTERED.value for z in zones),
+            "kill_switch": await kill_switch_on(db),
+            "delete_grace_hours": int(DELETE_GRACE.total_seconds() // 3600),
+            "standby_check_hours": int(STANDBY_EVERY.total_seconds() // 3600),
+        },
         "records": [
             {
                 "name": r.name,
@@ -403,18 +500,41 @@ async def status(db: Db) -> dict[str, Any]:
     }
 
 
+def _owner_values(current: PoolState, target: PoolState, now: datetime) -> dict[str, Any]:
+    """Column changes besides the state itself: entering ``filtered`` starts the deletion grace
+    period; leaving it (back to standby, ...) cancels the deletion."""
+    if target == PoolState.FILTERED:
+        return {
+            "filtered_at": now,
+            "delete_blocked": None,
+            "delete_error": None,
+            "delete_attempts": 0,
+            "delete_retry_at": None,
+        }
+    if current == PoolState.FILTERED:
+        return {"filtered_at": None, "delete_error": None, "delete_attempts": 0, "delete_retry_at": None}
+    return {}
+
+
 async def set_pool_state(
     session: AsyncSession, zone_id: str, target: PoolState, *, actor: str, now: datetime
 ) -> dict[str, Any]:
-    """Owner action. Raises CfServiceError(not_found | pool_transition_invalid | zone_not_ready)."""
-    # Lock every zone row: two concurrent activations must not both pass (the partial unique index
-    # would also refuse the second one).
-    zones = {z.id: z for z in (await session.execute(select(CfZone).with_for_update())).scalars().all()}
+    """Owner action. Raises CfServiceError(not_found | pool_transition_invalid | zone_not_ready |
+    zone_delete_in_progress)."""
+    # Lock every zone row, in id order like every automatic pool decision: two concurrent
+    # activations must not both pass (the partial unique index would also refuse the second one).
+    zones = {
+        z.id: z
+        for z in (await session.execute(select(CfZone).order_by(CfZone.id).with_for_update())).scalars().all()
+    }
     zone = zones.get(zone_id)
     if zone is None:
         await session.rollback()
         raise CfServiceError("not_found")
     current = PoolState(zone.pool_state)
+    if target not in OWNER_TARGETS:
+        await session.rollback()
+        raise CfServiceError("pool_transition_invalid")
     try:
         changed = check_pool_transition(current, target, zone_status=zone.status, dns_edit=zone.dns_edit)
     except ValueError as exc:
@@ -423,6 +543,10 @@ async def set_pool_state(
     if not changed:
         await session.rollback()
         return await status(session)
+    if zone.delete_claimed_at is not None and now - zone.delete_claimed_at < CLAIM_TTL:
+        # A deletion of this zone was decided and is being sent to Cloudflare right now.
+        await session.rollback()
+        raise CfServiceError("zone_delete_in_progress")
     if target == PoolState.ACTIVE:
         for other in zones.values():
             if other.id != zone.id and other.pool_state == PoolState.ACTIVE.value:
@@ -431,28 +555,16 @@ async def set_pool_state(
                 other.pool_changed_at = now
                 other.updated_at = now
                 await session.flush()
-                await _log_pool(session, actor, other.name, PoolState.ACTIVE, new_state, "replaced")
+                await log_pool_change(session, actor, other.name, PoolState.ACTIVE, new_state, "replaced")
     zone.pool_state = target.value
     zone.pool_changed_at = now
     zone.updated_at = now
+    for column, value in _owner_values(current, target, now).items():
+        setattr(zone, column, value)
     await session.flush()
-    await _log_pool(session, actor, zone.name, current, target, "owner")
+    await log_pool_change(session, actor, zone.name, current, target, "owner")
     await session.commit()
     return await status(session)
-
-
-async def _log_pool(db: Db, actor: str, name: str, old: PoolState, new: PoolState, why: str) -> None:
-    await log_action(
-        db,
-        actor=actor,
-        action="cloudflare_pool_change",
-        target=name,
-        dry_run=False,
-        allowed=True,
-        reasons=[why],
-        context={"from": old.value, "to": new.value},
-        result=f"{name}: {old.value} -> {new.value}",
-    )
 
 
 # --- desired records ---------------------------------------------------------------------------

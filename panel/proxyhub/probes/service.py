@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
@@ -134,15 +134,30 @@ async def due_targets(db: Db, settings: ProbeSettings, now: datetime, dns_zone: 
     return targets
 
 
+def cycle_costs(settings: ProbeSettings, targets: int, dns_targets: int) -> tuple[int, int, int]:
+    """Globalping tests one cycle needs: (control + TCP, ICMP, DNS). Each measurement costs at most
+    one test per requested network."""
+    per = len(settings.globalping_asns)
+    core = per * (1 + targets)
+    icmp = per * targets if settings.icmp else 0
+    dns = per * dns_targets if settings.dns else 0
+    return core, icmp, dns
+
+
+def node_probe_reserve(settings: ProbeSettings, ready_nodes: int) -> int:
+    """Tests to keep for the node probes' next full cycle (other Globalping users, such as the
+    domain filter checks, stay below this so the node probes are never starved)."""
+    if not settings.enabled or ready_nodes <= 0:
+        return 0
+    n = min(ready_nodes, settings.max_nodes_per_tick)
+    return sum(cycle_costs(settings, n, n))
+
+
 def globalping_plan(
     settings: ProbeSettings, targets: Sequence[Target], rate: RateLimit | None, now: datetime
 ) -> tuple[bool, bool, bool]:
-    """(run TCP at all, run ICMP, run DNS) so the cycle stays inside Globalping's hourly limit.
-    Each measurement costs at most one test per requested network."""
-    per = len(settings.globalping_asns)
-    core = per * (1 + len(targets))
-    icmp = per * len(targets) if settings.icmp else 0
-    dns = per * sum(1 for t in targets if t.dns_name) if settings.dns else 0
+    """(run TCP at all, run ICMP, run DNS) so the cycle stays inside Globalping's hourly limit."""
+    core, icmp, dns = cycle_costs(settings, len(targets), sum(1 for t in targets if t.dns_name))
     if rate is None or rate.reset_at <= now:
         return True, settings.icmp, settings.dns
     left = rate.remaining
@@ -487,6 +502,31 @@ async def globalping_rate(db: Db) -> RateLimit | None:
         return None
     return RateLimit(
         limit=int(r.ratelimit_limit or 0), remaining=int(r.ratelimit_remaining), reset_at=r.ratelimit_reset_at
+    )
+
+
+async def record_globalping_rate(db: Db, rate: RateLimit) -> None:
+    """Remember Globalping's allowance after a measurement made outside a probe cycle (the domain
+    filter checks). Only the rate columns of an existing row change: the source's health stays what
+    the last probe cycle saw, and no row means no cycle has run yet (nothing to share)."""
+    await db.execute(
+        update(ProbeSource)
+        .where(ProbeSource.name == "globalping")
+        .values(
+            ratelimit_limit=rate.limit,
+            ratelimit_remaining=rate.remaining,
+            ratelimit_reset_at=rate.reset_at,
+        )
+    )
+
+
+async def ready_node_count(db: Db) -> int:
+    return int(
+        (
+            await db.execute(
+                select(func.count()).select_from(Node).where(Node.state == NodeState.READY.value)
+            )
+        ).scalar_one()
     )
 
 

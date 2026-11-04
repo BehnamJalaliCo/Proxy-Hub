@@ -23,6 +23,14 @@ IP_APIS = re.compile(
     r"/v1/stats/users/active-ips|/v1/users\b|active_ips|unique_ips_list",
     re.IGNORECASE,
 )
+# D35: a whole Cloudflare zone is deleted in exactly one place, after every condition was re-checked
+# inside the deciding transaction (proxyhub/cloudflare/deletion.py); the client method is the only
+# code that builds the request.
+CF_ZONE_DELETE_CALL = re.compile(r"\.delete_zone\(")
+CF_ZONE_DELETE_DEF = re.compile(r"\bdef delete_zone\(")
+CF_ZONE_DELETE_REQUEST = re.compile(r"[\"']DELETE[\"'],\s*f?[\"']/zones/\{[a-z_]+\}[\"']\s*\)")
+CF_ZONE_DELETE_CALLER = PANEL / "cloudflare" / "deletion.py"
+CF_CLIENT = PANEL / "cloudflare" / "client.py"
 # mutations.py does the hcloud calls; the node executor is the single caller, holding gate permits
 # (test nodes only; tests/test_live_units.py::test_only_the_executor_reaches_server_mutations_and_permits).
 ALLOWED_MUTATION_FILES = {PANEL / "hetzner" / "mutations.py", PANEL / "nodes" / "executor.py"}
@@ -44,6 +52,11 @@ def test_negative_controls_match() -> None:
     assert HCLOUD_MUTATION.search("client.servers.delete(server)")
     assert IP_APIS.search('httpx.get("http://127.0.0.1:9091/v1/users")')
     assert IP_APIS.search('"statsUserOnline": true')
+    assert CF_ZONE_DELETE_CALL.search("await cf.delete_zone(zone_id)")
+    assert not CF_ZONE_DELETE_CALL.search("async def delete_zone(self, zone_id: str) -> None:")
+    assert CF_ZONE_DELETE_DEF.search("    async def delete_zone(self, zone_id: str) -> None:")
+    assert CF_ZONE_DELETE_REQUEST.search('await self._request("DELETE", f"/zones/{zone_id}")')
+    assert not CF_ZONE_DELETE_REQUEST.search('self._request("DELETE", f"/zones/{zone_id}/dns_records/{rid}")')
 
 
 def test_no_telegram_delete_anywhere() -> None:
@@ -68,3 +81,14 @@ def test_no_user_ip_apis() -> None:
     ]
     hits = [p for p in files if IP_APIS.search(_strip_comments(p.read_text(encoding="utf-8")))]
     assert not hits, f"rule 7 violated in {hits}"
+
+
+def _count(pattern: re.Pattern[str]) -> dict[Path, int]:
+    found = {p: len(pattern.findall(_strip_comments(p.read_text(encoding="utf-8")))) for p in _sources()}
+    return {p: n for p, n in found.items() if n}
+
+
+def test_cloudflare_zone_delete_has_exactly_one_call_site() -> None:
+    assert _count(CF_ZONE_DELETE_CALL) == {CF_ZONE_DELETE_CALLER: 1}, "D35: one caller of delete_zone"
+    assert _count(CF_ZONE_DELETE_DEF) == {CF_CLIENT: 1}
+    assert _count(CF_ZONE_DELETE_REQUEST) == {CF_CLIENT: 1}, "DELETE /zones/{id} is built only in the client"

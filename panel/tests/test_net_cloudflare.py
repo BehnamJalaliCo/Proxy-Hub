@@ -620,6 +620,13 @@ async def test_status_contract_shape_when_nothing_is_set(client: AsyncClient) ->
         "checked_at": None,
         "error": None,
         "zones": [],
+        "pool": {
+            "standby_usable": 0,
+            "in_use": False,
+            "kill_switch": True,  # no fleet settings stored: the kill switch is ON
+            "delete_grace_hours": 24,
+            "standby_check_hours": 6,
+        },
         "records": [],
     }
 
@@ -658,8 +665,20 @@ async def test_put_pool_over_http(client: AsyncClient, engine: AsyncEngine) -> N
         "example.com": "active",
         "example.net": "none",
     }
-    assert set(body) == {"token_set", "verified", "checked_at", "error", "zones", "records"}
-    assert set(body["zones"][0]) == {"id", "name", "status", "pool_state", "dns_edit"}
+    assert set(body) == {"token_set", "verified", "checked_at", "error", "zones", "pool", "records"}
+    assert set(body["zones"][0]) == {
+        "id",
+        "name",
+        "status",
+        "pool_state",
+        "dns_edit",
+        "filtered_at",
+        "delete_after",
+        "delete_blocked",
+        "delete_waiting",
+        "deleted_at",
+        "last_check",
+    }
     r = await client.put("/api/cloudflare/pool", json={"zone_id": ZONE_ID_2, "pool_state": "active"})
     assert r.status_code == 409 and r.json()["error"] == "zone_not_ready"
     r = await client.put("/api/cloudflare/pool", json={"zone_id": "e" * 32, "pool_state": "standby"})

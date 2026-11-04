@@ -8,7 +8,8 @@ DATA in the exact shapes those services return, fed to our real parsers and deci
   ``CF_INVALID_TOKEN_*`` are the bodies api.cloudflare.com really returned to this sandbox on
   2026-11-03 for a token-shaped random value.
 * ``GP_*`` are real Globalping measurements made from this sandbox on 2026-11-03 21:08-21:09 UTC
-  (ids in the dicts), trimmed to the fields our parser reads plus ``rawOutput``.
+  (ids in the dicts), trimmed to the fields our parser reads plus ``rawOutput``. ``GP_DOMAIN_*``
+  are real measurements for the domain filter check (2026-11-03 23:59 UTC, four probes in Iran).
 * ``CH_*`` are real check-host.net answers from the same time.
 
 Node IPs in this file are documentation addresses (RFC 5737) or public anycast/service addresses
@@ -320,6 +321,123 @@ GP_DNS_HIJACKED = {
     ],
 }
 
+# --- Globalping DNS from Iran for the domain filter check (real, 2026-11-03 23:59 UTC) ------------
+# Requested with locations [{"country": "IR", "limit": 4}] (proxyhub/cloudflare/filtering.py), so
+# Globalping picked four probes anywhere in Iran. Trimmed to what the parser reads (rawOutput and
+# the probes' configured resolver addresses dropped; answers kept as recorded).
+
+
+def _ir_probe(asn: int, network: str, tags: list[str], city: str = "Tehran") -> dict[str, Any]:
+    return {
+        "continent": "AS",
+        "region": "Southern Asia",
+        "country": "IR",
+        "state": None,
+        "city": city,
+        "asn": asn,
+        "network": network,
+        "tags": tags,
+    }
+
+
+def _dns_result(rcode: str, code: int, name: str, values: list[str], ttl: int, ms: int) -> dict[str, Any]:
+    return {
+        "status": "finished",
+        "statusCode": code,
+        "statusCodeName": rcode,
+        "answers": [{"name": name, "type": "A", "ttl": ttl, "class": "IN", "value": v} for v in values],
+        "timings": {"total": ms},
+    }
+
+
+_IR_ARVAN = _ir_probe(202468, "AbrArvan CDN and IaaS", ["datacenter-network", "u-hatamiarash7"])
+_IR_MCI = _ir_probe(
+    197207, "Mobile Communication Company of Iran", ["eyeball-network", "u-Albatrossvpn"], "Tabriz"
+)
+_IR_SEFROYEK = _ir_probe(48715, "Sefroyek Pardaz Engineering", ["eyeball-network", "u-zGato"])
+_IR_PISHGAMAN = _ir_probe(34918, "Pishgaman Toseeh Ertebatat", ["eyeball-network", "u-PatrickstarWritesCode"])
+_IR_BATTERFLY = _ir_probe(59580, "Batterflyai Media", ["datacenter-network", "u-gbzret4d"])
+_IR_HOSTIRAN = _ir_probe(59441, "Hostiran Network", ["datacenter-network", "u-hatamiarash7"])
+
+# youtube.com (filtered in Iran): three of four networks got the hijack answer 10.10.34.x; one
+# eyeball network (Sefroyek) resolved it normally.
+GP_DOMAIN_FILTERED = {
+    "id": "2KbKkYjc7WD5B02U000021RGx",
+    "type": "dns",
+    "status": "finished",
+    "createdAt": "2026-11-03T23:59:06.163Z",
+    "updatedAt": "2026-11-03T23:59:06.505Z",
+    "target": "youtube.com",
+    "probesCount": 4,
+    "locations": [{"country": "IR", "limit": 4}],
+    "results": [
+        {"probe": _IR_ARVAN, "result": _dns_result("NOERROR", 0, "youtube.com.", ["10.10.34.36"], 418, 4)},
+        {"probe": _IR_MCI, "result": _dns_result("NOERROR", 0, "youtube.com.", ["10.10.34.35"], 1, 52)},
+        {
+            "probe": _IR_SEFROYEK,
+            "result": _dns_result(
+                "NOERROR",
+                0,
+                "YOutUBe.Com.",
+                ["142.251.14.93", "142.251.14.190", "142.251.14.136", "142.251.14.91"],
+                19,
+                0,
+            ),
+        },
+        {
+            "probe": _IR_PISHGAMAN,
+            "result": _dns_result("NOERROR", 0, "youtube.com.", ["10.10.34.36"], 3590, 3),
+        },
+    ],
+}
+
+_DIGIKALA = ["185.188.105.12", "185.188.106.12", "185.188.104.12", "185.188.107.12"]
+# digikala.com (an Iranian site, not filtered): every probe got the real addresses.
+GP_DOMAIN_CLEAN = {
+    "id": "2Bi9Xe7ogRE1ikqU300021RGx",
+    "type": "dns",
+    "status": "finished",
+    "createdAt": "2026-11-03T23:59:09.009Z",
+    "updatedAt": "2026-11-03T23:59:10.177Z",
+    "target": "digikala.com",
+    "probesCount": 4,
+    "locations": [{"country": "IR", "limit": 4}],
+    "results": [
+        {"probe": _IR_ARVAN, "result": _dns_result("NOERROR", 0, "digikala.com.", _DIGIKALA, 3044, 8)},
+        {"probe": _IR_MCI, "result": _dns_result("NOERROR", 0, "digikala.com.", _DIGIKALA, 886, 61)},
+        {"probe": _IR_BATTERFLY, "result": _dns_result("NOERROR", 0, "digikala.com.", _DIGIKALA, 3600, 211)},
+        {"probe": _IR_SEFROYEK, "result": _dns_result("NOERROR", 0, "digikala.com.", _DIGIKALA, 3600, 915)},
+    ],
+}
+
+# A name that does not exist: every resolver answered NXDOMAIN without any address. (An apex with
+# no A record answers the same way, NOERROR or NXDOMAIN with no address: a clean answer.)
+GP_DOMAIN_NXDOMAIN = {
+    "id": "2tBcKR4lbEvIlsHdI00021RGx",
+    "type": "dns",
+    "status": "finished",
+    "createdAt": "2026-11-03T23:59:23.029Z",
+    "updatedAt": "2026-11-03T23:59:23.711Z",
+    "target": "no-such-zone-7d3f9a2c.com",
+    "probesCount": 4,
+    "locations": [{"country": "IR", "limit": 4}],
+    "results": [
+        {"probe": _IR_ARVAN, "result": _dns_result("NXDOMAIN", 3, "", [], 0, 96)},
+        {"probe": _IR_MCI, "result": _dns_result("NXDOMAIN", 3, "", [], 0, 323)},
+        {"probe": _IR_SEFROYEK, "result": _dns_result("NXDOMAIN", 3, "", [], 0, 179)},
+        {"probe": _IR_HOSTIRAN, "result": _dns_result("NXDOMAIN", 3, "", [], 0, 148)},
+    ],
+}
+
+# api.cloudflare.com's real answer (2026-11-04) to DELETE /zones/<random id> with a token-shaped
+# random value: HTTP 403, code 9109. The client maps 401/403 to "denied".
+CF_DELETE_ZONE_INVALID_TOKEN = {
+    "success": False,
+    "errors": [{"code": 9109, "message": "Invalid access token"}],
+    "messages": [],
+    "result": None,
+}
+
 GP_NO_PROBES_422 = {
     "error": {"type": "no_probes_found", "message": "No matching IPv4 probes available."},
     "links": {"documentation": "https://globalping.io/docs/api.globalping.io#post-/v1/measurements"},
@@ -394,6 +512,7 @@ async def clean_net_tables(engine: AsyncEngine) -> None:
         await conn.execute(text("DELETE FROM probe_node_state"))
         await conn.execute(text("DELETE FROM probe_sources"))
         await conn.execute(text("DELETE FROM cf_records"))
+        await conn.execute(text("DELETE FROM domain_checks"))
         await conn.execute(text("DELETE FROM cf_zones"))
         await conn.execute(text("DELETE FROM cf_state"))
         await conn.execute(text("DELETE FROM secrets WHERE name = 'cloudflare:token'"))
