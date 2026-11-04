@@ -58,7 +58,8 @@ def free_minutes(begin: datetime, finish: datetime, quiet: Sequence[QuietWindow]
 
 
 def day_plan(day: date, *, count: int, start: time, end: time, quiet: Sequence[QuietWindow]) -> list[Slot]:
-    """The slots of ``day`` in time order (fewer than ``count`` only if fewer free minutes)."""
+    """``count`` slots of ``day`` at distinct minutes, in time order (fewer only when the day has
+    fewer free minutes than ``count``)."""
     if count <= 0 or start == end:
         return []
     begin, finish = posting_window(day, start, end)
@@ -68,12 +69,13 @@ def day_plan(day: date, *, count: int, start: time, end: time, quiet: Sequence[Q
     n = min(count, len(free))
     gap = len(free) / n
     reach = min(gap / 4, MAX_JITTER_MIN)
-    picked: list[int] = []
+    picked: list[int] = []  # indexes into ``free``, strictly increasing
     for i in range(n):
         pos = int((i + 0.5) * gap + _jitter(day, i) * reach)
-        picked.append(free[min(max(pos, 0), len(free) - 1)])
-    picked = sorted(set(picked))
-    return [Slot(day=day, index=i, at=begin + timedelta(minutes=m)) for i, m in enumerate(picked)]
+        low = picked[-1] + 1 if picked else 0
+        high = len(free) - (n - i)  # leave one free minute for each slot still to come
+        picked.append(min(max(pos, low), high))
+    return [Slot(day=day, index=i, at=begin + timedelta(minutes=free[p])) for i, p in enumerate(picked)]
 
 
 def _days_around(now: datetime) -> list[date]:

@@ -362,7 +362,7 @@ def test_plan_edge_cases() -> None:
     st.integers(min_value=1, max_value=1439),
     st.dates(min_value=date(2025, 1, 1), max_value=date(2030, 12, 31)),
 )
-@settings(max_examples=60, deadline=None)
+@settings(max_examples=300, deadline=None)
 def test_plan_properties(count: int, start_min: int, length: int, day: date) -> None:
     start = time(start_min // 60, start_min % 60)
     end_min = (start_min + length) % 1440
@@ -372,6 +372,15 @@ def test_plan_properties(count: int, start_min: int, length: int, day: date) -> 
     assert len(slots) == min(count, length)
     assert all(begin <= s.at < finish for s in slots)
     assert [s.at for s in slots] == sorted({s.at for s in slots})
+
+
+def test_dense_plans_keep_every_slot() -> None:
+    # Ten posts in eleven free minutes (found by hypothesis): every slot still gets its own minute.
+    slots = plan.day_plan(date(2025, 1, 1), count=10, start=time(0), end=time(0, 11), quiet=[])
+    assert len({s.at for s in slots}) == 10
+    quiet = [QuietWindow.parse("08:03", "08:58")]
+    slots = plan.day_plan(DAY, count=8, start=time(8), end=time(9), quiet=quiet)
+    assert len({s.at for s in slots}) == 5  # only 5 free minutes: 08:00-08:02 and 08:58-08:59
 
 
 def test_due_slot_and_grace() -> None:
