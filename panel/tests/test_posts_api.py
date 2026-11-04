@@ -295,3 +295,28 @@ async def test_preview_status_and_recent(
         await conn.execute(text("UPDATE channel_posts SET role = 'main'"))
     post = (await client.get("/api/posts/recent")).json()["posts"][0]
     assert post["message_url"] == "https://t.me/ipoxxo/77"
+
+
+async def test_preview_shows_the_links_the_next_post_takes(
+    client: AsyncClient, engine: AsyncEngine, vault: Vault, providers: None
+) -> None:
+    nodes = [await make_node(engine, slot=i, ipv4=f"203.0.113.{30 + i}") for i in (1, 2, 3, 4)]
+    await setup_telegram(engine, vault)
+
+    def slots_in(text_html: str) -> list[int]:
+        return [i for i, n in enumerate(nodes, start=1) if node_vless_id(n) in text_html]
+
+    async def preview_slots() -> list[int]:
+        return slots_in((await client.get("/api/posts/preview")).json()["text"])
+
+    assert await preview_slots() == [1, 2, 3]  # 3 Reality configs per post, of 4 slots
+    planned = (await client.get("/api/posts/status")).json()["today"]["planned"]
+    first = datetime.fromisoformat(planned[0]["at"]) + timedelta(seconds=10)
+    async with engine.begin() as conn:
+
+        async def harvest() -> links.Harvest:
+            return await links.harvest(conn, PROVIDERS)
+
+        assert await publisher.publish_due(conn, first, harvest) == "queued"
+    assert slots_in((await jobs(engine, "send_post"))[0].payload["text"]) == [1, 2, 3]
+    assert await preview_slots() == [2, 3, 4]  # the next post starts one slot further

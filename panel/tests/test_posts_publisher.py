@@ -513,8 +513,15 @@ async def test_a_missing_config_past_its_own_expiry_is_marked_expired(
     now = slot_time(2)
     post_id, _ = await posted(engine, vault, now)
     [config] = await rows(engine, "SELECT expires_at FROM post_links WHERE kind = 'reality'")
+    later = config.expires_at + timedelta(minutes=1)
+
+    async def reality_refused(db: AsyncConnection) -> list[ProxyLink]:
+        return [ProxyLink(**{**x.__dict__, "url": "vless://a b"}) for x in await reality_provider(db)]
+
+    # While its provider returns it in a shape we refuse, the post waits, even past the end.
+    assert await refresh(engine, later, [mtproto_provider, reality_refused]) == 0
     # Its provider no longer lists the config at all, and the config's own end has passed.
-    assert await refresh(engine, config.expires_at + timedelta(minutes=1), [mtproto_provider]) == 1
+    assert await refresh(engine, later, [mtproto_provider]) == 1
     body = await edit_text(engine)
     assert "<s>ریلیتی ۱</s> — ⌛️ زمان این کانفیگ تمام شد" in body and node_secret(nodes[0]) in body
     got = {label: status for label, (status, _) in (await carried_links(engine, post_id)).items()}
