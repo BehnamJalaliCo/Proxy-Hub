@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Provision a Proxy-Hub Telemt node on Ubuntu 24.04 (docs/10 M2.4, docs/11). Run as root, either
+# Provision a Proxy-Hub node (Telemt MTProto + Xray VLESS Reality) on Ubuntu 24.04 (docs/10 M2.2,
+# M2.4, docs/11). Run as root, either
 # while building the node image (Packer) or from cloud-init on a fresh server. Idempotent.
 #
 #   provision.sh (--agent-binary FILE | --agent-url https://AGENT_DOMAIN/agent/v1/artifacts/proxyhub-agent) [--start]
 #
-# Installs Telemt (pinned URL + sha256 from versions.lock) and the agent binary (sha256 pinned
-# too; with --agent-url it is downloaded from the panel's agent site first), and hardens the host:
+# Installs Telemt and Xray (pinned URL + sha256 from versions.lock) and the agent binary (sha256
+# pinned too; with --agent-url it is downloaded from the panel's agent site first), and hardens the
+# host:
 #   * nftables: outbound 25/465/587, private/special ranges and 169.254.169.254 dropped;
-#     inbound 22 and Telemt's local metrics/API ports dropped;
+#     inbound 22, Telemt's local metrics/API ports and Xray's API port dropped; 443 (Xray) and
+#     8443 (Telemt) open;
 #   * no SSH server; journald in memory only; rsyslog removed; no core dumps;
-#   * Telemt's stdout/stderr to /dev/null, its config rendered only by the agent;
+#   * Telemt's and Xray's stdout/stderr to /dev/null, their configs rendered only by the agent;
 #   * BBR congestion control with the fq qdisc.
 # --start also applies everything now (cloud-init mode); without it, it takes effect at next boot
 # (image build mode). The agent itself starts once cloud-init has written /etc/proxyhub-agent/.
@@ -77,7 +80,7 @@ if [ "$updated" -ne 1 ]; then
   echo "apt-get update kept failing: refusing to continue" >&2
   exit 1
 fi
-"${APT[@]}" install -y -q --no-install-recommends nftables curl ca-certificates
+"${APT[@]}" install -y -q --no-install-recommends nftables curl ca-certificates unzip
 "${APT[@]}" purge -y -q openssh-server rsyslog || true
 "${APT[@]}" autoremove -y -q
 systemctl mask ssh.service ssh.socket >/dev/null 2>&1 || true
@@ -93,6 +96,18 @@ tar -xzf "$WORK/telemt.tar.gz" -C "$WORK/x" --no-same-owner telemt
 check_sha256 "$WORK/x/telemt" "$(lock TELEMT_BINARY_SHA256)"
 install -o root -g root -m 0755 "$WORK/x/telemt" /usr/local/bin/telemt
 
+echo "== xray $(lock XRAY_VERSION)"
+curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$WORK/xray.zip" "$(lock XRAY_URL)"
+check_sha256 "$WORK/xray.zip" "$(lock XCORE_ZIP_SHA256)"
+mkdir "$WORK/xr"
+# Only the binary and geoip.dat (for the geoip:private routing block); never anything else.
+unzip -q -o "$WORK/xray.zip" xray geoip.dat -d "$WORK/xr"
+check_sha256 "$WORK/xr/xray" "$(lock XCORE_BINARY_SHA256)"
+check_sha256 "$WORK/xr/geoip.dat" "$(lock XCORE_GEOIP_SHA256)"
+install -o root -g root -m 0755 "$WORK/xr/xray" /usr/local/bin/xray
+install -d -o root -g root -m 0755 /usr/local/share/xray
+install -o root -g root -m 0644 "$WORK/xr/geoip.dat" /usr/local/share/xray/geoip.dat
+
 echo "== proxyhub-agent $(lock AGENT_VERSION)"
 if [ -n "$AGENT_URL" ]; then
   # From the panel's agent site (public ACME certificate). Integrity comes from AGENT_SHA256 in
@@ -107,12 +122,18 @@ install -o root -g root -m 0755 "$AGENT_BINARY" /usr/local/bin/proxyhub-agent
 echo "== users and directories"
 id -u telemt >/dev/null 2>&1 || useradd --system --home-dir /var/lib/telemt --no-create-home \
   --shell /usr/sbin/nologin --user-group telemt
+id -u xray >/dev/null 2>&1 || useradd --system --home-dir /nonexistent --no-create-home \
+  --shell /usr/sbin/nologin --user-group xray
 install -d -o root -g telemt -m 0750 /etc/telemt
+install -d -o root -g xray -m 0750 /etc/xray
 install -d -o telemt -g telemt -m 0700 /var/lib/telemt /var/lib/telemt/cache /var/lib/telemt/tlsfront
 install -d -o root -g root -m 0700 /etc/proxyhub-agent /var/lib/proxyhub-agent
 
 echo "== system configuration"
 install -o root -g root -m 0644 "$FILES/telemt.service" /etc/systemd/system/telemt.service
+install -o root -g root -m 0644 "$FILES/xray.service" /etc/systemd/system/xray.service
+# The agent's Xray settings (paths, loopback API address, pinned version); no secret in it.
+install -o root -g root -m 0600 "$FILES/agent-xray.json" /etc/proxyhub-agent/xray.json
 install -o root -g root -m 0644 "$FILES/proxyhub-agent.service" /etc/systemd/system/proxyhub-agent.service
 install -o root -g root -m 0644 "$FILES/proxyhub-lockdown.service" /etc/systemd/system/proxyhub-lockdown.service
 install -o root -g root -m 0644 "$FILES/nftables.conf" /etc/nftables.conf
@@ -127,7 +148,8 @@ rm -rf /var/log/journal  # a persistent journal directory would override Storage
 
 nft -c -f /etc/nftables.conf
 systemctl daemon-reload
-systemctl enable nftables.service proxyhub-lockdown.service telemt.service proxyhub-agent.service
+systemctl enable nftables.service proxyhub-lockdown.service telemt.service xray.service \
+  proxyhub-agent.service
 
 if [ "$START" -eq 1 ]; then
   echo "== applying now"

@@ -33,6 +33,7 @@ import (
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/report"
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/sysstat"
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/telemt"
+	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/xray"
 )
 
 // Agent is one node agent.
@@ -62,6 +63,8 @@ type Agent struct {
 	pending    telemt.Action
 	telemtUp   bool
 	stats      metrics.Stats
+	// xr manages Xray (VLESS Reality); nil on a node without Xray.
+	xr *xrayRuntime
 }
 
 // localState is node-only bookkeeping, persisted as local.json (0600).
@@ -69,6 +72,10 @@ type localState struct {
 	// PlaceholderSecret is used for the disabled placeholder user when no user may be served.
 	PlaceholderSecret string         `json:"placeholder_secret"`
 	Usage             *enforce.Usage `json:"usage"`
+	// XrayUsage tracks Reality users (by label) across Xray restarts, like Usage for Telemt.
+	XrayUsage *enforce.Usage `json:"xray_usage,omitempty"`
+	// XrayRestartPending: a new Xray config is in place but Xray has not been restarted on it yet.
+	XrayRestartPending bool `json:"xray_restart_pending,omitempty"`
 }
 
 // cachedDesired is desired.json: the last document the panel served, with its ETag.
@@ -124,6 +131,7 @@ func New(cfg *config.Config, version string, log *slog.Logger) (*Agent, error) {
 	if err := a.loadState(); err != nil {
 		return nil, err
 	}
+	a.initXray(xray.SettingsFile)
 	return a, nil
 }
 
@@ -384,6 +392,7 @@ func (a *Agent) Report(ctx context.Context) error {
 		TelemtUp:     a.telemtUp,
 		Stats:        a.stats,
 		System:       sysstat.Read(a.procRoot),
+		Xray:         a.xrayReport(),
 	})
 	return a.client.Report(ctx, r)
 }
@@ -405,7 +414,9 @@ func (a *Agent) Once(ctx context.Context) error {
 	keep(a.RenewIfDue(ctx))
 	keep(a.Pull(ctx))
 	a.Scrape(ctx)
+	a.ScrapeXray(ctx)
 	keep(a.Apply(ctx))
+	keep(a.ApplyXray(ctx))
 	keep(a.Report(ctx))
 	return first
 }
@@ -435,8 +446,12 @@ func (a *Agent) Run(ctx context.Context) error {
 			backoff.reset()
 		}
 		a.Scrape(ctx)
+		a.ScrapeXray(ctx)
 		if err := a.Apply(ctx); err != nil {
 			a.log.Warn("apply failed", "code", a.applyErr, "error", err.Error())
+		}
+		if err := a.ApplyXray(ctx); err != nil {
+			a.log.Warn("xray apply failed", "code", a.xr.applyErr, "error", err.Error())
 		}
 		if !a.now().Before(nextReport) {
 			if err := a.Report(ctx); err != nil {

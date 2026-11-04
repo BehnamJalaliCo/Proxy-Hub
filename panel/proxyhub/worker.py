@@ -20,6 +20,7 @@ from proxyhub.reconcilers.nodes import NodesReconciler
 from proxyhub.reconcilers.pricing import PricingReconciler
 from proxyhub.reconcilers.probes import ProbesReconciler
 from proxyhub.reconcilers.publisher import PublisherReconciler
+from proxyhub.reconcilers.reality import RealityReconciler
 from proxyhub.reconcilers.sponsor import SponsorReconciler
 from proxyhub.reconcilers.telegram import (
     ApiWatchdogReconciler,
@@ -52,6 +53,7 @@ def reconcilers() -> list[Reconciler]:
         SponsorReconciler(),  # D25/D37: @MTProxybot registration and sponsor channel (kill switch OFF only)
         DelegationReconciler(),  # fleet r3: hourly NS lookups; a lost registration leaves the pool
         PublisherReconciler(),  # posts: new posts on the day plan + status edits (test channel by default)
+        RealityReconciler(),  # D18: fresh VLESS Reality configs per ready node, ended when used up
     ]
 
 

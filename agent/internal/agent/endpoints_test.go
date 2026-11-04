@@ -89,8 +89,9 @@ func TestTelemtIsOnlyAskedForMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// One request site towards Telemt (the scrape) and two towards the panel (GET desired, POSTs).
-	want := map[string]int{"internal/metrics/metrics.go": 1, "internal/panel/client.go": 2}
+	// One request site towards Telemt (the scrape), two towards the panel (GET desired, POSTs) and
+	// one towards Xray's loopback gRPC API (its methods are pinned in internal/xray's own tests).
+	want := map[string]int{"internal/metrics/metrics.go": 1, "internal/panel/client.go": 2, "internal/xray/api.go": 1}
 	if !reflect.DeepEqual(requestSites, want) {
 		t.Fatalf("HTTP requests are built in %v, want %v: review any new one against docs/11 E6", requestSites, want)
 	}

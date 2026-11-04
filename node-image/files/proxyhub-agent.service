@@ -1,4 +1,4 @@
-# Proxy-Hub node agent: registers once, then applies the panel's desired state to Telemt.
+# Proxy-Hub node agent: registers once, then applies the panel's desired state to Telemt and Xray.
 [Unit]
 Description=Proxy-Hub node agent
 After=network-online.target cloud-final.service proxyhub-lockdown.service
@@ -11,13 +11,14 @@ Type=simple
 ExecStart=/usr/local/bin/proxyhub-agent -config /etc/proxyhub-agent/agent.json run
 Restart=always
 RestartSec=5
-# Root only to chown the Telemt config to the telemt user and to reload/restart telemt.service.
+# Root only to chown the Telemt and Xray configs to their service users and to reload/restart
+# telemt.service and xray.service.
 User=root
 CapabilityBoundingSet=CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE
 NoNewPrivileges=true
 LimitCORE=0
 ProtectSystem=strict
-ReadWritePaths=/etc/telemt /etc/proxyhub-agent /var/lib/proxyhub-agent
+ReadWritePaths=/etc/telemt /etc/xray /etc/proxyhub-agent /var/lib/proxyhub-agent
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true

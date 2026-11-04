@@ -23,6 +23,7 @@ const StatsPage = lazy(() => import("./pages/StatsPage"));
 const MtprotoPage = lazy(() => import("./pages/MtprotoPage"));
 const SponsorPage = lazy(() => import("./pages/SponsorPage"));
 const ContentPage = lazy(() => import("./pages/ContentPage"));
+const RealityPage = lazy(() => import("./pages/RealityPage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
 const SetupPage = lazy(() => import("./pages/SetupPage"));
 const NotFoundPage = lazy(() => import("./pages/NotFoundPage"));
@@ -158,6 +159,14 @@ export default function App() {
                     element={
                       <Suspense fallback={<PageFallback />}>
                         <SponsorPage />
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="reality"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <RealityPage />
                       </Suspense>
                     }
                   />

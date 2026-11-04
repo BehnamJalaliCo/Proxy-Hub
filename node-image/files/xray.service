@@ -1,0 +1,52 @@
+# Xray VLESS + REALITY on TCP 443 on a Proxy-Hub node. The config is written only by proxyhub-agent
+# (log.access "none", warning level with addresses masked, statsUserOnline false, the gRPC API on
+# 127.0.0.1 only; the agent refuses any config that says otherwise).
+[Unit]
+Description=Xray VLESS Reality (managed by proxyhub-agent)
+After=network-online.target nftables.service
+Wants=network-online.target
+# Xray has no safe built-in default; it must never start before the agent has rendered ours.
+ConditionPathExists=/etc/xray/config.json
+
+[Service]
+Type=simple
+User=xray
+Group=xray
+# geoip.dat (for the geoip:private routing block) lives here, installed by provision.sh.
+Environment=XRAY_LOCATION_ASSET=/usr/local/share/xray
+UnsetEnvironment=XRAY_LOCATION_CONFDIR XRAY_LOCATION_CONFIG
+ExecStart=/usr/local/bin/xray run -config /etc/xray/config.json
+Restart=on-failure
+RestartSec=2
+# Rule 7: no process output is kept anywhere (there is no SSH to read it either).
+StandardOutput=null
+StandardError=null
+LimitNOFILE=1048576
+LimitCORE=0
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/xray /usr/local/share/xray
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+# AF_NETLINK only to read interface addresses (Go's net.Interfaces); with no network-admin
+# capability it can never change the network setup.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
