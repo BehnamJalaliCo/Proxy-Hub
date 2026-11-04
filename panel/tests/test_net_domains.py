@@ -779,6 +779,56 @@ async def test_deletion_waits_for_every_condition_and_never_calls_cloudflare_bef
 
 
 @pytest.mark.db
+async def test_the_claim_is_committed_before_the_call_and_no_lock_is_held_during_it(
+    engine: AsyncEngine, vault: Vault
+) -> None:
+    """While the (real) client sends DELETE, another connection sees the committed claim and can
+    lock the zone row at once: the decision is committed and no transaction spans the call."""
+    await deletable_setup(engine, vault)
+    seen: list[Any] = []
+
+    class Observing(CloudflareClient):
+        async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+            async with engine.begin() as other:
+                seen.append(
+                    (
+                        method,
+                        path,
+                        (
+                            await other.execute(
+                                text(
+                                    "SELECT delete_claimed_at FROM cf_zones WHERE id = :z FOR UPDATE NOWAIT"
+                                ),
+                                {"z": ZONE_ID},
+                            )
+                        ).scalar_one(),
+                    )
+                )
+            return await super()._request(method, path, **kwargs)
+
+    async with Observing(random_token(), base_url=CLOSED) as cf:
+        assert await deletion.delete_filtered_zone(engine, cf, ZONE_ID, datetime.now(UTC)) == "retry_later"
+    ((method, path, claimed_at),) = seen
+    assert (method, path) == ("DELETE", f"/zones/{ZONE_ID}") and claimed_at is not None
+    assert (await zone(engine, ZONE_ID)).delete_claimed_at is None  # released after the outcome
+
+
+@pytest.mark.db
+async def test_unreadable_fleet_settings_count_as_kill_switch_on(engine: AsyncEngine, vault: Vault) -> None:
+    await deletable_setup(engine, vault)
+    assert await deletable(engine) == [ZONE_ID]
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("""UPDATE settings SET value = '{"kill_switch": "maybe"}' WHERE key = 'fleet'""")
+        )
+        assert await deletion.kill_switch_on(conn) is True
+    assert await deletable(engine) == []
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM settings WHERE key = 'fleet'"))  # no row: the default is ON
+        assert await deletion.kill_switch_on(conn) is True
+
+
+@pytest.mark.db
 async def test_owner_moving_the_zone_back_cancels_the_deletion_and_a_claim_blocks_the_owner(
     engine: AsyncEngine, vault: Vault
 ) -> None:
