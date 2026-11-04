@@ -150,6 +150,47 @@ const REASON: Record<string, string> = {
   cf_unavailable: "Cloudflare پاسخ نداد",
   cf_rate_limited: "سقف درخواست Cloudflare پر شده",
   cf_invalid_response: "پاسخ Cloudflare قابل خواندن نبود",
+  // the operator account for @MTProxybot (D37)
+  mtproxybot_ok: "‎@MTProxybot‎ برای این حساب پیدا شد",
+  mtproxybot_not_found: "‎@MTProxybot‎ برای این حساب پیدا نشد",
+  get_me_ok: "نشست دوباره پاسخ داد",
+  telegram_logout: "نشست در تلگرام بسته شد",
+  session_already_ended: "نشست از قبل در تلگرام بسته شده بود",
+  session_unreadable: "نشست ذخیره‌شده با کلید فعلی پنل باز نشد",
+  session_missing: "نشست در گاوصندوق نبود",
+  credentials_missing: "api_id یا api_hash در گاوصندوق نبود",
+  credentials_only: "فقط api_id و api_hash مانده بود",
+  auth_key_unregistered: "تلگرام این نشست را نمیشناسد (بسته شده)",
+  session_revoked: "نشست از دستگاه دیگری بسته شد",
+  session_expired: "نشست منقضی شد",
+  user_deactivated: "حساب دوم حذف شد",
+  user_deactivated_ban: "حساب دوم مسدود شد",
+  auth_key_invalid: "کلید نشست نامعتبر است",
+  auth_key_perm_empty: "کلید نشست نامعتبر است",
+  auth_key_duplicated: "این نشست هم‌زمان جای دیگری استفاده شد",
+  user_empty: "تلگرام حساب را برنگرداند",
+  session_terminated: "نشست در تلگرام بسته شد",
+  api_id_format: "api_id نادرست",
+  api_hash_format: "api_hash نادرست",
+  phone_format: "شماره‌ی نادرست",
+  api_id_invalid: "تلگرام api_id و api_hash را نپذیرفت",
+  api_id_published: "api_id بسته شده (منتشر شده بود)",
+  phone_number_invalid: "شماره را تلگرام معتبر ندانست",
+  phone_number_banned: "شماره در تلگرام مسدود است",
+  phone_number_unoccupied: "با این شماره حساب تلگرامی نیست",
+  phone_number_flood: "درخواست کد برای این شماره زیاد بود",
+  flood_wait: "تلگرام خواست صبر کنیم",
+  password_flood: "رمز دومرحله‌ای زیاد اشتباه شد",
+  phone_code_invalid: "کد ورود اشتباه بود",
+  phone_code_expired: "کد ورود منقضی شد",
+  password_invalid: "رمز دومرحله‌ای اشتباه بود",
+  too_many_attempts: "چند بار پشت سر هم اشتباه؛ ورود لغو شد",
+  send_code_unavailable: "تلگرام راه دیگری برای فرستادن کد نداشت",
+  send_code_payment_required: "تلگرام برای پیامک کد پرداخت خواست",
+  update_app_to_login: "تلگرام این نسخه‌ی پنل را نپذیرفت",
+  telegram_refused: "تلگرام نپذیرفت",
+  telegram_unavailable: "تلگرام پاسخ نداد",
+  mtproxy_login_expired: "زمان ورود (۵ دقیقه) تمام شد",
 };
 
 /** Reasons stored as {"key": value} come as "key:value" (auth audit, counts). */
@@ -158,11 +199,20 @@ const REASON_KEY: Record<string, string> = {
   count: "تعداد",
   remaining: "باقی‌مانده",
   method: "روش",
+  code_via: "کد از راه",
 };
 
 const REASON_VALUE: Record<string, string> = {
   totp: "کد Authenticator",
   recovery: "کد بازیابی",
+  // code_via of the operator account's login code
+  app: "اپ تلگرام",
+  sms: "پیامک",
+  call: "تماس تلفنی",
+  email: "ایمیل",
+  fragment: "Fragment",
+  sms_word: "پیامک (یک کلمه)",
+  other: "راه دیگر",
 };
 
 export function reasonLabel(code: string): string {
@@ -238,6 +288,16 @@ const ACTION: Record<string, string> = {
   domain_check_skipped: "سنجش دامنه به بعد افتاد",
   domain_no_standby: "یادآوری: دامنه‌ی ذخیره نمانده",
   cloudflare_zone_delete: "پاک کردن دامنه‌ی فیلترشده از Cloudflare",
+  // the operator account for @MTProxybot (D37)
+  "mtproxy.account_code_sent": "فرستادن کد ورود حساب عملیاتی",
+  "mtproxy.account_password_needed": "حساب عملیاتی رمز دومرحله‌ای خواست",
+  "mtproxy.account_connected": "وصل شدن حساب عملیاتی ‎@MTProxybot‎",
+  "mtproxy.account_login_failed": "ورود حساب عملیاتی ناموفق",
+  "mtproxy.account_login_cancelled": "لغو ورود حساب عملیاتی",
+  "mtproxy.account_logged_out": "قطع اتصال حساب عملیاتی",
+  "mtproxy.account_disconnected": "بسته شدن نشست حساب عملیاتی در تلگرام",
+  "mtproxy.account_check_failed": "بررسی نشست حساب عملیاتی ناموفق",
+  "mtproxy.account_check_ok": "نشست حساب عملیاتی دوباره سالم",
 };
 
 export function actionLabel(code: string): string {
@@ -271,6 +331,7 @@ const ACTOR: Record<string, string> = {
   probes: "چرخه‌ی سنجش از ایران",
   domains: "چرخه‌ی دامنه‌ها",
   cli: "فرمان روی سرور پنل",
+  mtproxy: "چرخه‌ی حساب عملیاتی ‎@MTProxybot‎",
 };
 
 /** "admin:owner" -> "مالک (owner)"; control loops get a Persian name. */
@@ -309,6 +370,35 @@ const ERROR_FA: Record<string, string> = {
   cf_permissions_missing: "توکن Cloudflare همه‌ی دسترسی‌های لازم را ندارد.",
   cf_token_multiple_accounts: "این توکن دامنه‌های بیش از یک حساب Cloudflare را می‌بیند. آن را به حساب مخصوص Proxy-Hub محدود کنید (All zones from an account).",
   cf_unavailable: "پاسخ Cloudflare به دست نیامد. کمی بعد دوباره امتحان کنید.",
+  // the operator account for @MTProxybot (D37); the server sends its own sentence, these are spares
+  api_id_format: "api_id فقط عدد است (همان App api_id در my.telegram.org).",
+  api_hash_format: "api_hash باید دقیقاً ۳۲ نویسه از 0 تا 9 و a تا f باشد.",
+  phone_format: "شماره را کامل، با + و کد کشور وارد کنید.",
+  code_format: "کد ورود فقط رقم است (معمولاً ۵ رقم).",
+  password_format: "رمز دومرحله‌ای را وارد کنید.",
+  api_id_invalid: "تلگرام این api_id و api_hash را با هم نپذیرفت.",
+  api_id_published: "تلگرام این api_id را بسته است؛ در my.telegram.org برنامه‌ی تازه بسازید.",
+  phone_number_invalid: "تلگرام این شماره را معتبر نمیداند.",
+  phone_number_banned: "این شماره در تلگرام مسدود است.",
+  phone_number_unoccupied: "هیچ حساب تلگرامی با این شماره نیست.",
+  phone_number_flood: "برای این شماره درخواست کد زیاد بوده است؛ چند ساعت بعد امتحان کنید.",
+  flood_wait: "تلگرام خواسته است کمی صبر کنیم؛ بعداً دوباره امتحان کنید.",
+  password_flood: "رمز دومرحله‌ای چند بار اشتباه شد؛ تلگرام ورود را موقتاً بسته است.",
+  phone_code_invalid: "کد ورود درست نیست.",
+  phone_code_expired: "کد ورود منقضی شده است؛ از اول شروع کنید.",
+  password_invalid: "رمز دومرحله‌ای درست نیست.",
+  too_many_attempts: "چند بار پشت سر هم اشتباه وارد شد و ورود لغو شد.",
+  send_code_unavailable: "تلگرام فعلاً راه دیگری برای فرستادن کد ندارد.",
+  send_code_payment_required: "تلگرام برای پیامک کد پرداخت میخواهد؛ کد را در اپ تلگرام حساب دوم بگیرید.",
+  update_app_to_login: "تلگرام ورود این نسخه‌ی پنل را نپذیرفت.",
+  telegram_refused: "تلگرام این درخواست را نپذیرفت.",
+  logout_unavailable: "تلگرام پاسخ نداد و نشست هنوز باز است؛ دوباره بزنید یا در اپ تلگرام از بخش دستگاه‌ها ببندید.",
+  mtproxy_connected: "یک حساب عملیاتی وصل است؛ اول «قطع اتصال» را بزنید.",
+  mtproxy_not_connected: "هیچ حسابی وصل نیست.",
+  mtproxy_no_login: "ورودی در این مرحله در جریان نیست؛ صفحه را تازه کنید.",
+  mtproxy_login_expired: "زمان این ورود تمام شد؛ از اول شروع کنید.",
+  mtproxy_busy: "کار دیگری با این حساب در جریان است؛ چند ثانیه بعد امتحان کنید.",
+  state_unavailable: "Redis پنل در دسترس نیست؛ ورود ادامه نمییابد.",
 };
 
 export function errorCodeText(code: string): string | undefined {

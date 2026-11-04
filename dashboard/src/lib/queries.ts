@@ -23,6 +23,7 @@ export const keys = {
   nodeEvents: (id: string) => ["nodes", id, "events"] as const,
   cloudflare: ["cloudflare"] as const,
   probes: ["probes"] as const,
+  mtproxyAccount: ["mtproxy", "account"] as const,
 };
 
 /** Poll every `ms`, but stop while the route does not exist on this panel (no 404 every 15 s). */
@@ -144,4 +145,17 @@ export const useProbeSummary = () =>
     queryKey: keys.probes,
     queryFn: ({ signal }) => api.getProbeSummary(signal),
     refetchInterval: pollUnlessMissing(60_000),
+  });
+
+/** The operator account: every 5 s while a login waits for its code or password (the countdown),
+ * otherwise every 30 s. */
+export const useMtproxyAccount = () =>
+  useQuery({
+    queryKey: keys.mtproxyAccount,
+    queryFn: ({ signal }) => api.getMtproxyAccount(signal),
+    refetchInterval: (query) => {
+      if (isEndpointMissing(query.state.error)) return false;
+      const st = query.state.data?.state;
+      return st === "code_sent" || st === "password_needed" ? 5_000 : 30_000;
+    },
   });

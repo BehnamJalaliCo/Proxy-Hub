@@ -11,6 +11,7 @@ import type {
   KillSwitch,
   LoginResult,
   Me,
+  MtpAccount,
   NodeEventItem,
   NodeInfo,
   OutboxQueued,
@@ -129,6 +130,23 @@ export const sendTelegramTestAlert = () => request<Record<string, never>>("POST"
 
 /** Goes to the TEST channel only. */
 export const sendTelegramTestPost = () => request<OutboxQueued>("POST", "/api/telegram/test-post");
+
+// --- the operator account for @MTProxybot (D37) ------------------------------------------------------
+// api_hash, code and password go to the server once each and are never kept by the dashboard.
+
+export const getMtproxyAccount = (signal?: AbortSignal) =>
+  request<MtpAccount>("GET", "/api/mtproxy/account", undefined, opts(signal));
+
+export const startMtproxyLogin = (api_id: string, api_hash: string, phone: string) =>
+  request<MtpAccount>("PUT", "/api/mtproxy/account", { api_id, api_hash, phone });
+
+export const sendMtproxyCode = (code: string) => request<MtpAccount>("POST", "/api/mtproxy/account/code", { code });
+
+export const sendMtproxyPassword = (password: string) =>
+  request<MtpAccount>("POST", "/api/mtproxy/account/password", { password });
+
+/** Ends the session on Telegram, empties the vault; also cancels a login in progress. */
+export const logoutMtproxyAccount = () => request<MtpAccount>("POST", "/api/mtproxy/account/logout");
 
 // --- round 2: nodes (team live) -----------------------------------------------------------------
 

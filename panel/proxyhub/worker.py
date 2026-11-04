@@ -12,6 +12,7 @@ from proxyhub.reconcilers.base import Heartbeat, Reconciler
 from proxyhub.reconcilers.dns import DnsReconciler
 from proxyhub.reconcilers.domains import DomainsReconciler
 from proxyhub.reconcilers.fleet import FleetReconciler
+from proxyhub.reconcilers.mtproxy_account import MtproxyAccountReconciler
 from proxyhub.reconcilers.nodes import NodesReconciler
 from proxyhub.reconcilers.pricing import PricingReconciler
 from proxyhub.reconcilers.probes import ProbesReconciler
@@ -39,6 +40,7 @@ def reconcilers() -> list[Reconciler]:
         DnsReconciler(),  # net: no-op until a verified Cloudflare token and an active domain exist
         ProbesReconciler(),  # net: records reachability verdicts from Iran only
         DomainsReconciler(),  # D35: filter checks of the pool domains, rotation, deletion of filtered zones
+        MtproxyAccountReconciler(),  # D37: the operator account's session check (kill switch OFF only)
     ]
 
 

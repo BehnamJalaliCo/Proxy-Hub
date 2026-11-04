@@ -31,6 +31,17 @@ CF_ZONE_DELETE_DEF = re.compile(r"\bdef delete_zone\(")
 CF_ZONE_DELETE_REQUEST = re.compile(r"[\"']DELETE[\"'],\s*f?[\"']/zones/\{[a-z_]+\}[\"']\s*\)")
 CF_ZONE_DELETE_CALLER = PANEL / "cloudflare" / "deletion.py"
 CF_CLIENT = PANEL / "cloudflare" / "client.py"
+# D37 / docs/11 section 2.1: Telethon (a full user account client) is imported in exactly one
+# module, whose request allowlist keeps the operator account to @MTProxybot. Nothing anywhere in the
+# panel may even name the calls that list chats or contacts or read a chat's messages.
+TELETHON_IMPORT = re.compile(
+    r"^\s*(?:from|import)\s+telethon\b|import_module\(\s*[\"']telethon|__import__\(\s*[\"']telethon",
+    re.MULTILINE,
+)
+TELETHON_MODULE = PANEL / "mtproxy" / "userclient.py"
+USER_ACCOUNT_READS = re.compile(
+    r"get_dialogs|iter_dialogs|GetDialogsRequest|get_contacts|GetContactsRequest|iter_messages|get_messages"
+)
 # mutations.py does the hcloud calls; the node executor is the single caller, holding gate permits
 # (test nodes only; tests/test_live_units.py::test_only_the_executor_reaches_server_mutations_and_permits).
 ALLOWED_MUTATION_FILES = {PANEL / "hetzner" / "mutations.py", PANEL / "nodes" / "executor.py"}
@@ -57,6 +68,21 @@ def test_negative_controls_match() -> None:
     assert CF_ZONE_DELETE_DEF.search("    async def delete_zone(self, zone_id: str) -> None:")
     assert CF_ZONE_DELETE_REQUEST.search('await self._request("DELETE", f"/zones/{zone_id}")')
     assert not CF_ZONE_DELETE_REQUEST.search('self._request("DELETE", f"/zones/{zone_id}/dns_records/{rid}")')
+    assert TELETHON_IMPORT.search("from telethon import TelegramClient")
+    assert TELETHON_IMPORT.search("    import telethon.sessions")
+    assert TELETHON_IMPORT.search('mod = importlib.import_module("telethon.tl.functions")')
+    assert not TELETHON_IMPORT.search("from proxyhub.mtproxy.userclient import operator_session")
+    assert not TELETHON_IMPORT.search('"""Telethon is imported only in userclient.py."""')
+    for bad in (
+        "await client.get_dialogs()",
+        "async for d in client.iter_dialogs():",
+        "functions.messages.GetDialogsRequest(",
+        "await client.get_contacts()",
+        "functions.contacts.GetContactsRequest(hash=0)",
+        "async for m in client.iter_messages(peer):",
+        "await client.get_messages(peer, limit=5)",
+    ):
+        assert USER_ACCOUNT_READS.search(bad), bad
 
 
 def test_no_telegram_delete_anywhere() -> None:
@@ -92,3 +118,18 @@ def test_cloudflare_zone_delete_has_exactly_one_call_site() -> None:
     assert _count(CF_ZONE_DELETE_CALL) == {CF_ZONE_DELETE_CALLER: 1}, "D35: one caller of delete_zone"
     assert _count(CF_ZONE_DELETE_DEF) == {CF_CLIENT: 1}
     assert _count(CF_ZONE_DELETE_REQUEST) == {CF_CLIENT: 1}, "DELETE /zones/{id} is built only in the client"
+
+
+def test_telethon_is_imported_only_by_the_operator_client() -> None:
+    importers = {p for p in _sources() if TELETHON_IMPORT.search(p.read_text(encoding="utf-8"))}
+    assert importers == {TELETHON_MODULE}, f"Telethon imported outside userclient.py: {importers}"
+
+
+def test_no_call_that_reads_chats_or_contacts_is_named_anywhere() -> None:
+    # Comments and docstrings included: the names must not appear in the panel at all.
+    hits = {
+        p: USER_ACCOUNT_READS.findall(p.read_text(encoding="utf-8"))
+        for p in PANEL.rglob("*.py")
+        if USER_ACCOUNT_READS.search(p.read_text(encoding="utf-8"))
+    }
+    assert not hits, f"docs/11 section 2.1 lock 1 violated: {hits}"

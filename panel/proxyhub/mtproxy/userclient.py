@@ -1,0 +1,589 @@
+"""The operator account's MTProto client (decision D37, docs/11 section 2.1).
+
+This is the ONLY module that imports Telethon (pinned by tests/test_architecture.py). Over one
+short-lived connection (:func:`operator_session`) it offers exactly six operations:
+
+* :meth:`OperatorSession.send_code`: ``auth.sendCode`` (the code arrives in the second account's app),
+* :meth:`OperatorSession.sign_in_code`: ``auth.signIn`` with that code,
+* :meth:`OperatorSession.sign_in_password`: the optional two-step password
+  (``account.getPassword`` + ``auth.checkPassword``); the password is used once and never kept,
+* :meth:`OperatorSession.get_me`: ``users.getUsers([self])``,
+* :meth:`OperatorSession.resolve_mtproxybot`: ``contacts.resolveUsername("MTProxybot")`` only,
+* :meth:`OperatorSession.log_out`: ``auth.logOut``, which ends the session on Telegram's side.
+
+Locks (docs/11 section 2.1):
+
+* Every request passes :meth:`_OperatorClient._call`, which refuses any request type outside
+  :data:`ALLOWED_REQUESTS` and checks the arguments of the two that could reach further
+  (``users.getUsers`` only for the account itself, ``contacts.resolveUsername`` only for
+  @MTProxybot). Nothing here can list chats or contacts, read any chat, or send a message.
+* No updates: ``receive_updates=False``, and the library's post-login catch-up
+  (``updates.getState`` + ``updates.getDifference``) is replaced by one that only records the
+  account's own id, so the message box stays empty and no difference is ever requested.
+* Logs: the ``telethon`` loggers stay at WARNING and do not propagate; every record they make goes
+  through :class:`_RedactingForwarder`, which removes the secrets in use (api_hash, phone, code,
+  password, session string, phone_code_hash) and anything shaped like a phone number, a hex key, a
+  session string or a byte string before any handler sees it (tests/test_mtproxy_units.py proves
+  it at DEBUG).
+* Telethon's exceptions never leave this module: :func:`classify` turns them into
+  :class:`MtpError` with a contract code.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import re
+import time
+import traceback
+from collections import Counter
+from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
+from typing import Any, Final
+
+from telethon import TelegramClient, errors, functions, types
+from telethon import password as tl_password
+from telethon.sessions import StringSession
+
+from proxyhub import __version__
+from proxyhub.vault import SecretValue
+
+log = logging.getLogger(__name__)
+
+MTPROXYBOT: Final = "MTProxybot"
+DEFAULT_DEADLINE_S: Final = 20.0
+DISCONNECT_DEADLINE_S: Final = 5.0
+
+# --- logging guard ---------------------------------------------------------------------------------
+
+REDACTED: Final = "[redacted]"
+TELETHON_LOGGER: Final = "telethon"
+FORWARD_LOGGER: Final = "proxyhub.mtproxy.telethon"
+_BYTES_RE = re.compile(r"""b'(?:\\.|[^'\\]){12,}'|b"(?:\\.|[^"\\]){12,}\"""")
+_TOKENISH_RE = re.compile(r"[A-Za-z0-9_\-]{32,}={0,2}")  # session strings (urlsafe base64), hashes, keys
+# 7 to 15 digits (E.164), single spaces or dashes allowed between them; longer ids are kept.
+_PHONE_RE = re.compile(r"(?<![\w+])\+?\d(?:[ \-]?\d){6,14}(?!\w)")
+
+
+class _LiveSecrets:
+    """The secret values in use right now (reference counted), so a log line can be cleaned of
+    them even when they do not look like a secret (a 5-digit code, a short password)."""
+
+    MIN_LEN: Final = 3
+
+    def __init__(self) -> None:
+        self._live: Counter[str] = Counter()
+
+    @contextlib.contextmanager
+    def using(self, *values: str | None) -> Iterator[None]:
+        held = [v for v in values if v is not None and len(v) >= self.MIN_LEN]
+        for v in held:
+            self._live[v] += 1
+        try:
+            yield
+        finally:
+            for v in held:
+                self._live[v] -= 1
+                if self._live[v] <= 0:
+                    del self._live[v]
+
+    def redact(self, text: str) -> str:
+        for value in sorted(self._live, key=len, reverse=True):
+            text = text.replace(value, REDACTED)
+        text = _BYTES_RE.sub(REDACTED, text)
+        text = _TOKENISH_RE.sub(REDACTED, text)
+        return _PHONE_RE.sub(REDACTED, text)
+
+
+LIVE_SECRETS: Final = _LiveSecrets()
+
+
+def redact(text: str) -> str:
+    """``text`` without any secret in use and without anything shaped like one."""
+    return LIVE_SECRETS.redact(text)
+
+
+class _RedactingForwarder(logging.Handler):
+    """The FIRST handler of the ``telethon`` logger (which does not propagate). It cleans each record
+    IN PLACE (message formatted and redacted, arguments dropped, traceback and stack redacted), so a
+    handler added to that logger later (pytest's capture does this) sees only the clean record, and
+    then passes it on to :data:`FORWARD_LOGGER`, from where it reaches the normal handlers. The
+    record keeps its logger name, level and time."""
+
+    WITHHELD: Final = "[telethon log line withheld]"
+
+    def __init__(self, target: logging.Logger) -> None:
+        super().__init__(logging.NOTSET)
+        self._target = target
+
+    @staticmethod
+    def clean(record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+        except Exception:  # a broken format string: its raw arguments are dropped, not shown
+            message = str(record.msg)
+        exc_text = record.exc_text
+        if record.exc_info and record.exc_info[1] is not None:
+            exc_text = "".join(traceback.format_exception(record.exc_info[1]))
+        record.msg = redact(message)
+        record.args = None
+        record.exc_info = None
+        record.exc_text = redact(exc_text) if exc_text else None
+        record.stack_info = redact(record.stack_info) if record.stack_info else None
+        record.__dict__.pop("message", None)  # a formatter's cached copy of the old text
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.clean(record)
+        except Exception:  # cannot clean it: withhold the whole line rather than pass it on
+            record.msg, record.args, record.exc_info, record.exc_text, record.stack_info = (
+                self.WITHHELD,
+                None,
+                None,
+                None,
+                None,
+            )
+        try:
+            self._target.handle(record)
+        except Exception:  # noqa: S110 - logging must never break the caller
+            pass
+
+
+def _guard_first(telethon_log: logging.Logger) -> None:
+    """No direct propagation, and exactly one forwarder, placed before every other handler."""
+    telethon_log.propagate = False
+    ours = [h for h in telethon_log.handlers if isinstance(h, _RedactingForwarder)]
+    forwarder = ours[0] if ours else _RedactingForwarder(logging.getLogger(FORWARD_LOGGER))
+    for handler in ours:
+        telethon_log.removeHandler(handler)
+    telethon_log.handlers.insert(0, forwarder)
+
+
+def install_log_guard() -> logging.Logger:
+    """WARNING, no direct propagation, the redacting forwarder first. Idempotent."""
+    telethon_log = logging.getLogger(TELETHON_LOGGER)
+    telethon_log.setLevel(logging.WARNING)
+    _guard_first(telethon_log)
+    return telethon_log
+
+
+install_log_guard()
+
+# --- errors ----------------------------------------------------------------------------------------
+
+
+class MtpError(Exception):
+    """A failure with one of our contract codes. Never carries a Telethon object or a secret:
+    ``seconds`` is a wait Telegram asked for, ``rpc`` Telegram's own upper-case error name."""
+
+    def __init__(self, code: str, *, seconds: int | None = None, rpc: str | None = None) -> None:
+        super().__init__(code if rpc is None else f"{code} ({rpc})")
+        self.code = code
+        self.seconds = seconds
+        self.rpc = rpc
+
+
+class RequestNotAllowed(RuntimeError):
+    """A request outside the allowlist was attempted (a programming error, never sent)."""
+
+
+_RPC_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+
+_SESSION_ENDED: Final[dict[type[Exception], str]] = {
+    errors.AuthKeyUnregisteredError: "AUTH_KEY_UNREGISTERED",
+    errors.SessionRevokedError: "SESSION_REVOKED",
+    errors.SessionExpiredError: "SESSION_EXPIRED",
+    errors.UserDeactivatedError: "USER_DEACTIVATED",
+    errors.UserDeactivatedBanError: "USER_DEACTIVATED_BAN",
+    errors.AuthKeyInvalidError: "AUTH_KEY_INVALID",
+    errors.AuthKeyPermEmptyError: "AUTH_KEY_PERM_EMPTY",
+    errors.AuthKeyDuplicatedError: "AUTH_KEY_DUPLICATED",
+}
+
+_RPC_CODES: Final[tuple[tuple[type[Exception], str, str], ...]] = (
+    (errors.ApiIdInvalidError, "api_id_invalid", "API_ID_INVALID"),
+    (errors.ConnectionApiIdInvalidError, "api_id_invalid", "CONNECTION_API_ID_INVALID"),
+    (errors.ApiIdPublishedFloodError, "api_id_published", "API_ID_PUBLISHED_FLOOD"),
+    (errors.PhoneNumberInvalidError, "phone_number_invalid", "PHONE_NUMBER_INVALID"),
+    (errors.PhoneNumberBannedError, "phone_number_banned", "PHONE_NUMBER_BANNED"),
+    (errors.PhoneNumberUnoccupiedError, "phone_number_unoccupied", "PHONE_NUMBER_UNOCCUPIED"),
+    (
+        errors.PhoneNumberAppSignupForbiddenError,
+        "phone_number_unoccupied",
+        "PHONE_NUMBER_APP_SIGNUP_FORBIDDEN",
+    ),
+    (errors.PhoneNumberFloodError, "phone_number_flood", "PHONE_NUMBER_FLOOD"),
+    (errors.PhonePasswordFloodError, "password_flood", "PHONE_PASSWORD_FLOOD"),
+    (errors.PhoneCodeInvalidError, "phone_code_invalid", "PHONE_CODE_INVALID"),
+    (errors.PhoneCodeEmptyError, "phone_code_invalid", "PHONE_CODE_EMPTY"),
+    (errors.PhoneCodeExpiredError, "phone_code_expired", "PHONE_CODE_EXPIRED"),
+    (errors.PhoneCodeHashEmptyError, "phone_code_expired", "PHONE_CODE_HASH_EMPTY"),
+    (errors.PhoneHashExpiredError, "phone_code_expired", "PHONE_HASH_EXPIRED"),
+    (errors.SessionPasswordNeededError, "password_needed", "SESSION_PASSWORD_NEEDED"),
+    (errors.PasswordHashInvalidError, "password_invalid", "PASSWORD_HASH_INVALID"),
+    (errors.SendCodeUnavailableError, "send_code_unavailable", "SEND_CODE_UNAVAILABLE"),
+    (errors.UpdateAppToLoginError, "update_app_to_login", "UPDATE_APP_TO_LOGIN"),
+    (errors.UsernameNotOccupiedError, "mtproxybot_not_found", "USERNAME_NOT_OCCUPIED"),
+    (errors.UsernameInvalidError, "mtproxybot_not_found", "USERNAME_INVALID"),
+)
+
+_FLOOD: Final = (errors.FloodWaitError, errors.FloodPremiumWaitError, errors.FloodTestPhoneWaitError)
+_TELEGRAM_TROUBLE: Final = (
+    errors.ServerError,
+    errors.TimedOutError,
+    errors.RpcCallFailError,
+    errors.RpcMcgetFailError,
+    errors.InterdcCallErrorError,
+    errors.InterdcCallRichErrorError,
+)
+_TRANSPORT_TROUBLE: Final = (
+    OSError,  # ConnectionError, refused, reset, unreachable
+    TimeoutError,
+    EOFError,  # asyncio.IncompleteReadError
+    ValueError,  # Telethon's "Request was unsuccessful N time(s)" after its retries
+    errors.InvalidBufferError,
+    errors.InvalidChecksumError,
+    errors.SecurityError,
+    errors.AuthKeyNotFound,
+    errors.TypeNotFoundError,
+    errors.BadMessageError,
+)
+
+
+def _rpc_name(exc: Exception) -> str | None:
+    message = getattr(exc, "message", None)
+    return message if isinstance(message, str) and _RPC_NAME_RE.fullmatch(message) else None
+
+
+def classify(exc: BaseException) -> MtpError | None:
+    """Our contract code for an exception raised by Telethon, or None if it is not a Telegram or
+    network failure (a programming error, which must not be hidden)."""
+    if isinstance(exc, MtpError):
+        return exc
+    if isinstance(exc, _FLOOD):
+        seconds = getattr(exc, "seconds", None)
+        return MtpError(
+            "flood_wait",
+            seconds=int(seconds) if isinstance(seconds, int) else None,
+            rpc="FLOOD_WAIT",
+        )
+    for kind, rpc in _SESSION_ENDED.items():
+        if isinstance(exc, kind):
+            return MtpError("session_terminated", rpc=rpc)
+    for kind, code, rpc in _RPC_CODES:
+        if isinstance(exc, kind):
+            return MtpError(code, rpc=rpc)
+    if isinstance(exc, _TELEGRAM_TROUBLE):
+        return MtpError("telegram_unavailable", rpc=_rpc_name(exc))
+    if isinstance(exc, errors.RPCError):
+        return MtpError("telegram_refused", rpc=_rpc_name(exc))
+    if isinstance(exc, _TRANSPORT_TROUBLE):
+        return MtpError("telegram_unavailable")
+    return None
+
+
+# --- the client ------------------------------------------------------------------------------------
+
+# Requests that cannot return any chat's content. ``help.getConfig`` and ``updates.getState`` (only
+# counters: pts, qts, date, seq, unread_count) are used by the library itself when Telegram moves
+# the login to another data centre.
+ALLOWED_REQUESTS: Final[frozenset[type[Any]]] = frozenset(
+    {
+        functions.auth.SendCodeRequest,
+        functions.auth.SignInRequest,
+        functions.account.GetPasswordRequest,
+        functions.auth.CheckPasswordRequest,
+        functions.users.GetUsersRequest,
+        functions.contacts.ResolveUsernameRequest,
+        functions.auth.LogOutRequest,
+        functions.help.GetConfigRequest,
+        functions.updates.GetStateRequest,
+    }
+)
+
+
+def check_request(request: Any) -> None:
+    """Raise :class:`RequestNotAllowed` unless ``request`` is allowed with these arguments."""
+    kind = type(request)
+    if kind not in ALLOWED_REQUESTS:
+        raise RequestNotAllowed(f"request not allowed: {kind.__name__}")
+    if kind is functions.users.GetUsersRequest and not (
+        request.id and all(isinstance(u, types.InputUserSelf) for u in request.id)
+    ):
+        raise RequestNotAllowed("users.getUsers is allowed only for the account itself")
+    if (
+        kind is functions.contacts.ResolveUsernameRequest
+        and str(request.username).lower() != MTPROXYBOT.lower()
+    ):
+        raise RequestNotAllowed("contacts.resolveUsername is allowed only for @MTProxybot")
+
+
+class _OperatorClient(TelegramClient):  # type: ignore[misc]  # Telethon ships no type hints
+    async def _call(
+        self, sender: Any, request: Any, ordered: bool = False, flood_sleep_threshold: Any = None
+    ) -> Any:
+        for item in request if isinstance(request, list | tuple) else (request,):
+            check_request(item)
+        return await super()._call(
+            sender, request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold
+        )
+
+    async def _on_login(self, user: Any) -> Any:
+        # The library would call updates.getState and updates.getDifference here (catching up on
+        # every chat). We only remember who we are; the message box stays empty, so the update loop
+        # never asks for a difference.
+        self._mb_entity_cache.set_self_user(user.id, user.bot, user.access_hash)
+        self._authorized = True
+        return user
+
+
+@dataclass(frozen=True)
+class ApiCredentials:
+    api_id: int
+    api_hash: SecretValue
+
+    def __repr__(self) -> str:
+        return f"ApiCredentials(api_id={self.api_id}, api_hash=***)"
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """Where to connect instead of Telegram's default data centre. Production passes None; tests
+    use a local port (a real refusal or a server that never answers)."""
+
+    host: str
+    port: int
+    dc_id: int = 2
+
+
+@dataclass(frozen=True)
+class ClientOptions:
+    endpoint: Endpoint | None = None
+    deadline_s: float = DEFAULT_DEADLINE_S
+
+
+@dataclass(frozen=True)
+class CodeSent:
+    phone_code_hash: SecretValue
+    via: str
+    length: int | None
+
+    def __repr__(self) -> str:
+        return f"CodeSent(phone_code_hash=***, via={self.via!r}, length={self.length})"
+
+
+@dataclass(frozen=True)
+class Account:
+    """The operator account as the panel keeps it: no phone number."""
+
+    user_id: int
+    first_name: str
+    is_bot: bool
+
+
+_CODE_VIA: Final[dict[type[Any], str]] = {
+    types.auth.SentCodeTypeApp: "app",
+    types.auth.SentCodeTypeSms: "sms",
+    types.auth.SentCodeTypeFirebaseSms: "sms",
+    types.auth.SentCodeTypeCall: "call",
+    types.auth.SentCodeTypeFlashCall: "call",
+    types.auth.SentCodeTypeMissedCall: "call",
+    types.auth.SentCodeTypeFragmentSms: "fragment",
+    types.auth.SentCodeTypeEmailCode: "email",
+    types.auth.SentCodeTypeSmsWord: "sms_word",
+    types.auth.SentCodeTypeSmsPhrase: "sms_word",
+}
+
+
+def _account(user: Any) -> Account:
+    return Account(user_id=int(user.id), first_name=str(user.first_name or ""), is_bot=bool(user.bot))
+
+
+class OperatorSession:
+    """One connection to Telegram as the operator account (or as a login in progress)."""
+
+    def __init__(
+        self,
+        client: _OperatorClient,
+        creds: ApiCredentials,
+        options: ClientOptions,
+        hold: contextlib.ExitStack,
+    ) -> None:
+        self._client = client
+        self._creds = creds
+        self._options = options
+        self._hold = hold
+
+    def _keep_out_of_logs(self, value: str) -> None:
+        """Redact ``value`` from every log line until this connection is closed."""
+        self._hold.enter_context(LIVE_SECRETS.using(value))
+
+    async def _run(self, call: Any) -> Any:
+        try:
+            async with asyncio.timeout(self._options.deadline_s):
+                return await call
+        except RequestNotAllowed:
+            raise
+        except Exception as exc:
+            mapped = classify(exc)
+            if mapped is None:
+                raise
+            raise mapped from None
+
+    def export(self) -> SecretValue:
+        """The session string (auth key and data centre). A secret: vault or encrypted Redis only."""
+        value = self._client.session.save()
+        if not value:
+            raise MtpError("telegram_unavailable")  # no auth key: the connection never completed
+        self._keep_out_of_logs(str(value))
+        return SecretValue(str(value))
+
+    async def send_code(self, phone: SecretValue) -> CodeSent:
+        sent = await self._run(
+            self._client(
+                functions.auth.SendCodeRequest(
+                    phone.reveal(), self._creds.api_id, self._creds.api_hash.reveal(), types.CodeSettings()
+                )
+            )
+        )
+        if isinstance(sent, types.auth.SentCodePaymentRequired):
+            raise MtpError("send_code_payment_required", rpc="SENT_CODE_PAYMENT_REQUIRED")
+        if not isinstance(sent, types.auth.SentCode) or not sent.phone_code_hash:
+            raise MtpError("telegram_refused", rpc=type(sent).__name__.upper()[:64])
+        length = getattr(sent.type, "length", None)
+        self._keep_out_of_logs(str(sent.phone_code_hash))
+        return CodeSent(
+            phone_code_hash=SecretValue(str(sent.phone_code_hash)),
+            via=_CODE_VIA.get(type(sent.type), "other"),
+            length=length if isinstance(length, int) else None,
+        )
+
+    async def sign_in_code(
+        self, phone: SecretValue, phone_code_hash: SecretValue, code: SecretValue
+    ) -> Account:
+        """Raises ``MtpError("password_needed")`` when the account has a two-step password."""
+        self._keep_out_of_logs(code.reveal())
+        result = await self._run(
+            self._client(
+                functions.auth.SignInRequest(
+                    phone_number=phone.reveal(),
+                    phone_code_hash=phone_code_hash.reveal(),
+                    phone_code=code.reveal(),
+                )
+            )
+        )
+        if isinstance(result, types.auth.AuthorizationSignUpRequired):
+            raise MtpError("phone_number_unoccupied", rpc="SIGN_UP_REQUIRED")
+        return _account(result.user)
+
+    async def sign_in_password(self, password: SecretValue) -> Account:
+        self._keep_out_of_logs(password.reveal())
+        settings = await self._run(self._client(functions.account.GetPasswordRequest()))
+        try:
+            check = tl_password.compute_check(settings, password.reveal())
+        except ValueError:  # no password is set on this account, or an unknown algorithm
+            raise MtpError("password_invalid", rpc="PASSWORD_CHECK_FAILED") from None
+        result = await self._run(self._client(functions.auth.CheckPasswordRequest(check)))
+        return _account(result.user)
+
+    async def get_me(self) -> Account:
+        users = await self._run(self._client(functions.users.GetUsersRequest([types.InputUserSelf()])))
+        if not users or isinstance(users[0], types.UserEmpty):
+            raise MtpError("session_terminated", rpc="USER_EMPTY")
+        return _account(users[0])
+
+    async def resolve_mtproxybot(self) -> int:
+        """@MTProxybot's user id, proving this account can see it. Nothing about it is stored."""
+        found = await self._run(self._client(functions.contacts.ResolveUsernameRequest(username=MTPROXYBOT)))
+        peer = getattr(found, "peer", None)
+        if not isinstance(peer, types.PeerUser):
+            raise MtpError("mtproxybot_not_found")
+        for user in getattr(found, "users", []):
+            names = {str(user.username or "").lower()} | {
+                str(u.username).lower() for u in (getattr(user, "usernames", None) or [])
+            }
+            if user.id == peer.user_id and user.bot and MTPROXYBOT.lower() in names:
+                return int(user.id)
+        raise MtpError("mtproxybot_not_found")
+
+    async def log_out(self) -> None:
+        """Ends this session on Telegram (it disappears from Settings > Devices)."""
+        await self._run(self._client(functions.auth.LogOutRequest()))
+
+
+def _new_client(
+    creds: ApiCredentials, session: SecretValue | None, options: ClientOptions
+) -> _OperatorClient:
+    client = _OperatorClient(
+        StringSession(session.reveal() if session is not None else None),
+        creds.api_id,
+        creds.api_hash.reveal(),
+        receive_updates=False,
+        catch_up=False,
+        flood_sleep_threshold=0,  # a flood wait is reported (with its seconds), never slept through
+        request_retries=3,  # room for a data-centre switch during the login
+        connection_retries=1,
+        retry_delay=1,
+        raise_last_call_error=True,
+        auto_reconnect=False,
+        timeout=min(10.0, options.deadline_s),
+        device_model="Proxy-Hub panel",
+        system_version="Linux",
+        app_version=f"Proxy-Hub {__version__}",
+        lang_code="en",
+        system_lang_code="en",
+        base_logger=logging.getLogger(TELETHON_LOGGER),
+        entity_cache_limit=100,
+    )
+    if options.endpoint is not None:
+        client.session.set_dc(options.endpoint.dc_id, options.endpoint.host, options.endpoint.port)
+    return client
+
+
+@contextlib.asynccontextmanager
+async def operator_session(
+    creds: ApiCredentials,
+    session: SecretValue | None,
+    *,
+    phone: SecretValue | None = None,
+    phone_code_hash: SecretValue | None = None,
+    options: ClientOptions | None = None,
+) -> AsyncIterator[OperatorSession]:
+    """Connect (``session`` None: a fresh login), yield, always disconnect. Every secret involved
+    is registered with the log guard for the whole time. Connection failures raise MtpError."""
+    options = options or ClientOptions()
+    phone_value = phone.reveal() if phone is not None else None
+    secrets = (
+        creds.api_hash.reveal(),
+        session.reveal() if session is not None else None,
+        phone_value,
+        phone_value.lstrip("+") if phone_value else None,
+        phone_code_hash.reveal() if phone_code_hash is not None else None,
+    )
+    _guard_first(logging.getLogger(TELETHON_LOGGER))  # still first, whatever was added since
+    with contextlib.ExitStack() as hold:
+        hold.enter_context(LIVE_SECRETS.using(*secrets))
+        client = _new_client(creds, session, options)
+        started = time.monotonic()
+        try:
+            try:
+                async with asyncio.timeout(options.deadline_s):
+                    await client.connect()
+            except RequestNotAllowed:
+                raise
+            except Exception as exc:
+                mapped = classify(exc)
+                if mapped is None:
+                    raise
+                log.warning(
+                    "mtproxy: connecting to Telegram failed after %.1fs (%s)",
+                    time.monotonic() - started,
+                    mapped.code,
+                )
+                raise mapped from None
+            yield OperatorSession(client, creds, options, hold)
+        finally:
+            with contextlib.suppress(Exception):
+                async with asyncio.timeout(DISCONNECT_DEADLINE_S):
+                    await client.disconnect()
