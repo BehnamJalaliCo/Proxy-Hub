@@ -25,18 +25,20 @@ connection opened with a :class:`ChannelScope` that names the configured main an
 * :meth:`OperatorSession.messages_views`: ``messages.getMessagesViews`` of our posts, never
   incrementing the view counter.
 
-Any other peer, any delete request and any send are refused before a byte leaves.
+Any other peer, any delete request and any send outside the @MTProxybot chat are refused before a
+byte leaves.
 
 Locks (docs/11 section 2.1):
 
 * Every request passes :meth:`_OperatorClient._call`, which refuses any request type outside
   :data:`ALLOWED_REQUESTS` and :data:`BOT_CHAT_REQUESTS` and checks the arguments of those that
   could reach further (``users.getUsers`` only for the account itself, ``contacts.resolveUsername``
-  only for @MTProxybot). The three chat requests (``messages.sendMessage``, ``messages.getHistory``
-  with a small limit, ``messages.getBotCallbackAnswer``) pass only when their peer is the
+  only for @MTProxybot and our own channels, the statistics requests only for our configured
+  channels, see :class:`ChannelScope`). The three chat requests (``messages.sendMessage``,
+  ``messages.getHistory`` with a small limit, ``messages.getBotCallbackAnswer``) pass only when their peer is the
   @MTProxybot user that :meth:`OperatorSession.open_mtproxybot_chat` resolved on this connection
   AND whose id equals the id the panel stored at login. Nothing here can list chats or contacts,
-  read any other chat, or write to anyone else.
+  read any other chat's messages, or write to anyone else.
 * No updates: ``receive_updates=False``, and the library's post-login catch-up
   (``updates.getState`` + ``updates.getDifference``) is replaced by one that only records the
   account's own id, so the message box stays empty and no difference is ever requested.

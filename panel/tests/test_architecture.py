@@ -48,6 +48,9 @@ USER_ACCOUNT_READS = re.compile(
 BOT_CHAT_REQUEST_NAMES = re.compile(r"SendMessageRequest|GetHistoryRequest|GetBotCallbackAnswerRequest")
 MESSAGES_NAMESPACE = re.compile(r"functions\.messages\.(\w+)")
 BOT_CHAT_ONLY = {"SendMessageRequest", "GetHistoryRequest", "GetBotCallbackAnswerRequest"}
+# D38: the one messages.* read outside the bot chat. Channel statistics read the view and forward
+# counts of OUR channels' posts, never incrementing a view (proxyhub/mtproxy/channel_stats.py).
+CHANNEL_STATS_MESSAGES = {"GetMessagesViewsRequest"}
 # Telethon's high-level helpers that write to, or read, any chat (the sponsor code must not reach
 # around the allowlisted BotChat).
 USER_ACCOUNT_WRITES = re.compile(
@@ -168,7 +171,7 @@ def test_chat_requests_are_named_only_by_the_operator_client() -> None:
     used = set()
     for p in _sources():
         used |= set(MESSAGES_NAMESPACE.findall(_strip_comments(p.read_text(encoding="utf-8"))))
-    assert used == BOT_CHAT_ONLY, f"messages.* requests in the panel: {sorted(used)}"
+    assert used == BOT_CHAT_ONLY | CHANNEL_STATS_MESSAGES, f"messages.* requests in the panel: {sorted(used)}"
 
 
 def _operator_account_code() -> list[Path]:
@@ -208,7 +211,18 @@ def test_the_bot_chat_allowlist_is_exactly_three_requests_pinned_to_the_bot() ->
 
     assert {k.__name__ for k in BOT_CHAT_REQUESTS} == BOT_CHAT_ONLY
     assert not BOT_CHAT_REQUESTS & ALLOWED_REQUESTS
-    assert not any(k.__module__.endswith(".messages") for k in ALLOWED_REQUESTS)
+    in_messages = {k.__name__ for k in ALLOWED_REQUESTS if k.__module__.endswith(".messages")}
+    assert in_messages == CHANNEL_STATS_MESSAGES  # read-only, our channels only (D38)
+    other = types.InputPeerChannel(channel_id=1_234_567, access_hash=1)
+    for views in (
+        functions.messages.GetMessagesViewsRequest(peer=other, id=[1], increment=False),
+        functions.messages.GetMessagesViewsRequest(peer=other, id=[1], increment=True),
+    ):
+        try:
+            check_request(views)  # no channel is configured: nothing is ours
+        except RequestNotAllowed:
+            continue
+        raise AssertionError(f"getMessagesViews passed without our channel: {views}")
     assert MAX_HISTORY_LIMIT <= 10
     bot = types.InputPeerUser(user_id=93_372_553, access_hash=1)
     send = functions.messages.SendMessageRequest(peer=bot, message="/myproxies")
