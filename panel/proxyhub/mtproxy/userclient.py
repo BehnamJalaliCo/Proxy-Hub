@@ -353,7 +353,6 @@ def _channel_id(peer: Any) -> int | None:
     return None
 
 
-
 # The chat with @MTProxybot (proxyhub/sponsor). Allowed ONLY with the bot's own peer, see
 # :func:`_check_bot_chat_request`.
 BOT_CHAT_REQUESTS: Final[frozenset[type[Any]]] = frozenset(
@@ -405,9 +404,7 @@ def _check_bot_chat_request(request: Any, bot_id: int | None) -> None:
             raise RequestNotAllowed("messages.getBotCallbackAnswer: an inline button's data only")
 
 
-def check_request(
-    request: Any, scope: ChannelScope | None = None, *, bot_id: int | None = None
-) -> None:
+def check_request(request: Any, scope: ChannelScope | None = None, *, bot_id: int | None = None) -> None:
     """Raise :class:`RequestNotAllowed` unless ``request`` is allowed with these arguments.
     ``scope``: our configured channels (statistics requests are allowed only for them).
     ``bot_id``: @MTProxybot's user id once its chat is open on this connection, else None."""

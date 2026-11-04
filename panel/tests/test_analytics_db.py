@@ -168,6 +168,13 @@ async def test_only_live_nodes_with_a_hetzner_id_in_an_observed_account_are_samp
 # --- signals and alerts ---------------------------------------------------------------------------
 
 
+def midday() -> datetime:
+    """Yesterday at 12:00 Tehran (08:30 UTC): alert days are Tehran days, so a test that moves the
+    clock forward must not start near Tehran midnight (20:30 UTC) or a month boundary."""
+    day = datetime.now(UTC).date() - timedelta(days=1)
+    return datetime(day.year, day.month, day.day, 8, 30, tzinfo=UTC)
+
+
 async def hot_node(
     engine: AsyncEngine, now: datetime, *, out_bytes: int = 17 * TB, cpu: float = 90.0
 ) -> sampling.SampledNode:
@@ -182,7 +189,7 @@ async def hot_node(
 
 
 async def test_signals_and_one_alert_per_node_limit_and_day(engine: AsyncEngine) -> None:
-    now = sampling.minute(datetime.now(UTC))
+    now = midday()
     await channels(engine, owner=True)
     node = await hot_node(engine, now)
     async with engine.connect() as conn:
@@ -207,7 +214,7 @@ async def test_signals_and_one_alert_per_node_limit_and_day(engine: AsyncEngine)
 
 
 async def test_no_owner_chat_means_no_queued_alert_but_the_warning_stays(engine: AsyncEngine) -> None:
-    now = sampling.minute(datetime.now(UTC))
+    now = midday()
     await hot_node(engine, now, cpu=10.0)
     async with engine.begin() as conn:
         raised = await sampling.raise_threshold_alerts(conn, now)
@@ -218,7 +225,7 @@ async def test_no_owner_chat_means_no_queued_alert_but_the_warning_stays(engine:
 
 
 async def test_alerts_off_and_stale_samples(engine: AsyncEngine) -> None:
-    now = sampling.minute(datetime.now(UTC))
+    now = midday()
     await channels(engine, owner=True)
     await hot_node(engine, now)
     async with engine.begin() as conn:
@@ -637,7 +644,9 @@ async def test_migration_round_trip_single_head_and_no_drift(engine: AsyncEngine
     from proxyhub.cli import _alembic_config, downgrade, migrate
 
     cfg = _alembic_config()
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0016_analytics"]
+    script = ScriptDirectory.from_config(cfg)
+    (head,) = script.get_heads()  # one head; the round-3 merge builds on 0016
+    assert "0016_analytics" in {rev.revision for rev in script.walk_revisions("base", head)}
     await asyncio.to_thread(downgrade, "0010_domains")
     tables = await rows(engine, "SELECT tablename FROM pg_tables WHERE tablename LIKE 'analytics_%'")
     assert tables == []
