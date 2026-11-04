@@ -76,6 +76,7 @@ def test_post_has_content_links_and_tag_in_that_order() -> None:
     assert "<b>ریلیتی 1</b> — ⏳ اعتبار تا ساعت ۱۸:۳۰\n<code>vless://" in post
     assert ALL_DEAD_LINE not in post
     assert fits(post)
+    assert "·" not in post  # a middle dot next to Persian digits reads as a zero
 
 
 def test_rendering_is_deterministic() -> None:
@@ -120,6 +121,16 @@ def test_all_dead_gets_the_closing_line_and_owner_texts() -> None:
 def test_active_link_without_url_is_never_a_link() -> None:
     post = render_post(None, [PostLink(kind="mtproto", label="پروکسی 1", status="active")], "@ipoxxo").text
     assert "<a " not in post and "<s>پروکسی 1</s> 🚫" in post
+
+
+def test_a_dead_link_never_shows_its_url_even_if_it_still_has_one() -> None:
+    sec = secret()
+    dead = [
+        PostLink(kind="mtproto", label="پروکسی 1", status="burned", url=mt(1, sec=sec).url),
+        PostLink(kind="reality", label="ریلیتی 1", status="expired", url=rl(1).url),
+    ]
+    post = render_post(None, dead, "@ipoxxo").text
+    assert "<a " not in post and "<code>" not in post and sec not in post and "vless://" not in post
 
 
 def test_labels_are_escaped_and_bounded() -> None:
