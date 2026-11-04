@@ -6,7 +6,7 @@
 | جدول | ستون‌های اصلی | توضیح |
 |---|---|---|
 | `settings` | key, value (jsonb) | هدف‌ها، سقف‌ها، متن وضعیت‌ها، kill switch |
-| `nodes` | hetzner_id, name, location, server_type, ipv4, ipv6, state, protocols[], reality_pubkey, mtproto_secret_ref, created_at, ready_at, burned_at, retired_at, deleted_at | چرخه‌ی عمر در `03_NODES.md`. `state` یکی از requested / creating / booting / registering / ready / unhealthy / burned / retiring / deleted |
+| `nodes` | hetzner_id, name, location, server_type, ipv4, ipv6, state, slot, is_test, created_at, ready_at, burned_at, retired_at, deleted_at | چرخه‌ی عمر در `03_NODES.md`. `state` یکی از requested / creating / booting / registering / ready / unhealthy / burned / retiring / deleted |
 | `node_heartbeats` | node_id, at, cpu, mem, conns_total, rx_bytes, tx_bytes | فقط عددهای کلی. نگهداری کوتاه (مثلاً ۷ روز)، و بعد خلاصه‌ی ساعتی |
 | `probes` | node_id, source (iran_vps / traffic / public), at, ok, kind (tcp / tls / vless / mtproto), latency_ms | سنجش دسترسی |
 | `node_events` | node_id, at, kind, detail | ساخت، reboot، سوختن، حذف؛ برای تاریخچه و گزارش |
@@ -45,6 +45,16 @@
 | `analytics_usage_hourly` / `_daily` / `_dims` | بایت هر پروکسی در ساعت؛ کاربر یکتای روز و p50/p90/p99؛ کاربر و بایت هر کشور/استان/ASN | شمارنده‌های عامل (D39)؛ هر دسته‌ی کمتر از ۳ نفر در «other»، با CHECK در خود دیتابیس. |
 | `analytics_channel_stats` / `analytics_post_views` | آمار خود تلگرام و بازدید/بازنشر پست‌ها | با حساب دوم (D38)، فقط برای کانال‌های اصلی و آزمایشی. |
 | `analytics_mtproxybot_stats` | — | جای خالی برای آمار @MTProxybot (دور ۴). |
+
+## دور ۳ (ساخته‌شده؛ migrationهای `0011` تا `0015`، ادغام در `0017_merge`)
+| جدول | ستون‌های اصلی | توضیح |
+|---|---|---|
+| `mtproto_proxies` | node_id, user_name, live_at, disabled_at | یک secret بلندمدت برای هر node (`mt_<16 hex>`)؛ secret فقط رمزشده در `telemt_users`. |
+| `sponsor_flows` / `mtproxy_registrations` | host, port, user_name, ad_tag, state | ثبت در ‎@MTProxybot‎؛ ردیف ثبت فقط وقتی ساخته میشود که ربات tag داده باشد. |
+| `sponsor_campaigns` | customer, channel, starts_at, ends_at, paid | کمپین اسپانسر پولی؛ تغییر ۲ ساعت پیش از شروع. |
+| `fleet_plans`، `fleet_alerts`، `ip_history`، `domain_delegation_checks` / `_state` | slot، IP سوخته و /24، NS هر دامنه | ناوگان زنده‌ی ۹ جایگاه؛ IP سوخته دوباره گرفته نمیشود. |
+| `posts`، `post_links`، `content_items` | role، plan_day، plan_slot، لینک‌های هر پست | پست خودکار؛ فقط ویرایش، هرگز حذف. لینک node آزمایشی هرگز در کانال اصلی نمیآید. |
+| `reality_keys` / `reality_configs` / `reality_usage` / `reality_node_status` | slot، کلید رمزشده، uuid، انقضا، حجم، checked_target | کانفیگ ۲۴ ساعته یا ۵۰ گیگ؛ مصرف فقط برای هر کانفیگ، نه هر فرد. |
 
 ## چیزهایی که **هیچ‌جا** نیست
 IP کاربر، زمان اتصال هر کاربر، و مقصد ترافیک (قانون ۷).
