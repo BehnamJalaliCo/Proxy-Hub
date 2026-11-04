@@ -1,7 +1,9 @@
 """A small typed async client for the Telegram Bot API (https://core.telegram.org/bots/api).
 
-Only the methods Proxy-Hub needs: getMe, getUpdates, sendMessage, editMessageText, getChat and
-getChatMember. Nothing else can be sent: the one request path (:meth:`BotClient._call`) refuses any
+Only the methods Proxy-Hub needs: getMe, getUpdates, sendMessage, editMessageText, getChat,
+getChatMember, getChatMemberCount (channel size for the «آمار» page) and createChatInviteLink (a
+named tracking link per campaign; links are never revoked or edited). Nothing else can be sent: the
+one request path (:meth:`BotClient._call`) refuses any
 method name outside :data:`ALLOWED_METHODS` before a request is built, so no message can be removed
 and nobody banned through this client, not even with a computed method name (CLAUDE.md rule 6).
 
@@ -43,8 +45,19 @@ _RETRY_IN_TEXT = re.compile(r"retry after (\d+)", re.IGNORECASE)
 # The ONLY Bot API methods this client can call. Removing posts, banning, leaving a chat or
 # changing the webhook are deliberately absent (rule 6; and a webhook would stop getUpdates).
 ALLOWED_METHODS: Final = frozenset(
-    {"getMe", "getUpdates", "sendMessage", "editMessageText", "getChat", "getChatMember"}
+    {
+        "getMe",
+        "getUpdates",
+        "sendMessage",
+        "editMessageText",
+        "getChat",
+        "getChatMember",
+        "getChatMemberCount",
+        "createChatInviteLink",
+    }
 )
+# Telegram's limit for an invite link's name (Bot API, createChatInviteLink).
+INVITE_LINK_NAME_MAX: Final = 32
 
 DEFAULT_TIMEOUT: Final = httpx.Timeout(15.0, connect=10.0)
 MAX_LONG_POLL_SECONDS: Final = 25
@@ -329,6 +342,29 @@ class SentMessage:
 
 
 @dataclass(frozen=True)
+class InviteLink:
+    """A ChatInviteLink this bot created. Only the link and its name are read (not its creator)."""
+
+    invite_link: str
+    name: str | None
+    creates_join_request: bool
+    is_revoked: bool
+
+    @classmethod
+    def from_result(cls, result: Any, method: str = "createChatInviteLink") -> InviteLink:
+        obj = _obj(result, method, "invite link")
+        link = _str(obj, "invite_link")
+        if not link or not link.startswith("https://t.me/"):
+            raise InvalidResponse(method, "invite link without a t.me link")
+        return cls(
+            invite_link=link,
+            name=_str(obj, "name"),
+            creates_join_request=obj.get("creates_join_request") is True,
+            is_revoked=obj.get("is_revoked") is True,
+        )
+
+
+@dataclass(frozen=True)
 class Update:
     """One update. Only the fields Proxy-Hub reads are parsed; ``raw`` is never stored."""
 
@@ -481,3 +517,19 @@ class BotClient:
         return MemberRights.from_result(
             await self._call("getChatMember", {"chat_id": chat_id, "user_id": user_id})
         )
+
+    async def get_chat_member_count(self, chat_id: int | str) -> int:
+        """How many members a chat has (a channel's subscriber count). Only a number comes back."""
+        result = await self._call("getChatMemberCount", {"chat_id": chat_id})
+        if not isinstance(result, int) or isinstance(result, bool) or result < 0:
+            raise InvalidResponse("getChatMemberCount", "result is not a count")
+        return result
+
+    async def create_chat_invite_link(self, chat_id: int | str, *, name: str) -> InviteLink:
+        """A new, plain (no join request, no limit, no expiry) invite link named ``name``."""
+        if not 1 <= len(name) <= INVITE_LINK_NAME_MAX:
+            raise ValueError("invite link name must be 1 to 32 characters")
+        result = await self._call(
+            "createChatInviteLink", {"chat_id": chat_id, "name": name, "creates_join_request": False}
+        )
+        return InviteLink.from_result(result)

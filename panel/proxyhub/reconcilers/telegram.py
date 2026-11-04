@@ -3,6 +3,8 @@
 * ``telegram_updates``: long-polls getUpdates (only while a bot is set) with a persisted offset.
   ``/start <code>`` from a PRIVATE chat with the open pairing code binds the owner's chat. Every
   other message is ignored and nothing about it is stored (not even in ``tg_updates``).
+  ``chat_member`` updates of OUR channels become join/leave events with the D7 fields only
+  (proxyhub/analytics/members.py); about any other chat nothing is kept.
 * ``telegram_outbox``: one outbox job per step (proxyhub/telegram/outbox.py).
 * ``telegram_api_watchdog``: GET http://api:8000/livez every 60 s; after 3 failures in a row a
   Persian alert goes DIRECTLY to the owner (bot token from the vault), and a recovery message when
@@ -27,6 +29,7 @@ import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from proxyhub.analytics import members
 from proxyhub.fleet.actions import iso, log_action
 from proxyhub.reconcilers.base import Reconciler, lock_key
 from proxyhub.telegram import outbox, pairing, store
@@ -38,7 +41,8 @@ from proxyhub.vault import Vault, VaultError
 log = logging.getLogger(__name__)
 
 DEFAULT_LIVEZ_URL: Final = "http://api:8000/livez"
-ALLOWED_UPDATES: Final = ("message",)
+# chat_member must be asked for explicitly, or Telegram never sends it (finding T2).
+ALLOWED_UPDATES: Final = ("message", "chat_member")
 
 VaultFactory = Callable[[], Vault]
 
@@ -78,6 +82,8 @@ async def run_locked(engine: AsyncEngine, name: str, step: Callable[[], Awaitabl
 
 async def handle_update(conn: AsyncConnection, update: Update, now_: datetime) -> int | None:
     """Apply one update. Returns the owner chat id if it just paired, else None."""
+    if await members.record_member_update(conn, update):
+        return None
     message = update.private_text()
     if message is None:
         return None
