@@ -32,13 +32,15 @@ type xrayRuntime struct {
 	// checkTarget is xray.CheckTarget on a node; tests point it at a local TLS server.
 	checkTarget func(ctx context.Context, target, serverName string, roots *x509.CertPool) error
 
-	up          bool
-	uptimeS     *float64
-	applyErr    string
-	targetOK    *bool
-	targetKey   string
-	targetAt    time.Time
-	lastRestart time.Time
+	up       bool
+	uptimeS  *float64
+	applyErr string
+	targetOK *bool
+	// targetChecked / sniChecked: the target and server name targetOK is about (the report says so).
+	targetChecked string
+	sniChecked    string
+	targetAt      time.Time
+	lastRestart   time.Time
 }
 
 // initXray loads the node's Xray settings. Without the file this node simply serves no Xray; a
@@ -246,12 +248,12 @@ func (a *Agent) liveUsers(ctx context.Context, plan xray.Plan) error {
 // checkXrayTarget re-checks the REALITY target from this node when it changed or every few hours.
 func (a *Agent) checkXrayTarget(ctx context.Context) {
 	x := a.doc.Xray
-	key := x.Target + "|" + x.ServerNames[0]
-	if key == a.xr.targetKey && a.now().Sub(a.xr.targetAt) < targetRecheck {
+	target, sni := x.Target, x.ServerNames[0]
+	if target == a.xr.targetChecked && sni == a.xr.sniChecked && a.now().Sub(a.xr.targetAt) < targetRecheck {
 		return
 	}
-	ok := a.xr.checkTarget(ctx, x.Target, x.ServerNames[0], nil) == nil
-	a.xr.targetOK, a.xr.targetKey, a.xr.targetAt = &ok, key, a.now()
+	ok := a.xr.checkTarget(ctx, target, sni, nil) == nil
+	a.xr.targetOK, a.xr.targetChecked, a.xr.sniChecked, a.xr.targetAt = &ok, target, sni, a.now()
 	if !ok {
 		a.log.Warn("reality target failed the TLS 1.3 + HTTP/2 check from this node")
 	}
@@ -269,12 +271,14 @@ func (a *Agent) xrayReport() *report.Xray {
 		}
 	}
 	return report.BuildXray(report.XrayInput{
-		Enabled:    true,
-		Up:         a.xr.up,
-		Version:    a.xr.settings.Version,
-		UptimeS:    a.xr.uptimeS,
-		TargetOK:   a.xr.targetOK,
-		ApplyError: a.xr.applyErr,
-		Totals:     totals,
+		Enabled:           true,
+		Up:                a.xr.up,
+		Version:           a.xr.settings.Version,
+		UptimeS:           a.xr.uptimeS,
+		TargetOK:          a.xr.targetOK,
+		CheckedTarget:     a.xr.targetChecked,
+		CheckedServerName: a.xr.sniChecked,
+		ApplyError:        a.xr.applyErr,
+		Totals:            totals,
 	})
 }

@@ -20,9 +20,14 @@ type Xray struct {
 	Version *string  `json:"version"`
 	UptimeS *float64 `json:"uptime_s"`
 	// TargetOK: the REALITY target passed the TLS 1.3 + HTTP/2 check from this node (nil: not checked).
-	TargetOK   *bool      `json:"target_ok"`
-	ApplyError *string    `json:"apply_error"`
-	Users      []XrayUser `json:"users"`
+	TargetOK *bool `json:"target_ok"`
+	// CheckedTarget and CheckedServerName say which target ("host:port") and server name the check
+	// was about, so the panel never counts a result for a target it has since replaced. Both come
+	// from the panel's own desired state (DNS names only); nil exactly when TargetOK is nil.
+	CheckedTarget     *string    `json:"checked_target"`
+	CheckedServerName *string    `json:"checked_server_name"`
+	ApplyError        *string    `json:"apply_error"`
+	Users             []XrayUser `json:"users"`
 }
 
 // XrayUser is one Reality user's total traffic (uplink + downlink) as counted on this node.
@@ -33,18 +38,26 @@ type XrayUser struct {
 
 // XrayInput is what the agent knows about Xray at report time.
 type XrayInput struct {
-	Enabled    bool
-	Up         bool
-	Version    string
-	UptimeS    *float64
-	TargetOK   *bool
-	ApplyError string
-	Totals     map[string]uint64 // label -> cumulative octets
+	Enabled  bool
+	Up       bool
+	Version  string
+	UptimeS  *float64
+	TargetOK *bool
+	// CheckedTarget / CheckedServerName: what the TargetOK check was about.
+	CheckedTarget     string
+	CheckedServerName string
+	ApplyError        string
+	Totals            map[string]uint64 // label -> cumulative octets
 }
 
-// BuildXray assembles the Xray section; only valid labels are reported, sorted.
+// BuildXray assembles the Xray section; only valid labels are reported, sorted. A target check is
+// reported only together with a well-formed target and server name (DNS names, never an address).
 func BuildXray(in XrayInput) *Xray {
-	x := &Xray{Enabled: in.Enabled, Up: in.Up, TargetOK: in.TargetOK, Users: []XrayUser{}}
+	x := &Xray{Enabled: in.Enabled, Up: in.Up, Users: []XrayUser{}}
+	if in.TargetOK != nil && desired.ValidXrayTarget(in.CheckedTarget) && desired.ValidDNSName(in.CheckedServerName) {
+		ok, target, name := *in.TargetOK, in.CheckedTarget, in.CheckedServerName
+		x.TargetOK, x.CheckedTarget, x.CheckedServerName = &ok, &target, &name
+	}
 	if xrayVersion.MatchString(in.Version) {
 		v := in.Version
 		x.Version = &v

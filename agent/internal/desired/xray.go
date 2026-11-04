@@ -47,6 +47,19 @@ type XrayUser struct {
 // ValidXrayEmail reports whether a label may name an Xray user (and its stats counters).
 func ValidXrayEmail(email string) bool { return xrayEmailRE.MatchString(email) }
 
+// ValidDNSName reports whether name is a lower-case DNS name (never an IP literal).
+func ValidDNSName(name string) bool { return len(name) <= 253 && domainRE.MatchString(name) }
+
+// ValidXrayTarget reports whether target is "dns-name:port", the only shape of a REALITY target.
+func ValidXrayTarget(target string) bool {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil || !ValidDNSName(host) {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535 && strconv.Itoa(n) == port
+}
+
 // Validate checks the Xray part. telemtPorts are the ports Telemt listens on (they may not clash).
 // Errors never include the private key or a user id.
 func (x *Xray) Validate(telemtPorts []int) error {
@@ -62,18 +75,14 @@ func (x *Xray) Validate(telemtPorts []int) error {
 	if err != nil || len(key) != 32 || len(x.PrivateKey) != 43 {
 		return errors.New("desired state: xray private_key must be 32 bytes, base64url without padding")
 	}
-	host, port, err := net.SplitHostPort(x.Target)
-	if err != nil || len(host) > 253 || !domainRE.MatchString(host) {
-		return errors.New("desired state: xray target must be dns-name:port")
-	}
-	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return errors.New("desired state: xray target port out of range")
+	if !ValidXrayTarget(x.Target) {
+		return errors.New("desired state: xray target must be dns-name:port (port 1-65535)")
 	}
 	if len(x.ServerNames) < 1 || len(x.ServerNames) > 8 {
 		return errors.New("desired state: xray needs 1 to 8 server names")
 	}
 	for _, name := range x.ServerNames {
-		if len(name) > 253 || !domainRE.MatchString(name) {
+		if !ValidDNSName(name) {
 			return errors.New("desired state: xray server name is not a DNS name")
 		}
 	}
