@@ -46,12 +46,14 @@ def test_worker_stale_rule_matches_code() -> None:
 
 
 def test_every_series_an_alert_reads_is_produced() -> None:
-    """Every proxyhub_* series an alert reads is exported by the panel or written by a backup script."""
+    """Every proxyhub_* series an alert reads is exported by the panel or written by a host script
+    (backup and restore test, and the deployer's merge guard)."""
     import proxyhub.api.app as app_module
 
     used = set(re.findall(r"\b(proxyhub_[a-z_]+)\b", _rules_text()))
     exported = set(re.findall(r'"(proxyhub_[a-z_]+)"', Path(app_module.__file__).read_text(encoding="utf-8")))
-    scripts = "\n".join(p.read_text(encoding="utf-8") for p in sorted((DEPLOY / "backup").glob("*.sh")))
+    host_scripts = [*sorted((DEPLOY / "backup").glob("*.sh")), DEPLOY / "deployer.sh"]
+    scripts = "\n".join(p.read_text(encoding="utf-8") for p in host_scripts)
     written = set(re.findall(r"^(proxyhub_[a-z_]+) ", scripts, re.MULTILINE))
     missing = sorted(used - exported - written)
     assert used and not missing, f"alert rules read series nobody produces: {missing}"
