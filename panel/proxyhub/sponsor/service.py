@@ -10,15 +10,15 @@ many passes as it takes: a pass without a conversation, a failed try or «ثبت
 
 One step of :func:`run_once` (the reconciler calls it every minute):
 
-1. In ONE short transaction: stop if the kill switch is ON (docs/11 lock 6); move campaigns that are
+1. In short transactions: stop if the kill switch is ON (docs/11 lock 6); move campaigns that are
    due (scheduled -> active ``lead`` minutes before the start, -> finished at the end); ask the
    provider (team mtproto's ``sponsor_api``) for the live proxies without a registration. Each one
    is a candidate (new, or the one it already is, following its address), or, when a registration
-   with the same ``host:port`` and user exists, gets that registration's tag back with
-   ``apply_ad_tag``. A candidate whose node was deleted is dropped and a registration whose node
-   was deleted is retired. A tag that did not reach its node is tried again every
-   :data:`TAG_RETRY` (the provider never lists a registered proxy again). An owner alert that
-   could not be queued before (no chat was paired) is queued now.
+   with the same ``host:port`` and user exists, gets that registration's tag back. A candidate
+   whose node was deleted is dropped and a registration whose node was deleted is retired. A tag
+   that did not reach its node is tried again every :data:`TAG_RETRY` (the provider never lists a
+   registered proxy again). An owner alert that could not be queued before (no chat was paired) is
+   queued now. Every ``apply_ad_tag`` runs in a transaction of its own (:func:`apply_tags`).
 2. Pick at most ONE conversation: a campaign switch first, then a new registration, then setting
    the default sponsor. Nothing is picked while two or more are stuck (the bot is probably saying
    something new; the owner was alerted), while the hour's message budget cannot hold the whole
@@ -227,44 +227,58 @@ async def _advance_campaigns(db: AsyncConnection, settings: store.SponsorSetting
         )
 
 
-async def _apply_tag(
-    db: AsyncConnection,
-    provider: SponsorProvider,
-    flow_id: uuid.UUID,
-    key: str,
-    tag: str,
-    *,
-    address: str,
-    announce: bool,
-    now: datetime,
-) -> bool:
-    """Put the tag into the node's desired Telemt state (the provider's own transaction rules
-    apply). A failure is logged and tried again after :data:`TAG_RETRY`; the tag is never lost."""
-    try:
-        async with db.begin_nested():
-            await provider.apply_ad_tag(db, key, tag)
-    except Exception as exc:
-        log.warning("sponsor: apply_ad_tag failed (%s)", type(exc).__name__)
-        await store.update_flow(db, flow_id, now, tag_applied_at=None, tag_failed_at=now)
-        await _log(
-            db,
-            "sponsor.tag_apply_failed",
-            address,
-            allowed=False,
-            reasons=[type(exc).__name__],
-            context={"key": key, "tag": short_tag(tag), "next_try_at": iso(now + TAG_RETRY)},
-        )
-        return False
-    await store.update_flow(db, flow_id, now, tag_applied_at=now, tag_failed_at=None)
-    if announce:
-        await _log(
-            db,
-            "sponsor.tag_applied",
-            address,
-            reasons=["apply_ad_tag"],
-            context={"key": key, "tag": short_tag(tag)},
-        )
-    return True
+@dataclass(frozen=True)
+class TagJob:
+    """A registration's tag for the desired Telemt state of the proxy ``key`` (``apply_ad_tag``)."""
+
+    flow_id: uuid.UUID
+    key: str
+    tag: str
+    address: str
+    announce: bool
+
+    def __repr__(self) -> str:
+        return f"TagJob(key={self.key!r}, tag={short_tag(self.tag)!r})"
+
+
+async def apply_tags(
+    engine: AsyncEngine, provider: SponsorProvider, jobs: Sequence[TagJob], now: datetime
+) -> None:
+    """Each tag in its OWN outermost transaction, after the module's own rows are committed (the
+    tag is already safe in ``mtproxy_registrations``): the provider's write, the flow's bookkeeping
+    and the log line commit together or not at all. Never inside a SAVEPOINT: team mtproto's
+    ``apply_ad_tag`` writes the tag through an ORM session bound to the connection, which joins a
+    savepoint with one of its own and rolls it back when it closes. A failure is logged and tried
+    again after :data:`TAG_RETRY`."""
+    for job in jobs:
+        try:
+            async with engine.begin() as db:
+                await provider.apply_ad_tag(db, job.key, job.tag)
+                await store.update_flow(db, job.flow_id, now, tag_applied_at=now, tag_failed_at=None)
+                if job.announce:
+                    await _log(
+                        db,
+                        "sponsor.tag_applied",
+                        job.address,
+                        reasons=["apply_ad_tag"],
+                        context={"key": job.key, "tag": short_tag(job.tag)},
+                    )
+        except Exception as exc:
+            log.warning("sponsor: apply_ad_tag failed (%s)", type(exc).__name__)
+            async with engine.begin() as db:
+                await store.update_flow(db, job.flow_id, now, tag_applied_at=None, tag_failed_at=now)
+                await _log(
+                    db,
+                    "sponsor.tag_apply_failed",
+                    job.address,
+                    allowed=False,
+                    reasons=[type(exc).__name__],
+                    context={
+                        "key": job.key,
+                        "tag": short_tag(job.tag),
+                        "next_try_at": iso(now + TAG_RETRY),
+                    },
+                )
 
 
 def _tag_retry_due(reg: Reg, now: datetime) -> bool:
@@ -297,13 +311,13 @@ def _best_by_identity(regs: Sequence[Reg]) -> dict[Identity, Reg]:
 
 async def _match(
     db: AsyncConnection,
-    provider: SponsorProvider,
     proxy: Registrable,
     current: Reg | None,
     by_identity: dict[Identity, Reg],
     now: datetime,
-) -> None:
-    """One listed proxy: follow it as a candidate, or give it back the tag of its registration."""
+) -> TagJob | None:
+    """One listed proxy: follow it as a candidate, or give it back the tag of its registration
+    (the returned job, applied after this transaction)."""
     address = f"{proxy.host}:{proxy.port}"
     known = by_identity.get(identity(proxy.host, proxy.port, user_of(proxy.key)))
     if current is not None and current.candidate:
@@ -317,7 +331,7 @@ async def _match(
                     reasons=["address_changed"],
                     context={"key": proxy.key, "was": current.address},
                 )
-            return
+            return None
         await store.delete_flow(db, current.id)
         await _log(
             db,
@@ -346,7 +360,7 @@ async def _match(
         await _log(
             db, "sponsor.proxy_found", address, reasons=["no_registration"], context={"key": proxy.key}
         )
-        return
+        return None
     assert known.ad_tag is not None  # _best_by_identity keeps the registrations with a tag only
     revived = known.state == RETIRED
     moved = known.proxy_key != proxy.key
@@ -365,23 +379,18 @@ async def _match(
         )
     if revived or moved or _tag_retry_due(known, now):
         # Listed although it has a registration: the node does not carry the tag.
-        await _apply_tag(
-            db,
-            provider,
-            known.id,
-            proxy.key,
-            known.ad_tag,
-            address=address,
-            announce=revived or moved,
-            now=now,
+        return TagJob(
+            flow_id=known.id, key=proxy.key, tag=known.ad_tag, address=address, announce=revived or moved
         )
+    return None
 
 
 async def sync(
-    db: AsyncConnection, provider: SponsorProvider, proxies: Sequence[Registrable], now: datetime
-) -> tuple[list[Reg], dict[uuid.UUID, str], dict[str, Registrable]]:
+    db: AsyncConnection, proxies: Sequence[Registrable], now: datetime
+) -> tuple[list[Reg], dict[uuid.UUID, str], dict[str, Registrable], list[TagJob]]:
     """Match the provider's live proxies to candidates and registrations (module docstring,
-    step 1)."""
+    step 1). The tags to (re)apply come back as jobs for :func:`apply_tags`."""
+    jobs: list[TagJob] = []
     live: dict[str, Registrable] = {}
     skipped = 0
     for proxy in proxies:
@@ -396,7 +405,8 @@ async def sync(
     by_identity = _best_by_identity(regs)
     by_key = {r.proxy_key: r for r in regs if r.state != RETIRED and r.proxy_key is not None}
     for proxy in live.values():
-        await _match(db, provider, proxy, by_key.get(proxy.key), by_identity, now)
+        if (job := await _match(db, proxy, by_key.get(proxy.key), by_identity, now)) is not None:
+            jobs.append(job)
     regs = await store.load_regs(db)
     nodes = await store.node_states(db, {n for r in regs if (n := node_of(r.proxy_key)) is not None})
     for reg in regs:
@@ -436,17 +446,10 @@ async def sync(
             and in_use(reg, nodes)
             and _tag_retry_due(reg, now)
         ):
-            await _apply_tag(
-                db,
-                provider,
-                reg.id,
-                reg.proxy_key,
-                reg.ad_tag,
-                address=reg.address,
-                announce=True,
-                now=now,
+            jobs.append(
+                TagJob(flow_id=reg.id, key=reg.proxy_key, tag=reg.ad_tag, address=reg.address, announce=True)
             )
-    return await store.load_regs(db), nodes, live
+    return await store.load_regs(db), nodes, live, jobs
 
 
 # --- the owner alert ----------------------------------------------------------------------------------
@@ -610,11 +613,12 @@ async def _stuck(
 
 
 async def _registered(
-    db: AsyncConnection, deps: Deps, work: Work, reg: Reg | None, tag: str, step: str, now: datetime
-) -> str:
-    """@MTProxybot gave a tag: the registration row is written now, and the tag goes to the node.
-    If the proxy's row went away meanwhile (its node was deleted), the entry still exists in
-    @MTProxybot: it stays on record, retired, with its tag, and no node gets it."""
+    db: AsyncConnection, work: Work, reg: Reg | None, tag: str, step: str, now: datetime
+) -> tuple[str, TagJob | None]:
+    """@MTProxybot gave a tag: the registration row is written now, and the tag goes to the node
+    (the returned job, applied once this transaction committed). If the proxy's row went away
+    meanwhile (its node was deleted), the entry still exists in @MTProxybot: it stays on record,
+    retired, with its tag, and no node gets it."""
     gone = reg is None
     base = work.reg if reg is None else reg
     if reg is None:
@@ -653,81 +657,97 @@ async def _registered(
         reasons=["tag_received", *(["proxy_gone"] if gone else [])],
         context={"tag": short_tag(tag), "key": work.key},
     )
-    if not gone and work.key is not None and deps.provider is not None:
-        await _apply_tag(
-            db, deps.provider, flow_id, work.key, tag, address=base.address, announce=True, now=now
-        )
-    return "registered"
+    if gone or work.key is None:
+        return "registered", None
+    return "registered", TagJob(flow_id=flow_id, key=work.key, tag=tag, address=base.address, announce=True)
 
 
 async def _record(deps: Deps, work: Work, outcome: driver.FlowResult) -> str:
     now = deps.clock()
     async with deps.engine.begin() as db:
-        reg = await store.load_reg(db, work.reg.id, for_update=True)
-        step = outcome.last_step.value if outcome.last_step is not None else "start"
-        result = outcome.result
-        if isinstance(result, Registered):
-            return await _registered(db, deps, work, reg, result.tag, step, now)
-        if reg is None:
-            return "gone"
-        if isinstance(result, PromotionSet):
-            await store.update_reg(db, reg.registration_id, now, sponsor_channel=result.channel)
-            await store.update_flow(
-                db,
-                reg.id,
-                now,
-                attempts=0,
-                next_attempt_at=None,
-                last_error=None,
-                last_step=step,
-                promotion_set_at=now,
-                **CLEAR_STUCK,
-            )
-            await _log(
-                db,
-                "sponsor.promotion_set",
-                reg.address,
-                reasons=["set_promotion"],
-                context={"channel": f"@{result.channel}"},
-            )
-            return "promotion_set"
-        if isinstance(result, Stuck):
-            return await _stuck(
-                db,
-                reg,
-                step=result.step.value,
-                reason=result.reason,
-                hint=result.hint,
-                bot_text=outcome.last_bot_text,
-                rpc=None,
-                now=now,
-            )
-        code = outcome.error or "unknown"
-        if code in STUCK_ERRORS or (
-            code == "no_reply" and reg.last_error == "no_reply" and reg.attempts + 1 >= MAX_SILENT
-        ):
-            return await _stuck(
-                db, reg, step=step, reason=code, hint=None, bot_text=None, rpc=outcome.rpc, now=now
-            )
-        attempts = reg.attempts + (0 if code in NOT_COUNTED else 1)
-        retry_at = now + backoff(attempts, code, outcome.retry_after_s)
-        if code == "flood_wait" and outcome.retry_after_s:
-            # Telegram asked the ACCOUNT to wait: no message to anyone until then (lock 4).
-            await pacing.hold(db, now + timedelta(seconds=outcome.retry_after_s + 5), now)
+        done, job = await _settle(db, work, outcome, now)
+    if job is not None and deps.provider is not None:
+        await apply_tags(deps.engine, deps.provider, [job], now)
+    if done.startswith("failed:"):
+        log.warning("sponsor: conversation with @MTProxybot failed (%s)", done.removeprefix("failed:"))
+    return done
+
+
+async def _settle(
+    db: AsyncConnection, work: Work, outcome: driver.FlowResult, now: datetime
+) -> tuple[str, TagJob | None]:
+    """What the conversation ended with, written in the caller's transaction."""
+    reg = await store.load_reg(db, work.reg.id, for_update=True)
+    step = outcome.last_step.value if outcome.last_step is not None else "start"
+    result = outcome.result
+    if isinstance(result, Registered):
+        return await _registered(db, work, reg, result.tag, step, now)
+    if reg is None:
+        return "gone", None
+    return await _settle_reg(db, reg, outcome, step, now), None
+
+
+async def _settle_reg(
+    db: AsyncConnection, reg: Reg, outcome: driver.FlowResult, step: str, now: datetime
+) -> str:
+    result = outcome.result
+    if isinstance(result, PromotionSet):
+        await store.update_reg(db, reg.registration_id, now, sponsor_channel=result.channel)
         await store.update_flow(
-            db, reg.id, now, attempts=attempts, next_attempt_at=retry_at, last_error=code, last_step=step
+            db,
+            reg.id,
+            now,
+            attempts=0,
+            next_attempt_at=None,
+            last_error=None,
+            last_step=step,
+            promotion_set_at=now,
+            **CLEAR_STUCK,
         )
-        context: dict[str, Any] = {
-            "step": step,
-            "next_attempt_at": iso(retry_at),
-            "messages_sent": outcome.messages_sent,
-        }
-        if outcome.rpc:
-            context["telegram_error"] = outcome.rpc
-        if outcome.retry_after_s is not None:
-            context["retry_after_s"] = outcome.retry_after_s
-        await _log(db, "sponsor.flow_failed", reg.address, allowed=False, reasons=[code], context=context)
-    log.warning("sponsor: conversation with @MTProxybot failed (%s)", code)
+        await _log(
+            db,
+            "sponsor.promotion_set",
+            reg.address,
+            reasons=["set_promotion"],
+            context={"channel": f"@{result.channel}"},
+        )
+        return "promotion_set"
+    if isinstance(result, Stuck):
+        return await _stuck(
+            db,
+            reg,
+            step=result.step.value,
+            reason=result.reason,
+            hint=result.hint,
+            bot_text=outcome.last_bot_text,
+            rpc=None,
+            now=now,
+        )
+    code = outcome.error or "unknown"
+    if code in STUCK_ERRORS or (
+        code == "no_reply" and reg.last_error == "no_reply" and reg.attempts + 1 >= MAX_SILENT
+    ):
+        return await _stuck(
+            db, reg, step=step, reason=code, hint=None, bot_text=None, rpc=outcome.rpc, now=now
+        )
+    attempts = reg.attempts + (0 if code in NOT_COUNTED else 1)
+    retry_at = now + backoff(attempts, code, outcome.retry_after_s)
+    if code == "flood_wait" and outcome.retry_after_s:
+        # Telegram asked the ACCOUNT to wait: no message to anyone until then (lock 4).
+        await pacing.hold(db, now + timedelta(seconds=outcome.retry_after_s + 5), now)
+    await store.update_flow(
+        db, reg.id, now, attempts=attempts, next_attempt_at=retry_at, last_error=code, last_step=step
+    )
+    context: dict[str, Any] = {
+        "step": step,
+        "next_attempt_at": iso(retry_at),
+        "messages_sent": outcome.messages_sent,
+    }
+    if outcome.rpc:
+        context["telegram_error"] = outcome.rpc
+    if outcome.retry_after_s is not None:
+        context["retry_after_s"] = outcome.retry_after_s
+    await _log(db, "sponsor.flow_failed", reg.address, allowed=False, reasons=[code], context=context)
     return f"failed:{code}"
 
 
@@ -744,19 +764,24 @@ async def run_once(deps: Deps) -> str:
             return "kill_switch"
         settings = await store.load_settings(db)
         await _advance_campaigns(db, settings, now)
-        if deps.provider is None:
-            return "no_provider"
-        proxies: list[Registrable] = []
-        try:
-            async with db.begin_nested():  # a provider failure must not undo the campaign moves
-                proxies = list(await deps.provider.proxies_to_register(db))
-        except Exception as exc:
-            log.warning("sponsor: the provider failed to list proxies (%s)", type(exc).__name__)
-        regs, nodes, live = await sync(db, deps.provider, proxies, now)
+    provider = deps.provider
+    if provider is None:
+        return "no_provider"
+    proxies: list[Registrable] = []
+    try:
+        # A transaction of its own: a provider failure undoes nothing here, and the provider never
+        # runs inside a SAVEPOINT (see apply_tags).
+        async with deps.engine.begin() as db:
+            proxies = list(await provider.proxies_to_register(db))
+    except Exception as exc:
+        log.warning("sponsor: the provider failed to list proxies (%s)", type(exc).__name__)
+    async with deps.engine.begin() as db:
+        regs, nodes, live, tag_jobs = await sync(db, proxies, now)
         await _late_alerts(db, regs, now)
         windows = [c.window for c in await store.load_campaigns(db)]
         account = await account_store.load_row(db)
         pace = await pacing.load(db)
+    await apply_tags(deps.engine, provider, tag_jobs, now)
     if account.state != account_state.CONNECTED or account.mtproxybot_id is None:
         return "no_account"
     if stuck_count(regs) >= PAUSE_AFTER_STUCK:
