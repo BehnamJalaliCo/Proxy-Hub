@@ -138,6 +138,14 @@ func TestCheckTarget(t *testing.T) {
 	if err := CheckTarget(context.Background(), noH2.Listener.Addr().String(), "example.com", pool2); err == nil {
 		t.Fatal("HTTP/1.1-only target accepted")
 	}
+	// TLS 1.3 with a valid certificate but no ALPN at all: the handshake succeeds, and it is the
+	// HTTP/2 requirement that refuses it.
+	plain, pool4 := tlsTarget(t, func(c *tls.Config) { c.NextProtos = nil }, true)
+	defer plain.Close()
+	err := CheckTarget(context.Background(), plain.Listener.Addr().String(), "example.com", pool4)
+	if err == nil || err.Error() != "target: no HTTP/2" {
+		t.Fatalf("a target without HTTP/2 gave %v", err)
+	}
 	// TLS 1.2 only.
 	old, pool3 := tlsTarget(t, func(c *tls.Config) { c.MaxVersion = tls.VersionTLS12 }, true)
 	defer old.Close()

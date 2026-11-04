@@ -82,8 +82,17 @@ func TestRenderKeepsUsersPrivate(t *testing.T) {
 		t.Fatalf("api %v", api)
 	}
 	in := m["inbounds"].([]any)[0].(map[string]any)
-	if in["port"] != float64(443) || in["protocol"] != "vless" {
+	if in["port"] != float64(443) || in["protocol"] != "vless" || in["listen"] != "0.0.0.0" {
 		t.Fatalf("inbound %v", in)
+	}
+	// Mail ports are blocked twice: by routing, and again on the address actually dialed.
+	final := m["outbounds"].([]any)[0].(map[string]any)["settings"].(map[string]any)["finalRules"].([]any)
+	if mail := final[1].(map[string]any); mail["action"] != "block" || mail["network"] != "tcp" || mail["port"] != "25,465,587" {
+		t.Fatalf("final rules %v", final)
+	}
+	if rule := m["routing"].(map[string]any)["rules"].([]any)[2].(map[string]any); rule["port"] != "25,465,587" ||
+		rule["outboundTag"] != "block" {
+		t.Fatalf("routing %v", rule)
 	}
 	reality := in["streamSettings"].(map[string]any)["realitySettings"].(map[string]any)
 	if reality["target"] != "dl.google.com:443" || reality["show"] != false {
@@ -134,6 +143,18 @@ func TestCheckInvariantsRefusesEachBreak(t *testing.T) {
 		"no final rule": func(m map[string]any) {
 			m["outbounds"].([]any)[0].(map[string]any)["settings"] = map[string]any{"finalRules": []any{}}
 		},
+		"no mail final rule": func(m map[string]any) {
+			s := m["outbounds"].([]any)[0].(map[string]any)["settings"].(map[string]any)
+			s["finalRules"] = s["finalRules"].([]any)[:1]
+		},
+		"mail final rule allows": func(m map[string]any) {
+			s := m["outbounds"].([]any)[0].(map[string]any)["settings"].(map[string]any)
+			s["finalRules"].([]any)[1].(map[string]any)["action"] = "allow"
+		},
+		"no mail routing rule": func(m map[string]any) {
+			m["routing"].(map[string]any)["rules"] = m["routing"].(map[string]any)["rules"].([]any)[:2]
+		},
+		"inbound on loopback": func(m map[string]any) { m["inbounds"].([]any)[0].(map[string]any)["listen"] = "127.0.0.1" },
 		"second inbound": func(m map[string]any) {
 			ins := m["inbounds"].([]any)
 			m["inbounds"] = append(ins, ins[0])

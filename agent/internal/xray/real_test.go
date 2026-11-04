@@ -367,6 +367,11 @@ func TestRealXrayCarriesTrafficWhenAllowed(t *testing.T) {
 		t.Fatalf("hits %d", lab.hits.Load())
 	}
 	waitFor(t, "request and response bytes", func() bool { return userTraffic(t, api, lab.user.Email) > 150 })
+	// Reading the counters never resets them (the agent's tracker relies on cumulative totals).
+	first := userTraffic(t, api, lab.user.Email)
+	if again := userTraffic(t, api, lab.user.Email); again != first {
+		t.Fatalf("reading the counters changed them: %d -> %d", first, again)
+	}
 }
 
 // The whole Reality path with the rendered config, the pinned binary on both ends: a user connects

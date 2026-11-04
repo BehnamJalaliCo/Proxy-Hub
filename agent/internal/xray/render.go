@@ -37,6 +37,10 @@ var blockedIPs = []string{"geoip:private", "127.0.0.0/8", "::1/128", "169.254.16
 // mailPorts are never dialed (abuse), like the firewall's egress rule.
 const mailPorts = "25,465,587"
 
+// inboundListen: the Reality inbound answers on every IPv4 address of the node (port 443 is opened
+// by the node firewall); anything narrower would make every link fail.
+const inboundListen = "0.0.0.0"
+
 // User is one Reality user as rendered: id and stats label.
 type User struct {
 	ID    string
@@ -215,7 +219,7 @@ func Render(x *desired.Xray, users []User, apiListen string) ([]byte, error) {
 		},
 		Inbounds: []inbound{{
 			Tag:      InboundTag,
-			Listen:   "0.0.0.0",
+			Listen:   inboundListen,
 			Port:     x.Port,
 			Protocol: "vless",
 			Settings: inboundSettings{Clients: clients, Decryption: "none"},
@@ -314,7 +318,7 @@ func CheckInvariants(data []byte) error {
 		return refuse("exactly one inbound")
 	}
 	in := c.Inbounds[0]
-	if in.Tag != InboundTag || in.Protocol != "vless" || in.StreamSettings.Security != "reality" ||
+	if in.Tag != InboundTag || in.Listen != inboundListen || in.Protocol != "vless" || in.StreamSettings.Security != "reality" ||
 		in.StreamSettings.Network != "tcp" || in.Settings.Decryption != "none" || in.StreamSettings.Reality.Show ||
 		in.StreamSettings.Reality.Xver != 0 || !in.Sniffing.RouteOnly {
 		return refuse("the inbound must be VLESS REALITY on TCP")
@@ -329,16 +333,21 @@ func CheckInvariants(data []byte) error {
 		return refuse("outbounds must be freedom and blackhole")
 	}
 	free := c.Outbounds[0].Settings
-	if free == nil || len(free.FinalRules) < 1 || free.FinalRules[0].Action != "block" ||
-		!sameStrings(free.FinalRules[0].IP, blockedIPs) {
-		return refuse("freedom must block private ranges, loopback and metadata after DNS")
+	if free == nil || len(free.FinalRules) < 2 || free.FinalRules[0].Action != "block" ||
+		!sameStrings(free.FinalRules[0].IP, blockedIPs) || !mailBlock(free.FinalRules[1]) {
+		return refuse("freedom must block private ranges, loopback, metadata and mail ports after DNS")
 	}
 	rules := c.Routing.Rules
-	if len(rules) < 2 || rules[0].OutboundTag != blockTag || !sameStrings(rules[0].Protocol, []string{"bittorrent"}) ||
-		rules[1].OutboundTag != blockTag || !sameStrings(rules[1].IP, blockedIPs) {
-		return refuse("routing must block bittorrent and private ranges first")
+	if len(rules) < 3 || rules[0].OutboundTag != blockTag || !sameStrings(rules[0].Protocol, []string{"bittorrent"}) ||
+		rules[1].OutboundTag != blockTag || !sameStrings(rules[1].IP, blockedIPs) ||
+		rules[2].OutboundTag != blockTag || rules[2].Port != mailPorts {
+		return refuse("routing must block bittorrent, private ranges and mail ports first")
 	}
 	return nil
+}
+
+func mailBlock(r finalRule) bool {
+	return r.Action == "block" && r.Network == "tcp" && r.Port == mailPorts && len(r.IP) == 0
 }
 
 func loopbackAddr(addr string) bool {
