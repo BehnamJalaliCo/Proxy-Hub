@@ -7,6 +7,7 @@ the fleet loop never calls it, and the executor tests either stop before the fir
 
 from __future__ import annotations
 
+import json
 import socket
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -99,7 +100,7 @@ async def add_slot_node(
             acc=world.account_id,
             h=hetzner_id,
             name=f"ph-s{slot}-{node_id.hex[:8]}",
-            labels='{"managed-by": "proxy-hub", "role": "node", "node-id": "%s"}' % node_id,
+            labels=json.dumps({"managed-by": "proxy-hub", "role": "node", "node-id": str(node_id)}),
         )
     return node_id
 

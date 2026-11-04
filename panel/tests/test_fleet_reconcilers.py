@@ -123,7 +123,9 @@ async def test_stale_stored_prices_block_creations(engine: AsyncEngine, tmp_path
     assert all(not a["allowed"] and "prices_stale" in a["reasons"] for a in plan)
 
 
-async def test_dry_run_false_with_the_kill_switch_on_still_plans_dry(engine: AsyncEngine, tmp_path: Path) -> None:
+async def test_dry_run_false_with_the_kill_switch_on_still_plans_dry(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
     """dry_run=false alone is not enough: with the kill switch on the loop stays dry (the live
     fleet is tested in test_fleet_live_loop.py)."""
     await add_account(engine, make_vault(tmp_path), "nodes-b")

@@ -34,7 +34,9 @@ pytestmark = [pytest.mark.db, pytest.mark.redis]
 
 
 @pytest.fixture
-async def world(migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[LiveWorld]:
+async def world(
+    migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[LiveWorld]:
     async with live_world(migrated_db, tmp_path, monkeypatch) as w:
         yield w
 
@@ -141,7 +143,12 @@ async def test_live_never_passes_the_budget_or_the_node_cap(world: LiveWorld) ->
 async def test_a_refused_request_backs_off_and_counts_as_no_creation(world: LiveWorld) -> None:
     await world.settings(live_settings(target_slots=2, creations_per_hour_cap=1))
     refused = await add_slot_node(
-        world, 1, state="deleted", created_at=ago(minutes=3), deleted_at=ago(minutes=2), create_attempted=False
+        world,
+        1,
+        state="deleted",
+        created_at=ago(minutes=3),
+        deleted_at=ago(minutes=2),
+        create_attempted=False,
     )
     await run_fleet(world)
     _, plan = await last_plan(world)
@@ -175,7 +182,8 @@ async def test_a_blocked_node_burns_and_is_replaced_create_before_delete(world: 
 
     # The executor brings the replacement up; right after it is ready the old one still stays.
     await world.rows(
-        "UPDATE nodes SET state = 'ready', ready_at = now(), hetzner_id = 6001, ipv4 = '5.75.1.2' WHERE id = :n",
+        "UPDATE nodes SET state = 'ready', ready_at = now(), hetzner_id = 6001, ipv4 = '5.75.1.2' "
+        "WHERE id = :n",
         n=new[0].id,
     )
     await run_fleet(world)
@@ -213,7 +221,9 @@ async def test_an_unhealthy_node_gets_its_repair_window_then_a_replacement(world
     await world.settings(live_settings())
     nodes = await full_fleet(world)
     await world.rows("UPDATE nodes SET state = 'unhealthy' WHERE id = :n", n=nodes[4])
-    await world.rows("UPDATE node_operations SET state_since = now() - interval '5 minutes' WHERE node_id = :n", n=nodes[4])
+    await world.rows(
+        "UPDATE node_operations SET state_since = now() - interval '5 minutes' WHERE node_id = :n", n=nodes[4]
+    )
     await run_fleet(world)
     _, plan = await last_plan(world)
     assert plan["slot-4"]["reasons"] == ["slot_unhealthy"]

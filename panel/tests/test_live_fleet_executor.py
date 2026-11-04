@@ -33,7 +33,9 @@ pytestmark = [pytest.mark.db, pytest.mark.redis]
 
 
 @pytest.fixture
-async def world(migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[LiveWorld]:
+async def world(
+    migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[LiveWorld]:
     async with live_world(migrated_db, tmp_path, monkeypatch) as w:
         yield w
 
@@ -76,7 +78,9 @@ async def test_a_slot_request_passes_the_gates_and_stops_at_an_unreachable_hetzn
     # Every gate passed on stored data; the live look at the account (rule 4) could not be taken.
     assert node["state"] == "requested" and node["create_attempts"] == 0
     assert node["last_error"] == "hetzner_unreachable:ConnectionError"
-    obs = await world.rows("SELECT ok, error FROM hetzner_account_observations WHERE account_id = :a", a=world.account_id)
+    obs = await world.rows(
+        "SELECT ok, error FROM hetzner_account_observations WHERE account_id = :a", a=world.account_id
+    )
     assert obs[0].ok is False
 
     clock["now"] = t0 + ex.REQUEST_RETRY_WINDOW + timedelta(seconds=1)
@@ -112,7 +116,9 @@ async def test_a_slot_request_is_closed_when_the_fleet_stops_being_live(
 
 
 @pytest.mark.parametrize(("ip", "match"), [(IP_A, "ip"), (IP_A_SAME_24, "prefix24")])
-async def test_a_new_slot_server_with_a_burned_ip_is_retired_at_once(world: LiveWorld, ip: str, match: str) -> None:
+async def test_a_new_slot_server_with_a_burned_ip_is_retired_at_once(
+    world: LiveWorld, ip: str, match: str
+) -> None:
     await world.settings(live_settings())
     await burn(world, IP_A)
     fresh = await add_slot_node(
@@ -137,7 +143,13 @@ async def test_a_new_slot_server_with_a_burned_ip_is_retired_at_once(world: Live
 async def test_the_delete_of_a_slot_server_waits_for_a_live_fleet(world: LiveWorld) -> None:
     await world.settings(live_settings(kill_switch=True))
     retiring = await add_slot_node(
-        world, 1, state="retiring", hetzner_id=9002, ipv4=IP_B, retire_reason="burned", created_at=ago(hours=2)
+        world,
+        1,
+        state="retiring",
+        hetzner_id=9002,
+        ipv4=IP_B,
+        retire_reason="burned",
+        created_at=ago(hours=2),
     )
     await world.executor().run_once(world.engine)
     assert (await world.node(retiring))["state"] == "retiring"
