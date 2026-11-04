@@ -1,0 +1,4 @@
+# Exact gitleaks findings that are not secrets, one fingerprint each (commit:file:rule:line).
+# The @MTProxybot example secret quoted from the public issue the sponsor parser follows
+# (panel/tests/test_sponsor_replies.py REAL_SECRET); it belongs to no proxy of ours.
+9616b8c65edf41c199f22b8df194a98c944f1d63:panel/tests/test_sponsor_replies.py:generic-api-key:44
