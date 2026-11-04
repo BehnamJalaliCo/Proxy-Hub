@@ -11,6 +11,19 @@ short-lived connection (:func:`operator_session`) it offers exactly six operatio
 * :meth:`OperatorSession.resolve_mtproxybot`: ``contacts.resolveUsername("MTProxybot")`` only,
 * :meth:`OperatorSession.log_out`: ``auth.logOut``, which ends the session on Telegram's side.
 
+and, for OUR channels' statistics only (decision D38; proxyhub/mtproxy/channel_stats.py), on a
+connection opened with a :class:`ChannelScope` that names the configured main and test channels:
+
+* :meth:`OperatorSession.resolve_channel`: ``contacts.resolveUsername`` of one of those channels,
+* :meth:`OperatorSession.channel_full`: ``channels.getFullChannel`` (participant count, stats DC),
+* :meth:`OperatorSession.broadcast_stats` / :meth:`OperatorSession.load_graph`:
+  ``stats.getBroadcastStats`` and ``stats.loadAsyncGraph`` (only for tokens Telegram handed out in
+  that same answer),
+* :meth:`OperatorSession.messages_views`: ``messages.getMessagesViews`` of our posts, never
+  incrementing the view counter.
+
+Any other peer, any delete request and any send are refused before a byte leaves.
+
 Locks (docs/11 section 2.1):
 
 * Every request passes :meth:`_OperatorClient._call`, which refuses any request type outside
@@ -39,7 +52,7 @@ import time
 import traceback
 from collections import Counter
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final
 
 from telethon import TelegramClient, errors, functions, types
@@ -287,7 +300,17 @@ def classify(exc: BaseException) -> MtpError | None:
 
 # Requests that cannot return any chat's content. ``help.getConfig`` and ``updates.getState`` (only
 # counters: pts, qts, date, seq, unread_count) are used by the library itself when Telegram moves
-# the login to another data centre.
+# the login to another data centre. The four channel-statistics requests (decision D38) return only
+# Telegram's aggregate numbers about OUR channels, and only for the peers in the session's
+# :class:`ChannelScope` (the configured main and test channels); without a scope they are refused.
+CHANNEL_STATS_REQUESTS: Final[frozenset[type[Any]]] = frozenset(
+    {
+        functions.channels.GetFullChannelRequest,
+        functions.stats.GetBroadcastStatsRequest,
+        functions.stats.LoadAsyncGraphRequest,
+        functions.messages.GetMessagesViewsRequest,
+    }
+)
 ALLOWED_REQUESTS: Final[frozenset[type[Any]]] = frozenset(
     {
         functions.auth.SendCodeRequest,
@@ -300,31 +323,65 @@ ALLOWED_REQUESTS: Final[frozenset[type[Any]]] = frozenset(
         functions.help.GetConfigRequest,
         functions.updates.GetStateRequest,
     }
+    | CHANNEL_STATS_REQUESTS
 )
+MAX_VIEWS_IDS: Final = 100
 
 
-def check_request(request: Any) -> None:
+@dataclass
+class ChannelScope:
+    """The only channels a session may ask about: bare channel ids and their public usernames
+    (lower case, no @). ``graph_tokens`` collects the async-graph tokens Telegram handed out in this
+    session for those channels; stats.loadAsyncGraph accepts only those."""
+
+    channel_ids: frozenset[int] = frozenset()
+    usernames: frozenset[str] = frozenset()
+    graph_tokens: set[str] = field(default_factory=set)
+
+
+def _channel_id(peer: Any) -> int | None:
+    if isinstance(peer, types.InputChannel | types.InputPeerChannel):
+        return int(peer.channel_id)
+    return None
+
+
+def check_request(request: Any, scope: ChannelScope | None = None) -> None:
     """Raise :class:`RequestNotAllowed` unless ``request`` is allowed with these arguments."""
     kind = type(request)
+    scope = scope or ChannelScope()
     if kind not in ALLOWED_REQUESTS:
         raise RequestNotAllowed(f"request not allowed: {kind.__name__}")
     if kind is functions.users.GetUsersRequest and not (
         request.id and all(isinstance(u, types.InputUserSelf) for u in request.id)
     ):
         raise RequestNotAllowed("users.getUsers is allowed only for the account itself")
-    if (
-        kind is functions.contacts.ResolveUsernameRequest
-        and str(request.username).lower() != MTPROXYBOT.lower()
+    if kind is functions.contacts.ResolveUsernameRequest:
+        name = str(request.username).lower()
+        if name != MTPROXYBOT.lower() and name not in scope.usernames:
+            raise RequestNotAllowed("contacts.resolveUsername: only @MTProxybot and our own channels")
+    if kind in (functions.channels.GetFullChannelRequest, functions.stats.GetBroadcastStatsRequest):
+        if _channel_id(request.channel) not in scope.channel_ids:
+            raise RequestNotAllowed(f"{kind.__name__}: only our configured channels")
+    if kind is functions.messages.GetMessagesViewsRequest and (
+        _channel_id(request.peer) not in scope.channel_ids
+        or request.increment
+        or not 1 <= len(request.id or []) <= MAX_VIEWS_IDS
     ):
-        raise RequestNotAllowed("contacts.resolveUsername is allowed only for @MTProxybot")
+        raise RequestNotAllowed("messages.getMessagesViews: our channels only, never incrementing")
+    if kind is functions.stats.LoadAsyncGraphRequest and (
+        request.token not in scope.graph_tokens or request.x is not None
+    ):
+        raise RequestNotAllowed("stats.loadAsyncGraph: only a token Telegram gave for our channel")
 
 
 class _OperatorClient(TelegramClient):  # type: ignore[misc]  # Telethon ships no type hints
+    scope: ChannelScope = ChannelScope()
+
     async def _call(
         self, sender: Any, request: Any, ordered: bool = False, flood_sleep_threshold: Any = None
     ) -> Any:
         for item in request if isinstance(request, list | tuple) else (request,):
-            check_request(item)
+            check_request(item, self.scope)
         return await super()._call(
             sender, request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold
         )
@@ -511,9 +568,81 @@ class OperatorSession:
         """Ends this session on Telegram (it disappears from Settings > Devices)."""
         await self._run(self._client(functions.auth.LogOutRequest()))
 
+    # --- our channels' statistics (decision D38); every request is checked against the scope ---
+
+    @property
+    def home_dc(self) -> int:
+        return int(self._client.session.dc_id)
+
+    async def resolve_channel(self, username: str, channel_id: int) -> ChannelRef:
+        """One of OUR public channels by its username; its id must be the configured one."""
+        found = await self._run(
+            self._client(functions.contacts.ResolveUsernameRequest(username=username.lstrip("@")))
+        )
+        for chat in getattr(found, "chats", []):
+            if (
+                isinstance(chat, types.Channel)
+                and int(chat.id) == channel_id
+                and chat.broadcast
+                and chat.access_hash is not None
+            ):
+                return ChannelRef(channel_id=channel_id, access_hash=int(chat.access_hash))
+        raise MtpError("channel_not_found")
+
+    async def channel_full(self, ref: ChannelRef) -> Any:
+        """channels.getFullChannel -> the ``ChannelFull`` (participants_count, stats_dc, can_view_stats)."""
+        result = await self._run(self._client(functions.channels.GetFullChannelRequest(ref.input_channel())))
+        return result.full_chat
+
+    async def broadcast_stats(self, ref: ChannelRef) -> Any:
+        """stats.getBroadcastStats on the session's own data centre. Tokens of async graphs in the
+        answer are remembered so :meth:`load_graph` may ask for exactly those."""
+        stats = await self._run(
+            self._client(functions.stats.GetBroadcastStatsRequest(channel=ref.input_channel(), dark=False))
+        )
+        for name in dir(stats):
+            graph = getattr(stats, name, None) if name.endswith("_graph") else None
+            if isinstance(graph, types.StatsGraphAsync) and graph.token:
+                self._client.scope.graph_tokens.add(str(graph.token))
+        return stats
+
+    async def load_graph(self, token: str) -> Any:
+        return await self._run(self._client(functions.stats.LoadAsyncGraphRequest(token=token)))
+
+    async def messages_views(self, ref: ChannelRef, ids: list[int]) -> list[tuple[int, int, int]]:
+        """(message id, views, forwards) of our posts, without counting a view (increment=False)."""
+        ids = ids[:MAX_VIEWS_IDS]
+        result = await self._run(
+            self._client(
+                functions.messages.GetMessagesViewsRequest(peer=ref.input_peer(), id=ids, increment=False)
+            )
+        )
+        out: list[tuple[int, int, int]] = []
+        for msg_id, item in zip(ids, getattr(result, "views", []), strict=False):
+            out.append((msg_id, int(item.views or 0), int(item.forwards or 0)))
+        return out
+
+
+@dataclass(frozen=True)
+class ChannelRef:
+    channel_id: int
+    access_hash: int
+
+    def __repr__(self) -> str:
+        return f"ChannelRef(channel_id={self.channel_id})"
+
+    def input_channel(self) -> Any:
+        return types.InputChannel(channel_id=self.channel_id, access_hash=self.access_hash)
+
+    def input_peer(self) -> Any:
+        return types.InputPeerChannel(channel_id=self.channel_id, access_hash=self.access_hash)
+
 
 def _new_client(
-    creds: ApiCredentials, session: SecretValue | None, options: ClientOptions
+    creds: ApiCredentials,
+    session: SecretValue | None,
+    options: ClientOptions,
+    scope: ChannelScope | None = None,
 ) -> _OperatorClient:
     client = _OperatorClient(
         StringSession(session.reveal() if session is not None else None),
@@ -536,6 +665,7 @@ def _new_client(
         base_logger=logging.getLogger(TELETHON_LOGGER),
         entity_cache_limit=100,
     )
+    client.scope = scope or ChannelScope()
     if options.endpoint is not None:
         client.session.set_dc(options.endpoint.dc_id, options.endpoint.host, options.endpoint.port)
     return client
@@ -549,9 +679,11 @@ async def operator_session(
     phone: SecretValue | None = None,
     phone_code_hash: SecretValue | None = None,
     options: ClientOptions | None = None,
+    channels: ChannelScope | None = None,
 ) -> AsyncIterator[OperatorSession]:
     """Connect (``session`` None: a fresh login), yield, always disconnect. Every secret involved
-    is registered with the log guard for the whole time. Connection failures raise MtpError."""
+    is registered with the log guard for the whole time. Connection failures raise MtpError.
+    ``channels``: the only channels this connection may ask statistics about (none by default)."""
     options = options or ClientOptions()
     phone_value = phone.reveal() if phone is not None else None
     secrets = (
@@ -564,7 +696,7 @@ async def operator_session(
     _guard_first(logging.getLogger(TELETHON_LOGGER))  # still first, whatever was added since
     with contextlib.ExitStack() as hold:
         hold.enter_context(LIVE_SECRETS.using(*secrets))
-        client = _new_client(creds, session, options)
+        client = _new_client(creds, session, options, channels)
         started = time.monotonic()
         try:
             try:
