@@ -15,7 +15,7 @@ import type {
   NodeInfo,
   OutboxQueued,
   Overview,
-  PoolState,
+  OwnerPoolState,
   ProbeSummary,
   RecoveryCodes,
   SessionInfo,
@@ -152,7 +152,8 @@ export const getCloudflareStatus = (signal?: AbortSignal) =>
 /** The Cloudflare token goes to the server once and is never shown again. */
 export const putCloudflareToken = (token: string) => request<CfStatus>("PUT", "/api/cloudflare/token", { token });
 
-export const putCloudflarePool = (zone_id: string, pool_state: PoolState) =>
+/** "deleted" is never sent: only the panel itself deletes a filtered zone from Cloudflare. */
+export const putCloudflarePool = (zone_id: string, pool_state: OwnerPoolState) =>
   request<CfStatus>("PUT", "/api/cloudflare/pool", { zone_id, pool_state });
 
 export const getProbeSummary = (signal?: AbortSignal) =>

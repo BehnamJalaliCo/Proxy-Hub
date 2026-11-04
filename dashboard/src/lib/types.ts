@@ -214,13 +214,62 @@ export interface TestNodeRequested {
 
 // --- round 2: Cloudflare and probes (team net) --------------------------------------------------
 
-export type PoolState = "none" | "active" | "standby" | "filtered" | "retired";
+/** "deleted": the panel deleted the filtered zone from Cloudflare (terminal; never chosen by the owner). */
+export type PoolState = "none" | "active" | "standby" | "filtered" | "retired" | "deleted";
+/** The states the owner can choose in the dashboard. */
+export type OwnerPoolState = Exclude<PoolState, "deleted">;
+
+export type DomainVerdict = "filtered" | "clear" | "unknown";
+
+/** What one measurement network (an operator/ASN in Iran) answered; never a person. */
+export interface DomainCheckNetwork {
+  network: string;
+  asn: number | null;
+  answered: number;
+  hijacked: number;
+}
+
+/** The latest filter check of a domain from Iran (Globalping DNS; 10.10.34.x = the filter's answer). */
+export interface DomainCheck {
+  at: string;
+  /** ok | no_probes | rate_limited | error | timeout */
+  status: string;
+  /** The domain's verdict right after this check (needs two strong rounds for "filtered"). */
+  verdict: DomainVerdict;
+  reasons: string[];
+  probes: number;
+  answered: number;
+  hijacked: number;
+  networks_answered: number;
+  networks_hijacked: number;
+  networks: DomainCheckNetwork[];
+}
 
 export interface CfZone {
   id: string;
   name: string;
   status: string;
   pool_state: PoolState;
+  dns_edit?: boolean | null;
+  /** When it was taken out of rotation (the deletion grace period starts here). */
+  filtered_at?: string | null;
+  /** When a filtered zone becomes deletable from Cloudflare. */
+  delete_after?: string | null;
+  /** Cloudflare refused the deletion for good: zone_edit_denied | cf_refused[:codes]. */
+  delete_blocked?: string | null;
+  /** Conditions a filtered zone still waits for (kill_switch_on, records_remaining, ...). */
+  delete_waiting?: string[];
+  deleted_at?: string | null;
+  last_check?: DomainCheck | null;
+}
+
+export interface CfPoolSummary {
+  standby_usable: number;
+  /** An active or a filtered domain exists (so the "no standby left" warning makes sense). */
+  in_use: boolean;
+  kill_switch: boolean;
+  delete_grace_hours: number;
+  standby_check_hours: number;
 }
 
 export interface CfRecord {
@@ -238,6 +287,8 @@ export interface CfStatus {
   verified: boolean;
   checked_at: string | null;
   zones: CfZone[];
+  /** Missing on a panel older than the automatic pool (D35). */
+  pool?: CfPoolSummary;
   records: CfRecord[];
 }
 

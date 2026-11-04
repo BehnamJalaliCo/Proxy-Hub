@@ -92,6 +92,48 @@ describe("labels", () => {
     for (const actor of ["dns", "probes", "cli"]) expect(actorLabel(actor)).toMatch(/[آ-ی]/);
   });
 
+  it("names every action, loop and reason of the automatic domain pool in Persian (D35)", () => {
+    for (const a of ["domain_verdict", "domain_check_skipped", "domain_no_standby", "cloudflare_zone_delete"]) {
+      expect(actionLabel(a)).toMatch(/[آ-ی]/);
+    }
+    expect(actorLabel("domains")).toBe("چرخه‌ی دامنه‌ها");
+    const reasons = [
+      // pool moves (cloudflare_pool_change)
+      "owner",
+      "replaced",
+      "auto_new_zone",
+      "auto_promote",
+      "domain_filtered",
+      "replaces_filtered",
+      // token checks
+      "zones_gone",
+      "cf_token_invalid",
+      "cf_token_multiple_accounts",
+      "cf_permissions_missing",
+      // verdicts and why one is unknown
+      "filtered",
+      "clear",
+      "unknown",
+      "no_answers",
+      "single_round",
+      "weak_signal",
+      "not_confirmed",
+      "rounds_too_close",
+      "rounds_too_old",
+      // skipped checks, reminders, deletion outcomes
+      "globalping_budget_low",
+      "no_standby",
+      "deleted",
+      "already_absent",
+      "zone_edit_denied",
+      "cf_refused",
+      "cf_unavailable",
+      "cf_rate_limited",
+      "cf_invalid_response",
+    ];
+    for (const r of reasons) expect(reasonLabel(r), r).toMatch(/[آ-ی]/);
+  });
+
   it("explains account state reasons, with the foreign server count", () => {
     expect(stateReasonText("foreign_servers:2")).toContain("۲ سرور بیگانه");
     expect(stateReasonText("verified")).toContain("وارسی شد");

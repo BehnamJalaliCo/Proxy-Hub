@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { CircleAlert, Cloud, CloudCog, Globe, KeyRound, ListTree, ShieldCheck } from "lucide-react";
+import { CircleAlert, Cloud, CloudCog, Globe, KeyRound, ListTree, Radar, ShieldAlert, ShieldCheck, Trash2, TriangleAlert, Undo2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useState, type SubmitEvent } from "react";
 
@@ -11,13 +11,15 @@ import { Field, SecretInput } from "../components/ui/Form";
 import { PageHeader } from "../components/ui/PageHeader";
 import { errorList, errorMessage, isApiError } from "../lib/api";
 import { cn } from "../lib/browser";
-import { cfTokenProblem, poolChangeText, sortZones, ttlText } from "../lib/cloudflare";
+import { cfTokenProblem, checkSummary, deletionLine, noStandbyLeft, poolChangeText, sortZones, ttlText } from "../lib/cloudflare";
 import * as api from "../lib/endpoints";
 import { formatJalali, formatNumber, formatRelative } from "../lib/format";
-import { POOL_ORDER, poolStateInfo, zoneStatusInfo } from "../lib/labels";
+import { domainVerdictInfo, POOL_CHOICES, poolStateInfo, zoneStatusInfo } from "../lib/labels";
 import { keys, useCloudflareStatus } from "../lib/queries";
 import { toast } from "../lib/toast";
-import type { CfRecord, CfStatus, CfZone, PoolState } from "../lib/types";
+import { TONE_TEXT } from "../lib/tones";
+import type { CfRecord, CfStatus, CfZone, OwnerPoolState } from "../lib/types";
+import { useNow } from "../lib/useNow";
 
 const fadeUp = (i: number) => ({
   initial: { opacity: 0, y: 14 },
@@ -182,51 +184,135 @@ function TokenCard({ s }: { s: CfStatus }) {
 
 // --- zones and the domain pool ---------------------------------------------------------------------
 
-function ZoneRow({ zone, index, onPick }: { zone: CfZone; index: number; onPick: (target: PoolState) => void }) {
+const LINE_ICON = { success: ShieldCheck, danger: ShieldAlert, warning: TriangleAlert, neutral: Radar, info: Radar, brand: Radar } as const;
+
+function ZoneRow({ zone, index, now, onPick }: { zone: CfZone; index: number; now: Date; onPick: (target: OwnerPoolState) => void }) {
   const pool = poolStateInfo(zone.pool_state);
   const cf = zoneStatusInfo(zone.status);
+  const deleted = zone.pool_state === "deleted";
+  const inRotation = zone.pool_state === "active" || zone.pool_state === "standby";
+  const check = inRotation || zone.last_check ? checkSummary(zone.last_check) : null;
+  const removal = deletionLine(zone, now);
+  const CheckIcon = check ? LINE_ICON[check.tone] : Radar;
   return (
-    <motion.li {...fadeUp(index)} className={cn("flex flex-col gap-3 rounded-2xl border p-3.5 sm:flex-row sm:items-center", zone.pool_state === "active" ? "border-success/30 bg-success-soft/40" : "border-line bg-surface-2/50")}>
-      <div className="flex min-w-0 flex-1 items-center gap-3">
-        <span className={cn("grid size-10 shrink-0 place-items-center rounded-xl", zone.pool_state === "active" ? "bg-success text-white" : "bg-surface-3 text-fg-muted")}>
-          <Globe className="size-5" />
-        </span>
-        <div className="min-w-0">
-          <div className="ltr truncate text-right font-bold text-fg" title={zone.name}>
-            {zone.name}
-          </div>
-          <div className="mt-0.5 flex flex-wrap gap-1.5">
-            <Badge tone={pool.tone} dot>
-              {pool.label}
-            </Badge>
-            <Badge tone={cf.tone}>{cf.label}</Badge>
+    <motion.li
+      {...fadeUp(index)}
+      className={cn(
+        "flex flex-col gap-3 rounded-2xl border p-3.5",
+        zone.pool_state === "active" ? "border-success/30 bg-success-soft/40" : zone.pool_state === "filtered" ? "border-danger/30 bg-danger-soft/30" : "border-line bg-surface-2/50",
+        deleted && "opacity-70",
+      )}
+    >
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <span
+            className={cn(
+              "grid size-10 shrink-0 place-items-center rounded-xl",
+              zone.pool_state === "active" ? "bg-success text-white" : zone.pool_state === "filtered" ? "bg-danger text-white" : "bg-surface-3 text-fg-muted",
+            )}
+          >
+            {deleted ? <Trash2 className="size-5" /> : <Globe className="size-5" />}
+          </span>
+          <div className="min-w-0">
+            <div className={cn("ltr truncate text-right font-bold text-fg", deleted && "line-through decoration-fg-faint")} title={zone.name}>
+              {zone.name}
+            </div>
+            <div className="mt-0.5 flex flex-wrap gap-1.5">
+              <Badge tone={pool.tone} dot pulse={zone.pool_state === "active"}>
+                {pool.label}
+              </Badge>
+              {!deleted ? <Badge tone={cf.tone}>{cf.label}</Badge> : null}
+              {zone.last_check && zone.last_check.answered > 0 ? (
+                <Badge tone={domainVerdictInfo(zone.last_check.verdict).tone}>{domainVerdictInfo(zone.last_check.verdict).label}</Badge>
+              ) : null}
+            </div>
           </div>
         </div>
+        {deleted ? null : (
+          <label className="flex items-center gap-2 text-sm">
+            <span className="shrink-0 text-fg-muted">جای در استخر</span>
+            <select
+              value={zone.pool_state}
+              onChange={(e) => onPick(e.target.value as OwnerPoolState)}
+              className="h-10 min-w-0 flex-1 rounded-xl border border-line bg-surface px-3 text-base font-semibold text-fg outline-none focus:border-brand sm:w-44 sm:flex-none sm:text-sm"
+              aria-label={`جای ${zone.name} در استخر دامنه`}
+            >
+              {POOL_CHOICES.map((p) => (
+                <option key={p} value={p}>
+                  {poolStateInfo(p).label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
-      <label className="flex items-center gap-2 text-sm">
-        <span className="shrink-0 text-fg-muted">جای در استخر</span>
-        <select
-          value={zone.pool_state}
-          onChange={(e) => onPick(e.target.value as PoolState)}
-          className="h-10 min-w-0 flex-1 rounded-xl border border-line bg-surface px-3 text-base font-semibold text-fg outline-none focus:border-brand sm:w-44 sm:flex-none sm:text-sm"
-          aria-label={`جای ${zone.name} در استخر دامنه`}
-        >
-          {POOL_ORDER.map((p) => (
-            <option key={p} value={p}>
-              {poolStateInfo(p).label}
-            </option>
-          ))}
-        </select>
-      </label>
+
+      {check ? (
+        <p className={cn("flex items-start gap-2 text-[0.84rem] leading-6", TONE_TEXT[check.tone])}>
+          <CheckIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
+          <span>
+            <span className="text-fg">{check.text}</span>
+            {zone.last_check ? (
+              <span className="text-fg-muted" title={formatJalali(zone.last_check.at, "datetime")}>
+                {" "}
+                · سنجش {formatRelative(zone.last_check.at, now)}
+              </span>
+            ) : null}
+          </span>
+        </p>
+      ) : null}
+
+      {removal ? (
+        <div className={cn("flex flex-col gap-2 rounded-xl p-2.5 text-[0.84rem] leading-6", removal.tone === "danger" ? "bg-danger-soft text-danger" : "bg-surface-3 text-fg-muted")}>
+          <p className="flex items-start gap-2">
+            <Trash2 className="mt-0.5 size-4 shrink-0" aria-hidden />
+            <span className="font-semibold">{removal.text}</span>
+          </p>
+          {removal.notes.length > 0 ? (
+            <ul className="flex list-inside list-disc flex-col gap-0.5 ps-6 text-fg">
+              {removal.notes.map((n) => (
+                <li key={n}>{n}</li>
+              ))}
+            </ul>
+          ) : null}
+          {zone.pool_state === "filtered" ? (
+            <Button variant="secondary" size="sm" className="self-start" icon={<Undo2 className="size-4" />} onClick={() => onPick("standby")}>
+              برگرداندن به آماده‌به‌کار
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
     </motion.li>
+  );
+}
+
+function NoStandbyCard() {
+  return (
+    <Card className="border-warning/40 bg-warning-soft/40 lg:col-span-12" role="alert">
+      <div className="flex items-start gap-3 p-5">
+        <span className="grid size-10 shrink-0 place-items-center rounded-2xl bg-warning-soft text-warning">
+          <TriangleAlert className="size-5" />
+        </span>
+        <div className="min-w-0">
+          <h2 className="text-[1.02rem] leading-7 font-bold text-fg">دامنه‌ی ذخیره‌ای نمانده</h2>
+          <p className="text-sm leading-7 text-fg-muted">
+            اگر دامنه‌ی فعال فیلتر شود، دامنه‌ای نیست که جایش را بگیرد. یک دامنه‌ی تازه بخرید و به حساب Cloudflare مخصوص Proxy-Hub اضافه کنید (nameserverهای
+            Cloudflare را در ثبت‌کننده‌ی دامنه بگذارید). پنل خودش آن را پیدا میکند و ذخیره‌اش میکند؛ کار دیگری لازم نیست.
+          </p>
+        </div>
+      </div>
+    </Card>
   );
 }
 
 function ZonesCard({ s }: { s: CfStatus }) {
   const qc = useQueryClient();
-  const [pending, setPending] = useState<{ zone: CfZone; target: PoolState } | null>(null);
+  const now = useNow(30_000);
+  const [pending, setPending] = useState<{ zone: CfZone; target: OwnerPoolState } | null>(null);
   const [busy, setBusy] = useState(false);
   const zones = sortZones(s.zones);
+  const grace = s.pool?.delete_grace_hours ?? 24;
+  const standbyEvery = s.pool?.standby_check_hours ?? 6;
 
   const apply = () => {
     if (!pending) return;
@@ -248,7 +334,12 @@ function ZonesCard({ s }: { s: CfStatus }) {
       <CardHeader
         icon={<Cloud className="size-5" />}
         title="دامنه‌ها و استخر دامنه"
-        subtitle="یک دامنه «فعال» است (نام‌های پروکسی پست‌های تازه). «آماده‌به‌کار» اگر دامنه‌ی فعال فیلتر شد، جایش را میگیرد."
+        subtitle={`پنل خودش دامنه‌ها را از ایران میسنجد: دامنه‌ی فعال هر ۳۰ دقیقه و ذخیره‌ها هر ${formatNumber(standbyEvery)} ساعت. دامنه‌ی فیلترشده از دور خارج میشود، ذخیره‌ی بعدی جایش را میگیرد و ${formatNumber(grace)} ساعت بعد از Cloudflare پاک میشود.`}
+        action={
+          s.pool ? (
+            <Badge tone={s.pool.standby_usable > 0 ? "info" : "warning"}>{formatNumber(s.pool.standby_usable)} ذخیره</Badge>
+          ) : undefined
+        }
       />
       <div className="p-4 sm:p-5">
         {zones.length === 0 ? (
@@ -268,6 +359,7 @@ function ZonesCard({ s }: { s: CfStatus }) {
                 key={z.id}
                 zone={z}
                 index={i}
+                now={now}
                 onPick={(target) => {
                   if (target !== z.pool_state) setPending({ zone: z, target });
                 }}
@@ -282,7 +374,7 @@ function ZonesCard({ s }: { s: CfStatus }) {
           if (!v && !busy) setPending(null);
         }}
         title={pending ? `«${pending.zone.name}»: ${poolStateInfo(pending.target).label}` : ""}
-        description={pending ? poolChangeText(pending.zone, pending.target, s.zones) : ""}
+        description={pending ? poolChangeText(pending.zone, pending.target, s.zones, grace) : ""}
         confirmLabel="تغییر بده"
         tone={pending?.target === "filtered" || pending?.target === "retired" ? "danger" : "primary"}
         icon={<CloudCog className="size-6" />}
@@ -406,6 +498,7 @@ export default function CloudflarePage() {
         </Card>
       ) : s ? (
         <div className="grid gap-4 sm:gap-5 lg:grid-cols-12">
+          {noStandbyLeft(s) ? <NoStandbyCard /> : null}
           <TokenCard s={s} />
           <ZonesCard s={s} />
           <RecordsCard records={s.records} />

@@ -1,7 +1,7 @@
 // Persian labels for machine codes the API returns (states, reasons, actions). Unknown codes are
 // shown as they are, so a new code on the server is never hidden.
 
-import type { AccountState, FleetSettings, NodeState, PlanActionKind, PoolState, ProbeVerdict } from "./types";
+import type { AccountState, DomainVerdict, FleetSettings, NodeState, OwnerPoolState, PlanActionKind, PoolState, ProbeVerdict } from "./types";
 
 export type Tone = "neutral" | "brand" | "success" | "warning" | "danger" | "info";
 
@@ -121,6 +121,35 @@ const REASON: Record<string, string> = {
   // Telegram (team tg)
   getme_ok: "ربات با getMe وارسی شد",
   bot_can_delete: "ربات اجازه‌ی حذف پیام دارد؛ باید برداشته شود",
+  // Cloudflare and the domain pool (D35)
+  owner: "به دست مالک",
+  replaced: "دامنه‌ی دیگری فعال شد",
+  zones_gone: "دامنه‌ای از دید توکن بیرون رفت",
+  cf_token_invalid: "توکن Cloudflare معتبر نیست",
+  cf_token_multiple_accounts: "توکن دامنه‌های بیش از یک حساب Cloudflare را میبیند",
+  cf_permissions_missing: "توکن Cloudflare دسترسی کم دارد",
+  auto_new_zone: "دامنه‌ی تازه خودکار ذخیره شد",
+  auto_promote: "خودکار دامنه‌ی فعال شد",
+  domain_filtered: "در ایران فیلتر شد",
+  replaces_filtered: "جای دامنه‌ی فیلترشده را گرفت",
+  filtered: "فیلتر در ایران",
+  clear: "باز از ایران",
+  unknown: "هنوز معلوم نیست",
+  no_answers: "هیچ نقطه‌ای در ایران پاسخ نداد",
+  single_round: "فقط یک سنجش؛ دست‌کم دو سنجش لازم است",
+  weak_signal: "پاسخ جعلی کمتر از حد لازم",
+  not_confirmed: "سنجش قبلی آن را تأیید نکرد",
+  rounds_too_close: "دو سنجش آخر کمتر از ۲۰ دقیقه فاصله دارند",
+  rounds_too_old: "سنجش‌ها کهنه‌تر از ۶ ساعت‌اند",
+  globalping_budget_low: "سهم Globalping برای سنجش nodeها نگه داشته شد",
+  no_standby: "دامنه‌ی ذخیره نمانده",
+  deleted: "از Cloudflare پاک شد",
+  already_absent: "در Cloudflare نبود",
+  zone_edit_denied: "توکن دسترسی Zone Edit ندارد",
+  cf_refused: "Cloudflare نپذیرفت",
+  cf_unavailable: "Cloudflare پاسخ نداد",
+  cf_rate_limited: "سقف درخواست Cloudflare پر شده",
+  cf_invalid_response: "پاسخ Cloudflare قابل خواندن نبود",
 };
 
 /** Reasons stored as {"key": value} come as "key:value" (auth audit, counts). */
@@ -204,6 +233,11 @@ const ACTION: Record<string, string> = {
   dns_forget: "رکورد پنل در Cloudflare نبود؛ از فهرست برداشته شد",
   probe_verdict: "نتیجه‌ی سنجش از ایران",
   probe_run_requested: "درخواست سنجش دستی",
+  // the domain pool (D35)
+  domain_verdict: "نتیجه‌ی سنجش فیلتر دامنه",
+  domain_check_skipped: "سنجش دامنه به بعد افتاد",
+  domain_no_standby: "یادآوری: دامنه‌ی ذخیره نمانده",
+  cloudflare_zone_delete: "پاک کردن دامنه‌ی فیلترشده از Cloudflare",
 };
 
 export function actionLabel(code: string): string {
@@ -235,6 +269,7 @@ const ACTOR: Record<string, string> = {
   telegram: "ربات تلگرام",
   dns: "چرخه‌ی DNS",
   probes: "چرخه‌ی سنجش از ایران",
+  domains: "چرخه‌ی دامنه‌ها",
   cli: "فرمان روی سرور پنل",
 };
 
@@ -371,12 +406,68 @@ export function transitionReasonLabel(code: string): string {
 export const POOL_STATE: Record<PoolState, { label: string; tone: Tone; hint: string }> = {
   active: { label: "فعال", tone: "success", hint: "نام‌های پروکسی پست‌های تازه روی این دامنه‌اند. فقط یک دامنه فعال است." },
   standby: { label: "آماده‌به‌کار", tone: "info", hint: "اگر دامنه‌ی فعال فیلتر شد، خودکار جایش را میگیرد." },
-  none: { label: "بیرون از استخر", tone: "neutral", hint: "پنل از این دامنه استفاده نمیکند." },
-  filtered: { label: "فیلترشده", tone: "danger", hint: "از ایران بسته است؛ برای پست تازه استفاده نمیشود." },
-  retired: { label: "بازنشسته", tone: "neutral", hint: "کنار گذاشته شده و دیگر استفاده نمیشود." },
+  none: { label: "بیرون از استخر", tone: "neutral", hint: "پنل از این دامنه استفاده نمیکند و خودش هم آن را به استخر برنمیگرداند." },
+  filtered: { label: "فیلترشده", tone: "danger", hint: "از ایران بسته است؛ از دور خارج میشود و پس از مهلت از Cloudflare پاک میشود." },
+  retired: { label: "بازنشسته", tone: "neutral", hint: "کنار گذاشته شده؛ پنل هرگز خودکار به آن دست نمیزند." },
+  deleted: { label: "پاک‌شده از Cloudflare", tone: "neutral", hint: "دامنه‌ی فیلترشده بود و پنل آن را از Cloudflare پاک کرد." },
 };
 
-export const POOL_ORDER: PoolState[] = ["active", "standby", "none", "filtered", "retired"];
+/** Display order of zones (a deleted one last). */
+export const POOL_ORDER: PoolState[] = ["active", "standby", "none", "filtered", "retired", "deleted"];
+
+/** What the owner can choose for a zone ("deleted" is reached only by the panel deleting it). */
+export const POOL_CHOICES: OwnerPoolState[] = ["active", "standby", "none", "filtered", "retired"];
+
+export const DOMAIN_VERDICT: Record<DomainVerdict, { label: string; tone: Tone }> = {
+  filtered: { label: "فیلتر در ایران", tone: "danger" },
+  clear: { label: "باز از ایران", tone: "success" },
+  unknown: { label: "هنوز معلوم نیست", tone: "neutral" },
+};
+
+export function domainVerdictInfo(v: string): { label: string; tone: Tone } {
+  return (DOMAIN_VERDICT as Record<string, { label: string; tone: Tone } | undefined>)[v] ?? { label: v, tone: "neutral" };
+}
+
+/** Why a check of a domain gave no answer (domain_checks.status). */
+const CHECK_STATUS: Record<string, string> = {
+  rate_limited: "سقف ساعتی Globalping پر بود",
+  no_probes: "در ایران نقطه‌ی سنجش آنلاینی پیدا نشد",
+  error: "پاسخ Globalping به دست نیامد",
+  timeout: "Globalping در زمان مقرر پاسخ کامل نداد",
+};
+
+export function checkStatusText(status: string): string {
+  return CHECK_STATUS[status] ?? status;
+}
+
+/** What a filtered domain still waits for before it is deleted from Cloudflare. */
+const DELETE_WAIT: Record<string, string> = {
+  kill_switch_on: "کلید توقف روشن است؛ تا خاموش نشود، از Cloudflare پاک نمیشود.",
+  records_remaining: "نام‌های پروکسی هنوز روی این دامنه‌اند؛ وقتی به دامنه‌ی فعال تازه رفتند، پاک میشود.",
+  token_not_verified: "توکن Cloudflare وارسی‌شده نیست.",
+  zone_gone: "توکن Cloudflare دیگر این دامنه را نمیبیند.",
+  zone_active: "این دامنه فعال است.",
+  retry_later: "Cloudflare پاسخ نداد؛ کمی بعد دوباره امتحان میشود.",
+  delete_in_progress: "همین حالا در حال پاک شدن است.",
+  already_deleted: "پیش‌تر پاک شده است.",
+};
+
+export function deleteWaitText(code: string): string {
+  return DELETE_WAIT[code] ?? code;
+}
+
+/** Cloudflare refused the deletion for good (not retried until a token is stored again). */
+export function deleteBlockedText(code: string): string {
+  if (code === "zone_edit_denied") {
+    // U+2066/U+2069 isolate the English permission name (left to right inside Persian) and its
+    // no-break spaces keep it on one line.
+    return "پاک نشد: توکن Cloudflare دسترسی «⁦Zone · Zone · Edit⁩» ندارد. این دسترسی را به توکن بدهید و توکن را دوباره همین‌جا وارد کنید.";
+  }
+  if (code === "cf_refused" || code.startsWith("cf_refused:")) {
+    return "Cloudflare پاک کردنش را نپذیرفت (شاید دامنه در Cloudflare Registrar ثبت شده). خودتان در Cloudflare پاکش کنید یا آن را «بازنشسته» کنید.";
+  }
+  return code;
+}
 
 export function poolStateInfo(state: string): { label: string; tone: Tone; hint: string } {
   return (POOL_STATE as Record<string, { label: string; tone: Tone; hint: string } | undefined>)[state] ?? {
