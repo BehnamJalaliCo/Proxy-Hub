@@ -38,7 +38,7 @@ from test_posts_support import (
 )
 
 from proxyhub.links.contract import ProxyLink
-from proxyhub.posts import links, plan, publisher
+from proxyhub.posts import content, links, plan, publisher
 from proxyhub.posts import settings as posting
 from proxyhub.posts.poster import BotPoster
 from proxyhub.reconcilers.publisher import PublisherReconciler
@@ -293,6 +293,34 @@ async def test_content_order_recycling_and_fallback(engine: AsyncEngine, vault: 
     assert (await rows(engine, "SELECT content_item_id FROM posts ORDER BY id DESC LIMIT 1"))[
         0
     ].content_item_id is None
+
+
+async def test_retired_and_draft_items_are_never_posted(engine: AsyncEngine, vault: Vault) -> None:
+    await ready_fleet(engine)
+    await setup_telegram(engine, vault)
+    await quiet(engine, [], interval=0)
+    async with engine.begin() as conn:
+        await conn.execute(text("UPDATE content_items SET status = 'retired'"))
+        await conn.execute(
+            text(
+                "INSERT INTO content_items (title, body, status, origin, last_used_at) VALUES "
+                "('پیش‌نویس مالک', 'متن', 'draft', 'owner', NULL), "
+                "('کنارگذاشته‌ی قدیمی', 'متن', 'retired', 'owner', now() - interval '400 days')"
+            )
+        )
+    library = "SELECT id, status, used_count, last_used_at FROM content_items ORDER BY id"
+    before = await rows(engine, library)
+    for i in range(2):  # nothing approved and nothing used to recycle: the fallback title, twice
+        assert await publish(engine, slot_time(i)) == "queued"
+        job = (await jobs(engine, "send_post"))[-1]
+        assert job.payload["text"].startswith("<b>📡 پروکسی‌ها و کانفیگ‌های تازه</b>")
+        await deliver(engine, job.id, message_id=30 + i)
+    assert await rows(engine, library) == before  # not used, not counted, not moved
+    used = await rows(engine, "SELECT content_item_id FROM posts")
+    assert [r.content_item_id for r in used] == [None, None]
+    async with engine.connect() as conn:
+        assert await content.approved_queue(conn, 100) == []
+        assert await content.next_item(conn, slot_time(3), 1) == (None, False)
 
 
 async def test_posts_take_turns_over_the_slots(engine: AsyncEngine, vault: Vault) -> None:
