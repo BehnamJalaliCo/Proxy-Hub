@@ -31,6 +31,7 @@ export interface RealityXray {
   up: boolean;
   version: string | null;
   uptime_s: number | null;
+  /** The node's check of its scope's current target: null = not checked yet (or no key yet). */
   target_ok: boolean | null;
   apply_error: string | null;
   reported_at: string | null;
@@ -45,7 +46,10 @@ export interface RealityNode {
   /** null: this node's agent has never reported Xray (an older agent or image). */
   xray: RealityXray | null;
   public_key: string | null;
+  /** host:port of the target this node's links use now. */
   target: string | null;
+  /** The owner's newer target, while this slot waits for its current configs to end. */
+  target_next: string | null;
   active_configs: number;
 }
 
@@ -113,8 +117,21 @@ export function xrayState(x: RealityXray | null): { label: string; tone: Tone } 
   if (x.apply_error) return { label: APPLY_ERRORS[x.apply_error] ?? "خطا در اعمال تنظیمات Xray", tone: "danger" };
   if (x.target_ok === false) return { label: "سایت هدف از این node جواب درست نداد", tone: "danger" };
   if (!x.up) return { label: "Xray هنوز بالا نیامده", tone: "warning" };
+  if (x.target_ok === null) return { label: "Xray فعال است؛ سایت هدف هنوز آزموده نشده", tone: "info" };
   return { label: "Xray فعال است", tone: "success" };
 }
+
+/** What happens after the owner saves the target: the words for the toast. */
+export function savedMessage(before: RealitySettings, after: RealitySettings): string {
+  if (before.target_host !== after.target_host || before.target_port !== after.target_port) {
+    return "هر جایگاه پس از پایان کانفیگ‌های فعلی‌اش به سایت هدف تازه میرود (اگر سایت قبلی از node جواب نمیداد، بی‌درنگ). node سایت تازه را میآزماید و بعد کانفیگ تازه میگیرد.";
+  }
+  return "کانفیگ‌های تازه با این عددها ساخته میشوند.";
+}
+
+/** Hint under the target field: what changing it really does. */
+export const TARGET_HINT =
+  "یک سایت خارجی بزرگ با TLS 1.3 و HTTP/2. با تغییر آن، هر جایگاه پس از پایان کانفیگ‌های فعلی‌اش به سایت تازه میرود؛ اگر سایت قبلی از node جواب نمیداد، بی‌درنگ. لینک‌های پست‌شده تا پایانشان کار میکنند.";
 
 // --- numbers -------------------------------------------------------------------------------------
 

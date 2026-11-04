@@ -20,7 +20,9 @@ import {
   parseDraft,
   REALITY_STATUS,
   sameSettings,
+  savedMessage,
   sortConfigs,
+  TARGET_HINT,
   usage,
   xrayState,
   type RealityConfig,
@@ -206,6 +208,11 @@ function NodesCard({ nodes }: { nodes: RealityNode[] }) {
                     {n.xray?.reported_at ? <span>گزارش {formatRelative(n.xray.reported_at)}</span> : null}
                     {n.target ? <span className="ltr inline-block font-mono">{n.target}</span> : null}
                   </div>
+                  {n.target_next ? (
+                    <p className="mt-1.5 text-xs leading-5 text-fg-muted">
+                      <Badge tone="info">سایت هدف تازه</Badge> <span className="ltr inline-block font-mono">{n.target_next}</span> پس از پایان کانفیگ‌های فعلی
+                    </p>
+                  ) : null}
                 </li>
               );
             })}
@@ -258,7 +265,7 @@ function SettingsCard({ initial, defaults }: { initial: RealitySettingsView; def
         void qc.invalidateQueries({ queryKey: ["events"] });
         setDraft(draftFrom(saved));
         setSubmitted(false);
-        toast.success("تنظیمات Reality ذخیره شد", "کانفیگ‌های تازه با این عددها ساخته میشوند.");
+        toast.success("تنظیمات Reality ذخیره شد", savedMessage(initial, saved));
       })
       .catch((err: unknown) => {
         setServer(serverErrors(err));
@@ -299,7 +306,7 @@ function SettingsCard({ initial, defaults }: { initial: RealitySettingsView; def
           <Field
             label="سایت هدف (target)"
             htmlFor="r-target"
-            hint="یک سایت خارجی بزرگ با TLS 1.3 و HTTP/2. فقط برای کلیدهای تازه؛ لینک‌های پست‌شده عوض نمیشوند."
+            hint={TARGET_HINT}
             error={shown("target_host")}
           >
             <TextInput id="r-target" latin autoComplete="off" value={draft.target_host} onChange={(e) => set("target_host", e.target.value)} invalid={Boolean(shown("target_host"))} placeholder={defaults.target_host} />

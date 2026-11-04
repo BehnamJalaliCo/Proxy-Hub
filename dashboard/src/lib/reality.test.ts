@@ -8,6 +8,8 @@ import {
   parseDraft,
   REALITY_STATUS,
   sameSettings,
+  savedMessage,
+  TARGET_HINT,
   sortConfigs,
   usage,
   xrayState,
@@ -77,6 +79,16 @@ describe("reality settings form", () => {
     expect(parseDraft({ ...draftFrom(DEFAULTS), link_name: "" }).settings?.link_name).toBeNull();
   });
 
+  it("says what a new target does, and only then", () => {
+    const moved = savedMessage(DEFAULTS, { ...DEFAULTS, target_host: "www.example.org" });
+    expect(moved).toContain("سایت هدف تازه");
+    expect(moved).toContain("بی‌درنگ");
+    expect(savedMessage(DEFAULTS, { ...DEFAULTS, target_port: 8443 })).toBe(moved);
+    expect(savedMessage(DEFAULTS, { ...DEFAULTS, cap_gb: 80 })).toBe("کانفیگ‌های تازه با این عددها ساخته میشوند.");
+    expect(TARGET_HINT).toContain("پس از پایان کانفیگ‌های فعلی");
+    expect(TARGET_HINT).not.toContain("فقط برای کلیدهای تازه");
+  });
+
   it("says how often a fresh config comes", () => {
     expect(freshEveryHours(DEFAULTS)).toBe(12);
     expect(freshEveryHours({ cap_hours: 24, configs_per_node: 3 })).toBe(8);
@@ -129,6 +141,8 @@ describe("reality words", () => {
     expect(xrayState(base)).toEqual({ label: "Xray فعال است", tone: "success" });
     expect(xrayState({ ...base, up: false }).tone).toBe("warning");
     expect(xrayState({ ...base, target_ok: false }).tone).toBe("danger");
+    expect(xrayState({ ...base, target_ok: null })).toEqual({ label: "Xray فعال است؛ سایت هدف هنوز آزموده نشده", tone: "info" });
+    expect(xrayState({ ...base, target_ok: null, up: false }).tone).toBe("warning");
     expect(xrayState({ ...base, apply_error: "xray_config_refused" }).label).toContain("نپذیرفت");
     expect(xrayState({ ...base, apply_error: "something_new" }).tone).toBe("danger");
   });
