@@ -8,9 +8,12 @@ tested exhaustively with real-shaped data. Every intended creation is evaluated 
 Model (docs/10_IMPLEMENTATION_PLAN.md section 3.11):
 * ``target_slots`` fixed slots (default 9), spread over the owner's locations (3 fsn1, 3 nbg1,
   3 hel1 with the defaults).
-* One spare: when a slot's node burns, the replacement is built FIRST, in another location, and
-  the burned node is retired only after the replacement has been ready for a short settle time.
-  The fleet never plans more than ``target_slots + 1`` live nodes.
+* One spare: when a slot's node burns (blocked from Iran by both probe sources) or stays unhealthy
+  past its repair window, the replacement is built FIRST, in another location, and the old node is
+  retired only after the replacement has been ready for a short settle time (the slot's DNS name
+  follows the ready node by itself). The fleet never plans more than ``target_slots + 1`` live nodes.
+* A slot whose last request was refused by the executor waits a little before asking again; a
+  server that got a burned IP (proxyhub/fleet/ip_history.py) is retried in another location.
 * Accounts: youngest active account first, the next one when it is full (section 3.8).
 * Intended creations are evaluated cumulatively, in slot order: an allowed creation counts
   against the node cap, the hourly creation cap, the account and the month budget of the next one.
@@ -49,6 +52,13 @@ OBSERVATION_MAX_AGE = timedelta(minutes=30)  # account_guard checks every 10 min
 OFFER_MAX_AGE = timedelta(hours=6)
 REPLACEMENT_SETTLE = timedelta(minutes=2)  # DNS TTL 60 s + margin (section 3.11 step 4)
 CREATION_WINDOW = timedelta(hours=1)
+# An unhealthy node (agent silent, Telemt down) gets this long to recover by itself (the agent and
+# Telemt restart under systemd) before a replacement is built.
+REPAIR_WINDOW = timedelta(minutes=15)
+# A probe verdict older than this no longer decides anything (probes/settings.py max_round_age_s).
+VERDICT_MAX_AGE = timedelta(hours=1)
+# After the executor refused a slot's request (a gate said no on its live look), wait before asking again.
+REQUEST_BACKOFF = timedelta(minutes=15)
 
 S = NodeState
 STARTING = frozenset({S.REQUESTED, S.CREATING, S.BOOTING, S.REGISTERING})
@@ -76,6 +86,33 @@ class NodeSnapshot(NodeCostInput):
     slot: int | None = None
     is_test: bool = False
     ready_at: datetime | None = None
+    # Latest probe verdict from Iran (proxyhub/probes) and when it was computed.
+    verdict: str | None = None
+    verdict_at: datetime | None = None
+    # When the node entered its current state (node_operations.state_since).
+    state_since: datetime | None = None
+    retire_reason: str | None = None
+    ipv4: str | None = None  # our server's public address (never a user's)
+    # False only for a request closed before any Hetzner create call (it created nothing).
+    create_attempted: bool = True
+
+
+def counts_as_creation(n: NodeSnapshot, now: datetime) -> bool:
+    """A server creation within the last hour (the hourly creation cap). A request the executor
+    closed before any create call made no server and does not count."""
+    if n.created_at <= now - CREATION_WINDOW:
+        return False
+    return not (n.state == NodeState.DELETED and n.hetzner_id is None and not n.create_attempted)
+
+
+def verdict_blocked(n: NodeSnapshot, now: datetime) -> bool:
+    """A READY node whose fresh probe verdict says blocked from Iran (both sources, >= 2 rounds)."""
+    return (
+        n.state == NodeState.READY
+        and n.verdict == "blocked"
+        and n.verdict_at is not None
+        and now - n.verdict_at <= VERDICT_MAX_AGE
+    )
 
 
 @dataclass(frozen=True)
@@ -130,7 +167,8 @@ class PlannedAction:
             what = f"delete {self.target} ({c.get('why', '')})"
         else:
             what = f"no action on {self.target}"
-        verdict = "would do" if self.allowed else "blocked: " + ", ".join(self.reasons)
+        done = "would do" if dry_run else "doing (the node executor checks the gates again)"
+        verdict = done if self.allowed else "blocked: " + ", ".join(self.reasons)
         return f"{prefix}{what}; {verdict}"
 
 
@@ -218,7 +256,7 @@ class _Planner:
         self.run = _Running(
             live_total=len(live),
             fleet_live=len(self.fleet_nodes),
-            creations=sum(1 for n in snap.nodes if n.created_at > self.now - CREATION_WINDOW),
+            creations=sum(1 for n in snap.nodes if counts_as_creation(n, self.now)),
             projected=projected_month_total(items, self.now),
             per_account={a.id: max(a.servers_total or 0, per_account_db.get(a.id, 0)) for a in snap.accounts},
             per_location=per_location,
@@ -293,19 +331,32 @@ class _Planner:
         others = [loc for loc in locs if loc not in avoid]
         return sorted(others, key=lambda loc: (self.run.per_location.get(loc, 0), locs.index(loc)))
 
+    def _repair_over(self, n: NodeSnapshot) -> bool:
+        since = n.state_since or n.created_at
+        return self.now - since > REPAIR_WINDOW
+
     # --- evaluations --------------------------------------------------------------------------
 
-    def _create(self, slot: int, kind: str, avoid: set[str] | None = None) -> PlannedAction:
+    def _create(
+        self, slot: int, kind: str, avoid: set[str] | None = None, prefer_not: set[str] | None = None
+    ) -> PlannedAction:
+        """``avoid``: locations of the nodes being replaced (never reused, D14). ``prefer_not``:
+        locations tried recently (a server that got a burned IP); used only if nothing else is left."""
         planner_reasons = list(self.global_reasons)
         if self.run.fleet_live + 1 > self.s.target_slots + SPARE_SLOTS:
             planner_reasons.append("spare_in_use")
-        if avoid is None:
+        soft = prefer_not or set()
+        if avoid is None and not soft:
             preferred = self._slot_locations(slot)
         else:
-            preferred = self._replacement_locations(avoid)
+            hard = avoid or set()
+            preferred = self._replacement_locations(hard | soft) or self._replacement_locations(hard)
             if not preferred and self.s.locations:
-                planner_reasons.append("no_other_location")
-                preferred = list(self.s.locations)
+                if hard:
+                    planner_reasons.append("no_other_location")
+                    preferred = list(self.s.locations)
+                else:
+                    preferred = self._slot_locations(slot)
         placement = self._place(preferred)
         planner_reasons.extend(r for r in placement.reasons if r not in planner_reasons)
 
@@ -340,6 +391,7 @@ class _Planner:
             "fleet_live_total": self.run.live_total,
             "creations_last_hour": self.run.creations,
             "servers_in_account": view.servers_in_account,
+            "avoid": sorted((avoid or set()) | soft),
         }
         if allowed and placement.account is not None and placement.location is not None:
             self.run.live_total += 1
@@ -359,14 +411,17 @@ class _Planner:
         if account is None or account.state not in ("active", "draining", "preparing"):
             planner_reasons.append("account_not_usable")
         server: ServerView | None = None
-        if node.hetzner_id is None:
+        no_server = node.hetzner_id is None and node.state in (S.REQUESTED, S.CREATING, S.RETIRING)
+        if node.hetzner_id is None and not no_server:
             planner_reasons.append("no_hetzner_id")
-        else:
+        elif node.hetzner_id is not None:
             server = self.snap.servers.get((node.account_id, node.hetzner_id))
             if server is None:
                 planner_reasons.append("server_not_observed")
         gate_reasons: tuple[str, ...] = ()
-        gate_allowed = False
+        # A node without any server (a request, or a create that never answered) is closed by the
+        # executor after its lookups by label: no delete gate is involved until a server is found.
+        gate_allowed = no_server
         if server is not None:
             d = can_delete(
                 server, NodeRowView(node.account_id, node.hetzner_id, S.RETIRING.value), node.account_id
@@ -385,6 +440,33 @@ class _Planner:
         return PlannedAction(
             "delete", node.name, gate_allowed and not planner_reasons, tuple(reasons), context
         )
+
+    def _slot_history(self, slot: int) -> list[NodeSnapshot]:
+        return [
+            n
+            for n in self.snap.nodes
+            if n.slot == slot and not n.is_test and n.state == S.DELETED and n.deleted_at is not None
+        ]
+
+    def _backing_off(self, slot: int) -> bool:
+        """The executor refused this slot's last request a moment ago (no server was made)."""
+        return any(
+            n.hetzner_id is None
+            and not n.create_attempted
+            and n.deleted_at is not None
+            and self.now - n.deleted_at < REQUEST_BACKOFF
+            for n in self._slot_history(slot)
+        )
+
+    def _burned_ip_locations(self, slot: int) -> set[str]:
+        """Locations where this slot's server got a burned IP within the last hour."""
+        return {
+            n.location
+            for n in self._slot_history(slot)
+            if n.retire_reason == "burned_ip"
+            and n.deleted_at is not None
+            and self.now - n.deleted_at < CREATION_WINDOW
+        }
 
     @staticmethod
     def _none(target: str, reason: str, **context: Any) -> PlannedAction:
@@ -405,36 +487,48 @@ class _Planner:
 
         for slot in range(1, self.s.target_slots + 1):
             nodes = by_slot.get(slot, [])
-            serving = [n for n in nodes if n.state in SERVING]
+            blocked = [n for n in nodes if n.state == S.BURNED or verdict_blocked(n, self.now)]
+            serving = [n for n in nodes if n.state in SERVING and n not in blocked]
             starting = [n for n in nodes if n.state in STARTING]
             sick = [n for n in nodes if n.state in SICK]
-            burned = [n for n in nodes if n.state == S.BURNED]
             leaving = [n for n in nodes if n.state in (S.DRAINING, S.RETIRING)]
             target = f"slot-{slot}"
-            if burned and serving:
-                newest_ready = max((n.ready_at or n.created_at) for n in serving)
-                if newest_ready <= self.now - REPLACEMENT_SETTLE:
-                    deletes.extend((b, "replaced_burned") for b in burned)
+            if serving:
+                # The slot's DNS name points at the newest ready node; every other node of the slot
+                # (burned, unhealthy, an older ready one) leaves once that node has settled.
+                keep = max(serving, key=lambda n: (n.ready_at or n.created_at, n.created_at, n.id))
+                others = [*blocked, *sick, *(n for n in serving if n is not keep)]
+                if not others:
+                    actions.append(self._none(target, "slot_healthy", slot=slot))
+                elif (keep.ready_at or keep.created_at) <= self.now - REPLACEMENT_SETTLE:
+                    for n in others:
+                        why = "burned" if n in blocked else "unhealthy" if n in sick else "duplicate"
+                        deletes.append((n, why))
                     actions.append(self._none(target, "slot_healthy", slot=slot))
                 else:
                     actions.append(self._none(target, "replacement_settling", slot=slot))
-            elif not (serving or starting or sick):
-                if burned or leaving:
-                    avoid = {n.location for n in burned + leaving}
-                    actions.append(self._create(slot, "replace", avoid=avoid))
-                else:
-                    actions.append(self._create(slot, "fill"))
-            elif serving:
-                actions.append(self._none(target, "slot_healthy", slot=slot))
             elif starting:
-                reason = "replacement_in_progress" if burned else "slot_starting"
+                reason = "replacement_in_progress" if blocked or sick or leaving else "slot_starting"
                 actions.append(self._none(target, reason, slot=slot))
-            else:
+            elif sick and not all(self._repair_over(n) for n in sick):
                 actions.append(self._none(target, "slot_unhealthy", slot=slot))
+            else:
+                # Nothing serves and nothing is on its way: build one. A node that never served
+                # (failed boot) is not worth keeping while its replacement is built.
+                deletes.extend((n, "unhealthy") for n in sick if n.ready_at is None)
+                if self._backing_off(slot):
+                    actions.append(self._none(target, "request_backoff", slot=slot))
+                    continue
+                avoid = {n.location for n in blocked + sick}
+                prefer_not = {n.location for n in leaving} | self._burned_ip_locations(slot)
+                if blocked or sick or leaving:
+                    actions.append(self._create(slot, "replace", avoid=avoid, prefer_not=prefer_not))
+                else:
+                    actions.append(self._create(slot, "fill", prefer_not=prefer_not))
 
         for n in excess:
             if n.state not in (S.RETIRING, S.DRAINING):
-                deletes.append((n, "excess_node"))
+                deletes.append((n, "excess"))
             elif n.state == S.DRAINING:
                 actions.append(self._none(n.name, "draining", node_id=n.id))
         for n in self.fleet_nodes:

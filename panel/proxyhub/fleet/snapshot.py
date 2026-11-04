@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from datetime import datetime
 from decimal import Decimal
 
@@ -11,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from proxyhub.accounts.hetzner_io import LiveOffer
 from proxyhub.db.models import HetznerAccount, Node
 from proxyhub.db.models_fleet import AccountObservation, AccountServer, HetznerOffer
+from proxyhub.db.models_live import NodeOperation
+from proxyhub.db.models_net import ProbeNodeState
 from proxyhub.fleet.lifecycle import NodeState
 from proxyhub.fleet.planner import CREATION_WINDOW, AccountOffer, AccountSnapshot, FleetSnapshot, NodeSnapshot
 from proxyhub.fleet.settings_store import SettingsCorrupt, load_fleet_settings
@@ -51,18 +54,42 @@ async def load_accounts(db: Db) -> tuple[AccountSnapshot, ...]:
     )
 
 
+def _ip_text(value: object) -> str | None:
+    if value is None:
+        return None
+    try:
+        return str(ipaddress.ip_interface(str(value)).ip)
+    except ValueError:
+        return None
+
+
 async def load_nodes(db: Db, now: datetime) -> tuple[NodeSnapshot, ...]:
-    """Live nodes, plus deleted ones that still matter (billed this month, or created within the hour)."""
+    """Live nodes, plus deleted ones that still matter (billed this month, or created within the hour),
+    with the executor's bookkeeping (node_operations) and the latest probe verdict from Iran."""
     month_start, _ = month_bounds(now)
+    nodes = Node.__table__
+    ops = NodeOperation.__table__
+    verdicts = ProbeNodeState.__table__
     # Table-level selects return plain rows on both AsyncConnection (loops) and AsyncSession (API).
     rows = (
         await db.execute(
-            select(Node.__table__).where(
+            select(
+                nodes,
+                ops.c.state_since,
+                ops.c.retire_reason,
+                ops.c.create_attempted_at,
+                ops.c.node_id.label("op_node_id"),
+                verdicts.c.verdict,
+                verdicts.c.verdict_at,
+            )
+            .outerjoin(ops, ops.c.node_id == nodes.c.id)
+            .outerjoin(verdicts, verdicts.c.node_id == nodes.c.id)
+            .where(
                 or_(
-                    Node.state != NodeState.DELETED.value,
-                    Node.deleted_at.is_(None),
-                    Node.deleted_at >= month_start,
-                    Node.created_at >= now - CREATION_WINDOW,
+                    nodes.c.state != NodeState.DELETED.value,
+                    nodes.c.deleted_at.is_(None),
+                    nodes.c.deleted_at >= month_start,
+                    nodes.c.created_at >= now - CREATION_WINDOW,
                 )
             )
         )
@@ -81,6 +108,15 @@ async def load_nodes(db: Db, now: datetime) -> tuple[NodeSnapshot, ...]:
             slot=n.slot,
             is_test=n.is_test,
             ready_at=n.ready_at,
+            verdict=n.verdict,
+            verdict_at=n.verdict_at,
+            state_since=n.state_since,
+            retire_reason=n.retire_reason,
+            ipv4=_ip_text(n.ipv4),
+            # A node without executor bookkeeping is counted as a creation (conservative).
+            create_attempted=(
+                n.op_node_id is None or n.create_attempted_at is not None or n.hetzner_id is not None
+            ),
         )
         for n in rows
     )

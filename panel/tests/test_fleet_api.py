@@ -131,14 +131,14 @@ async def test_csrf_header_required_for_writes(client: AsyncClient) -> None:
 # --- settings and kill switch -----------------------------------------------------------------
 
 
-async def test_settings_defaults_have_no_caps(client: AsyncClient) -> None:
+async def test_settings_defaults_have_no_budget_cap(client: AsyncClient) -> None:
     r = await client.get("/api/settings/fleet")
     assert r.status_code == 200
     assert r.json() == {
         "kill_switch": True,
         "dry_run": True,
         "budget_cap_eur": None,
-        "node_cap_total": None,
+        "node_cap_total": 10,  # D14: 9 slots + 1 spare
         "creations_per_hour_cap": 3,
         "target_slots": 9,
         "allowed_server_types": ["cpx02"],
@@ -189,8 +189,9 @@ async def test_settings_update_validates_and_logs(client: AsyncClient, engine: A
         assert "input" not in str(payload["fields"])
     assert (await client.get("/api/settings/fleet")).json() == saved  # nothing changed
 
+    # The owner turns the live fleet on from the dashboard (the kill switch still has to be off).
     r = await client.put("/api/settings/fleet", json={**body, "dry_run": False})
-    assert r.status_code == 422 and r.json()["error"] == "live_mode_locked"
+    assert r.status_code == 200 and r.json()["dry_run"] is False and r.json()["kill_switch"] is True
 
 
 async def test_kill_switch(client: AsyncClient, engine: AsyncEngine) -> None:
