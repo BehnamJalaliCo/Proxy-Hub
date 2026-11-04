@@ -134,6 +134,9 @@ class FleetSnapshot:
     # Our own servers (label managed-by=proxy-hub) as last seen live, by (account_id, hetzner_id).
     servers: Mapping[tuple[str, int], ServerView] = field(default_factory=dict)
     settings_problem: str | None = None
+    # Reasons found outside the database that block every creation (e.g. agent_domain_not_set: a
+    # node's user data would have nowhere to register, so the executor would refuse each request).
+    blockers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -265,6 +268,7 @@ class _Planner:
         self.global_reasons: list[str] = []
         if snap.settings_problem:
             self.global_reasons.append("settings_invalid")
+        self.global_reasons.extend(r for r in snap.blockers if r not in self.global_reasons)
         if missing:
             self.global_reasons.append("projection_incomplete")
         if not self.s.locations:

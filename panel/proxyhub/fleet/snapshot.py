@@ -17,6 +17,7 @@ from proxyhub.db.models_net import ProbeNodeState
 from proxyhub.fleet.lifecycle import NodeState
 from proxyhub.fleet.planner import CREATION_WINDOW, AccountOffer, AccountSnapshot, FleetSnapshot, NodeSnapshot
 from proxyhub.fleet.settings_store import SettingsCorrupt, load_fleet_settings
+from proxyhub.nodes.settings import get_live_settings
 from proxyhub.safety.budget import Price, month_bounds
 from proxyhub.safety.gates import ServerView
 from proxyhub.settings_schema import FleetSettings
@@ -168,4 +169,5 @@ async def load_snapshot(db: Db, now: datetime) -> FleetSnapshot:
         offers=await load_offers(db),
         servers=await load_servers(db),
         settings_problem=problem,
+        blockers=() if get_live_settings().checked_agent_domain() else ("agent_domain_not_set",),
     )

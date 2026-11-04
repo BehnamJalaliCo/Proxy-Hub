@@ -56,6 +56,7 @@ CREATE_BLOCKS: dict[str, timedelta] = {
     "no_live_price": timedelta(minutes=30),
     "no_other_location": timedelta(minutes=30),
     "spare_in_use": timedelta(hours=1),
+    "agent_domain_not_set": timedelta(minutes=5),
 }
 # can_delete refusals the code cannot fix (server_not_observed and the kill switch clear by themselves).
 DELETE_BLOCKS = frozenset(
@@ -125,6 +126,10 @@ def _create_text(code: str, slots: list[int], plan: FleetPlan, snap: FleetSnapsh
         ),
         "no_other_location": (
             "location دیگری برای سرور جایگزین نمانده است. location دیگری در «تنظیمات» اضافه کنید."
+        ),
+        "agent_domain_not_set": (
+            "دامنه‌ی سایت عامل‌ها (AGENT_DOMAIN) روی سرور پنل تنظیم نشده است؛ بی آن هیچ node تازه‌ای "
+            "نمیتواند در پنل ثبت شود. پرامپت استقرار پنل را دوباره اجرا کنید."
         ),
         "spare_in_use": (
             "چند جایگاه هم‌زمان سرور جایگزین میخواهند و جای خالی (سرور دهم) بیش از یک ساعت است در کار است. "
