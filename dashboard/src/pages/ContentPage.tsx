@@ -107,7 +107,12 @@ function TgNodes({ nodes }: { nodes: TgNode[] }) {
   return (
     <>
       {nodes.map((n, i) => {
-        if (n.type === "text") return <Fragment key={i}>{n.text}</Fragment>;
+        if (n.type === "text") {
+          // A block (quote, pre) already ends its line, as in Telegram: one newline after it is not a new line.
+          const prev = nodes[i - 1];
+          const afterBlock = prev?.type === "el" && (prev.tag === "blockquote" || prev.tag === "pre");
+          return <Fragment key={i}>{afterBlock ? n.text.replace(/^\n/, "") : n.text}</Fragment>;
+        }
         const inner = <TgNodes nodes={n.children} />;
         switch (n.tag) {
           case "b":
@@ -162,7 +167,8 @@ function TelegramBubble({ html, channel, at }: { html: string; channel: string; 
         <div dir="ltr" className="mb-1.5 text-right text-[0.82rem] font-bold text-brand">
           {channel}
         </div>
-        <div className="text-[0.92rem] leading-7 break-words whitespace-pre-wrap text-fg">
+        {/* Each line takes the direction of its first letter, as Telegram draws a post. */}
+        <div className="text-start text-[0.92rem] leading-7 break-words whitespace-pre-wrap text-fg [unicode-bidi:plaintext]">
           <TgNodes nodes={nodes} />
         </div>
         <div className="mt-1 text-left text-[0.7rem] text-fg-faint">{at ? clock(at) : "پیش‌نمایش"}</div>
@@ -226,7 +232,7 @@ function StatusCard({ s }: { s: PostsStatus }) {
       <CardHeader
         icon={<Megaphone className="size-5" />}
         title="انتشار خودکار"
-        subtitle="هر پست: محتوای بالای پست، پروکسی‌های زنده زیر آن و اسم کانال در آخر. پست‌ها هرگز حذف نمیشوند؛ وقتی پروکسی‌شان از کار افتاد ویرایش میشوند."
+        subtitle="محتوا، پروکسی‌های زنده و اسم کانال؛ پست‌ها حذف نمیشوند، ویرایش میشوند."
         action={
           s.target === "main" ? (
             <Badge tone="success" dot pulse>
@@ -256,7 +262,7 @@ function StatusCard({ s }: { s: PostsStatus }) {
           <Stat
             label="پروکسی و کانفیگ زنده"
             value={toFaDigits(liveLinks)}
-            hint={`MTProto ${toFaDigits(s.links.mtproto)} · ریلیتی ${toFaDigits(s.links.reality)}`}
+            hint={`MTProto ${toFaDigits(s.links.mtproto)}، ریلیتی ${toFaDigits(s.links.reality)}`}
             tone={liveLinks > 0 ? "success" : "warning"}
           />
         </div>
@@ -359,7 +365,7 @@ function SettingsForm({ saved, s }: { saved: PostingSettings; s: PostsStatus }) 
         />
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-1">
         <NumberField id="pp-day" label="پست در روز" hint="۰ تا ۴۸؛ پیش‌فرض ۱۰، پخش در ساعت‌های پست." suffix="پست" value={draft.posts_per_day} error={errors.posts_per_day} onChange={(v) => set({ posts_per_day: v })} />
         <div className="flex flex-col gap-1.5">
           <span className="text-sm font-semibold text-fg">ساعت‌های پست (تهران)</span>
@@ -591,7 +597,7 @@ function RecentCard() {
                     <span className="text-xs text-fg-muted" title={formatJalali(post.created_at)}>
                       {formatRelative(post.created_at, now)}
                     </span>
-                    {post.edits > 0 ? <span className="text-xs text-fg-muted">· {toFaDigits(post.edits)} ویرایش</span> : null}
+                    {post.edits > 0 ? <Badge tone="warning">{toFaDigits(post.edits)} بار ویرایش شد</Badge> : null}
                     {post.edits_stopped ? <Badge tone="danger">ویرایش متوقف شد</Badge> : null}
                     {post.message_url ? (
                       <a href={post.message_url} target="_blank" rel="noopener noreferrer" className="ms-auto inline-flex items-center gap-1 text-xs font-bold text-brand hover:underline">

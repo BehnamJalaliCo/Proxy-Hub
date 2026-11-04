@@ -285,10 +285,14 @@ class _Builder(HTMLParser):
 LinkKind = Literal["mtproto", "reality"]
 LinkStatus = Literal["active", "expired", "full", "burned"]
 
-MTPROTO_HEADER: Final = "📡 <b>پروکسی تلگرام</b> · روی هر کدام بزنید"
-REALITY_HEADER: Final = "🔐 <b>کانفیگ ریلیتی (VLESS)</b> · برای کپی روی متن بزنید"
+MTPROTO_HEADER: Final = "📡 <b>پروکسی تلگرام</b> — روی هر کدام بزنید"
+REALITY_HEADER: Final = "🔐 <b>کانفیگ ریلیتی (VLESS)</b> — برای کپی روی متن بزنید"
 ALL_DEAD_LINE: Final = "♻️ <i>کانفیگ‌های این پست دیگر کار نمیکنند؛ کانفیگ تازه در پست‌های جدید کانال است.</i>"
 STATUS_MARKS: Final = {"expired": "⌛️", "full": "🔴", "burned": "🚫"}
+# Left-to-right mark before the @name: inside a right-to-left post the "@" stays in front of the
+# name ("@ipoxxo", never "ipoxxo@") whatever direction a client gives the line. A middle dot is
+# never used as a separator: next to Persian digits it reads as a zero ("۱ ·" looks like "۱۰").
+LRM: Final = "\u200e"
 MAX_LABEL_CHARS: Final = 32
 MAX_TITLE_CHARS: Final = 120
 MAX_VLESS_CHARS: Final = 2048
@@ -422,11 +426,11 @@ def _reality_block(links: Sequence[PostLink], texts: StatusTexts) -> str:
             assert link.url is not None
             head = f"<b>{_label(link)}</b>"
             if link.expires_at is not None:
-                head += f" · ⏳ تا ساعت {_tehran_clock(link.expires_at)}"
+                head += f" — ⏳ اعتبار تا ساعت {_tehran_clock(link.expires_at)}"
             lines.append(f"{head}\n<code>{html.escape(link.url, quote=False)}</code>")
         else:
             status = link.status if link.status != "active" else "burned"
-            lines.append(f"<s>{_label(link)}</s> · {html.escape(texts.for_status(status), quote=False)}")
+            lines.append(f"<s>{_label(link)}</s> — {html.escape(texts.for_status(status), quote=False)}")
     return REALITY_HEADER + "\n" + "\n\n".join(lines)
 
 
@@ -441,7 +445,7 @@ def post_tail(links: Sequence[PostLink], channel_username: str, texts: StatusTex
         parts.append(_reality_block(reality, texts))
     if links and not any(x.live for x in links):
         parts.append(ALL_DEAD_LINE)
-    parts.append(TAG_PREFIX + html.escape(channel_tag(channel_username), quote=False))
+    parts.append(TAG_PREFIX + LRM + html.escape(channel_tag(channel_username), quote=False))
     return "\n\n".join(parts)
 
 

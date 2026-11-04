@@ -258,7 +258,7 @@ async def test_preview_status_and_recent(
     preview = (await client.get("/api/posts/preview")).json()
     assert preview["blocked"] is None and preview["target"] == "test"
     assert preview["links"] == {"mtproto": 2, "reality": 2} and preview["content_item"]["recycled"] is False
-    assert node_secret(nodes[0]) in preview["text"] and preview["text"].endswith("🔗 @ipoxxo")
+    assert node_secret(nodes[0]) in preview["text"] and preview["text"].endswith("🔗 \u200e@ipoxxo")
     assert 0 < preview["chars"] <= 4096
     status = await client.get("/api/posts/status")
     s = status.json()

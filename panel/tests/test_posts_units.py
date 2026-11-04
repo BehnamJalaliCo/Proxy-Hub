@@ -67,13 +67,13 @@ def test_post_has_content_links_and_tag_in_that_order() -> None:
         < post.index("📡 <b>پروکسی تلگرام</b>")
         < post.index("🔐 <b>کانفیگ ریلیتی")
     )
-    assert post.endswith("\n\n🔗 @ipoxxo")
+    assert post.endswith("\n\n🔗 \u200e@ipoxxo")
     assert (
         f'<a href="https://t.me/proxy?server=slot1.example.com&amp;port=8443&amp;secret={sec}">پروکسی 1</a>'
         in post
     )
     assert " • " in post
-    assert "<b>ریلیتی 1</b> · ⏳ تا ساعت ۱۸:۳۰\n<code>vless://" in post
+    assert "<b>ریلیتی 1</b> — ⏳ اعتبار تا ساعت ۱۸:۳۰\n<code>vless://" in post
     assert ALL_DEAD_LINE not in post
     assert fits(post)
 
@@ -100,9 +100,9 @@ def test_dead_links_lose_their_link_and_get_marks() -> None:
     assert "<s>پروکسی 3</s> ⌛️" in post
     assert "<s>پروکسی 4</s> 🔴" in post
     assert post.count("<a href=") == 1 and sec in post
-    assert "<s>ریلیتی 1</s> · ⌛️ زمان این کانفیگ تمام شد" in post
-    assert "<s>ریلیتی 2</s> · 🔴 ظرفیت این کانفیگ پر شد" in post
-    assert "<s>ریلیتی 3</s> · 🚫 این کانفیگ از دسترس خارج شد" in post
+    assert "<s>ریلیتی 1</s> — ⌛️ زمان این کانفیگ تمام شد" in post
+    assert "<s>ریلیتی 2</s> — 🔴 ظرفیت این کانفیگ پر شد" in post
+    assert "<s>ریلیتی 3</s> — 🚫 این کانفیگ از دسترس خارج شد" in post
     assert "<code>" not in post and "vless://" not in post
     assert ALL_DEAD_LINE not in post  # one link still works
 
@@ -114,7 +114,7 @@ def test_all_dead_gets_the_closing_line_and_owner_texts() -> None:
     post = render_post(CONTENT, items, "@ipoxxo", texts).text
     assert ALL_DEAD_LINE in post
     assert "⌛️ تمام شد &lt;b&gt;" in post  # owner text is escaped
-    assert post.index(ALL_DEAD_LINE) < post.index("🔗 @ipoxxo")
+    assert post.index(ALL_DEAD_LINE) < post.index("🔗 \u200e@ipoxxo")
 
 
 def test_active_link_without_url_is_never_a_link() -> None:
@@ -134,7 +134,7 @@ def test_content_is_shortened_but_links_and_tag_never() -> None:
     post = render_post(compose_content("عنوان", long_body[:2900]), many, "@ipoxxo")
     assert fits(post.text)
     assert post.text.count("<a href=") == 12 and post.text.count("<code>") == 3
-    assert post.text.endswith("🔗 @ipoxxo")
+    assert post.text.endswith("🔗 \u200e@ipoxxo")
     assert post.content_html.endswith("…</blockquote>")
     assert len(post.text) <= MAX_MESSAGE_CHARS and utf16_len(visible_text(post.text)) <= MAX_MESSAGE_CHARS
 
@@ -174,7 +174,7 @@ def test_body_keeps_only_body_tags_and_never_nests_blockquotes() -> None:
 def test_any_content_renders_inside_the_limits(title: str, body: str) -> None:
     post = render_post(compose_content(title, body) if title.strip() or body.strip() else None,
                        [mt(1), rl(1)], "@ipoxxo").text  # fmt: skip
-    assert fits(post) and post.endswith("🔗 @ipoxxo")
+    assert fits(post) and post.endswith("🔗 \u200e@ipoxxo")
 
 
 # --- link checks ---------------------------------------------------------------------------------

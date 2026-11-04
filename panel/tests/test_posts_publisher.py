@@ -156,7 +156,7 @@ async def test_due_post_carries_content_links_and_tag(engine: AsyncEngine, vault
     for i, node in enumerate(nodes, start=1):
         assert f"server=slot{i}.proxyhub-posts.example&amp;port=8443&amp;secret={node_secret(node)}" in body
         assert f"vless://{node_vless_id(node)}@slot{i}.proxyhub-posts.example:443" in body
-    assert body.endswith("🔗 @ipoxxo")
+    assert body.endswith("🔗 \u200e@ipoxxo")
     [post] = await rows(engine, "SELECT * FROM posts")
     assert (post.role, post.plan_slot, post.outbox_id, post.poster) == ("test", 1, job.id, "bot")
     assert post.content_html and post.channel_tag == "@ipoxxo" and post.content_item_id == first.id
@@ -323,7 +323,7 @@ async def test_burned_node_is_marked_by_an_edit_and_never_comes_back(
     body = edit.payload["text"]
     assert "<s>پروکسی ۲</s> 🚫" in body and node_secret(nodes[1]) not in body
     assert node_secret(nodes[0]) in body and node_secret(nodes[2]) in body
-    assert "<s>ریلیتی ۲</s> · 🚫 این کانفیگ از دسترس خارج شد" in body and node_vless_id(nodes[1]) not in body
+    assert "<s>ریلیتی ۲</s> — 🚫 این کانفیگ از دسترس خارج شد" in body and node_vless_id(nodes[1]) not in body
     statuses = await rows(
         engine, "SELECT label, status FROM post_links WHERE post_id = :p ORDER BY position", p=post_id
     )
@@ -397,8 +397,8 @@ async def test_expired_and_gone_links(engine: AsyncEngine, vault: Vault) -> None
     await set_node(engine, nodes[1], slot=None)
     assert await refresh(engine, now + timedelta(minutes=1)) == 1
     body = await edit_text(engine)
-    assert "<s>ریلیتی ۱</s> · ⌛️ زمان این کانفیگ تمام شد" in body
-    assert "<s>پروکسی ۲</s> 🚫" in body and "<s>ریلیتی ۲</s> · 🚫" in body
+    assert "<s>ریلیتی ۱</s> — ⌛️ زمان این کانفیگ تمام شد" in body
+    assert "<s>پروکسی ۲</s> 🚫" in body and "<s>ریلیتی ۲</s> — 🚫" in body
     assert node_secret(nodes[0]) in body  # node 1's MTProto link still works
     assert ALL_DEAD_LINE not in body
     carried = await rows(engine, "SELECT label, status FROM post_links WHERE post_id = :p", p=post_id)
@@ -415,7 +415,7 @@ async def test_everything_dead_gets_the_closing_line(engine: AsyncEngine, vault:
     assert await refresh(engine, now + timedelta(minutes=1)) == 1
     body = await edit_text(engine)
     assert ALL_DEAD_LINE in body and "<a href" not in body and "<code>" not in body
-    assert body.endswith("🔗 @ipoxxo")
+    assert body.endswith("🔗 \u200e@ipoxxo")
 
 
 async def test_failed_edits_back_off_and_stop_with_one_alert(engine: AsyncEngine, vault: Vault) -> None:
