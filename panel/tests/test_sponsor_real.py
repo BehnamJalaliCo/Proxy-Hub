@@ -11,6 +11,13 @@ Environment (skipped without it, tests/conftest.py):
 
 Every message goes through the real pacing (5 s gap, 30 an hour) and is written to actions_log;
 the Telethon loggers run at DEBUG and no secret may reach a log line.
+
+Run these ONLY with ``PROXYHUB_DATABASE_URL`` pointing at a throwaway database, never the panel's
+own: the session fixture downgrades the schema to base, and ``clean()`` deletes the registrations,
+campaigns, outbox, fleet settings (the kill switch reads OFF afterwards) and operator-account rows.
+The full registration run creates an entry in @MTProxybot that the panel's own database does not
+know about; point it at a throwaway proxy (a test node removed afterwards), never at a proxy the
+panel will register itself, or the bot holds a duplicate.
 """
 
 from __future__ import annotations

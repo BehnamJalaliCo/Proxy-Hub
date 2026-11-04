@@ -11,6 +11,13 @@ This module only describes that shape (:class:`SponsorProvider`, which the modul
 and holds :data:`MTPROTO_PROVIDER`, which the integrator points at that module. While it is None the
 sponsor reconciler registers nothing (it still keeps campaign states up to date).
 
+"Without a registration" (team mtproto's ``_registered_names``): a proxy is no longer listed once
+its Telemt user has a tag or a linked registration, or a ``mtproxy_registrations`` row in state
+``pending`` or ``registered`` names its user or key. This module writes that row only when
+@MTProxybot gave the tag (proxyhub/sponsor/service.py), so a proxy stays listed, with the secret
+the conversation needs, for every pass until it is registered; after that it is never listed
+again, and the module keeps what it needs (address, key, tag) itself.
+
 * ``key``: a stable id, ``"mtproto:<node_id>:<user>"``.
 * ``host``: the slot's DNS name, or the node's IPv4 when there is no usable domain.
 * ``secret_hex``: 32 lower-case hex characters, no ``ee``/``dd`` prefix. A secret: it is sent to
