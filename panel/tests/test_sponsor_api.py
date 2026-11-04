@@ -131,7 +131,7 @@ async def test_a_fresh_panel_shows_the_defaults(client: AsyncClient) -> None:
     r = await client.get(BASE)
     assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
     body = r.json()
-    assert body["settings"] == {"default_channel": "ipoxxo", "lead_minutes": 60}
+    assert body["settings"] == {"default_channel": "ipoxxo", "lead_minutes": 120}
     assert body["kill_switch"] is True and body["provider_ready"] is (
         provider_module.MTPROTO_PROVIDER is not None
     )
@@ -178,7 +178,7 @@ async def test_campaign_create_edit_cancel_and_delete(client: AsyncClient, engin
     )
     assert c["customer"] == "فروشگاه نمونه" and c["effective"] is False
     assert datetime.fromisoformat(c["switch_at"]) == datetime.fromisoformat(c["starts_at"]) - timedelta(
-        hours=1
+        hours=2
     )
     # Another campaign in the same window is refused; back to back is fine.
     assert_error(

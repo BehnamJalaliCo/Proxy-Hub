@@ -25,7 +25,9 @@ FINISHED: Final = "finished"
 CANCELLED: Final = "cancelled"
 OPEN_STATES: Final = frozenset({SCHEDULED, ACTIVE})
 MAX_DURATION: Final = timedelta(days=366)
-DEFAULT_LEAD: Final = timedelta(minutes=60)
+# Switching one proxy is 4 messages to @MTProxybot at most 30 an hour: 9 proxies take about 75
+# minutes, so the switch starts 2 hours before a campaign (owner-editable on the sponsor page).
+DEFAULT_LEAD: Final = timedelta(minutes=120)
 
 
 @dataclass(frozen=True)
