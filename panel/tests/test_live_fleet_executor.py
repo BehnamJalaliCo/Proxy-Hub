@@ -112,6 +112,25 @@ async def test_a_slot_request_is_closed_when_the_fleet_stops_being_live(
     assert world.no_hetzner.calls == 0
 
 
+async def test_the_code_lock_stops_the_executor_too(
+    world: LiveWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # FLEET_LIVE_ENABLED = False is the last-resort lock: a slot request the fleet loop already wrote
+    # is closed by the executor, not created, even while the owner's settings say live.
+    from proxyhub.reconcilers import fleet as fleet_reconciler
+
+    await world.settings(live_settings(target_slots=1))
+    await run_fleet(world)
+    (node_id,) = [r.id for r in await world.rows("SELECT id FROM nodes WHERE slot = 1")]
+    monkeypatch.setattr(fleet_reconciler, "FLEET_LIVE_ENABLED", False)
+    await world.executor().run_once(world.engine)
+    node = await world.node(node_id)
+    assert node["state"] == "deleted" and node["create_attempts"] == 0
+    refused = [d["reasons"] for k, d in await world.events(node_id) if k == "create_refused"]
+    assert refused and "fleet_live_disabled" in refused[0]
+    assert world.no_hetzner.calls == 0
+
+
 # --- burned IPs ------------------------------------------------------------------------------------
 
 

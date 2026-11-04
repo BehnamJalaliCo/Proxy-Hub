@@ -61,6 +61,7 @@ from proxyhub.nodes.service import (
 from proxyhub.nodes.settings import get_live_settings
 from proxyhub.nodes.transitions import ensure_operation, event, lock_node, transition
 from proxyhub.pki.ca import build_ca_certificate, load_ca_key, to_pem
+from proxyhub.reconcilers import fleet as fleet_reconciler
 from proxyhub.reconcilers.account_guard import AccountRef, apply_failure, apply_observation
 from proxyhub.safety.gates import (
     MANAGED_LABEL,
@@ -278,7 +279,8 @@ class NodeExecutor:
     async def _fleet_blocked(self, s: AsyncSession) -> list[str]:
         """Why the fleet may not create or delete a slot server right now (empty: it may)."""
         settings, problems = await load_settings(s)
-        return [*problems, *(["fleet_dry_run"] if settings.dry_run else [])]
+        locked = [] if fleet_reconciler.FLEET_LIVE_ENABLED else ["fleet_live_disabled"]  # the code lock
+        return [*problems, *locked, *(["fleet_dry_run"] if settings.dry_run else [])]
 
     async def _requested(self, sm: async_sessionmaker[AsyncSession], node: NodeRef) -> None:
         now = self._clock()
@@ -745,6 +747,8 @@ class NodeExecutor:
             blocked = [*problems, *(["kill_switch_on"] if settings.kill_switch else [])]
             if not node.is_test and settings.dry_run:  # a slot server is deleted only by a live fleet
                 blocked.append("fleet_dry_run")
+            if not node.is_test and not fleet_reconciler.FLEET_LIVE_ENABLED:  # nor with the code lock shut
+                blocked.append("fleet_live_disabled")
             row = await s.get(Node, node.id)
             op = await self._op(s, row) if row is not None else None
             attempted = op.create_attempted_at if op is not None else None

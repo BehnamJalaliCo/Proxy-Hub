@@ -255,15 +255,24 @@ def test_only_the_executor_reaches_server_mutations_and_permits() -> None:
 
 
 def test_executor_checks_the_owners_dry_run_for_slot_nodes() -> None:
-    """The executor reads the owner's settings itself (fleet_dry_run) before any slot-node create
-    or delete; it never consults (or could flip) the build-time switch of the fleet loop."""
+    """The executor reads the owner's settings itself (fleet_dry_run) and the fleet loop's code lock
+    (fleet_live_disabled) before any slot-node create or delete. It only reads that lock: nothing
+    in the executor can assign it."""
     assert fleet_loop.FLEET_LIVE_ENABLED is True
     source = (PANEL / "nodes" / "executor.py").read_text()
-    assert source.count('"fleet_dry_run"') == 2  # once for creations, once for deletions
-    assert "_fleet_blocked(s)" in source
-    used = {n.id if isinstance(n, ast.Name) else n.attr for n in ast.walk(ast.parse(source))
-            if isinstance(n, ast.Name | ast.Attribute)}  # fmt: skip
-    assert "FLEET_LIVE_ENABLED" not in used
+    assert source.count('"fleet_dry_run"') == 2 and source.count('"fleet_live_disabled"') == 2
+    assert source.count("_fleet_blocked(s)") == 2  # once for creations, once for deletions
+    tree = ast.parse(source)
+    assigned = {
+        t.attr if isinstance(t, ast.Attribute) else getattr(t, "id", None)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign | ast.AugAssign | ast.AnnAssign)
+        for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
+    }
+    assert "FLEET_LIVE_ENABLED" not in assigned
+    assert "setattr" not in {
+        n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
     assert not hasattr(ex, "FleetNotLive")
 
 

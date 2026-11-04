@@ -34,6 +34,7 @@ export const FLEET_REASON: Record<string, string> = {
   verdict_blocked: "هر دو منبع سنجش: از ایران بسته است",
   // the executor and the nodes API
   fleet_dry_run: "ناوگان در حالت خشک است؛ سرور جایگاه‌ها نه ساخته میشود نه حذف",
+  fleet_live_disabled: "حالت زنده‌ی ناوگان در کد بسته است؛ سرور جایگاه‌ها نه ساخته میشود نه حذف",
   fleet_managed: "node ناوگان را خود ناوگان جایگزین یا بازنشسته میکند",
   // owner alerts (fleet_alerts.code)
   delete_blocked: "قفل حذف، حذف یک سرور را رد میکند",
