@@ -6,8 +6,9 @@
   table; the owner retires an item instead.
 * ``posts``: one row per automatic post (its outbox job, the content as posted, the plan slot).
   Posts are never deleted (CLAUDE.md rule 6).
-* ``post_links``: which links a post carries and their status in that post. No link URL is stored
-  (it holds a proxy secret or a VLESS id; rule 3).
+* ``post_links``: which links a post carries and their status in that post, and since when a
+  provider stopped listing one (``missing_since``). No link URL is stored (it holds a proxy secret
+  or a VLESS id; rule 3).
 
 Revision ID: 0014_posts
 Revises: 0010_domains
@@ -374,6 +375,7 @@ def upgrade() -> None:
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("status", sa.String(length=10), nullable=False),
         sa.Column("status_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("missing_since", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint("kind IN ('mtproto', 'reality')", name=op.f("ck_post_links_kind")),
         sa.CheckConstraint("position >= 0", name=op.f("ck_post_links_position")),
         sa.CheckConstraint(

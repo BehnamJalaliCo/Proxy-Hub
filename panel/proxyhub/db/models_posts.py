@@ -10,7 +10,10 @@
   POST. The link URL itself (it holds the proxy secret or the VLESS id) is NOT stored here: the
   outbox payload already holds the posted text, and an edit takes the current URL from its
   provider (proxyhub/links/registry.py). A status other than ``active`` never goes back to
-  ``active`` in a post.
+  ``active`` in a post. A status only changes when a provider REPORTS it (or the link's own expiry
+  passed): a link a provider merely stopped listing is not dead. ``missing_since`` records when it
+  was first missing; for a short while the post is left alone, after that it shows the link as
+  paused (not dead) until the provider lists it again.
 
 Nothing here records anything about the people who read the channel or use a proxy (rule 7).
 """
@@ -130,3 +133,4 @@ class PostLink(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(10), nullable=False)
     status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    missing_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

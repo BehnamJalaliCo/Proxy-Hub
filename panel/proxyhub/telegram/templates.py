@@ -19,8 +19,11 @@ units after entity parsing), so it always fits one message.
 body in a blockquote, the MTProto links as Persian link words, the Reality configs as copyable
 ``<code>`` lines, then the channel tag. A link that is no longer active keeps its label with a
 status mark and LOSES its link or config (docs/04: nobody should tap a dead config); when every
-link of a post is dead a closing line points to the newer posts. The same inputs always give the
-same text, so a status edit is queued only when something really changed.
+link of a post is dead a closing line points to the newer posts. A ``paused`` link (its provider has
+not listed it for a while, see proxyhub/posts/publisher.py) keeps its label, without a strike, with
+a pause mark and without its link; it is not dead and gets its link back when it is listed again.
+The same inputs always give the same text, so a status edit is queued only when something really
+changed.
 """
 
 from __future__ import annotations
@@ -284,11 +287,15 @@ class _Builder(HTMLParser):
 
 LinkKind = Literal["mtproto", "reality"]
 LinkStatus = Literal["active", "expired", "full", "burned"]
+# How a post shows a link: a link status, or "paused" (shown only; never stored as a status).
+ShownStatus = Literal["active", "paused", "expired", "full", "burned"]
 
 MTPROTO_HEADER: Final = "📡 <b>پروکسی تلگرام</b> — روی هر کدام بزنید"
 REALITY_HEADER: Final = "🔐 <b>کانفیگ ریلیتی (VLESS)</b> — برای کپی روی متن بزنید"
 ALL_DEAD_LINE: Final = "♻️ <i>کانفیگ‌های این پست دیگر کار نمیکنند؛ کانفیگ تازه در پست‌های جدید کانال است.</i>"
 STATUS_MARKS: Final = {"expired": "⌛️", "full": "🔴", "burned": "🚫"}
+PAUSED_MARK: Final = "⏸"
+PAUSED_LINE: Final = "⏸ فعلاً در دسترس نیست"
 # Left-to-right mark before the @name: inside a right-to-left post the "@" stays in front of the
 # name ("@ipoxxo", never "ipoxxo@") whatever direction a client gives the line. A middle dot is
 # never used as a separator: next to Persian digits it reads as a zero ("۱ ·" looks like "۱۰").
@@ -329,13 +336,17 @@ class PostLink:
 
     kind: LinkKind
     label: str
-    status: LinkStatus
+    status: ShownStatus
     url: str | None = None
     expires_at: datetime | None = None
 
     @property
     def live(self) -> bool:
         return self.status == "active" and self.url is not None
+
+    @property
+    def dead(self) -> bool:
+        return not self.live and self.status != "paused"
 
 
 @dataclass(frozen=True)
@@ -413,6 +424,8 @@ def _mtproto_block(links: Sequence[PostLink]) -> str:
         if link.live:
             assert link.url is not None
             words.append(f'<a href="{html.escape(link.url, quote=True)}">{_label(link)}</a>')
+        elif link.status == "paused":
+            words.append(f"{_label(link)} {PAUSED_MARK}")
         else:
             mark = STATUS_MARKS.get(link.status, STATUS_MARKS["burned"])
             words.append(f"<s>{_label(link)}</s> {mark}")
@@ -428,6 +441,8 @@ def _reality_block(links: Sequence[PostLink], texts: StatusTexts) -> str:
             if link.expires_at is not None:
                 head += f" — ⏳ اعتبار تا ساعت {_tehran_clock(link.expires_at)}"
             lines.append(f"{head}\n<code>{html.escape(link.url, quote=False)}</code>")
+        elif link.status == "paused":
+            lines.append(f"<b>{_label(link)}</b> — {PAUSED_LINE}")
         else:
             status = link.status if link.status != "active" else "burned"
             lines.append(f"<s>{_label(link)}</s> — {html.escape(texts.for_status(status), quote=False)}")
@@ -443,7 +458,7 @@ def post_tail(links: Sequence[PostLink], channel_username: str, texts: StatusTex
         parts.append(_mtproto_block(mtproto))
     if reality:
         parts.append(_reality_block(reality, texts))
-    if links and not any(x.live for x in links):
+    if links and all(x.dead for x in links):
         parts.append(ALL_DEAD_LINE)
     parts.append(TAG_PREFIX + LRM + html.escape(channel_tag(channel_username), quote=False))
     return "\n\n".join(parts)

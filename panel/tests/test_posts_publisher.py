@@ -28,6 +28,7 @@ from test_posts_support import (
     mtproto_provider,
     node_secret,
     node_vless_id,
+    reality_provider,
     rows,
     set_active_zone,
     set_node,
@@ -42,7 +43,7 @@ from proxyhub.posts.poster import BotPoster
 from proxyhub.reconcilers.publisher import PublisherReconciler
 from proxyhub.telegram import store
 from proxyhub.telegram.schedule import TEHRAN, QuietWindow
-from proxyhub.telegram.templates import ALL_DEAD_LINE
+from proxyhub.telegram.templates import ALL_DEAD_LINE, PAUSED_LINE
 from proxyhub.vault import Vault
 
 pytestmark = pytest.mark.db
@@ -386,6 +387,13 @@ async def test_min_gap_between_two_edits_of_a_post(engine: AsyncEngine, vault: V
     assert await refresh(engine, now + timedelta(minutes=12)) == 1
 
 
+async def carried_links(engine: AsyncEngine, post_id: int) -> dict[str, Any]:
+    got = await rows(
+        engine, "SELECT label, status, missing_since FROM post_links WHERE post_id = :p", p=post_id
+    )
+    return {r.label: (r.status, r.missing_since) for r in got}
+
+
 async def test_expired_and_gone_links(engine: AsyncEngine, vault: Vault) -> None:
     nodes = await ready_fleet(engine, 2)
     await setup_telegram(engine, vault)
@@ -393,17 +401,90 @@ async def test_expired_and_gone_links(engine: AsyncEngine, vault: Vault) -> None
     post_id, _ = await posted(engine, vault, now)
     # The provider now reports node 1's Reality config as expired (its 24 h are over).
     await set_node(engine, nodes[0], ready_at=datetime.now(UTC) - timedelta(hours=25))
-    # Node 2 is gone from every provider (slot freed): its links count as burned.
+    # Node 2 is no longer listed by any provider (slot freed): unknown, NOT dead.
     await set_node(engine, nodes[1], slot=None)
-    assert await refresh(engine, now + timedelta(minutes=1)) == 1
+    t = now + timedelta(minutes=1)
+    assert await refresh(engine, t) == 0  # missing for a moment only: the post waits
+    assert await carried_links(engine, post_id) == {
+        "پروکسی ۱": ("active", None),
+        "ریلیتی ۱": ("active", None),
+        "پروکسی ۲": ("active", t),
+        "ریلیتی ۲": ("active", t),
+    }
+    assert await refresh(engine, t + publisher.MISSING_GRACE - timedelta(seconds=1)) == 0
+    # Missing for the whole grace: the post shows them as paused (not dead) with its other changes.
+    assert await refresh(engine, t + publisher.MISSING_GRACE) == 1
     body = await edit_text(engine)
     assert "<s>ریلیتی ۱</s> — ⌛️ زمان این کانفیگ تمام شد" in body
-    assert "<s>پروکسی ۲</s> 🚫" in body and "<s>ریلیتی ۲</s> — 🚫" in body
+    assert "پروکسی ۲ ⏸" in body and f"<b>ریلیتی ۲</b> — {PAUSED_LINE}" in body
+    assert "<s>پروکسی ۲</s>" not in body and "<s>ریلیتی ۲</s>" not in body
+    assert node_secret(nodes[1]) not in body and node_vless_id(nodes[1]) not in body
     assert node_secret(nodes[0]) in body  # node 1's MTProto link still works
     assert ALL_DEAD_LINE not in body
-    carried = await rows(engine, "SELECT label, status FROM post_links WHERE post_id = :p", p=post_id)
-    got = {r.label: r.status for r in carried}
-    assert got == {"پروکسی ۱": "active", "ریلیتی ۱": "expired", "پروکسی ۲": "burned", "ریلیتی ۲": "burned"}
+    got = {label: status for label, (status, _) in (await carried_links(engine, post_id)).items()}
+    assert got == {"پروکسی ۱": "active", "ریلیتی ۱": "expired", "پروکسی ۲": "active", "ریلیتی ۲": "active"}
+    [action] = await rows(
+        engine, "SELECT reasons::text AS c FROM actions_log WHERE action = 'posts.edit_queued'"
+    )
+    assert "پروکسی ۲" in action.c and node_secret(nodes[1]) not in action.c
+    assert '"link_status"' in action.c and '"link_paused"' in action.c
+    # Node 2 is listed again: its links come back live in the post; the expired config stays expired.
+    await deliver(engine, (await jobs(engine, "edit_post"))[-1].id, message_id=0)
+    await set_node(engine, nodes[1], slot=2)
+    assert await refresh(engine, t + publisher.MISSING_GRACE + publisher.EDIT_MIN_GAP) == 1
+    body = await edit_text(engine)
+    assert node_secret(nodes[1]) in body and node_vless_id(nodes[1]) in body and "⏸" not in body
+    assert "<s>ریلیتی ۱</s> — ⌛️" in body
+    assert all(since is None for _, since in (await carried_links(engine, post_id)).values())
+
+
+async def reality_unconfirmed(db: AsyncConnection) -> list[ProxyLink]:
+    """The Reality provider while no node of a config's scope confirms it (Xray restarting, an
+    apply error, a report with up=false): an active config is left out (proxyhub/reality/links.py)."""
+    return [x for x in await reality_provider(db) if x.status != "active"]
+
+
+async def test_a_link_missing_for_one_round_is_not_marked(engine: AsyncEngine, vault: Vault) -> None:
+    nodes = await ready_fleet(engine, 2)
+    await setup_telegram(engine, vault)
+    now = slot_time(2)
+    post_id, _ = await posted(engine, vault, now)
+    assert await refresh(engine, now + timedelta(minutes=1), [mtproto_provider, reality_unconfirmed]) == 0
+    assert await refresh(engine, now + timedelta(minutes=2)) == 0  # listed again: nothing to do
+    assert await jobs(engine, "edit_post") == []
+    assert {v for v in (await carried_links(engine, post_id)).values()} == {("active", None)}
+    # Much later the post is still edited normally, with node 2's config live in it.
+    await set_node(engine, nodes[0], state="burned")
+    assert await refresh(engine, now + timedelta(hours=2)) == 1
+    body = await edit_text(engine)
+    assert "<s>ریلیتی ۱</s> — 🚫" in body and node_vless_id(nodes[1]) in body
+    assert "<b>ریلیتی ۲</b> — ⏳ اعتبار تا" in body
+
+
+async def test_a_missing_config_past_its_own_expiry_is_marked_expired(
+    engine: AsyncEngine, vault: Vault
+) -> None:
+    nodes = await ready_fleet(engine, 1)
+    await setup_telegram(engine, vault)
+    now = slot_time(2)
+    post_id, _ = await posted(engine, vault, now)
+    [config] = await rows(engine, "SELECT expires_at FROM post_links WHERE kind = 'reality'")
+    # Its provider no longer lists the config at all, and the config's own end has passed.
+    assert await refresh(engine, config.expires_at + timedelta(minutes=1), [mtproto_provider]) == 1
+    body = await edit_text(engine)
+    assert "<s>ریلیتی ۱</s> — ⌛️ زمان این کانفیگ تمام شد" in body and node_secret(nodes[0]) in body
+    got = {label: status for label, (status, _) in (await carried_links(engine, post_id)).items()}
+    assert got == {"پروکسی ۱": "active", "ریلیتی ۱": "expired"}
+
+
+async def test_no_edit_without_any_provider(engine: AsyncEngine, vault: Vault) -> None:
+    await ready_fleet(engine, 1)
+    await setup_telegram(engine, vault)
+    now = slot_time(2)
+    post_id, _ = await posted(engine, vault, now)
+    for minutes in (1, 60, 600):  # no provider registered: no picture at all, nothing changes
+        assert await refresh(engine, now + timedelta(minutes=minutes), []) == 0
+    assert {v for v in (await carried_links(engine, post_id)).values()} == {("active", None)}
 
 
 async def test_everything_dead_gets_the_closing_line(engine: AsyncEngine, vault: Vault) -> None:
@@ -453,8 +534,6 @@ async def test_no_edit_from_a_partial_picture(engine: AsyncEngine, vault: Vault)
     async def broken_url(db: AsyncConnection) -> list[ProxyLink]:
         good = await mtproto_provider(db)
         return [ProxyLink(**{**x.__dict__, "url": "https://t.me/proxy?server=x"}) for x in good]
-
-    from test_posts_support import reality_provider
 
     # A provider returned a link we refused (bad URL): posts carrying it wait.
     assert await refresh(engine, now + timedelta(minutes=2), [broken_url, reality_provider]) == 0

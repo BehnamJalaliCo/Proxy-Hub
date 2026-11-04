@@ -10,23 +10,31 @@ one live link** (docs/04): then nothing is queued, the slot stays due until its 
 owner hears it at most once a day (not while the fleet's kill switch is on: nothing can run then).
 
 **Status edits** (:func:`refresh_posts`): every sent post younger than ``edit_window_hours`` is
-rendered again from what it carries: a link the provider now reports expired/full/burned (or no
-longer lists) gets its status mark and loses its link; a live link takes its provider's current URL,
-so a new active domain (proxyhub.cloudflare.rotation) or a node's slot name replaces the old host.
-When the text differs from the one in the channel (``channel_posts.text_sha256``) an ``edit_post``
-job is queued, through the poster that sent the post. Bounds: one edit job per post at a time,
-:data:`EDIT_MIN_GAP` between two edits of a post, :data:`MAX_EDITS_PER_RUN` per step and
-:data:`MAX_PENDING_EDITS` waiting at once; the outbox paces every message per channel (3 s, 429).
-A failed edit is retried with backoff and given up after :data:`MAX_EDIT_FAILURES` (owner alerted).
-A link's status in a post never goes back to active. Nothing is edited when a provider failed or
-returned a link we refused, since a missing link would otherwise look dead. Posts are never deleted.
+rendered again from what it carries: a link the provider now REPORTS expired/full/burned (or whose
+own expiry passed) gets its status mark and loses its link; a live link takes its provider's current
+URL, so a new active domain (proxyhub.cloudflare.rotation) or a node's slot name replaces the old
+host. When the text differs from the one in the channel (``channel_posts.text_sha256``) an
+``edit_post`` job is queued, through the poster that sent the post. Bounds: one edit job per post at
+a time, :data:`EDIT_MIN_GAP` between two edits of a post, :data:`MAX_EDITS_PER_RUN` per step and
+:data:`MAX_PENDING_EDITS` waiting at once; the outbox paces every message per channel (3 s, 429). A
+failed edit is retried with backoff and given up after
+:data:`MAX_EDIT_FAILURES` (owner alerted). A link's status in a post never goes back to active, so
+only a REPORTED status (or the link's own expiry) ends a link in a post.
+
+**A link that is merely missing is not dead.** Both providers keep an ended link listed with its
+status (for days, longer than the edit window), but leave a live one out for a while when its node
+restarts Xray, reports an error or its secret cannot be read. Such a link is remembered as missing
+(``post_links.missing_since``) and the post is left alone for :data:`MISSING_GRACE`; after that the
+post shows it as paused (label and a pause mark, no link) so the post's other changes can go out,
+and it gets its link back as soon as a provider lists it again. Nothing is edited when a provider
+failed, none is registered, or one returned a link we refused. Posts are never deleted.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Any, Final, cast
 
@@ -52,9 +60,9 @@ from proxyhub.telegram import store as tg_store
 from proxyhub.telegram.schedule import quiet_until
 from proxyhub.telegram.templates import (
     LinkKind,
-    LinkStatus,
     PostTooLong,
     RenderedPost,
+    ShownStatus,
     StatusTexts,
     channel_tag,
     compose_content,
@@ -69,6 +77,8 @@ EDIT_MIN_GAP: Final = timedelta(minutes=10)
 MAX_EDITS_PER_RUN: Final = 5
 MAX_PENDING_EDITS: Final = 20
 MAX_EDIT_FAILURES: Final = 5
+# How long a link may be missing from every provider before a post shows it as paused.
+MISSING_GRACE: Final = timedelta(minutes=30)
 NO_LINKS_REPEAT: Final = timedelta(days=1)
 NO_CONTENT_REPEAT: Final = timedelta(days=1)
 RECYCLED_REPEAT: Final = timedelta(days=7)
@@ -397,13 +407,20 @@ class _Carried:
     label: str
     expires_at: datetime | None
     status: str
+    missing_since: datetime | None = None
 
 
 async def _carried(db: AsyncConnection, post_id: int) -> list[_Carried]:
     rows = (
         await db.execute(
             select(
-                PostLink.id, PostLink.kind, PostLink.key, PostLink.label, PostLink.expires_at, PostLink.status
+                PostLink.id,
+                PostLink.kind,
+                PostLink.key,
+                PostLink.label,
+                PostLink.expires_at,
+                PostLink.status,
+                PostLink.missing_since,
             )
             .where(PostLink.post_id == post_id)
             .order_by(PostLink.position)
@@ -411,28 +428,64 @@ async def _carried(db: AsyncConnection, post_id: int) -> list[_Carried]:
     ).all()
     return [
         _Carried(
-            id=int(r.id), kind=r.kind, key=r.key, label=r.label, expires_at=r.expires_at, status=r.status
+            id=int(r.id),
+            kind=r.kind,
+            key=r.key,
+            label=r.label,
+            expires_at=r.expires_at,
+            status=r.status,
+            missing_since=r.missing_since,
         )
         for r in rows
     ]
 
 
-def _dead(carried: _Carried, status: str) -> LinkView:
-    return LinkView(kind=cast(LinkKind, carried.kind), label=carried.label, status=cast(LinkStatus, status))
+async def _track_missing(
+    db: AsyncConnection, carried: list[_Carried], h: links.Harvest, now: datetime
+) -> list[_Carried]:
+    """Remember since when each active link of a post is missing from a complete harvest, and
+    forget it once a provider lists it again. Returns the links with ``missing_since`` updated."""
+    out: list[_Carried] = []
+    for c in carried:
+        missing = c.status == "active" and c.key not in h.links and c.key not in h.doubtful
+        since = (c.missing_since or now) if missing else None
+        if since != c.missing_since:
+            await db.execute(update(PostLink).where(PostLink.id == c.id).values(missing_since=since))
+            c = replace(c, missing_since=since)
+        out.append(c)
+    return out
 
 
-def current_view(carried: _Carried, h: links.Harvest, now: datetime) -> tuple[LinkView, str | None]:
-    """How a carried link shows now, and its new status if it just left ``active``."""
-    if carried.status != "active":  # sticky: a dead link never comes back in a post
-        return _dead(carried, carried.status), None
+@dataclass(frozen=True)
+class Shown:
+    """How a carried link shows now. ``new_status``: the link just left ``active`` in this post
+    (stored, never undone). ``unsure``: missing for less than :data:`MISSING_GRACE`, so the post is
+    not edited this round."""
+
+    view: LinkView
+    new_status: str | None = None
+    unsure: bool = False
+
+
+def _as(carried: _Carried, status: str) -> LinkView:
+    return LinkView(kind=cast(LinkKind, carried.kind), label=carried.label, status=cast(ShownStatus, status))
+
+
+def current_view(carried: _Carried, h: links.Harvest, now: datetime) -> Shown:
+    """How a carried link shows now. Only a status its provider reports, or the link's own expiry,
+    ends it; a link missing from the harvest is unsure first, then paused (see the module doc)."""
+    if carried.status != "active":  # sticky: an ended link never comes back in a post
+        return Shown(_as(carried, carried.status))
     current = h.links.get(carried.key)
     if current is None:
-        gone = "expired" if carried.expires_at is not None and carried.expires_at <= now else "burned"
-        return _dead(carried, gone), gone
+        if carried.expires_at is not None and carried.expires_at <= now:
+            return Shown(_as(carried, "expired"), new_status="expired")
+        since = carried.missing_since or now
+        return Shown(_as(carried, "paused"), unsure=now - since < MISSING_GRACE)
     if current.status != "active":
-        return _dead(carried, current.status), current.status
+        return Shown(_as(carried, current.status), new_status=current.status)
     if current.expires_at is not None and current.expires_at <= now:
-        return _dead(carried, "expired"), "expired"
+        return Shown(_as(carried, "expired"), new_status="expired")
     view = LinkView(
         kind=current.kind,
         label=carried.label,
@@ -440,7 +493,7 @@ def current_view(carried: _Carried, h: links.Harvest, now: datetime) -> tuple[Li
         url=current.url,
         expires_at=current.expires_at,
     )
-    return view, None
+    return Shown(view)
 
 
 async def refresh_posts(
@@ -465,7 +518,7 @@ async def refresh_posts(
     if not ready or waiting >= MAX_PENDING_EDITS:
         return 0
     h = await harvest()
-    if not h.complete:
+    if not h.complete or h.providers == 0:  # no full picture of the links: change nothing
         return 0
     texts = cfg.texts()
     queued = 0
@@ -475,16 +528,15 @@ async def refresh_posts(
         poster = posters.get(post.poster)
         if poster is None:
             continue
-        carried = await _carried(db, post.id)
+        carried = await _track_missing(db, await _carried(db, post.id), h, now)
         if any(c.status == "active" and c.key in h.doubtful for c in carried):
             continue
-        views: list[LinkView] = []
-        changes: list[tuple[_Carried, str]] = []
-        for c in carried:
-            view, new_status = current_view(c, h, now)
-            views.append(view)
-            if new_status is not None:
-                changes.append((c, new_status))
+        shown = [current_view(c, h, now) for c in carried]
+        if any(x.unsure for x in shown):
+            continue  # a link is missing for a moment only: wait before showing it as paused
+        views = [x.view for x in shown]
+        changes = [(c, x.new_status) for c, x in zip(carried, shown, strict=True) if x.new_status]
+        paused = [c.label for c, x in zip(carried, shown, strict=True) if x.view.status == "paused"]
         try:
             text = render_post(post.content_html, views, post.channel_tag, texts).text
         except (PostTooLong, ValueError) as exc:
@@ -512,10 +564,12 @@ async def refresh_posts(
             target=f"{post.role}:post:{post.id}",
             dry_run=False,
             allowed=True,
-            reasons=["link_status"] if changes else ["link_moved"],
+            reasons=[*(["link_status"] if changes else []), *(["link_paused"] if paused else [])]
+            or ["link_moved"],
             context={
                 "outbox_id": job,
                 "changes": [{"label": c.label, "kind": c.kind, "status": s} for c, s in changes],
+                "paused": paused,
             },
         )
     return queued

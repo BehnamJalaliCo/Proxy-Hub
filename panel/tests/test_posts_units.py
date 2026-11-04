@@ -16,11 +16,12 @@ from proxyhub.links.contract import ProxyLink
 from proxyhub.posts import content, links, plan
 from proxyhub.posts import settings as posting
 from proxyhub.posts.content import ContentInvalid
-from proxyhub.posts.publisher import fit
+from proxyhub.posts.publisher import MISSING_GRACE, _Carried, current_view, fit
 from proxyhub.telegram.schedule import TEHRAN, QuietWindow
 from proxyhub.telegram.templates import (
     ALL_DEAD_LINE,
     MAX_MESSAGE_CHARS,
+    PAUSED_LINE,
     PostLink,
     PostTooLong,
     StatusTexts,
@@ -116,6 +117,21 @@ def test_all_dead_gets_the_closing_line_and_owner_texts() -> None:
     assert ALL_DEAD_LINE in post
     assert "⌛️ تمام شد &lt;b&gt;" in post  # owner text is escaped
     assert post.index(ALL_DEAD_LINE) < post.index("🔗 \u200e@ipoxxo")
+
+
+def test_paused_links_keep_their_label_without_a_link_and_are_not_dead() -> None:
+    sec = secret()
+    items = [
+        PostLink(kind="mtproto", label="پروکسی 1", status="paused", url=mt(1, sec=sec).url),
+        PostLink(kind="reality", label="ریلیتی 1", status="paused", url=rl(1).url),
+    ]
+    post = render_post(None, items, "@ipoxxo").text
+    assert "پروکسی 1 ⏸" in post and "<s>پروکسی 1</s>" not in post
+    assert f"<b>ریلیتی 1</b> — {PAUSED_LINE}" in post and "<s>ریلیتی 1</s>" not in post
+    assert "<a " not in post and "<code>" not in post and sec not in post and "vless://" not in post
+    assert ALL_DEAD_LINE not in post  # paused is not dead: it may come back
+    dead_and_paused = [PostLink(kind="mtproto", label="پروکسی 2", status="burned"), items[0]]
+    assert ALL_DEAD_LINE not in render_post(None, dead_and_paused, "@ipoxxo").text
 
 
 def test_active_link_without_url_is_never_a_link() -> None:
@@ -312,6 +328,59 @@ def test_selection_orders_by_slot_caps_and_skips_ending_configs() -> None:
     chosen = links.for_new_post(h, now, max_mtproto=3, max_reality=5)
     assert [x.key for x in chosen] == ["m1", "m2", "m3", "r1", "r3"]
     assert [x.key for x in links.for_new_post(h, now, max_mtproto=0, max_reality=1)] == ["r1"]
+
+
+# --- how a carried link shows in an edit (proxyhub/posts/publisher.py) -------------------------
+
+NOW = datetime(2026, 11, 5, 12, 0, tzinfo=UTC)
+
+
+def carried(status: str = "active", **over: Any) -> _Carried:
+    base: dict[str, Any] = {"id": 1, "kind": "reality", "key": "reality:7", "label": "ریلیتی ۷",
+                            "expires_at": NOW + timedelta(hours=5), "status": status}  # fmt: skip
+    base.update(over)
+    return _Carried(**base)
+
+
+def harvest_of(*items: ProxyLink) -> links.Harvest:
+    return links.Harvest(links={x.key: x for x in items}, providers=2)
+
+
+def reality(status: str = "active", expires: datetime | None = None) -> ProxyLink:
+    url = "vless://a@slot7.example.com:443"
+    return link(kind="reality", key="reality:7", slot=7, url=url, status=status,
+                expires_at=expires or NOW + timedelta(hours=5))  # fmt: skip
+
+
+def test_a_missing_link_is_unsure_first_then_paused_never_dead() -> None:
+    for since in (None, NOW, NOW - MISSING_GRACE + timedelta(seconds=1)):
+        shown = current_view(carried(missing_since=since), harvest_of(), NOW)
+        assert shown.unsure and shown.new_status is None and shown.view.status == "paused"
+    for since in (NOW - MISSING_GRACE, NOW - timedelta(days=1)):
+        shown = current_view(carried(missing_since=since), harvest_of(), NOW)
+        assert not shown.unsure and shown.new_status is None and shown.view.status == "paused"
+        assert shown.view.url is None
+
+
+def test_a_missing_link_past_its_own_expiry_is_expired() -> None:
+    for expires in (NOW, NOW - timedelta(minutes=1)):
+        shown = current_view(carried(expires_at=expires), harvest_of(), NOW)
+        assert (shown.new_status, shown.view.status, shown.unsure) == ("expired", "expired", False)
+
+
+def test_only_a_reported_status_or_the_expiry_ends_a_link() -> None:
+    live = current_view(carried(missing_since=NOW - timedelta(hours=2)), harvest_of(reality()), NOW)
+    assert (live.view.status, live.new_status, live.unsure) == ("active", None, False)
+    assert live.view.url == "vless://a@slot7.example.com:443"
+    for status in ("expired", "full", "burned"):
+        shown = current_view(carried(), harvest_of(reality(status=status)), NOW)
+        assert (shown.view.status, shown.new_status) == (status, status)
+    late = current_view(carried(), harvest_of(reality(expires=NOW - timedelta(seconds=1))), NOW)
+    assert late.new_status == "expired"
+    # Sticky: once ended in a post, a link never comes back, even if it is listed as active again.
+    for status in ("expired", "full", "burned"):
+        shown = current_view(carried(status=status), harvest_of(reality()), NOW)
+        assert (shown.view.status, shown.new_status, shown.view.url) == (status, None, None)
 
 
 # --- the day plan --------------------------------------------------------------------------------
