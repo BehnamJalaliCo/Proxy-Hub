@@ -12,7 +12,7 @@
 // Playwright is not a dashboard dependency: it is resolved from the machine (global install).
 
 import { createHmac, randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 
@@ -24,6 +24,11 @@ const OUT = resolve(process.env.OUT ?? "screenshots-raw");
 const TOKEN = process.env.SETUP_TOKEN ?? "";
 const ONLY_PUBLIC = process.env.ONLY_PUBLIC === "1";
 const PREFIX = process.env.PREFIX ?? "";
+// ONLY_STATS=1: after the setup (or with STATE_FILE, a session saved by SAVE_STATE on a throwaway
+// database), shoot only the «آمار» page, e.g. once empty and once after local data was added.
+const ONLY_STATS = process.env.ONLY_STATS === "1";
+const STATE_FILE = process.env.STATE_FILE ?? "";
+const SAVE_STATE = process.env.SAVE_STATE ?? "";
 // A fresh random owner password per run (never printed, never in the repo): even a run pointed at
 // the wrong panel by mistake can never create an owner whose password anyone else knows.
 const PASSWORD = randomBytes(24).toString("base64url");
@@ -240,6 +245,7 @@ async function signedInPages(browser, combo, state) {
   watch(page, label);
   for (const [path, name, heading] of [
     ["/", "overview", "نمای کلی"],
+    ["/stats", "stats", "آمار"],
     ["/nodes", "nodes", "nodeها"],
     ["/telegram", "telegram", "تلگرام"],
     ["/cloudflare", "cloudflare", "Cloudflare و دامنه‌ها"],
@@ -263,6 +269,19 @@ async function signedInPages(browser, combo, state) {
     await page.getByRole("dialog").waitFor();
     await shot(page, "drawer", combo, { full: false });
   }
+  await ctx.close();
+}
+
+/** Only the «آمار» page (ONLY_STATS=1). */
+async function statsPage(browser, combo, state) {
+  const ctx = await newContext(browser, combo, state);
+  const page = await ctx.newPage();
+  const label = `${combo.device.name}/${combo.theme} stats`;
+  watch(page, label);
+  await visit(page, "/stats", label);
+  await page.getByRole("heading", { name: "آمار", level: 1 }).waitFor({ timeout: 15000 });
+  await checkRtl(page, `${label} /stats`);
+  await shot(page, "stats", combo);
   await ctx.close();
 }
 
@@ -318,11 +337,14 @@ async function loginError(browser, combo) {
 
 const browser = await chromium.launch();
 try {
-  for (const combo of COMBOS) {
+  for (const combo of ONLY_STATS ? [] : COMBOS) {
     console.log(`public pages: ${combo.device.name}/${combo.theme}`);
     await publicPages(browser, combo);
   }
-  if (TOKEN && !ONLY_PUBLIC) {
+  if (ONLY_STATS && STATE_FILE) {
+    const saved = JSON.parse(readFileSync(STATE_FILE, "utf8"));
+    for (const combo of COMBOS) await statsPage(browser, combo, saved);
+  } else if (TOKEN && !ONLY_PUBLIC) {
     let state = null;
     for (const [i, combo] of COMBOS.entries()) {
       console.log(`setup flow: ${combo.device.name}/${combo.theme}`);
@@ -331,13 +353,18 @@ try {
       if (last) state = r.state;
     }
     if (!state) throw new Error("setup did not produce a session");
-    await ownerActions(browser, COMBOS[0], state);
-    for (const combo of COMBOS) {
-      console.log(`signed-in pages: ${combo.device.name}/${combo.theme}`);
-      await signedInPages(browser, combo, state);
+    if (SAVE_STATE) writeFileSync(SAVE_STATE, JSON.stringify(state), { mode: 0o600 });
+    if (ONLY_STATS) {
+      for (const combo of COMBOS) await statsPage(browser, combo, state);
+    } else {
+      await ownerActions(browser, COMBOS[0], state);
+      for (const combo of COMBOS) {
+        console.log(`signed-in pages: ${combo.device.name}/${combo.theme}`);
+        await signedInPages(browser, combo, state);
+      }
+      await loginError(browser, COMBOS[0]);
+      await loginError(browser, COMBOS[3]);
     }
-    await loginError(browser, COMBOS[0]);
-    await loginError(browser, COMBOS[3]);
   }
 } finally {
   await browser.close();
