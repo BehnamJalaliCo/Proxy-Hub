@@ -451,7 +451,8 @@ async def registration(env: Env, secret_name: str, state: str, ad_tag: str | Non
 
 
 async def test_proxies_to_register_are_live_proxies_in_service_without_a_registration(env: Env) -> None:
-    names = ["plain", "pending", "burned", "unhealthy", "registered", "pending_reg", "failed_reg", "by_key", "tagged"]
+    names = ["plain", "pending", "burned", "unhealthy", "registered"]
+    names += ["pending_reg", "failed_reg", "by_key", "tagged"]
     nodes = {
         n: await make_node(env.engine, slot=i + 1, ipv4=f"203.0.113.{i + 1}") for i, n in enumerate(names)
     }
