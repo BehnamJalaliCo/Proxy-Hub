@@ -19,6 +19,7 @@ const SecurityPage = lazy(() => import("./pages/SecurityPage"));
 const NodesPage = lazy(() => import("./pages/NodesPage"));
 const TelegramPage = lazy(() => import("./pages/TelegramPage"));
 const CloudflarePage = lazy(() => import("./pages/CloudflarePage"));
+const RealityPage = lazy(() => import("./pages/RealityPage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
 const SetupPage = lazy(() => import("./pages/SetupPage"));
 const NotFoundPage = lazy(() => import("./pages/NotFoundPage"));
@@ -129,6 +130,14 @@ export default function App() {
                     element={
                       <Suspense fallback={<PageFallback />}>
                         <CloudflarePage />
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="reality"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <RealityPage />
                       </Suspense>
                     }
                   />
