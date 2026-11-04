@@ -25,7 +25,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
-from proxyhub.agent_api.desired import create_telemt_user, set_telemt_node_config
+from proxyhub.agent_api.desired import create_telemt_user, set_telemt_node_config, set_user_sponsor_tag
 from proxyhub.agent_api.sealing import open_secret
 from proxyhub.mtproxy import state as account_state
 from proxyhub.mtproxy import store as account_store
@@ -108,19 +108,24 @@ class TelemtUsersProvider:
         _, node_id, name = key.split(":")
         if self.fail_apply:
             raise LookupError("no such MTProto proxy")
-        # As team mtproto does: the tag, and the link to the registration it came from.
-        done = await db.execute(
+        # As team mtproto does it: the tag through the desired-state code on an ORM session bound to
+        # the caller's connection (inside a SAVEPOINT that session would roll the tag back when it
+        # closes), then the link to the registration the tag came from, in plain SQL.
+        session = AsyncSession(bind=db)
+        try:  # DesiredStateError for a user that is not there
+            await set_user_sponsor_tag(session, uuid.UUID(node_id), name, ad_tag)
+            await session.flush()
+        finally:
+            await session.close()
+        await db.execute(
             text(
-                "UPDATE telemt_users SET ad_tag = CAST(:tag AS varchar), updated_at = now(), "
-                "registration_id = (SELECT r.id FROM mtproxy_registrations r "
+                "UPDATE telemt_users SET registration_id = (SELECT r.id FROM mtproxy_registrations r "
                 "WHERE r.secret_name IN (CAST(:u AS varchar), CAST(:key AS varchar)) "
                 "AND r.state = 'registered' AND r.ad_tag = CAST(:tag AS varchar) LIMIT 1) "
                 "WHERE node_id = :n AND name = CAST(:u AS varchar)"
             ),
             {"tag": ad_tag, "n": uuid.UUID(node_id), "u": name, "key": key},
         )
-        if done.rowcount != 1:
-            raise LookupError("no such Telemt user")
         self.applied.append((key, ad_tag))
 
 
