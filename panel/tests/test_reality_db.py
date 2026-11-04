@@ -32,9 +32,15 @@ from proxyhub.agent_api.tokens import issue_registration_token
 from proxyhub.api.deps import require_admin
 from proxyhub.reality.keys import public_from_private
 from proxyhub.reality.links import provide_links
-from proxyhub.reality.policy import create_configs, end_configs, ensure_keys, retarget_scopes
+from proxyhub.reality.policy import (
+    create_configs,
+    end_configs,
+    ensure_keys,
+    forget_gone_node_keys,
+    retarget_scopes,
+)
 from proxyhub.reality.settings import GB, RealitySettings, save_reality_settings
-from proxyhub.reality.store import xray_section
+from proxyhub.reality.store import store_xray_report, xray_section
 from proxyhub.reconcilers.reality import RealityReconciler
 from proxyhub.telegram.store import save_channel
 
@@ -171,20 +177,28 @@ async def test_ip_links_burn_with_their_server_and_scopes_without_servers(world:
 async def test_the_private_key_of_a_deleted_slotless_node_is_forgotten(world: World) -> None:
     test_node = await world.node(slot=None, ipv4="198.51.100.6")
     slot_node = await world.node(slot=7, ipv4="198.51.100.7")
+    idle_node = await world.node(slot=None, ipv4="198.51.100.8")  # in service, key only
     for n in (test_node, slot_node):
         await world.report(n, now=datetime.now(UTC))
+    await world.report(idle_node, now=datetime.now(UTC), target_ok=None)
     await _loop(world)
     keys = {k.node_id or k.slot: k for k in await _keys(world)}
-    assert set(keys) == {test_node, 7}
-    # Still in service, or gone but with an active config: kept.
+    assert set(keys) == {test_node, 7, idle_node}
+
+    async def secrets() -> list[str]:
+        return [r.name for r in await world.rows("SELECT name FROM secrets WHERE name LIKE 'reality:%'")]
+
+    # In service (with or without a config), or gone but with an active config: kept.
     await _loop(world)
-    assert len(await world.rows("SELECT name FROM secrets WHERE name LIKE 'reality:%'")) == 2
+    assert len(await secrets()) == 3
     await world.rows("UPDATE nodes SET state = 'deleted' WHERE id IN (:a, :b)", a=test_node, b=slot_node)
+    async with world.engine.begin() as conn:
+        assert await forget_gone_node_keys(conn) == []  # its config is still active
+    assert len(await secrets()) == 3
     await _loop(world)  # the configs end as burned first, then the slotless node's key goes
-    assert [r.name for r in await world.rows("SELECT name FROM secrets WHERE name LIKE 'reality:%'")] == [
-        keys[7].secret_name
-    ]  # a slot keeps its key for its next server
-    assert len(await _keys(world)) == 2 and all(c.status == "burned" for c in await _configs(world))
+    # A slot keeps its key for its next server; the idle node is still in service.
+    assert sorted(await secrets()) == sorted([keys[7].secret_name, keys[idle_node].secret_name])
+    assert len(await _keys(world)) == 3 and all(c.status == "burned" for c in await _configs(world))
     [log] = await world.rows("SELECT target FROM actions_log WHERE action = 'reality_key_forgotten'")
     assert log.target == f"node:{test_node}"
     await _loop(world)  # once only
@@ -291,13 +305,14 @@ async def test_a_failing_target_is_replaced_by_the_owners_new_target(world: Worl
     zone = await world.zone("t")
     node = await world.node(slot=3)
     expired_node = await world.node(slot=4, ipv4="203.0.113.44")
+    working = await world.node(slot=6, ipv4="203.0.113.46")  # its target keeps working
     now = datetime.now(UTC)
-    for n in (node, expired_node):
+    for n in (node, expired_node, working):
         await world.report(n, now=now)
     await _loop(world)
     configs = {c.slot: c for c in await _configs(world)}
-    assert set(configs) == {3, 4}
-    [old3, old4] = await _keys(world)
+    assert set(configs) == {3, 4, 6}
+    [old3, old4, old6] = await _keys(world)
     # The target fails from both nodes; slot 4's config has run out meanwhile (the reviewer's case).
     await world.rows(
         "UPDATE reality_configs SET created_at = created_at - interval '2 days', "
@@ -306,7 +321,7 @@ async def test_a_failing_target_is_replaced_by_the_owners_new_target(world: Worl
     for n in (node, expired_node):
         await world.report(n, now=now, target_ok=False)
     await _loop(world)
-    assert {c.slot: c.status for c in await _configs(world)} == {3: "active", 4: "expired"}
+    assert {c.slot: c.status for c in await _configs(world)} == {3: "active", 4: "expired", 6: "active"}
     [failing] = await world.rows(
         "SELECT reasons->'context' AS context FROM actions_log WHERE action = 'reality_target_failing'"
     )
@@ -322,10 +337,12 @@ async def test_a_failing_target_is_replaced_by_the_owners_new_target(world: Worl
     rows = {c.slot: c for c in await _configs(world)}
     assert rows[3].status == "burned" and rows[4].status == "expired"  # old target, no new config yet
     keys = await _keys(world)
-    for before, after in zip((old3, old4), keys, strict=True):
+    for before, after in zip((old3, old4), keys[:2], strict=True):
         assert (after.target, after.server_name) == NEW_TARGET
         assert after.public_key == before.public_key and after.secret_name == before.secret_name
         assert after.short_id != before.short_id
+    # Slot 6's target works and its config is in use: it keeps both until that config ends.
+    assert rows[6].status == "active" and keys[2] == old6
     section = await _section(world, node)
     assert section is not None
     assert (section["target"], section["server_names"], section["users"]) == (
@@ -342,19 +359,22 @@ async def test_a_failing_target_is_replaced_by_the_owners_new_target(world: Worl
     by_action = [(r.action, r.target) for r in logs]
     assert ("reality_config_ended", f"reality:{rows[3].id}") in by_action
     assert {t for a, t in by_action if a == "reality_target_switched"} == {"slot:3", "slot:4"}
+    assert ("reality_config_ended", f"reality:{rows[6].id}") not in by_action
     assert any("old_target_failed" in r.reasons for r in logs if r.target == "slot:3")
     assert any("no_active_configs" in r.reasons for r in logs if r.target == "slot:4")
     assert all(str(c.uuid) not in r.reasons for r in logs for c in rows.values())
 
     # A stale report about the old target changes nothing; the node's check of the new one does.
     await world.report(node, now=datetime.now(UTC), target_ok=False)
+    await world.report(working, now=datetime.now(UTC))
     await _loop(world)
-    assert [c.status for c in await _configs(world)].count("active") == 0
+    assert [c.slot for c in await _configs(world) if c.status == "active"] == [6]
     for n in (node, expired_node):
         await world.report(n, now=datetime.now(UTC), target_ok=True, checked=NEW_TARGET)
     await _loop(world)
-    fresh = [c for c in await _configs(world) if c.status == "active"]
+    fresh = [c for c in await _configs(world) if c.status == "active" and c.slot != 6]
     assert sorted(c.slot for c in fresh) == [3, 4]
+    assert (await _keys(world))[2] == old6  # still waiting for its config to end
     for c in fresh:
         assert c.host.endswith(zone)
     section = await _section(world, node)
@@ -419,6 +439,11 @@ async def test_a_working_target_is_switched_once_its_configs_have_ended(world: W
     [after] = await _keys(world)
     assert (after.id, after.public_key) == (key.id, key.public_key) and after.short_id != key.short_id
     assert await _create(world, now, new) == []  # the node has not checked the new target yet
+    async with world.engine.connect() as conn:
+        view = await summary(conn, now)
+    [item] = [n for n in view["nodes"] if n["node_id"] == str(node)]
+    # Its last check (passed) was about the old target: not shown as a result for the new one.
+    assert item["target"] == "www.example.org:443" and item["xray"]["target_ok"] is None
     await world.report(node, now=now, target_ok=True, checked=NEW_TARGET)
     [c3] = await _create(world, now, new)
     async with world.engine.connect() as conn:
@@ -784,6 +809,24 @@ async def test_loop_logs_without_user_ids_and_alerts_once(world: World) -> None:
     )
     assert [r.action for r in logs] == ["reality_key_created", "reality_config_created"]
     assert logs[1].target == f"reality:{c.id}" and str(c.uuid) not in "".join(r.reasons for r in logs)
+
+    # A failed check of some other target (not this slot's) is no reason to alert the owner.
+    await world.report(node, now=datetime.now(UTC), target_ok=False, checked=NEW_TARGET)
+    async with world.engine.begin() as conn:
+        await RealityReconciler().run_once(conn)
+    assert await world.rows("SELECT id FROM actions_log WHERE action = 'reality_target_failing'") == []
+    # A check result never comes without what it was about.
+    async with world.engine.begin() as conn:
+        with pytest.raises(ValueError, match="target it was about"):
+            await store_xray_report(
+                conn, node, enabled=True, up=True, version=None, uptime_s=None, target_ok=True,
+                apply_error=None, users=[], now=datetime.now(UTC),
+            )  # fmt: skip
+        with pytest.raises(ValueError, match="target it was about"):
+            await store_xray_report(
+                conn, node, enabled=True, up=True, version=None, uptime_s=None, target_ok=None,
+                apply_error=None, users=[], now=datetime.now(UTC), checked=NEW_TARGET,
+            )  # fmt: skip
 
     # The target fails from the node: one owner alert a day, and no new config there.
     await world.report(node, now=datetime.now(UTC), target_ok=False)

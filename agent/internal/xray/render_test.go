@@ -154,6 +154,12 @@ func TestCheckInvariantsRefusesEachBreak(t *testing.T) {
 		"no mail routing rule": func(m map[string]any) {
 			m["routing"].(map[string]any)["rules"] = m["routing"].(map[string]any)["rules"].([]any)[:2]
 		},
+		"mail routing rule goes direct": func(m map[string]any) {
+			m["routing"].(map[string]any)["rules"].([]any)[2].(map[string]any)["outboundTag"] = "direct"
+		},
+		"mail routing rule on other ports": func(m map[string]any) {
+			m["routing"].(map[string]any)["rules"].([]any)[2].(map[string]any)["port"] = "26"
+		},
 		"inbound on loopback": func(m map[string]any) { m["inbounds"].([]any)[0].(map[string]any)["listen"] = "127.0.0.1" },
 		"second inbound": func(m map[string]any) {
 			ins := m["inbounds"].([]any)

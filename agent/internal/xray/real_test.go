@@ -366,11 +366,14 @@ func TestRealXrayCarriesTrafficWhenAllowed(t *testing.T) {
 	if lab.hits.Load() != 1 {
 		t.Fatalf("hits %d", lab.hits.Load())
 	}
-	waitFor(t, "request and response bytes", func() bool { return userTraffic(t, api, lab.user.Email) > 150 })
+	var seen uint64
+	waitFor(t, "request and response bytes", func() bool {
+		seen = userTraffic(t, api, lab.user.Email)
+		return seen > 150
+	})
 	// Reading the counters never resets them (the agent's tracker relies on cumulative totals).
-	first := userTraffic(t, api, lab.user.Email)
-	if again := userTraffic(t, api, lab.user.Email); again != first {
-		t.Fatalf("reading the counters changed them: %d -> %d", first, again)
+	if again := userTraffic(t, api, lab.user.Email); again < seen {
+		t.Fatalf("reading the counters reset them: %d -> %d", seen, again)
 	}
 }
 
