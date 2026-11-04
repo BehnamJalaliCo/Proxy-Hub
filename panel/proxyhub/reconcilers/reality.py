@@ -25,6 +25,7 @@ from proxyhub.reality.policy import (
     end_configs,
     ensure_keys,
     forget_gone_node_keys,
+    renew_configs,
     retarget_scopes,
     scope_label,
 )
@@ -60,6 +61,17 @@ class RealityReconciler(Reconciler):
     async def run_once(self, conn: AsyncConnection) -> None:
         now = datetime.now(UTC)
         settings = await load_reality_settings(conn)
+        for config_id in await renew_configs(conn, settings, now):  # D41: before anything ends
+            await log_action(
+                conn,
+                actor=ACTOR,
+                action="reality_config_renewed",
+                target=f"reality:{config_id}",
+                dry_run=False,
+                allowed=True,
+                reasons=["still_working"],
+                context={"hours": settings.cap_hours, "gb": settings.cap_gb},
+            )
         for config_id, status in sorted((await end_configs(conn, now)).items()):
             await self._ended(conn, config_id, [status])
         for node_id in await forget_gone_node_keys(conn):

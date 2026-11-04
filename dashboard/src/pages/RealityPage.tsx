@@ -225,7 +225,7 @@ function NodesCard({ nodes }: { nodes: RealityNode[] }) {
 
 // --- settings ------------------------------------------------------------------------------------
 
-const DRAFT_KEYS = new Set<string>(["enabled", "configs_per_node", "cap_hours", "cap_gb", "target_host", "target_port", "link_name"]);
+const DRAFT_KEYS = new Set<string>(["enabled", "renew", "configs_per_node", "cap_hours", "cap_gb", "target_host", "target_port", "link_name"]);
 
 /** 422 {"fields": ["cap_gb", ...]} -> which form fields the server refused. */
 function serverErrors(err: unknown): RealityDraftErrors {
@@ -279,7 +279,7 @@ function SettingsCard({ initial, defaults }: { initial: RealitySettingsView; def
       <CardHeader
         icon={<SlidersHorizontal className="size-5" />}
         title="تنظیمات Reality"
-        subtitle={`هر کانفیگ تا ${formatNumber(initial.cap_hours)} ساعت یا ${formatNumber(initial.cap_gb)} گیگ کار میکند، هر کدام زودتر برسد. node خودش هم این سقف‌ها را اجرا میکند، حتی اگر پنل در دسترس نباشد.`}
+        subtitle={`هر کانفیگ تا ${formatNumber(initial.cap_hours)} ساعت یا ${formatNumber(initial.cap_gb)} گیگ کار میکند، هر کدام زودتر برسد${initial.renew ? "، و اگر سالم باشد با همان لینک تمدید میشود" : ""}. node خودش هم این سقف‌ها را اجرا میکند، حتی اگر پنل در دسترس نباشد.`}
       />
       <form onSubmit={save} noValidate className="flex flex-col gap-5 p-5">
         <Toggle
@@ -287,6 +287,12 @@ function SettingsCard({ initial, defaults }: { initial: RealitySettingsView; def
           onCheckedChange={(v) => set("enabled", v)}
           label="ساخت خودکار کانفیگ تازه"
           description="خاموش: کانفیگ تازه ساخته نمیشود؛ کانفیگ‌های فعال تا پایان زمان یا حجمشان کار میکنند."
+        />
+        <Toggle
+          checked={draft.renew}
+          onCheckedChange={(v) => set("renew", v)}
+          label="تمدید خودکار کانفیگ سالم"
+          description="کانفیگی که هنوز کار میکند، یک ساعت پیش از پایانش با همان لینک دوباره به همین اندازه زمان و حجم میگیرد؛ کسی که آن را دارد قطع نمیشود و در پست‌های تازه هم دوباره می‌آید."
         />
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           <Field label="سقف زمان هر کانفیگ" htmlFor="r-hours" hint={`ساعت؛ پیش‌فرض ${formatNumber(defaults.cap_hours)}.`} error={shown("cap_hours")}>

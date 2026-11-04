@@ -19,9 +19,10 @@ import {
 
 const DEFAULTS: RealitySettings = {
   enabled: true,
+  renew: true,
   configs_per_node: 2,
-  cap_hours: 24,
-  cap_gb: 50,
+  cap_hours: 48,
+  cap_gb: 1000,
   target_host: "dl.google.com",
   target_port: 443,
   link_name: null,
@@ -89,8 +90,14 @@ describe("reality settings form", () => {
     expect(TARGET_HINT).not.toContain("فقط برای کلیدهای تازه");
   });
 
+  it("keeps the renew switch through the form", () => {
+    const off = parseDraft({ ...draftFrom(DEFAULTS), renew: false }).settings;
+    expect(off?.renew).toBe(false);
+    expect(off && sameSettings(off, DEFAULTS)).toBe(false);
+  });
+
   it("says how often a fresh config comes", () => {
-    expect(freshEveryHours(DEFAULTS)).toBe(12);
+    expect(freshEveryHours(DEFAULTS)).toBe(24);
     expect(freshEveryHours({ cap_hours: 24, configs_per_node: 3 })).toBe(8);
   });
 });

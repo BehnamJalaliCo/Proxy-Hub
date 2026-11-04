@@ -11,6 +11,8 @@ export type RealityStatus = "active" | "expired" | "full" | "burned";
 
 export interface RealitySettings {
   enabled: boolean;
+  /** D41: a working config gets another period (same link) an hour before its end. */
+  renew: boolean;
   configs_per_node: number;
   cap_hours: number;
   cap_gb: number;
@@ -185,6 +187,7 @@ export function sortConfigs(configs: RealityConfig[]): RealityConfig[] {
 
 export interface RealityDraft {
   enabled: boolean;
+  renew: boolean;
   configs_per_node: string;
   cap_hours: string;
   cap_gb: string;
@@ -201,6 +204,7 @@ const LINK_NAME = /^[A-Za-z0-9_][A-Za-z0-9_ .|-]{0,31}$/;
 export function draftFrom(s: RealitySettings): RealityDraft {
   return {
     enabled: s.enabled,
+    renew: s.renew,
     configs_per_node: String(s.configs_per_node),
     cap_hours: String(s.cap_hours),
     cap_gb: String(s.cap_gb),
@@ -241,6 +245,7 @@ export function parseDraft(d: RealityDraft): { settings: RealitySettings | null;
   return {
     settings: {
       enabled: d.enabled,
+      renew: d.renew,
       configs_per_node: configs,
       cap_hours: hours,
       cap_gb: gb,
@@ -255,6 +260,7 @@ export function parseDraft(d: RealityDraft): { settings: RealitySettings | null;
 export function sameSettings(a: RealitySettings, b: RealitySettings): boolean {
   return (
     a.enabled === b.enabled &&
+    a.renew === b.renew &&
     a.configs_per_node === b.configs_per_node &&
     a.cap_hours === b.cap_hours &&
     a.cap_gb === b.cap_gb &&

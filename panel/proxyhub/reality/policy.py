@@ -23,14 +23,20 @@ not involved; the owner's own switch is ``RealitySettings.enabled``.
   (:func:`ensure_keys`): the node gets it, checks the target and reports, and the next round makes
   the config. The agent checks again whenever target or server name change, and every 6 hours.
 * A scope (a slot, or a slotless node) keeps ``configs_per_node`` active configs, started half a
-  lifetime apart (two per day by default), on its newest ready, healthy node.
+  lifetime apart, on its newest ready, healthy node.
+* D41 (owner): a config that still works is renewed in place by :func:`renew_configs` an hour
+  before it would end: same link, ``cap_hours`` more and ``cap_gb`` more on top of what it used.
+  Nothing else about it changes, so people who already have it never get stuck. "Works" means: not
+  full, nothing above would end it now, and a node of its scope serves Reality and passed the
+  scope's target check. It is not renewed while its scope waits to move to a new target (those end
+  at their own time so the scope can switch).
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
@@ -67,6 +73,8 @@ IP_SERVING: Final = frozenset({S.READY, S.UNHEALTHY, S.REPAIRING})
 # A node's agent must have reported this recently for the node to get a new config.
 REPORT_FRESH: Final = timedelta(minutes=10)
 MAX_CREATIONS_PER_TICK: Final = 20
+# D41: a working config is renewed this long before its end, before the node itself would stop it.
+RENEW_AHEAD: Final = timedelta(hours=1)
 
 
 @dataclass(frozen=True)
@@ -202,6 +210,92 @@ async def _active(conn: AsyncConnection) -> list[ActiveConfig]:
         )
     ).all()
     return [ActiveConfig(*r) for r in rows]
+
+
+def renewal_due(c: ActiveConfig, *, now: datetime) -> bool:
+    """Its end is less than :data:`RENEW_AHEAD` away and its data cap is not reached."""
+    return c.expires_at - now <= RENEW_AHEAD and c.used_bytes < c.data_cap_bytes
+
+
+async def renew_configs(conn: AsyncConnection, settings: RealitySettings, now: datetime) -> list[int]:
+    """D41: give every working config whose end is near another period, in place (same uuid, so
+    the same link). Returns the renewed config ids."""
+    if not (settings.enabled and settings.renew):
+        return []
+    due = [c for c in await _active(conn) if renewal_due(c, now=now)]
+    if not due:
+        return []
+    nodes = {n.id: n for n in await live_nodes(conn)}
+    keys = {
+        k.id: k
+        for k in (
+            await conn.execute(
+                select(
+                    RealityKey.id,
+                    RealityKey.slot,
+                    RealityKey.node_id,
+                    RealityKey.target,
+                    RealityKey.server_name,
+                )
+            )
+        ).all()
+    }
+    serving_slots = {n.slot for n in nodes.values() if n.slot is not None and S(n.state) in SERVE_STATES}
+    serving_nodes = {n.id for n in nodes.values() if S(n.state) in SERVE_STATES}
+    statuses = await all_statuses(conn)
+    domain = await current_active_domain(conn)
+    period = timedelta(hours=settings.cap_hours)
+    healthy: dict[int, bool] = {}  # key id -> a node of its scope serves it and passed its target check
+    renewed: list[int] = []
+    for c in due:
+        key = keys.get(c.key_id)
+        if key is None or (key.target, key.server_name) != (settings.target, settings.target_host):
+            continue  # its scope moves to the owner's new target once its configs have ended
+        if key.id not in healthy:
+            scope_nodes = [
+                n
+                for n in nodes.values()
+                if (n.slot == key.slot if key.slot is not None else n.id == key.node_id)
+            ]
+            healthy[key.id] = False
+            for n in scope_nodes:
+                if eligible_for_new_configs(
+                    n,
+                    statuses.get(n.id),
+                    now=now,
+                    telemt_clashes=await telemt_clash(conn, n.id),
+                    target=(key.target, key.server_name),
+                ):
+                    healthy[key.id] = True
+                    break
+        if not healthy[key.id]:
+            continue  # not "working" now (no node serves it, or the target check fails): it ends on time
+        served = key.slot in serving_slots if key.slot is not None else key.node_id in serving_nodes
+        own = nodes.get(c.node_id)
+        # Would anything but time end it now? (Its time is moved out of the way for this check.)
+        why = end_status(
+            replace(c, expires_at=now + period),
+            now=now,
+            own_node_state=own.state if own else None,
+            scope_served=served,
+            active_domain=domain,
+        )
+        if why is not None:
+            continue
+        done = await conn.execute(
+            update(RealityConfig)
+            .where(
+                RealityConfig.id == c.id,
+                RealityConfig.status == "active",
+                RealityConfig.expires_at == c.expires_at,
+            )
+            .values(
+                expires_at=max(c.expires_at, now) + period, data_cap_bytes=c.used_bytes + settings.cap_bytes
+            )
+        )
+        if done.rowcount:
+            renewed.append(c.id)
+    return renewed
 
 
 async def end_configs(conn: AsyncConnection, now: datetime) -> dict[int, EndStatus]:
