@@ -4,6 +4,8 @@
 /** The sponsor actions in the events page (proxyhub/sponsor/service.py). */
 export const SPONSOR_ACTION: Record<string, string> = {
   "sponsor.proxy_found": "پروکسی تازه برای ثبت در ‎@MTProxybot‎",
+  "sponsor.candidate_moved": "نشانی پروکسیِ هنوز ثبت‌نشده عوض شد",
+  "sponsor.candidate_dropped": "کنار گذاشتن پروکسیِ ثبت‌نشده",
   "sponsor.bot_sent": "پیام به ‎@MTProxybot‎",
   "sponsor.bot_pressed": "زدن دکمه در ‎@MTProxybot‎",
   "sponsor.bot_reply": "پاسخ ‎@MTProxybot‎",
