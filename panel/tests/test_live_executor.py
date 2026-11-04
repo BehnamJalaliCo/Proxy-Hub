@@ -414,22 +414,25 @@ async def test_timeouts_mark_unhealthy_and_a_stuck_test_node_is_retired(world: L
     assert reasons == ["no_good_report"]
 
 
-async def test_executor_never_touches_fleet_nodes(world: LiveWorld) -> None:
-    await world.settings(good_settings())
-    fleet = [
+async def test_fleet_nodes_in_dry_run_never_reach_hetzner(world: LiveWorld) -> None:
+    """While the fleet is dry-run, a slot node's request is closed and nothing is created or
+    deleted; the steps that need no Hetzner call (closing a node that never had a server) go on."""
+    await world.settings(good_settings())  # dry_run: True
+    requested, booting, retiring = [
         await world.add_node(state=s, is_test=False, slot=1) for s in ("requested", "booting", "retiring")
     ]
     await run_executor(world)
-    for node_id in fleet:
-        assert await world.events(node_id) == []
-    assert [r[0] for r in await world.rows("SELECT state FROM nodes WHERE NOT is_test ORDER BY state")] == [
-        "booting",
-        "requested",
-        "retiring",
-    ]
-    executor = world.executor()
-    with pytest.raises(ex.FleetNotLive):
-        await executor.step(world.sessions, fleet[0])
+    assert (await world.node(requested))["state"] == "deleted"
+    refused = [d for k, d in await world.events(requested) if k == "create_refused"]
+    assert refused == [{"reasons": ["fleet_dry_run"]}]
+    assert (await world.node(booting))["state"] == "booting" and await world.events(booting) == []
+    closed = await world.node(retiring)
+    assert closed["state"] == "deleted"  # never had a server: closed without any Hetzner call
+    assert world.no_hetzner.calls == 0
+    log = await world.rows(
+        "SELECT allowed, reasons FROM actions_log WHERE actor = 'node_executor' AND action = 'node_create'"
+    )
+    assert [(a, r["reasons"]) for a, r in log] == [(False, ["fleet_dry_run"])]
 
 
 # --- retire --------------------------------------------------------------------------------------
@@ -457,7 +460,8 @@ async def test_retire_refusals(world: LiveWorld) -> None:
     test_node = await world.add_node(state="ready")
     async with api_client(world) as c:
         r = await c.post(f"/api/nodes/{fleet}/retire")
-        assert r.status_code == 409 and r.json()["reasons"] == ["fleet_not_live"]
+        assert r.status_code == 409 and r.json()["reasons"] == ["fleet_managed"]
+        assert r.json()["reasons_fa"][0] != "fleet_managed"
         await world.settings(good_settings(kill_switch=True))
         r = await c.post(f"/api/nodes/{test_node}/retire")
         assert r.status_code == 409 and r.json()["reasons"] == ["kill_switch_on"]
