@@ -137,6 +137,25 @@ async def test_without_a_provider_only_campaign_states_move(engine: AsyncEngine,
     ]
 
 
+async def test_a_failing_provider_does_not_stop_the_campaigns(engine: AsyncEngine, vault: Vault) -> None:
+    class Broken(TelemtUsersProvider):
+        async def proxies_to_register(self, db: object) -> list[object]:  # type: ignore[override]
+            await db.execute(text("SELECT * FROM no_such_table"))  # type: ignore[attr-defined]
+            return []
+
+    await kill_switch(engine, False)
+    now = datetime.now(UTC)
+    data = service.CampaignInput(
+        customer=None, channel="@customer_one", starts_at=now + timedelta(minutes=10),
+        ends_at=now + timedelta(hours=2), price=None, currency=None, paid=False,
+    )  # fmt: skip
+    campaign_id = await service.create_campaign(engine, data, actor="admin:o", now=now)
+    assert await service.run_once(deps(engine, vault, Broken(secrets.token_bytes(32)))) == "no_account"
+    async with engine.connect() as conn:
+        campaign = await store.load_campaign(conn, campaign_id)
+    assert campaign is not None and campaign.state == "active"
+
+
 async def test_live_proxies_get_rows_and_nothing_talks_without_an_account(
     engine: AsyncEngine, vault: Vault, seal_key: bytes
 ) -> None:

@@ -281,6 +281,10 @@ def test_the_success_reply_is_stored_without_the_secret() -> None:
     assert "secret=[secret]" in masked and "ecfe…e999" in masked and "Success!" in masked
     unknown = replies.mask(raw)  # even without knowing the secret: secret= values and hex runs go
     assert secret not in unknown.lower() and REAL_TAG not in unknown
+    # A link with a secret in another encoding (base64url Fake-TLS) that nobody told us about.
+    other = base64.urlsafe_b64encode(bytes.fromhex("ee" + secrets.token_hex(16)) + b"example.com").decode()
+    link = f"tg://proxy?server=1.2.3.4&port=443&secret={other.rstrip('=')}&x=1"
+    assert replies.mask(link) == "tg://proxy?server=1.2.3.4&port=443&secret=[secret]&x=1"
 
 
 def test_every_encoding_of_the_secret_is_masked() -> None:

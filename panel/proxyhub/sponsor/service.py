@@ -599,7 +599,12 @@ async def run_once(deps: Deps) -> str:
         await _advance_campaigns(db, settings, now)
         if deps.provider is None:
             return "no_provider"
-        proxies = list(await deps.provider.proxies_to_register(db))
+        proxies: list[Registrable] = []
+        try:
+            async with db.begin_nested():  # a provider failure must not undo the campaign moves
+                proxies = list(await deps.provider.proxies_to_register(db))
+        except Exception as exc:
+            log.warning("sponsor: the provider failed to list proxies (%s)", type(exc).__name__)
         regs, nodes, live = await sync(db, deps.provider, proxies, now)
         windows = [c.window for c in await store.load_campaigns(db)]
         account = await account_store.load_row(db)
