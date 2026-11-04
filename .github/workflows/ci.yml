@@ -41,7 +41,9 @@ jobs:
       - run: uv run --frozen ruff check proxyhub tests
       - run: uv run --frozen ruff format --check proxyhub tests
       - run: uv run --frozen mypy proxyhub
-      - run: uv run --frozen pytest -q
+      # The pinned Xray (three sha256 checks) so the Reality tests also run it, not only render.
+      - run: bash ../node-image/fetch-xray.sh "$RUNNER_TEMP/xray"
+      - run: PROXYHUB_TEST_XRAY="$RUNNER_TEMP/xray/xray" uv run --frozen pytest -q
 
   dashboard:
     # Owner dashboard (dashboard/): exact lockfile install, lint, strict typecheck, unit tests, build.
@@ -75,7 +77,8 @@ jobs:
           cache: false
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
-      - run: go test -count=1 ./...
+      - run: bash ../node-image/fetch-xray.sh "$RUNNER_TEMP/xray"
+      - run: PROXYHUB_TEST_XRAY="$RUNNER_TEMP/xray/xray" go test -count=1 ./...
 
   deploy-files:
     runs-on: ubuntu-24.04

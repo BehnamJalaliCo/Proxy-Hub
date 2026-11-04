@@ -40,6 +40,7 @@ type Report struct {
 	ApplyError   *string `json:"apply_error"`
 	Telemt       Telemt  `json:"telemt"`
 	System       System  `json:"system"`
+	Xray         *Xray   `json:"xray,omitempty"`
 }
 
 // Telemt holds process counters and per-user aggregates.
@@ -78,6 +79,7 @@ type Input struct {
 	TelemtUp     bool
 	Stats        metrics.Stats
 	System       sysstat.Stats
+	Xray         *Xray
 }
 
 // Build assembles a report. Only users with a valid name are reported (never the placeholder).
@@ -87,6 +89,7 @@ func Build(in Input) Report {
 		AgentVersion: in.AgentVersion,
 		ApplyOK:      in.ApplyOK,
 		Telemt:       Telemt{Up: in.TelemtUp, Users: []User{}},
+		Xray:         in.Xray,
 	}
 	if in.AppliedETag != "" {
 		etag := in.AppliedETag

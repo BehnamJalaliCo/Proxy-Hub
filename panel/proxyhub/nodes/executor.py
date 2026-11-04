@@ -1,13 +1,17 @@
-"""Node executor: the first REAL node pipeline, for owner-triggered TEST nodes only, fail-closed.
+"""Node executor: the REAL node pipeline, fail-closed, for the owner's test node and the slot
+nodes of the live fleet (decision D14).
 
     requested --(gates, live account guard, CreatePermit)--> creating --(Hetzner create)--> booting
+    booting --(a burned IP or an IP in a burned /24)--> retiring   (slot nodes; ip_history)
     booting --(agent registers with its one-time token)--> registering --(first good report)--> ready
     booting/registering/ready --(timeouts, no heartbeat)--> unhealthy --(good reports)--> ready
-    any --(owner retire, or a test node unhealthy for an hour)--> retiring
+    any --(owner retire, a test node unhealthy for an hour, or the fleet loop)--> retiring
     retiring --(can_delete on a LIVE read + DeletePermit)--> deleted
 
-Only nodes with ``is_test`` are ever touched here: the 9-slot fleet stays dry-run
-(``proxyhub.reconcilers.fleet.FLEET_LIVE_ENABLED`` is False and this module never reads it).
+Slot nodes are requested and retired by the fleet loop (proxyhub/reconcilers/fleet.py) only while
+the owner has turned the fleet's dry-run off. The executor checks that again: while the fleet is
+dry-run (or its settings are invalid) a slot node's request is closed and its deletion waits, so no
+Hetzner create or delete happens for a slot node; only reads (lookups by label, IP refresh) do.
 
 Every step is small and recorded (``node_events``, ``actions_log``); state changes are committed
 BEFORE the Hetzner call they lead to, so a crash at any point is recovered on the next pass:
@@ -41,7 +45,8 @@ from proxyhub.db.models_agent import AgentNode, AgentNodeReport, TelemtNodeConfi
 from proxyhub.db.models_fleet import AccountServer
 from proxyhub.db.models_live import NodeOperation
 from proxyhub.fleet.actions import log_action
-from proxyhub.fleet.lifecycle import NodeState
+from proxyhub.fleet.ip_history import burned_hit, public_ipv4, record_ip
+from proxyhub.fleet.lifecycle import ALLOWED, NodeState
 from proxyhub.hetzner.client import HetznerReader
 from proxyhub.hetzner.mutations import CreateSpec, create_server, delete_server
 from proxyhub.nodes.cloud_init import UserData, render_user_data
@@ -56,6 +61,7 @@ from proxyhub.nodes.service import (
 from proxyhub.nodes.settings import get_live_settings
 from proxyhub.nodes.transitions import ensure_operation, event, lock_node, transition
 from proxyhub.pki.ca import build_ca_certificate, load_ca_key, to_pem
+from proxyhub.reconcilers import fleet as fleet_reconciler
 from proxyhub.reconcilers.account_guard import AccountRef, apply_failure, apply_observation
 from proxyhub.safety.gates import (
     MANAGED_LABEL,
@@ -90,10 +96,6 @@ TRANSIENT_CODES = frozenset(
     {"timeout", "conflict", "bad_gateway", "service_unavailable", "500", "502", "503"}
 )
 LIVE_STEP_STATES = (S.REQUESTED, S.CREATING, S.BOOTING, S.REGISTERING, S.READY, S.UNHEALTHY, S.RETIRING)
-
-
-class FleetNotLive(PermissionError):
-    """Raised if the executor is ever handed a non-test node."""
 
 
 def default_ca_pem() -> str:
@@ -158,14 +160,14 @@ class NodeExecutor:
     # --- driver ---------------------------------------------------------------------------------
 
     async def run_once(self, engine: AsyncEngine) -> None:
-        """One pass over every live test node (the caller holds the executor's advisory lock)."""
+        """One pass over every node with a step to take (the caller holds the executor's advisory lock)."""
         sm = async_sessionmaker(engine, expire_on_commit=False)
         async with sm() as s:
             ids = (
                 (
                     await s.execute(
                         select(Node.id)
-                        .where(Node.is_test.is_(True), Node.state.in_([st.value for st in LIVE_STEP_STATES]))
+                        .where(Node.state.in_([st.value for st in LIVE_STEP_STATES]))
                         .order_by(Node.created_at, Node.id)
                     )
                 )
@@ -183,8 +185,6 @@ class NodeExecutor:
         node = await self._load(sm, node_id)
         if node is None:
             return
-        if not node.is_test:
-            raise FleetNotLive("the executor handles test nodes only; the fleet is dry-run")
         handler = {
             S.REQUESTED: self._requested,
             S.CREATING: self._creating,
@@ -276,13 +276,25 @@ class NodeExecutor:
         )
         await s.commit()
 
+    async def _fleet_blocked(self, s: AsyncSession) -> list[str]:
+        """Why the fleet may not create or delete a slot server right now (empty: it may)."""
+        settings, problems = await load_settings(s)
+        locked = [] if fleet_reconciler.FLEET_LIVE_ENABLED else ["fleet_live_disabled"]  # the code lock
+        return [*problems, *locked, *(["fleet_dry_run"] if settings.dry_run else [])]
+
     async def _requested(self, sm: async_sessionmaker[AsyncSession], node: NodeRef) -> None:
         now = self._clock()
         async with sm() as s:
-            other = await self._blocked_by_other(s, node.id)
-            if other is not None:  # at most one live test node
-                await self._close_request(s, node.id, ["test_node_exists"], {"other_node_id": str(other)})
-                return
+            if node.is_test:
+                other = await self._blocked_by_other(s, node.id)
+                if other is not None:  # at most one live test node
+                    await self._close_request(s, node.id, ["test_node_exists"], {"other_node_id": str(other)})
+                    return
+            else:
+                blocked = await self._fleet_blocked(s)
+                if blocked:  # the owner turned the fleet back to dry-run: nothing is created
+                    await self._close_request(s, node.id, blocked, {"slot": await self._slot(s, node.id)})
+                    return
             ev = await evaluate_create(
                 s,
                 now,
@@ -354,6 +366,9 @@ class NodeExecutor:
             if not ev.allowed:
                 await self._close_request(s, node.id, ev.reasons, ev.context)
                 return
+            if not node.is_test and (blocked := await self._fleet_blocked(s)):
+                await self._close_request(s, node.id, blocked, ev.context)
+                return
             permit = issue_create_permit(ev.limits, ev.request)  # the gate decides once more
             token = await issue_registration_token(s, node.id, now=now)
             try:
@@ -388,8 +403,12 @@ class NodeExecutor:
                 dry_run=False,
                 allowed=True,
                 reasons=[],
-                context={"node_id": str(node.id), **ev.context},
-                result="creating a test server through CreatePermit",
+                context={"node_id": str(node.id), "slot": row.slot, **ev.context},
+                result=(
+                    "creating a test server through CreatePermit"
+                    if node.is_test
+                    else f"creating the server of slot {row.slot} through CreatePermit"
+                ),
             )
             await s.commit()
 
@@ -403,7 +422,7 @@ class NodeExecutor:
             role="node",
             node_id=str(node.id),
             user_data=user_data.text,
-            is_test=True,
+            is_test=node.is_test,
         )
         try:
             hetzner_id = await call_hetzner(lambda: create_server(reader, permit, spec))
@@ -428,7 +447,50 @@ class NodeExecutor:
             event(s, node.id, self._clock(), "server_created", hetzner_id=hetzner_id, ipv4=ipv4)
             if row.state == S.CREATING.value:  # else the owner retired it meanwhile: delete next pass
                 await transition(s, row, S.BOOTING, self._clock(), reason="server_created")
+            await self._check_ip(s, row, self._clock())
             await s.commit()
+
+    @staticmethod
+    async def _slot(s: AsyncSession, node_id: uuid.UUID) -> int | None:
+        return (await s.execute(select(Node.slot).where(Node.id == node_id))).scalar_one_or_none()
+
+    async def _check_ip(self, s: AsyncSession, row: Node, now: datetime) -> bool:
+        """Record the node's public IPv4 in ``ip_history`` (once). A SLOT node whose fresh IP burned
+        before, or lies in a burned /24, is retired at once (the fleet retries in another location).
+        The caller holds the row lock and commits. Returns True if the node was retired."""
+        ip = public_ipv4(row.ipv4)
+        if ip is None:
+            return False
+        first = await record_ip(
+            s, node_id=row.id, account_id=row.account_id, location=row.location, ip=ip, now=now
+        )
+        if not first or row.is_test:
+            return False
+        hit = await burned_hit(s, ip, node_id=row.id)
+        state = S(row.state)
+        if hit is None or S.RETIRING not in ALLOWED[state]:
+            return False
+        event(s, row.id, now, "burned_ip", ipv4=str(ip), match=hit.kind)
+        await self._to_retiring(s, row, now, "burned_ip")
+        await log_action(
+            s,
+            actor=ACTOR,
+            action="node_burned_ip",
+            target=row.name,
+            dry_run=False,
+            allowed=True,
+            reasons=[f"burned_{hit.kind}"],
+            context={
+                "node_id": str(row.id),
+                "slot": row.slot,
+                "location": row.location,
+                "ipv4": str(ip),  # our own server's address (rule 7 is about users)
+                "hetzner_id": row.hetzner_id,
+            },
+            result="the new server got a burned IP (or one in a burned /24): retired at once, "
+            "the fleet retries in another location",
+        )
+        return True
 
     async def _blocked_by_other(self, s: AsyncSession, me: uuid.UUID) -> uuid.UUID | None:
         """Another live test node that goes first: one already past ``requested``, or an older request."""
@@ -526,6 +588,7 @@ class NodeExecutor:
                 (await self._op(s, row)).server_seen_at = now
                 event(s, node.id, now, "server_adopted", hetzner_id=row.hetzner_id, found=len(found))
                 await transition(s, row, S.BOOTING, now, reason="server_found_by_label")
+                await self._check_ip(s, row, now)
             elif attempted is None or now - attempted > CREATE_LOOKUP_GRACE:
                 event(s, node.id, now, "no_server_found")
                 await self._to_retiring(s, row, now, "create_failed")
@@ -568,6 +631,9 @@ class NodeExecutor:
             row = await lock_node(s, node.id)
             if row is None or row.state != S.BOOTING.value:
                 await s.rollback()
+                return
+            if await self._check_ip(s, row, now):
+                await s.commit()
                 return
             health = await self._health(s, node.id, now)
             if health.registered:
@@ -678,14 +744,21 @@ class NodeExecutor:
         now = self._clock()
         async with sm() as s:
             settings, problems = await load_settings(s)
+            blocked = [*problems, *(["kill_switch_on"] if settings.kill_switch else [])]
+            if not node.is_test and settings.dry_run:  # a slot server is deleted only by a live fleet
+                blocked.append("fleet_dry_run")
+            if not node.is_test and not fleet_reconciler.FLEET_LIVE_ENABLED:  # nor with the code lock shut
+                blocked.append("fleet_live_disabled")
             row = await s.get(Node, node.id)
             op = await self._op(s, row) if row is not None else None
             attempted = op.create_attempted_at if op is not None else None
-            # The Hetzner client is built only when a Hetzner call is needed.
-            needs_hetzner = node.hetzner_id is not None or attempted is not None
+            # The Hetzner client is built only when a Hetzner call is needed (a lookup by label for
+            # a node without a server id; a delete only when nothing blocks it).
+            needs_hetzner = (node.hetzner_id is not None and not blocked) or (
+                node.hetzner_id is None and attempted is not None
+            )
             reader = await self._reader(s, node.account_id) if needs_hetzner else None
             await s.commit()
-        blocked = [*problems, *(["kill_switch_on"] if settings.kill_switch else [])]
 
         if node.hetzner_id is None:
             if attempted is None:  # no create call was ever made: nothing can exist on Hetzner

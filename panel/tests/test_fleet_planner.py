@@ -123,8 +123,11 @@ def test_fresh_defaults_block_every_creation_with_all_reasons() -> None:
     assert [a.target for a in cs] == [f"slot-{i}" for i in range(1, 10)]
     for a in cs:
         assert not a.allowed
-        assert {"kill_switch_on", "budget_cap_not_set", "node_cap_not_set"} <= set(a.reasons)
+        assert {"kill_switch_on", "budget_cap_not_set"} <= set(a.reasons)
     assert plan.dry_run is True
+    assert FleetSettings().node_cap_total == 10  # D14: 9 slots + 1 spare; the budget has no default
+    cs = creates(plan_for(FleetSettings(node_cap_total=None)))
+    assert all({"kill_switch_on", "budget_cap_not_set", "node_cap_not_set"} <= set(a.reasons) for a in cs)
 
 
 def test_missing_caps_block_even_with_kill_switch_off() -> None:
@@ -280,7 +283,7 @@ def test_burned_node_deleted_only_after_replacement_settled() -> None:
     settled = node(10, slot=1, location="nbg1", ready_min_ago=10)
     plan = plan_for(open_settings(), nodes=(burned, settled, *rest), servers=servers)
     (d,) = [a for a in plan.actions if a.action == "delete"]
-    assert d.target == "n1" and d.allowed and d.context["why"] == "replaced_burned"
+    assert d.target == "n1" and d.allowed and d.context["why"] == "burned"
 
     plan = plan_for(open_settings(kill_switch=True), nodes=(burned, settled, *rest), servers=servers)
     (d,) = [a for a in plan.actions if a.action == "delete"]

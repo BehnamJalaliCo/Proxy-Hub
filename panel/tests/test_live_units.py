@@ -199,9 +199,9 @@ def cli(*args: str) -> tuple[int, object]:
 @pytest.mark.db
 @pytest.mark.redis
 async def test_cli_uses_the_same_gates_as_the_api(world: LiveWorld) -> None:
-    code, out = cli("test-node")  # no settings yet: kill switch on, no caps
+    code, out = cli("test-node")  # no settings yet: kill switch on, no budget cap (node cap 10, D14)
     assert code == 1 and isinstance(out, dict) and out["error"] == "gate_refused"
-    assert {"kill_switch_on", "budget_cap_not_set", "node_cap_not_set"} <= set(out["reasons"])
+    assert {"kill_switch_on", "budget_cap_not_set"} <= set(out["reasons"])
     await world.settings(good_settings())
     code, out = cli("test-node", "--location", "nbg1")
     assert code == 0 and isinstance(out, dict)
@@ -254,14 +254,26 @@ def test_only_the_executor_reaches_server_mutations_and_permits() -> None:
     assert _names(ast.parse("from proxyhub.hetzner.mutations import delete_server\ndelete_server(r, p)\n"))
 
 
-def test_executor_is_for_test_nodes_and_the_fleet_stays_dry() -> None:
-    assert fleet_loop.FLEET_LIVE_ENABLED is False
+def test_executor_checks_the_owners_dry_run_for_slot_nodes() -> None:
+    """The executor reads the owner's settings itself (fleet_dry_run) and the fleet loop's code lock
+    (fleet_live_disabled) before any slot-node create or delete. It only reads that lock: nothing
+    in the executor can assign it."""
+    assert fleet_loop.FLEET_LIVE_ENABLED is True
     source = (PANEL / "nodes" / "executor.py").read_text()
-    assert "Node.is_test.is_(True)" in source and "raise FleetNotLive" in source
-    used = {n.id if isinstance(n, ast.Name) else n.attr for n in ast.walk(ast.parse(source))
-            if isinstance(n, ast.Name | ast.Attribute)}  # fmt: skip
-    assert "FLEET_LIVE_ENABLED" not in used  # it never consults (or could flip) the fleet switch
-    assert issubclass(ex.FleetNotLive, PermissionError)
+    assert source.count('"fleet_dry_run"') == 2 and source.count('"fleet_live_disabled"') == 2
+    assert source.count("_fleet_blocked(s)") == 2  # once for creations, once for deletions
+    tree = ast.parse(source)
+    assigned = {
+        t.attr if isinstance(t, ast.Attribute) else getattr(t, "id", None)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign | ast.AugAssign | ast.AnnAssign)
+        for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
+    }
+    assert "FLEET_LIVE_ENABLED" not in assigned
+    assert "setattr" not in {
+        n.func.id for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
+    assert not hasattr(ex, "FleetNotLive")
 
 
 def test_no_log_call_in_the_node_package_carries_user_data_or_tokens() -> None:

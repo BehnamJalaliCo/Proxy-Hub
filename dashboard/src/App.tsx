@@ -19,6 +19,11 @@ const SecurityPage = lazy(() => import("./pages/SecurityPage"));
 const NodesPage = lazy(() => import("./pages/NodesPage"));
 const TelegramPage = lazy(() => import("./pages/TelegramPage"));
 const CloudflarePage = lazy(() => import("./pages/CloudflarePage"));
+const StatsPage = lazy(() => import("./pages/StatsPage"));
+const MtprotoPage = lazy(() => import("./pages/MtprotoPage"));
+const SponsorPage = lazy(() => import("./pages/SponsorPage"));
+const ContentPage = lazy(() => import("./pages/ContentPage"));
+const RealityPage = lazy(() => import("./pages/RealityPage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
 const SetupPage = lazy(() => import("./pages/SetupPage"));
 const NotFoundPage = lazy(() => import("./pages/NotFoundPage"));
@@ -109,6 +114,14 @@ export default function App() {
                     }
                   />
                   <Route
+                    path="stats"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <StatsPage />
+                      </Suspense>
+                    }
+                  />
+                  <Route
                     path="nodes"
                     element={
                       <Suspense fallback={<PageFallback />}>
@@ -124,11 +137,36 @@ export default function App() {
                       </Suspense>
                     }
                   />
+                  <Route path="content" element={<Suspense fallback={<PageFallback />}><ContentPage /></Suspense>} />
+                  <Route
+                    path="mtproto"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <MtprotoPage />
+                      </Suspense>
+                    }
+                  />
                   <Route
                     path="cloudflare"
                     element={
                       <Suspense fallback={<PageFallback />}>
                         <CloudflarePage />
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="sponsor"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <SponsorPage />
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="reality"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <RealityPage />
                       </Suspense>
                     }
                   />
