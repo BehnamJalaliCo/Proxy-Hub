@@ -16,6 +16,7 @@ from proxyhub.reconcilers.mtproxy_account import MtproxyAccountReconciler
 from proxyhub.reconcilers.nodes import NodesReconciler
 from proxyhub.reconcilers.pricing import PricingReconciler
 from proxyhub.reconcilers.probes import ProbesReconciler
+from proxyhub.reconcilers.sponsor import SponsorReconciler
 from proxyhub.reconcilers.telegram import (
     ApiWatchdogReconciler,
     TelegramOutboxReconciler,
@@ -41,6 +42,7 @@ def reconcilers() -> list[Reconciler]:
         ProbesReconciler(),  # net: records reachability verdicts from Iran only
         DomainsReconciler(),  # D35: filter checks of the pool domains, rotation, deletion of filtered zones
         MtproxyAccountReconciler(),  # D37: the operator account's session check (kill switch OFF only)
+        SponsorReconciler(),  # D25/D37: @MTProxybot registration and sponsor channel (kill switch OFF only)
     ]
 
 
