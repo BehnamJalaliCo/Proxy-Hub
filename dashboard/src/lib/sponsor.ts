@@ -44,6 +44,8 @@ export interface SponsorRegistration {
   state_reason: string | null;
   has_tag: boolean;
   tag_hint: string | null;
+  /** The tag is in the node's desired Telemt state; null when there is no tag or no node uses it. */
+  tag_on_node: boolean | null;
   sponsor_channel: string | null;
   wanted_channel: string | null;
   in_sync: boolean;
@@ -286,6 +288,12 @@ export function sponsorLine(r: SponsorRegistration, now: Date = new Date()): { t
   }
   const now_ = r.sponsor_channel ? `فعلاً ${channelText(r.sponsor_channel)}` : "هنوز تنظیم نشده";
   return { tone: "warning", text: `باید ${channelText(r.wanted_channel)} شود (${now_}).` };
+}
+
+/** A note when the tag from @MTProxybot has not reached the proxy's node yet (null otherwise). */
+export function tagNote(r: SponsorRegistration): string | null {
+  if (r.state === "retired" || r.tag_on_node !== false) return null;
+  return "tag هنوز روی node ننشسته است؛ پنل هر ۱۰ دقیقه دوباره امتحان میکند. «ثبت دوباره» همین حالا امتحان میکند.";
 }
 
 // --- campaigns ---------------------------------------------------------------------------------------

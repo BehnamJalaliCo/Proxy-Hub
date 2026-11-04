@@ -19,6 +19,7 @@ import {
   regStateInfo,
   sortRegistrations,
   sponsorLine,
+  tagNote,
   toLocalInput,
   type CampaignDraft,
   type SponsorCampaign,
@@ -40,6 +41,7 @@ const reg = (over: Partial<SponsorRegistration> = {}): SponsorRegistration => ({
   state_reason: null,
   has_tag: true,
   tag_hint: "ecfe…e999",
+  tag_on_node: true,
   sponsor_channel: "ipoxxo",
   wanted_channel: "ipoxxo",
   in_sync: true,
@@ -145,6 +147,10 @@ describe("the module's state", () => {
     expect(sponsorLine(reg({ has_tag: false, in_sync: false }), NOW).tone).toBe("info");
     expect(sponsorLine(reg({ in_sync: false, wanted_channel: "customer_one" }), NOW).text).toMatch(/@customer_one.*@ipoxxo/);
     expect(sponsorLine(reg({ state: "retired" }), NOW).tone).toBe("neutral");
+    expect(tagNote(reg())).toBeNull();
+    expect(tagNote(reg({ has_tag: false, tag_hint: null, tag_on_node: null }))).toBeNull();
+    expect(tagNote(reg({ tag_on_node: false }))).toMatch(/روی node/);
+    expect(tagNote(reg({ tag_on_node: false, state: "retired" }))).toBeNull();
     expect(lastErrorText(null)).toBeNull();
     expect(lastErrorText("no_reply")).toMatch(/جواب نداد/);
     expect(lastErrorText("something_new")).toMatch(/something_new/);

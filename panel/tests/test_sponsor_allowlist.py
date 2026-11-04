@@ -178,6 +178,37 @@ async def test_opening_the_chat_needs_telegram_and_fails_cleanly_without_it() ->
     assert caught.value.code == "telegram_unavailable"
 
 
+async def test_the_chat_opens_only_for_the_bot_id_stored_at_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    """docs/11 lock 1: if the username @MTProxybot now leads to another user (it was taken over),
+    no chat opens, and the client keeps refusing every chat request: the secret never goes there.
+    Telegram's answer to the username lookup is a REAL Telethon ``User`` object, as data."""
+    creds = ApiCredentials(api_id=123456, api_hash=SecretValue(secrets.token_hex(16)))
+    options = ClientOptions(endpoint=Endpoint("127.0.0.1", closed_port()), deadline_s=2)
+    with contextlib.ExitStack() as hold:
+        op = OperatorSession(userclient._new_client(creds, None, options), creds, options, hold)
+        answer: list[types.User] = []
+
+        async def resolved() -> types.User:
+            return answer[-1]
+
+        monkeypatch.setattr(op, "_mtproxybot_user", resolved)
+        for user in (
+            types.User(id=BOT_ID + 1, access_hash=7_001, bot=True, username="MTProxybot"),  # another user
+            types.User(id=BOT_ID, access_hash=None, bot=True, username="MTProxybot"),  # no way to address it
+        ):
+            answer.append(user)
+            with pytest.raises(MtpError) as caught:
+                await op.open_mtproxybot_chat(BOT_ID)
+            assert caught.value.code == "mtproxybot_changed"
+            assert op._client._mtproxybot_id is None
+            with pytest.raises(RequestNotAllowed):
+                await op._client(_send(types.InputPeerUser(user_id=user.id, access_hash=7_001)))
+        answer.append(types.User(id=BOT_ID, access_hash=7_001, bot=True, username="MTProxybot"))
+        chat = await op.open_mtproxybot_chat(BOT_ID)
+        assert chat.bot_id == BOT_ID and op._client._mtproxybot_id == BOT_ID
+        assert chat._peer == types.InputPeerUser(user_id=BOT_ID, access_hash=7_001)
+
+
 @pytest.fixture
 def telethon_debug() -> Iterator[None]:
     logger = logging.getLogger("telethon")

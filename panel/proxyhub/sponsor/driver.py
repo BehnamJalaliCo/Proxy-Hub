@@ -1,9 +1,12 @@
 """Runs one conversation (proxyhub/sponsor/conversation.py) over the chat with @MTProxybot.
 
-For each action: take a pacing slot (5 s gap, 30 per hour, kill switch; proxyhub/sponsor/pacing.py),
-send the text or press the button, write it to actions_log, then read the chat every ``poll_s``
-until the bot's new or changed messages arrive (one more read lets a burst of messages settle),
-write the reply to actions_log with every secret masked, and ask the state machine what is next.
+For each action (:func:`perform`): take a pacing slot (5 s gap, 30 per hour, Telegram's hold, kill
+switch; proxyhub/sponsor/pacing.py), write the message to actions_log (before it goes out, so a
+message Telegram received while the call failed is on record too: lock 5), then send the text
+(a secret only with ``sensitive=True``, which keeps it out of every log line) or press the button.
+Then read the chat every ``poll_s`` until the bot's new or changed messages arrive (one more read
+lets a burst of messages settle), write the reply to actions_log with every secret masked, and ask
+the state machine what is next.
 It stops at the first result (tag, promotion set, or a reply it does not understand) or at the
 first failure, and never raises for Telegram's or the pace's reasons: the caller gets a
 :class:`FlowResult`. No database transaction is open while Telegram is called.
@@ -45,10 +48,11 @@ class Chat(Protocol):
 
 
 class Recorder(Protocol):
-    """actions_log lines, one short transaction each (proxyhub/sponsor/service.py)."""
+    """actions_log lines, one short transaction each (proxyhub/sponsor/service.py). ``sending`` and
+    ``pressing`` are written before the request goes out."""
 
-    async def sent(self, step: Step, shown: str) -> None: ...
-    async def pressed(self, step: Step, label: str, answer: str | None) -> None: ...
+    async def sending(self, step: Step, shown: str) -> None: ...
+    async def pressing(self, step: Step, label: str) -> None: ...
     async def reply(self, step: Step, text: str, buttons: list[str]) -> None: ...
 
 
@@ -112,6 +116,25 @@ async def _await_reply(
     return [], latest
 
 
+async def perform(
+    chat: Chat,
+    action: Send | Press,
+    *,
+    take_slot: Callable[[], Awaitable[object]],
+    record: Recorder,
+    secrets: Sequence[str] = (),
+) -> str | None:
+    """ONE message to the bot: the pacing slot first (raises :class:`PaceStop`), then its
+    actions_log line, then the request. A press returns the bot's short answer, if any."""
+    await take_slot()
+    if isinstance(action, Send):
+        await record.sending(action.then, action.shown)
+        await chat.send(action.text, sensitive=action.sensitive)
+        return None
+    await record.pressing(action.then, replies.mask(action.label, secrets=secrets))
+    return await chat.press(action.message_id, action.data)
+
+
 async def run(
     chat: Chat,
     job: Job,
@@ -128,20 +151,8 @@ async def run(
         before = await chat.recent()
         action: Send | Press = first_action(job)
         for _ in range(MAX_ACTIONS):
-            await take_slot()
-            answer: str | None = None
-            if isinstance(action, Send):
-                await chat.send(action.text, sensitive=action.sensitive)
-                sent += 1
-                await record.sent(action.then, action.shown)
-            else:
-                answer = await chat.press(action.message_id, action.data)
-                sent += 1
-                await record.pressed(
-                    action.then,
-                    replies.mask(action.label, secrets=secrets),
-                    replies.mask(answer, secrets=secrets) if answer else None,
-                )
+            answer = await perform(chat, action, take_slot=take_slot, record=record, secrets=secrets)
+            sent += 1
             step = action.then
             found, before = await _await_reply(chat, before, timing, sleep)
             if not found and not answer:
