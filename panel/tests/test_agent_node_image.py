@@ -9,6 +9,7 @@ download anything.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -52,6 +53,58 @@ def test_versions_lock_pins_every_artifact() -> None:
     # The agent reports the Telemt version the image pins (cloud-init template).
     template = (NODE_IMAGE / "cloud-init" / "node-user-data.yaml.tmpl").read_text()
     assert f'"telemt_version": "{v["TELEMT_VERSION"]}"' in template
+
+
+def test_versions_lock_pins_xray() -> None:
+    """Xray 26.10.31 (docs/10 X1): the official release zip and the two files used from it. The
+    hashes were taken from the downloaded asset on 2026-11-04; the zip's equals the release's .dgst."""
+    v = lock()
+    assert v["XRAY_VERSION"] == "26.10.31"
+    assert v["XRAY_URL"] == (
+        "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-64.zip"
+    )
+    assert v["XCORE_ZIP_SHA256"] == "e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214"
+    assert v["XCORE_BINARY_SHA256"] == "cc4b84d3069569f297a61f04b914f2bb37e9d202fd7b84cb50def1fc30fd40e1"
+    assert v["XCORE_GEOIP_SHA256"] == "ce90dc02a81528109c99d769e1f8fe3071ded6b02a574f31e62d8f4eee312563"
+    # The agent's Xray settings report the same version and keep the API on loopback.
+    settings = json.loads((FILES / "agent-xray.json").read_text())
+    assert settings["version"] == v["XRAY_VERSION"] and settings["api"] == "127.0.0.1:10085"
+    provision = (NODE_IMAGE / "provision.sh").read_text()
+    for snippet in (
+        'check_sha256 "$WORK/xray.zip" "$(lock XCORE_ZIP_SHA256)"',
+        'check_sha256 "$WORK/xr/xray" "$(lock XCORE_BINARY_SHA256)"',
+        'check_sha256 "$WORK/xr/geoip.dat" "$(lock XCORE_GEOIP_SHA256)"',
+        'unzip -q -o "$WORK/xray.zip" xray geoip.dat -d "$WORK/xr"',
+        'install -o root -g root -m 0600 "$FILES/agent-xray.json" /etc/proxyhub-agent/xray.json',
+    ):
+        assert snippet in provision, snippet
+    fetch = (NODE_IMAGE / "fetch-xray.sh").read_text()
+    assert "XCORE_ZIP_SHA256" in fetch and "XCORE_BINARY_SHA256" in fetch and "XCORE_GEOIP_SHA256" in fetch
+
+
+def test_xray_unit_never_runs_unconfigured_or_logs() -> None:
+    unit = (FILES / "xray.service").read_text()
+    for line in (
+        "ConditionPathExists=/etc/xray/config.json",
+        "User=xray",
+        "StandardOutput=null",
+        "StandardError=null",
+        "NoNewPrivileges=true",
+        "CapabilityBoundingSet=CAP_NET_BIND_SERVICE",
+        "AmbientCapabilities=CAP_NET_BIND_SERVICE",
+        "LimitCORE=0",
+        "ProtectSystem=strict",
+        "MemoryDenyWriteExecute=true",
+        "Environment=XRAY_LOCATION_ASSET=/usr/local/share/xray",
+        "ExecStart=/usr/local/bin/xray run -config /etc/xray/config.json",
+    ):
+        assert line in unit.splitlines(), line
+    assert "CAP_NET_ADMIN" not in unit and "ReadWritePaths" not in unit
+    agent_unit = (FILES / "proxyhub-agent.service").read_text()
+    assert "ReadWritePaths=/etc/telemt /etc/xray /etc/proxyhub-agent /var/lib/proxyhub-agent" in agent_unit
+    # Contract item 1: both proxy ports open; Xray's API port closed from outside (loopback only).
+    nft = (FILES / "nftables.conf").read_text()
+    assert "tcp dport { 443, 8443 } accept" in nft and "tcp dport 10085 counter drop" in nft
 
 
 @requires_go

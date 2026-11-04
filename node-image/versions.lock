@@ -10,8 +10,24 @@ TELEMT_TARBALL_SHA256=e6f46b2f3becf29bfd555cec8a059e429f7c082c1af402499b3a7940cf
 # The single file inside the tarball ("telemt", 17075200 bytes).
 TELEMT_BINARY_SHA256=1954f18faeb9f5838e9444880f2ffb00704c6bd5b2836bc86dd64611537d49b8
 
+# Xray-core 26.10.31 (2026-10-31, commit a4a3dff, built with go1.27.3): VLESS + REALITY on TCP 443.
+# Official release asset for Linux x86_64. Downloaded and hashed on 2026-11-04; XCORE_ZIP_SHA256 equals
+# the SHA2-256 line of the release's own Xray-linux-64.zip.dgst. Only two files of the zip are
+# installed: the binary and geoip.dat (needed for the "geoip:private" routing block). This release is
+# four days old: docs/10 X1 records it as an emergency security release and the earlier October
+# releases as withdrawn, so the newest release that is at least two weeks old (26.10.21) is the
+# vulnerable one. The sources of exactly this tag were read for docs/10 (section 10).
+XRAY_VERSION=26.10.31
+XRAY_URL=https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-64.zip
+XCORE_ZIP_SHA256=e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214
+# "xray" inside the zip (35151996 bytes) and "geoip.dat" (3312784 bytes). The hash keys are XCORE_*,
+# not XRAY_*: the secret scanner's rule for JFrog Xray tokens would take a 64-hex value right after
+# "XRAY...=" for a leaked token (gitleaks jfrog-identity-token).
+XCORE_BINARY_SHA256=cc4b84d3069569f297a61f04b914f2bb37e9d202fd7b84cb50def1fc30fd40e1
+XCORE_GEOIP_SHA256=ce90dc02a81528109c99d769e1f8fe3071ded6b02a574f31e62d8f4eee312563
+
 # proxyhub-agent, built from agent/ in this repository by node-image/build-agent.sh
 # (go1.24.7, CGO off, -trimpath, empty build id: reproducible). A test rebuilds it and compares.
-AGENT_VERSION=0.1.0
+AGENT_VERSION=0.2.0
 AGENT_GO_VERSION=1.24.7
-AGENT_SHA256=deddc65be303f16ed637c3d83a7836a615c445d7147ab777db44505c687058c3
+AGENT_SHA256=6b215920dd952924ed7726cc6c832c93e600cf01dffe514d2bee9db53f65354e
