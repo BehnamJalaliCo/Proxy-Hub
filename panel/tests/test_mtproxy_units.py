@@ -220,9 +220,16 @@ def test_only_six_operations_worth_of_requests_are_allowed() -> None:
         "LogOutRequest",
         "GetConfigRequest",
         "GetStateRequest",
+        # D38: our own channels' statistics, each only for the peers of a ChannelScope
+        # (tests/test_analytics_units.py proves the argument checks).
+        "GetFullChannelRequest",
+        "GetBroadcastStatsRequest",
+        "LoadAsyncGraphRequest",
+        "GetMessagesViewsRequest",
     }
-    # This slice sends nothing: no request of the messages namespace at all.
-    assert not any(kind.__module__.endswith(".messages") for kind in ALLOWED_REQUESTS)
+    # Nothing sends: the only request of the messages namespace is the read-only views counter.
+    messages = {kind.__name__ for kind in ALLOWED_REQUESTS if kind.__module__.endswith(".messages")}
+    assert messages == {"GetMessagesViewsRequest"}
 
 
 @pytest.mark.parametrize(
