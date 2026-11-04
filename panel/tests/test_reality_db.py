@@ -168,6 +168,29 @@ async def test_ip_links_burn_with_their_server_and_scopes_without_servers(world:
     assert await _end(world, T0 + timedelta(minutes=1)) == {slot_made.config_id: "burned"}
 
 
+async def test_the_private_key_of_a_deleted_slotless_node_is_forgotten(world: World) -> None:
+    test_node = await world.node(slot=None, ipv4="198.51.100.6")
+    slot_node = await world.node(slot=7, ipv4="198.51.100.7")
+    for n in (test_node, slot_node):
+        await world.report(n, now=datetime.now(UTC))
+    await _loop(world)
+    keys = {k.node_id or k.slot: k for k in await _keys(world)}
+    assert set(keys) == {test_node, 7}
+    # Still in service, or gone but with an active config: kept.
+    await _loop(world)
+    assert len(await world.rows("SELECT name FROM secrets WHERE name LIKE 'reality:%'")) == 2
+    await world.rows("UPDATE nodes SET state = 'deleted' WHERE id IN (:a, :b)", a=test_node, b=slot_node)
+    await _loop(world)  # the configs end as burned first, then the slotless node's key goes
+    assert [r.name for r in await world.rows("SELECT name FROM secrets WHERE name LIKE 'reality:%'")] == [
+        keys[7].secret_name
+    ]  # a slot keeps its key for its next server
+    assert len(await _keys(world)) == 2 and all(c.status == "burned" for c in await _configs(world))
+    [log] = await world.rows("SELECT target FROM actions_log WHERE action = 'reality_key_forgotten'")
+    assert log.target == f"node:{test_node}"
+    await _loop(world)  # once only
+    assert len(await world.rows("SELECT id FROM actions_log WHERE action = 'reality_key_forgotten'")) == 1
+
+
 async def test_usage_from_reports_fills_configs(world: World) -> None:
     a = await world.node(slot=1, ipv4="203.0.113.31", ready_at=T0 - timedelta(hours=1))
     b = await world.node(slot=1, ipv4="203.0.113.32", ready_at=T0 - timedelta(hours=2))
@@ -657,6 +680,14 @@ async def test_links_provider(world: World) -> None:
     assert len(await _create(world, now)) == 1
     async with world.engine.connect() as conn:
         assert await provide_links(conn) == []  # not confirmed by the node yet
+    # A report after creation confirms only with Xray up and without an apply error.
+    for broken in ({"up": False}, {"apply_error": "xray_config_refused"}):
+        await world.report(node, now=now + timedelta(seconds=30), **broken)
+        async with world.engine.connect() as conn:
+            assert await provide_links(conn) == [], broken
+    await world.report(node, now=now + timedelta(seconds=10))  # too soon after creation
+    async with world.engine.connect() as conn:
+        assert await provide_links(conn) == []
     await world.report(node, now=now + timedelta(seconds=30))
     async with world.engine.begin() as conn:
         await save_channel(conn, "main", {"username": "ipoxxo_main", "title": "IPOXXO"})
@@ -710,8 +741,17 @@ async def test_dashboard_api(world: World) -> None:
                 and cfg["remaining_bytes"] == 50 * GB
             )
             assert 0 < cfg["remaining_s"] <= 24 * 3600
-            assert any(n["node_id"] == str(node) and n["xray"]["enabled"] for n in body["nodes"])
+            [item] = [n for n in body["nodes"] if n["node_id"] == str(node)]
+            assert item["xray"]["enabled"] and item["xray"]["target_ok"] is True
+            assert item["target"] == "dl.google.com:443" and item["target_next"] is None
             assert private not in json.dumps(body)
+            # An ended config shows no link any more (its UUID leaves the page) and nothing left.
+            await world.rows("UPDATE reality_configs SET status = 'expired', ended_at = now()")
+            [ended] = (await c.get("/api/reality")).json()["configs"]
+            assert ended["status"] == "expired" and ended["url"] is None
+            assert ended["remaining_s"] == 0 and ended["remaining_bytes"] == 0
+            [row] = await _configs(world)
+            assert str(row.uuid) not in json.dumps((await c.get("/api/reality")).json())
 
             put = await c.put("/api/reality/settings", json={**RealitySettings().model_dump(), "cap_gb": 80})
             assert put.status_code == 200 and put.json()["cap_gb"] == 80

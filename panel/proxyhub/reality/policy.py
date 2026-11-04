@@ -34,11 +34,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import exists, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from proxyhub.cloudflare.rotation import current_active_domain
 from proxyhub.cloudflare.service import slot_name
+from proxyhub.db.models import Node
 from proxyhub.db.models_reality import RealityConfig, RealityKey
 from proxyhub.fleet.lifecycle import NodeState
 from proxyhub.reality.keys import new_key_pair, new_short_id
@@ -56,7 +57,7 @@ from proxyhub.reality.store import (
     target_verdict,
     telemt_clash,
 )
-from proxyhub.vault import Vault
+from proxyhub.vault import Vault, delete_secret
 
 S = NodeState
 EndStatus = Literal["expired", "full", "burned"]
@@ -320,6 +321,24 @@ async def retarget_scopes(
             )
         )
     return out
+
+
+async def forget_gone_node_keys(conn: AsyncConnection) -> list[uuid.UUID]:
+    """Delete the vaulted private key of every node scope (a node without a slot, such as the
+    owner's test node) whose node is gone for good and has no active config left. The key row stays
+    for the config history; a slot's key is kept, the slot gets new servers. Returns the node ids."""
+    rows = (
+        await conn.execute(
+            select(RealityKey.node_id, RealityKey.secret_name)
+            .join(Node, Node.id == RealityKey.node_id)
+            .where(
+                Node.state == S.DELETED.value,
+                ~exists().where(RealityConfig.key_id == RealityKey.id, RealityConfig.status == "active"),
+            )
+            .order_by(RealityKey.id)
+        )
+    ).all()
+    return [r.node_id for r in rows if await delete_secret(conn, r.secret_name)]
 
 
 class VaultFactory:

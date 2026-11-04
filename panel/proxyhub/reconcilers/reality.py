@@ -1,6 +1,7 @@
 """Reality policy loop (team reality), every 30 seconds (proxyhub/reality/policy.py): ends configs
 that are full, expired or burned; moves key scopes to the owner's target setting; makes keys for new
-scopes and fresh configs on nodes that confirmed their scope's target.
+scopes and fresh configs on nodes that confirmed their scope's target; deletes the vaulted key of a
+slotless node that is gone.
 
 Every change goes to actions_log (actor ``reality``) without the config's UUID: that is the
 credential a link carries. The owner hears about what code cannot fix by itself: a node from which
@@ -19,7 +20,14 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from proxyhub.db.models_reality import RealityKey
 from proxyhub.fleet.actions import iso, log_action
-from proxyhub.reality.policy import create_configs, end_configs, ensure_keys, retarget_scopes, scope_label
+from proxyhub.reality.policy import (
+    create_configs,
+    end_configs,
+    ensure_keys,
+    forget_gone_node_keys,
+    retarget_scopes,
+    scope_label,
+)
 from proxyhub.reality.settings import load_reality_settings, load_state, save_state
 from proxyhub.reality.store import all_statuses, live_nodes, target_verdict
 from proxyhub.reconcilers.base import Reconciler
@@ -54,6 +62,16 @@ class RealityReconciler(Reconciler):
         settings = await load_reality_settings(conn)
         for config_id, status in sorted((await end_configs(conn, now)).items()):
             await self._ended(conn, config_id, [status])
+        for node_id in await forget_gone_node_keys(conn):
+            await log_action(
+                conn,
+                actor=ACTOR,
+                action="reality_key_forgotten",
+                target=scope_label(None, node_id),
+                dry_run=False,
+                allowed=True,
+                reasons=["node_deleted"],
+            )
         for r in await retarget_scopes(conn, settings, now):
             for config_id in r.burned:
                 await self._ended(conn, config_id, ["burned", "target_replaced"])
