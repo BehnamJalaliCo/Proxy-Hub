@@ -9,6 +9,7 @@ a config posted as ``slot<N>.<domain>`` keeps working when slot N moves to a new
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import uuid
 from collections.abc import Sequence
@@ -25,10 +26,11 @@ from proxyhub.db.models_agent import TelemtNodeConfig
 from proxyhub.db.models_reality import RealityConfig, RealityKey, RealityNodeStatus, RealityUsage
 from proxyhub.fleet.lifecycle import NodeState
 from proxyhub.reality.settings import PORT
-from proxyhub.vault import Vault
+from proxyhub.vault import Vault, VaultError
 
 Db = AsyncConnection | AsyncSession
 S = NodeState
+log = logging.getLogger(__name__)
 
 # Nodes that keep serving their scope's configs (a burned or draining node until it is gone: its
 # clients may still reach it, and the slot's replacement serves the same configs).
@@ -103,6 +105,14 @@ async def live_nodes(db: Db) -> list[NodeView]:
     return [_node(r) for r in rows]
 
 
+Scope = tuple[str, int | uuid.UUID]
+
+
+def node_scope(node: NodeView) -> Scope:
+    """A node's key scope: ("slot", N) or, without a slot, ("node", its id)."""
+    return ("slot", node.slot) if node.slot is not None else ("node", node.id)
+
+
 @dataclass(frozen=True)
 class KeyView:
     id: int
@@ -113,6 +123,18 @@ class KeyView:
     target: str
     server_name: str
     secret_name: str
+
+    @property
+    def scope(self) -> Scope:
+        if self.slot is not None:
+            return ("slot", self.slot)
+        assert self.node_id is not None  # reality_keys one_scope check
+        return ("node", self.node_id)
+
+    @property
+    def target_pair(self) -> tuple[str, str]:
+        """(target, server name): what a node's target check must be about to count."""
+        return self.target, self.server_name
 
 
 _KEY_COLS = (
@@ -136,6 +158,10 @@ async def scope_key(db: Db, node: NodeView) -> KeyView | None:
     return KeyView(*r) if r is not None else None
 
 
+async def keys_by_scope(db: Db) -> dict[Scope, KeyView]:
+    return {(k := KeyView(*r)).scope: k for r in (await db.execute(select(*_KEY_COLS))).all()}
+
+
 async def telemt_clash(db: Db, node_id: uuid.UUID) -> bool:
     """True if the node's Telemt config uses Xray's port or API port (the agent would refuse it)."""
     ports = (
@@ -155,6 +181,9 @@ class StatusView:
     apply_error: str | None
     users_reported: int
     reported_at: datetime
+    # What the node's last target check was about (None with target_ok: never checked).
+    checked_target: str | None = None
+    checked_server_name: str | None = None
 
 
 _STATUS_COLS = (
@@ -167,7 +196,20 @@ _STATUS_COLS = (
     RealityNodeStatus.apply_error,
     RealityNodeStatus.users_reported,
     RealityNodeStatus.reported_at,
+    RealityNodeStatus.checked_target,
+    RealityNodeStatus.checked_server_name,
 )
+
+
+def target_verdict(status: StatusView | None, target: str, server_name: str) -> bool | None:
+    """The node's target check for exactly this target and server name: True passed, False failed,
+    None not checked yet. A result about another target (one the owner has since replaced) does
+    not count either way."""
+    if status is None or status.target_ok is None:
+        return None
+    if (status.checked_target, status.checked_server_name) != (target, server_name):
+        return None
+    return status.target_ok
 
 
 async def node_status(db: Db, node_id: uuid.UUID) -> StatusView | None:
@@ -206,9 +248,18 @@ async def xray_section(db: Db, node_id: uuid.UUID, vault: Vault | None = None) -
             .order_by(RealityConfig.id)
         )
     ).all()
-    secret = await (vault or Vault.from_config()).get(db, key.secret_name)
+    try:
+        secret = await (vault or Vault.from_config()).get(db, key.secret_name)
+    except VaultError as exc:
+        secret, problem = None, type(exc).__name__
+    else:
+        problem = "missing"
     if secret is None:
-        raise LookupError("reality key missing from the vault")
+        # Leave Xray out rather than fail the whole document: the node's Telemt and ad-tag changes
+        # must still reach it. The agent then stops Xray and reports it down, so no config of this
+        # scope is handed to posts (proxyhub/reality/links.py needs Xray up on a serving node).
+        log.error("reality: the private key of key %s is unusable (%s); xray left out", key.id, problem)
+        return None
     return {
         "port": PORT,
         "private_key": secret.reveal(),
@@ -245,19 +296,26 @@ async def store_xray_report(
     apply_error: str | None,
     users: Sequence[XrayUserTotal],
     now: datetime,
+    checked: tuple[str, str] | None = None,
 ) -> int:
     """Store one report's Xray section: node status, and per config the bytes this node counted.
 
     The agent sends cumulative totals; a total below the last one means the agent started counting
     again (its state was reset), so the new total is added rather than lost. Only configs of the
-    node's own scope are accepted. Returns how many configs got usage. The caller commits.
+    node's own scope are accepted. ``checked`` is the (target, server name) the node's last target
+    check was about, given exactly when ``target_ok`` is. Returns how many configs got usage. The
+    caller commits.
     """
+    if (target_ok is None) != (checked is None):
+        raise ValueError("a target check result comes with the target it was about")
     status_values: dict[str, Any] = {
         "enabled": enabled,
         "up": up,
         "version": version,
         "uptime_s": uptime_s,
         "target_ok": target_ok,
+        "checked_target": checked[0] if checked else None,
+        "checked_server_name": checked[1] if checked else None,
         "apply_error": apply_error,
         "users_reported": len(users),
         "reported_at": now,

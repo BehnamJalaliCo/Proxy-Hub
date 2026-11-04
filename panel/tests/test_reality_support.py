@@ -20,6 +20,7 @@ from proxyhub.reality.store import XrayUserTotal, store_xray_report
 from proxyhub.vault import Vault
 
 PREFIX = "reality-test-"
+DEFAULT_TARGET = ("dl.google.com:443", "dl.google.com")  # RealitySettings() target and server name
 
 
 @dataclass
@@ -75,9 +76,12 @@ class World:
         enabled: bool = True,
         up: bool = True,
         target_ok: bool | None = True,
+        checked: tuple[str, str] = DEFAULT_TARGET,
         apply_error: str | None = None,
         users: dict[str, int] | None = None,
     ) -> int:
+        """Store an Xray report as the agent sends it. ``target_ok`` is the node's check of
+        ``checked`` (target, server name): by default the default target, which passed."""
         async with self.engine.begin() as conn:
             return await store_xray_report(
                 conn,
@@ -87,6 +91,7 @@ class World:
                 version="26.10.31",
                 uptime_s=60.0,
                 target_ok=target_ok,
+                checked=None if target_ok is None else checked,
                 apply_error=apply_error,
                 users=[XrayUserTotal(e, n) for e, n in (users or {}).items()],
                 now=now or datetime.now(UTC),

@@ -185,6 +185,7 @@ async def store_report(session: AsyncSession, node_id: uuid.UUID, report: AgentR
             version=x.version,
             uptime_s=x.uptime_s,
             target_ok=x.target_ok,
+            checked=x.checked(),
             apply_error=x.apply_error,
             users=[XrayUserTotal(u.email, u.total_octets) for u in x.users],
             now=now,

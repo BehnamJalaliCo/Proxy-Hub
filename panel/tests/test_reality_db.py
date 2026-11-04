@@ -32,7 +32,7 @@ from proxyhub.agent_api.tokens import issue_registration_token
 from proxyhub.api.deps import require_admin
 from proxyhub.reality.keys import public_from_private
 from proxyhub.reality.links import provide_links
-from proxyhub.reality.policy import create_configs, end_configs
+from proxyhub.reality.policy import create_configs, end_configs, ensure_keys, retarget_scopes
 from proxyhub.reality.settings import GB, RealitySettings, save_reality_settings
 from proxyhub.reality.store import xray_section
 from proxyhub.reconcilers.reality import RealityReconciler
@@ -44,8 +44,22 @@ T0 = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 
 
 async def _create(world: World, now: datetime, settings: RealitySettings | None = None) -> list[Any]:
+    """One policy round's making step: keys for new scopes, then due configs (as the loop does)."""
     async with world.engine.begin() as conn:
+        await ensure_keys(conn, settings or RealitySettings(), now)
         return await create_configs(conn, settings or RealitySettings(), now)
+
+
+async def _retarget(world: World, now: datetime, settings: RealitySettings) -> list[Any]:
+    async with world.engine.begin() as conn:
+        return await retarget_scopes(conn, settings, now)
+
+
+async def _keys(world: World) -> list[Any]:
+    return await world.rows(
+        "SELECT id, slot, node_id, public_key, short_id, target, server_name, secret_name FROM reality_keys "
+        "ORDER BY id"
+    )
 
 
 async def _end(world: World, now: datetime) -> dict[int, str]:
@@ -75,11 +89,9 @@ async def test_a_ready_node_gets_a_vaulted_key_and_staggered_configs(world: Worl
     assert await _create(world, T0) == []  # an agent without Xray
     await world.report(node, now=T0)
     [made] = await _create(world, T0)
-    assert made.key_created and made.slot == 3 and made.host == "203.0.113.10"  # no active domain
+    assert made.slot == 3 and made.host == "203.0.113.10"  # no active domain
 
-    [key] = await world.rows(
-        "SELECT id, slot, node_id, public_key, short_id, target, server_name, secret_name FROM reality_keys"
-    )
+    [key] = await _keys(world)
     assert (key.slot, key.node_id, key.target, key.server_name) == (
         3,
         None,
@@ -101,7 +113,7 @@ async def test_a_ready_node_gets_a_vaulted_key_and_staggered_configs(world: Worl
     assert await _create(world, T0 + timedelta(hours=11)) == []
     await world.report(node, now=T0 + timedelta(hours=12))
     [second] = await _create(world, T0 + timedelta(hours=12))
-    assert not second.key_created
+    assert second.slot == 3 and len(await _keys(world)) == 1  # the same scope key
     await world.report(node, now=T0 + timedelta(hours=23))
     assert await _create(world, T0 + timedelta(hours=23)) == []  # two active already
     await world.report(node, now=T0 + timedelta(hours=24))
@@ -223,6 +235,177 @@ async def test_nodes_that_must_not_get_configs(world: World) -> None:
     assert await _section(world, ok) is None
 
 
+NEW_TARGET = ("www.example.org:443", "www.example.org")
+
+
+async def _loop(world: World) -> None:
+    async with world.engine.begin() as conn:
+        await RealityReconciler().run_once(conn)
+
+
+async def test_a_new_scope_gets_its_key_first_and_a_config_once_the_node_confirmed_the_target(
+    world: World,
+) -> None:
+    node = await world.node(slot=3)
+    await world.report(node, now=T0, target_ok=None)  # the agent never had a target to check
+    assert await _create(world, T0) == []
+    [key] = await _keys(world)
+    section = await _section(world, node)
+    assert section is not None and section["users"] == [] and section["target"] == key.target
+    # A result about another target does not count, failed or not.
+    await world.report(node, now=T0, target_ok=True, checked=NEW_TARGET)
+    assert await _create(world, T0) == []
+    await world.report(node, now=T0, target_ok=False)
+    assert await _create(world, T0) == []
+    await world.report(node, now=T0, target_ok=True)
+    [made] = await _create(world, T0)
+    assert made.slot == 3 and len(await _keys(world)) == 1
+
+
+async def test_a_failing_target_is_replaced_by_the_owners_new_target(world: World) -> None:
+    """Review finding: a slot whose target failed could never get a config again, whatever the
+    owner set. Now the owner's new target reaches the slot, the node checks it, configs resume."""
+    zone = await world.zone("t")
+    node = await world.node(slot=3)
+    expired_node = await world.node(slot=4, ipv4="203.0.113.44")
+    now = datetime.now(UTC)
+    for n in (node, expired_node):
+        await world.report(n, now=now)
+    await _loop(world)
+    configs = {c.slot: c for c in await _configs(world)}
+    assert set(configs) == {3, 4}
+    [old3, old4] = await _keys(world)
+    # The target fails from both nodes; slot 4's config has run out meanwhile (the reviewer's case).
+    await world.rows(
+        "UPDATE reality_configs SET created_at = created_at - interval '2 days', "
+        "expires_at = created_at - interval '1 day' WHERE slot = 4"
+    )
+    for n in (node, expired_node):
+        await world.report(n, now=now, target_ok=False)
+    await _loop(world)
+    assert {c.slot: c.status for c in await _configs(world)} == {3: "active", 4: "expired"}
+    [failing] = await world.rows(
+        "SELECT reasons->'context' AS context FROM actions_log WHERE action = 'reality_target_failing'"
+    )
+    assert sorted(failing.context["nodes"]) == sorted(
+        r.name
+        for r in await world.rows("SELECT name FROM nodes WHERE id IN (:a, :b)", a=node, b=expired_node)
+    )
+
+    # The owner sets another target in the dashboard.
+    async with world.engine.begin() as conn:
+        await save_reality_settings(conn, RealitySettings(target_host="www.example.org"))
+    await _loop(world)
+    rows = {c.slot: c for c in await _configs(world)}
+    assert rows[3].status == "burned" and rows[4].status == "expired"  # old target, no new config yet
+    keys = await _keys(world)
+    for before, after in zip((old3, old4), keys, strict=True):
+        assert (after.target, after.server_name) == NEW_TARGET
+        assert after.public_key == before.public_key and after.secret_name == before.secret_name
+        assert after.short_id != before.short_id
+    section = await _section(world, node)
+    assert section is not None
+    assert (section["target"], section["server_names"], section["users"]) == (
+        NEW_TARGET[0],
+        [NEW_TARGET[1]],
+        [],
+    )
+    assert section["short_ids"] == [keys[0].short_id]
+    logs = await world.rows(
+        "SELECT action, target, CAST(reasons AS text) AS reasons FROM actions_log "
+        "WHERE actor = 'reality' AND action IN ('reality_target_switched', 'reality_config_ended') "
+        "ORDER BY id"
+    )
+    by_action = [(r.action, r.target) for r in logs]
+    assert ("reality_config_ended", f"reality:{rows[3].id}") in by_action
+    assert {t for a, t in by_action if a == "reality_target_switched"} == {"slot:3", "slot:4"}
+    assert any("old_target_failed" in r.reasons for r in logs if r.target == "slot:3")
+    assert any("no_active_configs" in r.reasons for r in logs if r.target == "slot:4")
+    assert all(str(c.uuid) not in r.reasons for r in logs for c in rows.values())
+
+    # A stale report about the old target changes nothing; the node's check of the new one does.
+    await world.report(node, now=datetime.now(UTC), target_ok=False)
+    await _loop(world)
+    assert [c.status for c in await _configs(world)].count("active") == 0
+    for n in (node, expired_node):
+        await world.report(n, now=datetime.now(UTC), target_ok=True, checked=NEW_TARGET)
+    await _loop(world)
+    fresh = [c for c in await _configs(world) if c.status == "active"]
+    assert sorted(c.slot for c in fresh) == [3, 4]
+    for c in fresh:
+        assert c.host.endswith(zone)
+    section = await _section(world, node)
+    assert section is not None and [u["id"] for u in section["users"]] == [
+        str(c.uuid) for c in fresh if c.slot == 3
+    ]
+    await world.report(
+        node, now=datetime.now(UTC) + timedelta(seconds=30), target_ok=True, checked=NEW_TARGET
+    )
+    async with world.engine.connect() as conn:
+        links = [link for link in await provide_links(conn) if link.status == "active" and link.slot == 3]
+    assert (
+        len(links) == 1
+        and "sni=www.example.org" in links[0].url
+        and f"sid={keys[0].short_id}" in links[0].url
+    )
+
+
+async def test_a_working_target_is_switched_once_its_configs_have_ended(world: World) -> None:
+    node = await world.node(slot=5)
+    await world.report(node, now=T0)
+    [c1] = await _create(world, T0)
+    await world.report(node, now=T0 + timedelta(hours=12))
+    [c2] = await _create(world, T0 + timedelta(hours=12))
+    [key] = await _keys(world)
+    new = RealitySettings(target_host="www.example.org")
+
+    # The owner changes the target while two configs of the old one are in use (and it works).
+    async with world.engine.begin() as conn:
+        await save_reality_settings(conn, new)
+    for hours in (13, 23):
+        now = T0 + timedelta(hours=hours)
+        await world.report(node, now=now)
+        assert await _retarget(world, now, new) == []
+        assert await _create(world, now, new) == []  # no new config on the old target meanwhile
+    section = await _section(world, node)
+    assert section is not None and section["target"] == "dl.google.com:443" and len(section["users"]) == 2
+    async with world.engine.connect() as conn:
+        from proxyhub.reality.service import summary
+
+        view = await summary(conn, T0 + timedelta(hours=23))
+    [item] = [n for n in view["nodes"] if n["node_id"] == str(node)]
+    assert item["target"] == "dl.google.com:443" and item["target_next"] == "www.example.org:443"
+    assert item["xray"]["target_ok"] is True
+
+    # The older one ends: still one in use.
+    now = T0 + timedelta(hours=24)
+    await world.report(node, now=now)
+    assert await _end(world, now) == {c1.config_id: "expired"}
+    assert await _retarget(world, now, new) == [] and await _create(world, now, new) == []
+    # The last one ends: the scope switches (nothing burned), the node checks, configs resume.
+    now = T0 + timedelta(hours=36)
+    await world.report(node, now=now)
+    assert await _end(world, now) == {c2.config_id: "expired"}
+    [switched] = await _retarget(world, now, new)
+    assert (switched.slot, switched.burned, switched.old_target, switched.new_target) == (
+        5,
+        (),
+        "dl.google.com:443",
+        "www.example.org:443",
+    )
+    [after] = await _keys(world)
+    assert (after.id, after.public_key) == (key.id, key.public_key) and after.short_id != key.short_id
+    assert await _create(world, now, new) == []  # the node has not checked the new target yet
+    await world.report(node, now=now, target_ok=True, checked=NEW_TARGET)
+    [c3] = await _create(world, now, new)
+    async with world.engine.connect() as conn:
+        view = await summary(conn, now)
+    [item] = [n for n in view["nodes"] if n["node_id"] == str(node)]
+    assert item["target"] == "www.example.org:443" and item["target_next"] is None
+    assert item["xray"]["target_ok"] is True and item["active_configs"] == 1
+    assert c3.slot == 5
+
+
 # --- desired state and the agent API ---------------------------------------------------------------
 
 
@@ -268,6 +451,43 @@ async def test_desired_state_has_xray_only_for_agents_that_manage_it(world: Worl
     await world.report(node, now=T0 + timedelta(hours=24))
     await world.rows("UPDATE nodes SET state = 'retiring' WHERE id = :n", n=node)
     assert "xray" not in await doc()  # a leaving server stops Xray
+
+
+async def test_an_unusable_vault_key_leaves_xray_out_but_never_fails_the_document(
+    world: World, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The desired state also carries Telemt and ad tags: a broken Reality key must not turn the
+    whole document into an error (the agent would keep an old Telemt state)."""
+    node = await world.node(slot=6)
+    await world.report(node, now=T0)
+    await _create(world, T0)
+    seal = load_seal_key(world.files.master_key)
+    maker = async_sessionmaker(world.engine, expire_on_commit=False)
+    [key] = await _keys(world)
+    async with world.engine.connect() as conn:
+        private = (await world.vault.get(conn, key.secret_name)).reveal()  # type: ignore[union-attr]
+
+    async def doc() -> dict[str, Any]:
+        async with maker() as session:
+            return await build_desired_state(session, seal, node)
+
+    assert "xray" in await doc()
+    caplog.set_level(logging.ERROR)
+    # The stored value no longer authenticates (copied from another row, or tampered with).
+    await world.rows(
+        "UPDATE secrets SET ciphertext = decode(repeat('00', octet_length(ciphertext)), 'hex') "
+        "WHERE name = :n",
+        n=key.secret_name,
+    )
+    broken = await doc()
+    assert "xray" not in broken and broken["node_id"] == str(node)
+    assert any("VaultDecryptError" in r.getMessage() for r in caplog.records)
+    # Gone altogether.
+    await world.rows("DELETE FROM secrets WHERE name = :n", n=key.secret_name)
+    assert "xray" not in await doc()
+    assert any("(missing)" in r.getMessage() for r in caplog.records)
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert private not in logged and key.secret_name not in logged
 
 
 def _csr(node_id: uuid.UUID) -> str:
@@ -336,6 +556,8 @@ async def test_agent_api_round_trip(world: World, caplog: pytest.LogCaptureFixtu
             "version": "26.10.31",
             "uptime_s": None,
             "target_ok": None,
+            "checked_target": None,
+            "checked_server_name": None,
             "apply_error": None,
             "users": [],
         }
@@ -349,20 +571,72 @@ async def test_agent_api_round_trip(world: World, caplog: pytest.LogCaptureFixtu
         bad = {**xray, "users": [{"email": "cfg-1@10.1.2.3", "total_octets": 1}]}
         resp = await client.post("/agent/v1/report", json=_report(bad), headers=auth)
         assert resp.status_code == 422 and resp.json() == {"error": "ip_like_value"}
+        # A target check comes with what it was about, which is never an address.
+        for wrong in (
+            {**xray, "target_ok": True},
+            {**xray, "target_ok": True, "checked_target": "dl.google.com:443"},
+            {
+                **xray,
+                "target_ok": False,
+                "checked_target": "dl.google.com",
+                "checked_server_name": "dl.google.com",
+            },
+            {
+                **xray,
+                "target_ok": False,
+                "checked_target": "dl.google.com:0",
+                "checked_server_name": "dl.google.com",
+            },
+            {**xray, "checked_target": "dl.google.com:443", "checked_server_name": "dl.google.com"},
+        ):
+            resp = await client.post("/agent/v1/report", json=_report(wrong), headers=auth)
+            assert resp.status_code == 422, wrong
+        ip_target = {
+            **xray,
+            "target_ok": True,
+            "checked_target": "142.250.1.1:443",
+            "checked_server_name": "x.com",
+        }
+        resp = await client.post("/agent/v1/report", json=_report(ip_target), headers=auth)
+        assert resp.status_code == 422 and resp.json() == {"error": "ip_like_value"}
 
+        # The first round makes the scope's key only: the node has not checked the target yet.
         async with world.engine.begin() as conn:
             await RealityReconciler().run_once(conn)
+        assert await _configs(world) == []
         desired = await client.get("/agent/v1/desired", headers=auth)
         assert desired.status_code == 200 and desired.headers["cache-control"] == "no-store"
         x = desired.json()["xray"]
+        assert x["users"] == [] and x["target"] == "dl.google.com:443"
+        # The agent checks the target it was given and says so; the next round makes the config.
+        checked = {
+            **xray,
+            "up": True,
+            "uptime_s": 20.0,
+            "target_ok": True,
+            "checked_target": x["target"],
+            "checked_server_name": x["server_names"][0],
+        }
+        assert (await client.post("/agent/v1/report", json=_report(checked), headers=auth)).status_code == 204
+        [st] = await world.rows(
+            "SELECT target_ok, checked_target, checked_server_name FROM reality_node_status "
+            "WHERE node_id = :n",
+            n=node,
+        )
+        assert (st.target_ok, st.checked_target, st.checked_server_name) == (
+            True,
+            "dl.google.com:443",
+            "dl.google.com",
+        )
+        async with world.engine.begin() as conn:
+            await RealityReconciler().run_once(conn)
+        x = (await client.get("/agent/v1/desired", headers=auth)).json()["xray"]
         [c] = await _configs(world)
         assert [u["id"] for u in x["users"]] == [str(c.uuid)]
         email = x["users"][0]["email"]
         used = {
-            **xray,
-            "up": True,
+            **checked,
             "uptime_s": 30.0,
-            "target_ok": True,
             "users": [{"email": email, "total_octets": 1234}],
         }
         assert (await client.post("/agent/v1/report", json=_report(used), headers=auth)).status_code == 204
@@ -486,17 +760,8 @@ async def test_loop_logs_without_user_ids_and_alerts_once(world: World) -> None:
 # --- the real agent on the panel's document -------------------------------------------------------
 
 
-@requires_go
-async def test_the_go_agent_accepts_and_renders_the_panels_document(world: World, tmp_path: Path) -> None:
-    node = await world.node(slot=20)
-    await world.report(node, now=T0)
-    await _create(world, T0)
-    await world.report(node, now=T0 + timedelta(hours=12))
-    await _create(world, T0 + timedelta(hours=12))
-    seal = load_seal_key(world.files.master_key)
-    async with async_sessionmaker(world.engine, expire_on_commit=False)() as session:
-        body = canonical_json(await build_desired_state(session, seal, node))
-    path = tmp_path / "desired.json"
+def _go_panel_document(node: uuid.UUID, body: bytes, path: Path, users: int) -> None:
+    """Run the Go agent's TestPanelDocument on a document the real panel built."""
     path.write_bytes(body)
     path.chmod(0o600)
     # PROXYHUB_TEST_XRAY (when set) passes through: then the pinned binary checks the config too.
@@ -504,7 +769,7 @@ async def test_the_go_agent_accepts_and_renders_the_panels_document(world: World
         "env",
         f"PROXYHUB_TEST_DESIRED_DOC={path}",
         f"PROXYHUB_TEST_NODE_ID={node}",
-        "PROXYHUB_TEST_EXPECT_USERS=2",
+        f"PROXYHUB_TEST_EXPECT_USERS={users}",
         "go",
         "-C",
         AGENT_DIR,
@@ -522,3 +787,24 @@ async def test_the_go_agent_accepts_and_renders_the_panels_document(world: World
     private = json.loads(body)["xray"]["private_key"]
     assert private not in result.stdout + result.stderr
     assert len(base64.urlsafe_b64decode(private + "=")) == 32
+
+
+@requires_go
+async def test_the_go_agent_accepts_and_renders_the_panels_document(world: World, tmp_path: Path) -> None:
+    node = await world.node(slot=20)
+    seal = load_seal_key(world.files.master_key)
+
+    async def body() -> bytes:
+        async with async_sessionmaker(world.engine, expire_on_commit=False)() as session:
+            return canonical_json(await build_desired_state(session, seal, node))
+
+    # A new scope: the key without any user yet, so the node can check the target first.
+    await world.report(node, now=T0, target_ok=None)
+    await _create(world, T0)
+    _go_panel_document(node, await body(), tmp_path / "key-only.json", 0)
+    # Then two configs.
+    await world.report(node, now=T0)
+    await _create(world, T0)
+    await world.report(node, now=T0 + timedelta(hours=12))
+    await _create(world, T0 + timedelta(hours=12))
+    _go_panel_document(node, await body(), tmp_path / "desired.json", 2)

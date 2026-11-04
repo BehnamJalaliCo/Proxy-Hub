@@ -16,7 +16,14 @@ from proxyhub.db.models_reality import RealityConfig
 from proxyhub.fleet.actions import iso
 from proxyhub.reality.links import ENDED_KEPT_FOR, config_name, link_prefix, links_for, vless_url
 from proxyhub.reality.settings import GB, PORT, RealitySettings, load_reality_settings
-from proxyhub.reality.store import all_statuses, live_nodes, recent_and_active_configs, scope_key
+from proxyhub.reality.store import (
+    all_statuses,
+    keys_by_scope,
+    live_nodes,
+    node_scope,
+    recent_and_active_configs,
+    target_verdict,
+)
 
 Db = AsyncConnection | AsyncSession
 
@@ -42,10 +49,11 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
         if r.status == "active":
             active_by_key[r.key_id] = active_by_key.get(r.key_id, 0) + 1
 
+    keys = await keys_by_scope(db)
     node_items: list[dict[str, Any]] = []
     for n in sorted(nodes, key=lambda n: (n.slot is None, n.slot or 0, n.name)):
         st = statuses.get(n.id)
-        key = await scope_key(db, n)
+        key = keys.get(node_scope(n))
         node_items.append(
             {
                 "node_id": str(n.id),
@@ -60,12 +68,17 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
                     "up": st.up,
                     "version": st.version,
                     "uptime_s": st.uptime_s,
-                    "target_ok": st.target_ok,
+                    # Only a check of the scope's current target counts (null: not checked yet).
+                    "target_ok": target_verdict(st, *key.target_pair) if key else None,
                     "apply_error": st.apply_error,
                     "reported_at": iso(st.reported_at),
                 },
                 "public_key": key.public_key if key else None,
                 "target": key.target if key else None,
+                # The owner's newer target, while this scope still waits for its configs to end.
+                "target_next": settings.target
+                if key and key.target_pair != (settings.target, settings.target_host)
+                else None,
                 "active_configs": active_by_key.get(key.id, 0) if key else 0,
             }
         )

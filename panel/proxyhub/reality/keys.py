@@ -50,7 +50,3 @@ def public_from_private(private_b64: str) -> str:
 def new_short_id() -> str:
     """16 hex characters (8 random bytes), the longest short id REALITY accepts."""
     return secrets.token_hex(8)
-
-
-def secret_name(key_id: int) -> str:
-    return f"reality:key:{key_id}"

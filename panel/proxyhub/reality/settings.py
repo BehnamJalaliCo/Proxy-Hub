@@ -9,9 +9,12 @@ CDN, near the nodes) defaults to ``dl.google.com``: Google's own edge (no third-
 with HTTP/2 and X25519, served from Google's front ends in Frankfurt and Hamina right next to
 Hetzner's fsn1/nbg1/hel1, and a download host that Iranian networks are expected to leave open (it
 serves Android and Chrome updates; not verified from Iran here: the panel-server runbook checks
-it). Every node checks the target itself (TLS 1.3 + h2) and reports the result; a node whose check
-fails gets no new configs and the owner is told. The target applies to key scopes created after a
-change: an existing scope keeps its target so the links already posted stay valid.
+it). Every node checks the target itself (TLS 1.3 + h2) and reports the result together with the
+target it checked; a config is only made on a node that confirmed its scope's current target, and
+the owner is told about nodes where it fails. After the owner changes the target, every scope moves
+to it (proxyhub/reality/policy.py ``retarget_scopes``): at once if the old target fails there or
+the scope has no active config, otherwise once its active configs have ended, so links already
+posted keep working until their own end.
 """
 
 from __future__ import annotations

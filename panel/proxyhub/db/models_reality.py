@@ -3,13 +3,16 @@
 * ``reality_keys``: one REALITY key pair per key scope. A scope is a slot (slot<N> keeps its key
   when a new server takes the slot over, so a posted ``slot<N>.<domain>`` link keeps working, as
   docs/10 M2.6 requires) or, for a node without a slot (the owner's test node), the node itself.
-  The private key is only in the vault (``secrets``, name ``reality:key:<id>``, AES-256-GCM,
-  rule 3); the public key, short id and target are public link data.
+  The private key is only in the vault (``secrets``, name ``reality:key:slot:<N>`` or
+  ``reality:key:node:<uuid>``, AES-256-GCM, rule 3); the public key, short id and target are public
+  link data. A scope follows the owner's target setting once none of its configs needs the old one
+  (proxyhub/reality/policy.py ``retarget_scopes``).
 * ``reality_configs``: short-lived configs (a UUID each), 24 h or 50 GB by default, with the link
   host fixed when the config is made (contract item 2: slot name, else the node's IPv4).
 * ``reality_usage``: per config and node, the agent's cumulative byte count (aggregate per
   config, never a person) and the last value reported, so a reset agent is added up correctly.
-* ``reality_node_status``: what each node's agent says about Xray (up, version, target check).
+* ``reality_node_status``: what each node's agent says about Xray (up, version, and its target
+  check together with the target and server name that check was about).
 
 Rule 7: there is no end-user data anywhere here; the only addresses are our own nodes' (in a
 config's link host).
@@ -118,7 +121,14 @@ class RealityUsage(Base):
 
 class RealityNodeStatus(Base):
     __tablename__ = "reality_node_status"
-    __table_args__ = (CheckConstraint("users_reported >= 0", name="users"),)
+    __table_args__ = (
+        CheckConstraint("users_reported >= 0", name="users"),
+        CheckConstraint(
+            "(target_ok IS NULL) = (checked_target IS NULL) "
+            "AND (checked_target IS NULL) = (checked_server_name IS NULL)",
+            name="checked",
+        ),
+    )
     node_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("nodes.id", ondelete="CASCADE"), primary_key=True
     )
@@ -126,7 +136,11 @@ class RealityNodeStatus(Base):
     up: Mapped[bool] = mapped_column(Boolean, nullable=False)
     version: Mapped[str | None] = mapped_column(String(40))
     uptime_s: Mapped[float | None] = mapped_column(Float)
+    # The node's last REALITY target check: its result and the target and server name it was about
+    # (a result only counts for the scope's current target; all three are NULL until the first check).
     target_ok: Mapped[bool | None] = mapped_column(Boolean)
+    checked_target: Mapped[str | None] = mapped_column(String(260))
+    checked_server_name: Mapped[str | None] = mapped_column(String(253))
     apply_error: Mapped[str | None] = mapped_column(String(60))
     users_reported: Mapped[int] = mapped_column(Integer, nullable=False)
     reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

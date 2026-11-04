@@ -4,7 +4,8 @@
   in the vault only.
 * ``reality_configs``: the configs posts publish (24 h / 50 GB by default), with a fixed link host.
 * ``reality_usage``: per config and node, the agent's cumulative bytes (aggregate, no person).
-* ``reality_node_status``: each node's Xray state as its agent reports it.
+* ``reality_node_status``: each node's Xray state as its agent reports it, including which REALITY
+  target (and server name) its last target check was about.
 
 Revision ID: 0015_reality
 Revises: 0010_domains
@@ -108,10 +109,17 @@ def upgrade() -> None:
         sa.Column("version", sa.String(length=40), nullable=True),
         sa.Column("uptime_s", sa.Float(), nullable=True),
         sa.Column("target_ok", sa.Boolean(), nullable=True),
+        sa.Column("checked_target", sa.String(length=260), nullable=True),
+        sa.Column("checked_server_name", sa.String(length=253), nullable=True),
         sa.Column("apply_error", sa.String(length=60), nullable=True),
         sa.Column("users_reported", sa.Integer(), nullable=False),
         sa.Column("reported_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("users_reported >= 0", name=op.f("ck_reality_node_status_users")),
+        sa.CheckConstraint(
+            "(target_ok IS NULL) = (checked_target IS NULL) "
+            "AND (checked_target IS NULL) = (checked_server_name IS NULL)",
+            name=op.f("ck_reality_node_status_checked"),
+        ),
         sa.ForeignKeyConstraint(
             ["node_id"], ["nodes.id"], name=op.f("fk_reality_node_status_node_id_nodes"), ondelete="CASCADE"
         ),

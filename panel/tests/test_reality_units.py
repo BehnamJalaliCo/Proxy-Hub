@@ -23,9 +23,23 @@ from pydantic import ValidationError
 from proxyhub.agent_api.reports import ReportRejected, parse_report
 from proxyhub.reality.keys import new_key_pair, new_short_id, public_from_private
 from proxyhub.reality.links import config_name, flag, vless_url
-from proxyhub.reality.policy import ActiveConfig, creation_due, eligible_for_new_configs, end_status
+from proxyhub.reality.policy import (
+    ActiveConfig,
+    creation_due,
+    eligible_for_new_configs,
+    end_status,
+    retarget_decision,
+    serves_reality,
+)
 from proxyhub.reality.settings import GB, RealitySettings
-from proxyhub.reality.store import NodeView, StatusView, config_email, config_id_from_email, is_ip_host
+from proxyhub.reality.store import (
+    NodeView,
+    StatusView,
+    config_email,
+    config_id_from_email,
+    is_ip_host,
+    target_verdict,
+)
 from proxyhub.reconcilers.reality import target_alert_text
 
 REPO = Path(__file__).resolve().parents[2]
@@ -163,27 +177,87 @@ def _status(node: NodeView, **over: Any) -> StatusView:
         "apply_error": None,
         "users_reported": 0,
         "reported_at": NOW - timedelta(minutes=1),
+        "checked_target": TARGET[0],
+        "checked_server_name": TARGET[1],
     }
     base.update(over)
     return StatusView(**base)
 
 
+TARGET = ("dl.google.com:443", "dl.google.com")
+OTHER = ("www.example.org:443", "www.example.org")
+
+
 def test_eligibility_for_new_configs() -> None:
     n = _node()
-    assert eligible_for_new_configs(n, _status(n), now=NOW, telemt_clashes=False)
-    assert eligible_for_new_configs(n, _status(n, target_ok=None, up=False), now=NOW, telemt_clashes=False)
+
+    def ok(node: NodeView, status: StatusView | None, clash: bool = False) -> bool:
+        return eligible_for_new_configs(node, status, now=NOW, telemt_clashes=clash, target=TARGET)
+
+    assert ok(n, _status(n))
+    assert ok(n, _status(n, up=False))  # a new config is what brings Xray up with users
     refused = {
         "no report": (n, None, False),
         "old agent / no xray": (n, _status(n, enabled=False), False),
         "stale": (n, _status(n, reported_at=NOW - timedelta(minutes=11)), False),
         "xray error": (n, _status(n, apply_error="xray_config_refused"), False),
         "target failed": (n, _status(n, target_ok=False), False),
+        "target not checked yet": (
+            n,
+            _status(n, target_ok=None, checked_target=None, checked_server_name=None),
+            False,
+        ),
+        "another target checked": (
+            n,
+            _status(n, checked_target=OTHER[0], checked_server_name=OTHER[1]),
+            False,
+        ),
+        "another server name checked": (n, _status(n, checked_server_name=OTHER[1]), False),
         "telemt clash": (n, _status(n), True),
         "not ready": (_node(state="unhealthy"), _status(n), False),
         "no ipv4": (_node(ipv4=None), _status(n), False),
     }
     for name, (node, status, clash) in refused.items():
-        assert not eligible_for_new_configs(node, status, now=NOW, telemt_clashes=clash), name
+        assert not ok(node, status, clash), name
+    # Serving Reality (getting the scope's key, so the target can be checked) needs no target check.
+    assert serves_reality(
+        n,
+        _status(n, target_ok=None, checked_target=None, checked_server_name=None),
+        now=NOW,
+        telemt_clashes=False,
+    )
+    assert serves_reality(n, _status(n, target_ok=False), now=NOW, telemt_clashes=False)
+    assert not serves_reality(n, _status(n, enabled=False), now=NOW, telemt_clashes=False)
+
+
+def test_target_verdict_counts_only_a_check_of_that_exact_target() -> None:
+    n = _node()
+    assert target_verdict(None, *TARGET) is None
+    assert target_verdict(_status(n), *TARGET) is True
+    assert target_verdict(_status(n, target_ok=False), *TARGET) is False
+    assert target_verdict(_status(n, target_ok=False), *OTHER) is None
+    assert target_verdict(_status(n), TARGET[0], OTHER[1]) is None
+    assert target_verdict(_status(n), OTHER[0], TARGET[1]) is None
+    assert (
+        target_verdict(_status(n, target_ok=None, checked_target=None, checked_server_name=None), *TARGET)
+        is None
+    )
+
+
+def test_retarget_decision() -> None:
+    old, new = RealitySettings(), RealitySettings(target_host="www.example.org")
+
+    def d(settings: RealitySettings, active: int, failing: bool) -> str:
+        return retarget_decision(
+            key_target=TARGET, settings=settings, active_configs=active, old_target_failing=failing
+        )
+
+    # The key already has the settings' target: nothing to do, failing or not (the owner decides).
+    assert d(old, 0, False) == d(old, 2, True) == "keep"
+    assert d(RealitySettings(target_port=8443), 0, False) == "switch"  # the port is part of the target
+    assert d(new, 0, False) == d(new, 0, True) == "switch"  # nothing in use: switch now
+    assert d(new, 2, True) == "switch_burn"  # those links cannot work anyway
+    assert d(new, 2, False) == d(new, 1, False) == "wait"  # posted links keep working to their end
 
 
 def test_labels_and_hosts() -> None:
@@ -250,6 +324,8 @@ GOOD_XRAY = {
     "version": "26.10.31",
     "uptime_s": 12.0,
     "target_ok": True,
+    "checked_target": "dl.google.com:443",
+    "checked_server_name": "dl.google.com",
     "apply_error": None,
     "users": [{"email": "cfg-1@proxyhub", "total_octets": 5}, {"email": "cfg-2@proxyhub", "total_octets": 0}],
 }
@@ -279,8 +355,32 @@ def test_report_xray_section() -> None:
     dup = [{"email": "cfg-1@proxyhub", "total_octets": 1}] * 2
     assert code({**GOOD_XRAY, "users": dup}) == "schema"
     assert code({**GOOD_XRAY, "up": "yes"}) == "schema"
+    # The target check: result, target and server name come together, and only as DNS names.
+    assert parsed.xray.checked() == ("dl.google.com:443", "dl.google.com")
+    unchecked = {**GOOD_XRAY, "target_ok": None, "checked_target": None, "checked_server_name": None}
+    assert parse_report(_report(unchecked)).xray.checked() is None  # type: ignore[union-attr]
+    assert code({k: v for k, v in GOOD_XRAY.items() if k != "checked_target"}) == "schema"
+    assert code({**GOOD_XRAY, "checked_target": None}) == "schema"
+    assert code({**GOOD_XRAY, "checked_server_name": None}) == "schema"
+    assert code(
+        {**unchecked, "checked_target": "dl.google.com:443", "checked_server_name": "dl.google.com"}
+    ) == ("schema")
+    for bad in (
+        "dl.google.com",
+        "dl.google.com:0",
+        "dl.google.com:65536",
+        "localhost:443",
+        "DL.google.com:443",
+    ):
+        assert code({**GOOD_XRAY, "checked_target": bad}) == "schema", bad
+    for bad in ("localhost", "dl.google.com.", "x" * 254):
+        assert code({**GOOD_XRAY, "checked_server_name": bad}) == "schema", bad
+    assert code({**GOOD_XRAY, "checked_target": "142.250.1.1:443"}) == "ip_like_value"
+    assert code({**GOOD_XRAY, "checked_server_name": "142.250.1.1"}) == "ip_like_value"
 
 
 def test_target_alert_is_persian_and_escaped() -> None:
     text = target_alert_text(["ph-<b>-1", "ph-2"])
     assert "سایت هدف" in text and "&lt;b&gt;" in text and "۲" in text
+    # It says what really happens: the node checks again by itself, and a new target is taken.
+    assert "۶ ساعت" in text and "سایت هدف دیگری بگذارید" in text and "کنار میروند" in text
