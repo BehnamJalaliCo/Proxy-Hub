@@ -318,6 +318,32 @@ async def test_without_valid_settings_or_master_key_nothing_is_made_but_retiring
     assert fresh in await configs(env.engine)
 
 
+async def test_one_broken_node_neither_blocks_the_others_nor_the_disabling(env: Env) -> None:
+    broken, fine, leaving = [await make_node(env.engine) for _ in range(3)]
+    await env.run()
+    await env.make_live(leaving)
+    await set_node_state(env.engine, leaving, "retiring")
+    # broken: READY but not yet live, with a sealed secret that no longer opens (e.g. after a master
+    # key mismatch), so building its desired state raises SealError on every pass.
+    await register_agent(env.engine, broken)
+    etag = await current_etag(env.engine, env.seal_key, broken)
+    await agent_reports(env.engine, broken, applied_etag=etag)  # applied, Telemt up
+    await set_node_state(env.engine, broken, "ready")
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            # Flip one ciphertext byte: same length, but AES-GCM no longer opens it.
+            text(
+                "UPDATE telemt_users SET secret_sealed = "
+                "set_byte(secret_sealed, 20, get_byte(secret_sealed, 20) # 255) WHERE node_id = :n"
+            ),
+            {"n": broken},
+        )
+    await env.run()
+    assert [u.enabled for u in await users(env.engine, leaving)] == [False]
+    assert fine in await configs(env.engine) and [u.enabled for u in await users(env.engine, fine)] == [True]
+    assert (await proxy_row(env.engine, broken)).live_at is None
+
+
 async def test_a_failing_run_leaves_nothing_behind(env: Env) -> None:
     node = await make_node(env.engine)
     with pytest.raises(ValueError):  # AES-GCM refuses the key while sealing the new secret

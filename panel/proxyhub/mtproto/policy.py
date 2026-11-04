@@ -21,6 +21,7 @@ node's lifecycle. Burned and draining nodes keep what they have. No secret or ta
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -30,12 +31,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from proxyhub.agent_api.desired import (
+    DesiredStateError,
     build_desired_state,
     canonical_json,
     create_telemt_user,
     etag_for,
     set_telemt_node_config,
 )
+from proxyhub.agent_api.sealing import SealError
 from proxyhub.db.models import Node
 from proxyhub.db.models_agent import AgentNode, AgentNodeReport, TelemtNodeConfig, TelemtUser
 from proxyhub.db.models_mtproto import MtprotoProxy
@@ -51,6 +54,8 @@ RETIRED_STATES = (S.RETIRING, S.DELETED)
 # A run touches at most this many nodes (the node cap is 10; this only bounds a pathological table).
 MAX_NODES_PER_RUN = 100
 
+log = logging.getLogger(__name__)
+
 
 @dataclass
 class PolicyOutcome:
@@ -58,6 +63,7 @@ class PolicyOutcome:
     created: list[uuid.UUID] = field(default_factory=list)
     live: list[uuid.UUID] = field(default_factory=list)
     disabled: dict[uuid.UUID, int] = field(default_factory=dict)
+    failed: dict[uuid.UUID, str] = field(default_factory=dict)  # node -> error type, retried next pass
 
     @property
     def changed(self) -> bool:
@@ -246,6 +252,9 @@ async def apply_policy(
     """One idempotent pass. Without valid settings or the sealing key nothing is configured or
     created (fail closed), but users of retiring/deleted nodes are still disabled."""
     out = PolicyOutcome()
+    # Disabling comes first: a node that cannot be configured below must never keep the users of a
+    # retiring or deleted node enabled.
+    await _disable_retired(session, now, out)
     if settings is not None and seal_key is not None:
         nodes = (
             await session.execute(
@@ -256,10 +265,16 @@ async def apply_policy(
             )
         ).all()
         for node in nodes:
-            await _ensure_config(session, node, settings, out)
-            proxy = await _ensure_user(session, seal_key, node, now, out)
-            if node.state == S.READY.value and proxy.live_at is None:
-                await _check_live(session, seal_key, node, proxy, now, out)
-    await _disable_retired(session, now, out)
+            # One SAVEPOINT per node: a node whose secret does not open (SealError) or that hits a
+            # desired-state limit is skipped and retried next pass; the other nodes still go on.
+            try:
+                async with session.begin_nested():
+                    await _ensure_config(session, node, settings, out)
+                    proxy = await _ensure_user(session, seal_key, node, now, out)
+                    if node.state == S.READY.value and proxy.live_at is None:
+                        await _check_live(session, seal_key, node, proxy, now, out)
+            except (SealError, DesiredStateError) as exc:  # only the type is logged, never values
+                out.failed[node.id] = type(exc).__name__
+                log.warning("mtproto: node %s skipped this pass (%s)", node.name, type(exc).__name__)
     await session.flush()
     return out
