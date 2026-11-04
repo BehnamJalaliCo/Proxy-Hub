@@ -21,6 +21,9 @@ dependencies = [
     # MTProto user client for the operator account (D37, docs/11 section 2.1). Imported ONLY by
     # proxyhub/mtproxy/userclient.py (pinned by tests/test_architecture.py).
     "telethon==1.45.0",
+    # Telethon -> rsa -> pyasn1: pinned to a release that has been out for a long time (0.6.5 was
+    # only days old when Telethon was added; a fresh release is a supply-chain risk).
+    "pyasn1==0.6.1",
 ]
 
 [dependency-groups]
