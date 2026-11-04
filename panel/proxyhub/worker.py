@@ -8,6 +8,7 @@ import signal
 
 from proxyhub.db.session import get_engine
 from proxyhub.reconcilers.account_guard import AccountGuardReconciler
+from proxyhub.reconcilers.analytics import AnalyticsReconciler, ChannelStatsReconciler
 from proxyhub.reconcilers.base import Heartbeat, Reconciler
 from proxyhub.reconcilers.dns import DnsReconciler
 from proxyhub.reconcilers.domains import DomainsReconciler
@@ -41,6 +42,8 @@ def reconcilers() -> list[Reconciler]:
         ProbesReconciler(),  # net: records reachability verdicts from Iran only
         DomainsReconciler(),  # D35: filter checks of the pool domains, rotation, deletion of filtered zones
         MtproxyAccountReconciler(),  # D37: the operator account's session check (kill switch OFF only)
+        AnalyticsReconciler(),  # read-only: server traffic/CPU every 15 min, channel size hourly, alerts
+        ChannelStatsReconciler(),  # D38: channel statistics via the operator account (kill switch OFF only)
     ]
 
 

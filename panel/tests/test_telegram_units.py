@@ -482,6 +482,9 @@ def test_token_shape_is_checked_before_any_request() -> None:
         "setWebhook",
         "restrictChatMember",
         "unpinAllChatMessages",
+        "revokeChatInviteLink",  # a tracking link is never revoked: its joins stay countable
+        "editChatInviteLink",
+        "exportChatInviteLink",  # would revoke the channel's primary link
         "sendmessage",  # the allowlist is exact, not case-insensitive
         "sendMessage/../deleteMessage",
         "",
@@ -496,7 +499,18 @@ async def test_only_allowed_methods_can_be_called(method: str) -> None:
 
 def test_the_allowlist_is_exactly_the_typed_methods() -> None:
     assert (
-        frozenset({"getMe", "getUpdates", "sendMessage", "editMessageText", "getChat", "getChatMember"})
+        frozenset(
+            {
+                "getMe",
+                "getUpdates",
+                "sendMessage",
+                "editMessageText",
+                "getChat",
+                "getChatMember",
+                "getChatMemberCount",
+                "createChatInviteLink",
+            }
+        )
         == ALLOWED_METHODS
     )
     assert not hasattr(BotClient, "call")  # no public "send any method" entry point
@@ -509,6 +523,8 @@ def test_the_allowlist_is_exactly_the_typed_methods() -> None:
         "edit_message_text",
         "get_chat",
         "get_chat_member",
+        "get_chat_member_count",
+        "create_chat_invite_link",
     }
 
 

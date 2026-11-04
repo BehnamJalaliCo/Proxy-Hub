@@ -34,5 +34,17 @@
 - `cost_per_member`: خرج دوره تقسیم بر عضو تازه‌ی کانال سیگنال در همان دوره.
 - `cohort_retention`: چند درصد از عضوهای هر هفته بعد از ۱، ۷ و ۳۰ روز مانده‌اند.
 
+## آمار (ساخته‌شده؛ migration `0016_analytics`، صفحه‌ی «آمار»)
+| جدول | ستون‌های اصلی | توضیح |
+|---|---|---|
+| `analytics_node_samples` | node_id, at, out_bytes, in_bytes, included_bytes, out_delta_bytes, cpu_avg, cpu_max, net_out_bps_avg | هر ۱۵ دقیقه از هتزنر (فقط خواندن). بی FK به `nodes`، پس تاریخچه‌ی node حذف‌شده میماند. |
+| `analytics_channel_samples` | role, chat_id, at, member_count | تعداد عضو هر ساعت (getChatMemberCount). |
+| `analytics_member_events` | role, chat_id, at, kind (join/leave), telegram_user_id, source, link_name, tracking_link_id | فقط همین‌ها (D7)؛ نه نام، نه username، نه تلفن. |
+| `analytics_tracking_links` | name, purpose, invite_link | لینک دعوت نام‌دار هر کمپین؛ هرگز باطل یا پاک نمیشود. |
+| `analytics_alerts` | node_id, kind, day | هشدار آستانه، روزی یک بار برای هر node. |
+| `analytics_usage_hourly` / `_daily` / `_dims` | بایت هر پروکسی در ساعت؛ کاربر یکتای روز و p50/p90/p99؛ کاربر و بایت هر کشور/استان/ASN | شمارنده‌های عامل (D39)؛ هر دسته‌ی کمتر از ۳ نفر در «other»، با CHECK در خود دیتابیس. |
+| `analytics_channel_stats` / `analytics_post_views` | آمار خود تلگرام و بازدید/بازنشر پست‌ها | با حساب دوم (D38)، فقط برای کانال‌های اصلی و آزمایشی. |
+| `analytics_mtproxybot_stats` | — | جای خالی برای آمار @MTProxybot (دور ۴). |
+
 ## چیزهایی که **هیچ‌جا** نیست
 IP کاربر، زمان اتصال هر کاربر، و مقصد ترافیک (قانون ۷).

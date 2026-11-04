@@ -1136,7 +1136,9 @@ async def test_migration_0010_round_trip_and_no_drift(engine: AsyncEngine) -> No
     from proxyhub.cli import _alembic_config, downgrade, migrate
 
     cfg = _alembic_config()
-    assert ScriptDirectory.from_config(cfg).get_heads() == ["0010_domains"]
+    script = ScriptDirectory.from_config(cfg)
+    (head,) = script.get_heads()  # one head; later migrations build on 0010
+    assert "0010_domains" in {rev.revision for rev in script.walk_revisions("base", head)}
     await add_zone(engine, ZONE_ID, "old.example", pool="deleted")
     await asyncio.to_thread(downgrade, "0009_merge")
     async with engine.connect() as conn:
