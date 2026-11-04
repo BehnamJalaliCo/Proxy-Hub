@@ -6,6 +6,7 @@ import asyncio
 import logging
 import signal
 
+from proxyhub.cloudflare.delegation import DelegationReconciler
 from proxyhub.db.session import get_engine
 from proxyhub.reconcilers.account_guard import AccountGuardReconciler
 from proxyhub.reconcilers.base import Heartbeat, Reconciler
@@ -27,13 +28,13 @@ log = logging.getLogger(__name__)
 
 def reconcilers() -> list[Reconciler]:
     # budget, sponsor, node_health, ... are added milestone by milestone (docs/10, docs/11).
-    # The fleet loop is dry-run only (proxyhub.reconcilers.fleet.FLEET_LIVE_ENABLED).
+    # The fleet loop is live only when the owner turns dry-run off (proxyhub/reconcilers/fleet.py).
     return [
         Heartbeat(),
         AccountGuardReconciler(),
         PricingReconciler(),
         FleetReconciler(),
-        NodesReconciler(),  # owner-requested test nodes only (proxyhub.nodes.executor)
+        NodesReconciler(),  # the test node and the live fleet's slot nodes (proxyhub.nodes.executor)
         TelegramUpdatesReconciler(),
         TelegramOutboxReconciler(),
         ApiWatchdogReconciler(),
@@ -41,6 +42,7 @@ def reconcilers() -> list[Reconciler]:
         ProbesReconciler(),  # net: records reachability verdicts from Iran only
         DomainsReconciler(),  # D35: filter checks of the pool domains, rotation, deletion of filtered zones
         MtproxyAccountReconciler(),  # D37: the operator account's session check (kill switch OFF only)
+        DelegationReconciler(),  # fleet r3: hourly NS lookups; a lost registration leaves the pool
     ]
 
 
