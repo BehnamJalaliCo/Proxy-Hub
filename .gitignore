@@ -6,3 +6,21 @@
 *.key
 *.pem
 secrets/
+
+# Python / tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Local git worktrees created by Claude Code agent teams (never committed)
+.claude/worktrees/
+
+# Dashboard (Node): dependencies and build output are never committed
+node_modules/
+dashboard/dist/
+dashboard/*.tsbuildinfo
+dashboard/test-results/

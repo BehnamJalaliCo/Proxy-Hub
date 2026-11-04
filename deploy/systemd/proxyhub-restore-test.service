@@ -1,0 +1,17 @@
+[Unit]
+Description=Proxy-Hub weekly restore test of the newest backup (throwaway PostgreSQL)
+After=docker.service network-online.target proxyhub-backup.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/proxy-hub/deploy/backup/restore_test.sh
+TimeoutStartSec=1800
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectHome=read-only

@@ -1,0 +1,35 @@
+# Full test suite against REAL, throwaway PostgreSQL and Redis containers (decision D10).
+# No ports are published; data lives in tmpfs and disappears after the run.
+#   docker compose -f deploy/docker-compose.test.yml run --rm --build tests
+#   docker compose -f deploy/docker-compose.test.yml down -v
+name: proxyhub-test
+
+services:
+  pg:
+    image: ${PROXYHUB_POSTGRES_IMAGE:-postgres:16-bookworm@sha256:e8a07d2c7579b038938cdba6c539e580e5001caf9ea203d397b5cc83e76bd938}
+    environment:
+      POSTGRES_USER: proxyhub
+      POSTGRES_PASSWORD: throwaway-test-db
+      POSTGRES_DB: proxyhub
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proxyhub -d proxyhub"]
+      interval: 2s
+      retries: 30
+
+  rd:
+    image: ${PROXYHUB_REDIS_IMAGE:-redis:7-bookworm@sha256:b6b6e3dc0c0952737748e55d5d885272840c7e42ba41ab1d5489f693419882f5}
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  tests:
+    build:
+      context: ../panel
+      target: test
+      args:
+        PYTHON_IMAGE: ${PROXYHUB_PYTHON_IMAGE:-python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f}
+    environment:
+      PROXYHUB_DATABASE_URL: postgresql+asyncpg://proxyhub:throwaway-test-db@pg:5432/proxyhub
+      PROXYHUB_REDIS_URL: redis://rd:6379/0
+    depends_on:
+      pg: {condition: service_healthy}
+      rd: {condition: service_started}

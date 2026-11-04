@@ -1,0 +1,15 @@
+# Closes the boot-time window to the metadata service (169.254.169.254) once cloud-init has read
+# this node's user data. From then on nothing on the node can reach it (see nftables.conf).
+[Unit]
+Description=Proxy-Hub: block the metadata service after cloud-init
+After=cloud-final.service nftables.service
+Requires=nftables.service
+PartOf=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft flush chain inet proxyhub boot_window
+
+[Install]
+WantedBy=multi-user.target

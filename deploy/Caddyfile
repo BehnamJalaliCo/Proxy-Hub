@@ -1,0 +1,42 @@
+{
+	admin off
+	# UDP 443 is not published/opened, so do not advertise HTTP/3 (alt-svc h3).
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$PANEL_DOMAIN} {
+	encode zstd gzip
+
+	# Internal endpoints (metrics, health) are never public; the deployer uses 127.0.0.1:8000.
+	# /agent/* is served only on the node agents' own mTLS site (M2.1), never on the owner's site.
+	@internal path /internal/* /healthz /livez /agent/*
+	respond @internal 404
+
+	# Nobody outside may set the headers the agent site uses to vouch for a client certificate.
+	request_header -X-ProxyHub-Agent-Proxy-Secret
+	request_header -X-ProxyHub-Client-Cert-Sha256
+
+	reverse_proxy api:8000
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+		# Caddy adds "Via: 1.1 Caddy" itself AFTER reverse_proxy's header_down runs; a deletion here
+		# is deferred to when the response is written, so it really removes it (seen on the server, P06).
+		-Via
+	}
+
+	# No access log (CLAUDE.md rule 7 spirit: we keep no visitor IPs anywhere).
+	log {
+		output discard
+	}
+}
+
+# The node agents' own mTLS site (agent.<domain>): deploy/caddy/agent-on.caddy when the deployer
+# finds AGENT_DOMAIN in /etc/proxy-hub/deploy.env, else agent-off.caddy (nothing, no certificate).
+import /etc/caddy/agent/agent-{$PROXYHUB_AGENT_SITE:off}.caddy

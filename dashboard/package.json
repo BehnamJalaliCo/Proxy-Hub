@@ -1,0 +1,50 @@
+{
+  "name": "proxyhub-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Proxy-Hub owner dashboard (Persian, right-to-left). Built into the panel image and served by proxyhub.api.routes_zz_static.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.22.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b",
+    "lint": "eslint --max-warnings=0 .",
+    "test": "vitest run",
+    "screenshots": "node scripts/screenshots.mjs"
+  },
+  "dependencies": {
+    "@date-fns/tz": "1.5.0",
+    "@fontsource-variable/vazirmatn": "5.3.0",
+    "@tanstack/react-query": "5.105.0",
+    "date-fns-jalali": "4.4.0-0",
+    "echarts": "6.1.0",
+    "lucide-react": "1.61.0",
+    "motion": "14.6.0",
+    "qrcode.react": "4.2.0",
+    "radix-ui": "1.8.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-router": "8.5.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "eslint": "10.13.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.7",
+    "globals": "17.13.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}

@@ -1,0 +1,12 @@
+# gitleaks: the default rules, plus an allowlist of exactly two obviously fake MTProto secrets that
+# the Go agent's unit tests use as fixtures (no real secret is a counting sequence). Any other value,
+# in any file, is still reported.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "fake MTProto user secrets in agent unit-test fixtures"
+regexes = [
+  '''^0123456789abcdef0123456789abcdef$''',
+  '''^fedcba9876543210fedcba9876543210$''',
+]

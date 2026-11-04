@@ -1,0 +1,105 @@
+// Grafana Alloy: ships the logs of the PANEL's own containers to Loki, nothing else (rule 7).
+//
+// How only panel logs are shipped, without giving Alloy the Docker socket (root-equivalent):
+// - deploy/docker-compose.yml labels the panel containers (api, worker, migrate) with
+//   io.proxyhub.logs=panel and tells the json-file log driver to copy that label into every log
+//   line ("attrs"). Alloy reads the json-file logs read-only and DROPS every line without it.
+// - Every IPv4/IPv6 address is replaced by <ip> before a line leaves this process, as a second
+//   line of defence (e.g. a uvicorn access line). Health/metrics access lines are dropped.
+logging {
+	level  = "warn"
+	format = "logfmt"
+}
+
+local.file_match "docker_json" {
+	path_targets = [{"__path__" = "/var/lib/docker/containers/*/*-json.log"}]
+	sync_period  = "10s"
+}
+
+loki.source.file "docker_json" {
+	targets       = local.file_match.docker_json.targets
+	forward_to    = [loki.process.panel_only.receiver]
+	// No stored position (new container, first start): read the file from its beginning, so the
+	// startup lines of a freshly deployed api/worker/migrate are shipped too.
+	tail_from_end = false
+}
+
+loki.process "panel_only" {
+	stage.json {
+		expressions = {
+			output  = "log",
+			stream  = "stream",
+			ts      = "time",
+			ship    = "attrs.\"io.proxyhub.logs\"",
+			service = "attrs.\"com.docker.compose.service\"",
+			project = "attrs.\"com.docker.compose.project\"",
+		}
+	}
+
+	// Not a panel container (or not a docker json line at all): drop.
+	stage.labels {
+		values = {ship = ""}
+	}
+
+	stage.match {
+		selector            = "{ship!=\"panel\"}"
+		action              = "drop"
+		drop_counter_reason = "not_panel_container"
+	}
+
+	stage.timestamp {
+		source = "ts"
+		format = "RFC3339Nano"
+	}
+
+	stage.output {
+		source = "output"
+	}
+
+	// Docker keeps the trailing newline of every line; Loki does not need it.
+	stage.replace {
+		expression = `(\r?\n)$`
+		replace    = ""
+	}
+
+	// Scrape/health probes every few seconds are noise, not information.
+	stage.drop {
+		expression          = "\"(GET|HEAD) /(internal/metrics|livez|healthz)[ ?]"
+		drop_counter_reason = "probe_access_line"
+	}
+
+	// Rule 7 defence in depth: redact IPv4 and IPv6 addresses anywhere in the line.
+	stage.replace {
+		expression = `((?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3})`
+		replace    = "<ip>"
+	}
+
+	stage.replace {
+		expression = `((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,7}:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?|::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?)`
+		replace    = "<ip>"
+	}
+
+	stage.labels {
+		values = {
+			service = "",
+			project = "",
+			stream  = "",
+		}
+	}
+
+	stage.label_drop {
+		values = ["ship", "filename"]
+	}
+
+	stage.static_labels {
+		values = {job = "panel"}
+	}
+
+	forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}
