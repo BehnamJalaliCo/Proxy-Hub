@@ -201,6 +201,23 @@ async def test_a_blocked_node_burns_and_is_replaced_create_before_delete(world: 
     assert world.no_hetzner.calls == 0
 
 
+async def test_a_blocked_verdict_on_a_closed_port_burns_nothing(world: LiveWorld) -> None:
+    # A refused port fails from every Iranian network exactly like a block. Unless the node's own
+    # agent says Telemt (the probed service) is up, the node and its /24 are never burned.
+    await world.settings(live_settings())
+    nodes = await full_fleet(world)
+    await world.rows("UPDATE nodes SET ipv4 = CAST(:ip AS inet) WHERE id = :n", ip=IP_A, n=nodes[1])
+    await set_verdict(world, nodes[1], "blocked", serving=False)
+    await run_fleet(world)
+    assert (await world.node(nodes[1]))["state"] == "ready"
+    assert await world.rows("SELECT ip FROM ip_history") == []
+    assert await fleet_log(world, "node_burned") == []
+    # Once the agent reports Telemt up again, the same verdict does burn it.
+    await set_verdict(world, nodes[1], "blocked")
+    await run_fleet(world)
+    assert (await world.node(nodes[1]))["state"] == "burned"
+
+
 async def test_a_second_burn_waits_for_the_single_spare(world: LiveWorld) -> None:
     await world.settings(live_settings(node_cap_total=11))
     nodes = await full_fleet(world)

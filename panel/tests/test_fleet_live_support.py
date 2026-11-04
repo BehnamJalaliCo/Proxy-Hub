@@ -122,13 +122,29 @@ async def full_fleet(world: LiveWorld, slots: int = 9, *, skip: tuple[int, ...] 
     return out
 
 
-async def set_verdict(world: LiveWorld, node_id: uuid.UUID, verdict: str, at: datetime | None = None) -> None:
+async def set_verdict(
+    world: LiveWorld, node_id: uuid.UUID, verdict: str, at: datetime | None = None, *, serving: bool = True
+) -> None:
+    """The probes' verdict for a node. ``serving``: the node's Telemt config exists and its agent's
+    newest report says Telemt is up, so a "blocked" verdict is about Iran, not a closed port."""
     await world.rows(
         "INSERT INTO probe_node_state (node_id, verdict, verdict_at, verdict_reasons) VALUES "
         "(:n, :v, :at, '[]') ON CONFLICT (node_id) DO UPDATE SET verdict = :v, verdict_at = :at",
         n=node_id,
         v=verdict,
         at=at or datetime.now(UTC),
+    )
+    await world.rows(
+        "INSERT INTO telemt_node_configs (node_id, ports, tls_domain, mode_classic, mode_secure, mode_tls, "
+        "updated_at) VALUES (:n, '{8443}', 'www.microsoft.com', false, false, true, now()) "
+        "ON CONFLICT (node_id) DO NOTHING",
+        n=node_id,
+    )
+    await world.rows(
+        "INSERT INTO agent_node_reports (node_id, at, apply_ok, telemt_up, users_reported) "
+        "VALUES (:n, now(), true, :up, 1)",
+        n=node_id,
+        up=serving,
     )
 
 

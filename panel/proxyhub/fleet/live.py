@@ -30,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from proxyhub.db.models import Node
+from proxyhub.db.models_agent import AgentNodeReport, TelemtNodeConfig
 from proxyhub.db.models_live import NodeOperation
 from proxyhub.db.models_net import ProbeNodeState
 from proxyhub.fleet.actions import iso, log_action
@@ -59,6 +60,28 @@ class Applied:
 # --- burned nodes ---------------------------------------------------------------------------
 
 
+async def probed_service_up(s: AsyncSession, node_id: uuid.UUID, now: datetime) -> bool:
+    """True when the node's own agent says the service the probes test is listening: the probes
+    test Telemt's port (proxyhub/probes/service.py; every serving node has a Telemt config), so the
+    newest report, at most :data:`VERDICT_MAX_AGE` old, must show Telemt up. A refused port fails
+    from every Iranian network exactly like a block, so without this a down service would burn a
+    healthy node and its whole /24."""
+    has_config = (
+        await s.execute(select(TelemtNodeConfig.node_id).where(TelemtNodeConfig.node_id == node_id))
+    ).first()
+    if has_config is None:
+        return False
+    latest = (
+        await s.execute(
+            select(AgentNodeReport.telemt_up, AgentNodeReport.at)
+            .where(AgentNodeReport.node_id == node_id)
+            .order_by(AgentNodeReport.at.desc(), AgentNodeReport.id.desc())
+            .limit(1)
+        )
+    ).first()
+    return latest is not None and latest.telemt_up is True and now - latest.at <= VERDICT_MAX_AGE
+
+
 async def mark_burned_nodes(s: AsyncSession, snap: FleetSnapshot, now: datetime) -> list[str]:
     """READY slot nodes with a fresh ``blocked`` verdict -> ``burned`` (+ ip_history). Returns names."""
     burned: list[str] = []
@@ -84,6 +107,8 @@ async def mark_burned_nodes(s: AsyncSession, snap: FleetSnapshot, now: datetime)
             or now - verdict.verdict_at > VERDICT_MAX_AGE
         ):
             continue
+        if not await probed_service_up(s, node_id, now):
+            continue  # a closed port also looks "blocked" from Iran; never burn a node (and its /24) for it
         await transition(
             s, row, S.BURNED, now, reason="verdict_blocked", detail={"verdict_at": iso(verdict.verdict_at)}
         )
