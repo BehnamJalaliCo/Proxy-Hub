@@ -502,7 +502,7 @@ function SettingsCard({ s }: { s: PostsStatus }) {
       ) : settings.isError ? (
         <LoadError error={settings.error} compact onRetry={() => void settings.refetch()} notYet={NOT_YET} />
       ) : (
-        <SettingsForm key={settings.dataUpdatedAt} saved={settings.data} s={s} />
+        <SettingsForm saved={settings.data} s={s} />
       )}
     </Card>
   );
