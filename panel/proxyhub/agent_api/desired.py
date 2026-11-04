@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from proxyhub.agent_api.sealing import open_secret, seal_secret
 from proxyhub.agent_api.validation import HEX32, RESERVED_PORTS, valid_domain, valid_user_name
 from proxyhub.db.models_agent import TelemtNodeConfig, TelemtUser
+from proxyhub.reality.store import xray_section
 
 DESIRED_FORMAT = 1
 POLL_INTERVAL_S = 15
@@ -66,6 +67,9 @@ async def build_desired_state(session: AsyncSession, seal_key: bytes, node_id: u
         "intervals": {"poll_s": POLL_INTERVAL_S, "report_s": REPORT_INTERVAL_S},
         "telemt": None,
     }
+    xray = await xray_section(session, node_id)  # VLESS Reality (proxyhub/reality); None: key left out
+    if xray is not None:
+        doc["xray"] = xray
     if config is None:
         return doc
     users = (
