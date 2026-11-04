@@ -1,5 +1,5 @@
-"""Control loop "nodes": drives owner-requested TEST nodes through their lifecycle
-(:mod:`proxyhub.nodes.executor`). The 9-slot fleet loop stays dry-run.
+"""Control loop "nodes": drives every node through its lifecycle (:mod:`proxyhub.nodes.executor`):
+the owner's test node, and the slot nodes the fleet loop requests or retires while the fleet is live.
 
 Unlike the other loops it does not run inside one transaction: the executor commits each state
 change BEFORE the Hetzner call it leads to (crash safety), so it gets the engine. The advisory

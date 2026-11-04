@@ -18,7 +18,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from proxyhub.db.models import Base
 
-RETIRE_REASONS = ("owner", "unhealthy_test_node", "create_failed")
+RETIRE_REASONS: tuple[str, ...] = ("owner", "unhealthy_test_node", "create_failed")
+# Round 3, the live fleet (proxyhub/fleet/live.py, proxyhub/nodes/executor.py; migration 0013_fleetlive).
+RETIRE_REASONS += ("burned", "unhealthy", "duplicate", "excess", "burned_ip")
 
 
 class NodeOperation(Base):

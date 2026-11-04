@@ -32,7 +32,7 @@ from proxyhub.db.models_live import NodeOperation
 from proxyhub.fleet.actions import iso, log_action
 from proxyhub.fleet.costs import money, node_cost_items
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
-from proxyhub.fleet.planner import CREATION_WINDOW, OBSERVATION_MAX_AGE, OFFER_MAX_AGE, AccountSnapshot
+from proxyhub.fleet.planner import OBSERVATION_MAX_AGE, OFFER_MAX_AGE, AccountSnapshot, counts_as_creation
 from proxyhub.fleet.settings_store import SettingsCorrupt, load_fleet_settings
 from proxyhub.fleet.snapshot import load_accounts, load_nodes, load_offers
 from proxyhub.hetzner.client import HetznerReader, _delete_protected
@@ -97,7 +97,11 @@ REASONS_FA: dict[str, str] = {
     "vault_unavailable": "کلید رمزنگاری پنل در دسترس نیست.",
     "node_changed_meanwhile": "وضعیت node هم‌زمان عوض شد؛ دوباره امتحان کنید.",
     "node_deleted": "این node پیش‌تر حذف شده است.",
-    "fleet_not_live": "ناوگان ۹ جایگاهی هنوز فقط حالت خشک دارد؛ فقط node آزمایشی حذف‌شدنی است.",
+    "fleet_managed": (
+        "این node از ناوگان ۹ جایگاهی است و ناوگان خودش آن را جایگزین یا بازنشسته میکند؛ "
+        "فقط node آزمایشی با دست بازنشسته میشود."
+    ),
+    "fleet_dry_run": "ناوگان در حالت خشک است؛ سرور جایگاه‌ها نه ساخته میشود نه حذف.",
     "hetzner_unreachable": "API هتزنر پاسخ نداد.",
     "hetzner_rate_limited": "سقف درخواست API هتزنر پر شده است.",
     "hetzner_token_invalid": "هتزنر توکن این حساب را نپذیرفت.",
@@ -290,7 +294,7 @@ async def evaluate_create(
     request = CreateRequest(
         account=view,
         fleet_live_total=len(live_nodes),
-        creations_last_hour=sum(1 for n in nodes if n.created_at > now - CREATION_WINDOW),
+        creations_last_hour=sum(1 for n in nodes if counts_as_creation(n, now)),
         projected_month_eur=projected,
         new_server_rest_of_month_eur=cost,
     )
@@ -450,7 +454,7 @@ async def request_retire(
     if node.state == NodeState.DELETED.value:
         reasons.append("node_deleted")
     if not node.is_test:
-        reasons.append("fleet_not_live")  # the 9-slot fleet is dry-run only (FLEET_LIVE_ENABLED)
+        reasons.append("fleet_managed")  # slot nodes are replaced and retired by the fleet loop itself
     settings, problems = await load_settings(db)
     reasons.extend(problems)
     if settings.kill_switch:

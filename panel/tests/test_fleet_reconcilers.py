@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -17,6 +17,7 @@ from test_fleet_support import clean_fleet_tables, live_offers, make_vault, new_
 from proxyhub.accounts import service
 from proxyhub.accounts.hetzner_io import Verification, summarize_servers
 from proxyhub.fleet.settings_store import save_fleet_settings
+from proxyhub.nodes.settings import get_live_settings
 from proxyhub.reconcilers.account_guard import AccountGuardReconciler
 from proxyhub.reconcilers.fleet import PLAN_RETENTION, FleetReconciler
 from proxyhub.reconcilers.pricing import PricingReconciler
@@ -24,6 +25,15 @@ from proxyhub.settings_schema import FleetSettings
 from proxyhub.vault import Vault
 
 pytestmark = pytest.mark.db
+
+
+@pytest.fixture(autouse=True)
+def agent_domain(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """The deployed panel always has its agent site (else every creation is blocked, tested below)."""
+    monkeypatch.setenv("PROXYHUB_AGENT_DOMAIN", "agent.proxyhub-test.example")
+    get_live_settings.cache_clear()
+    yield
+    get_live_settings.cache_clear()
 
 
 @pytest.fixture
@@ -110,6 +120,21 @@ async def test_open_caps_allow_creations_only_within_budget_and_rate(
     assert await q(engine, "SELECT count(*) FROM nodes") == 0
 
 
+async def test_without_the_agent_site_nothing_is_created(
+    engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A node's user data would have nowhere to register: the planner itself blocks every creation
+    (the executor would only refuse each request again and again)."""
+    await add_account(engine, make_vault(tmp_path), "nodes-no-agent-site")
+    await set_settings(engine, OPEN)
+    monkeypatch.delenv("PROXYHUB_AGENT_DOMAIN")
+    get_live_settings.cache_clear()
+    assert await FleetReconciler().try_run_once(engine)
+    plan = await q(engine, "SELECT actions FROM fleet_plans ORDER BY id DESC LIMIT 1")
+    assert isinstance(plan, list) and len(plan) == 9
+    assert all(not a["allowed"] and "agent_domain_not_set" in a["reasons"] for a in plan)
+
+
 async def test_stale_stored_prices_block_creations(engine: AsyncEngine, tmp_path: Path) -> None:
     """The snapshot carries hetzner_offers.fetched_at into the planner (fail closed on old prices)."""
     vault = make_vault(tmp_path)
@@ -123,10 +148,13 @@ async def test_stale_stored_prices_block_creations(engine: AsyncEngine, tmp_path
     assert all(not a["allowed"] and "prices_stale" in a["reasons"] for a in plan)
 
 
-async def test_dry_run_false_in_storage_still_plans_dry(engine: AsyncEngine, tmp_path: Path) -> None:
-    """Even if dry_run=false reached the settings row, the loop stays dry (FLEET_LIVE_ENABLED)."""
+async def test_dry_run_false_with_the_kill_switch_on_still_plans_dry(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """dry_run=false alone is not enough: with the kill switch on the loop stays dry (the live
+    fleet is tested in test_fleet_live_loop.py)."""
     await add_account(engine, make_vault(tmp_path), "nodes-b")
-    await set_settings(engine, OPEN.model_copy(update={"dry_run": False}))
+    await set_settings(engine, OPEN.model_copy(update={"dry_run": False, "kill_switch": True}))
     assert await FleetReconciler().try_run_once(engine)
     assert await q(engine, "SELECT dry_run FROM fleet_plans ORDER BY id DESC LIMIT 1") is True
     assert await q(engine, "SELECT bool_and(dry_run) FROM actions_log WHERE actor = 'fleet'") is True

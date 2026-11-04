@@ -52,7 +52,7 @@ requires_node_image = pytest.mark.skipif(
 def good_settings(**overrides: Any) -> FleetSettings:
     values: dict[str, Any] = {
         "kill_switch": False,
-        "dry_run": True,  # the 9-slot fleet stays dry; test nodes do not depend on it
+        "dry_run": True,  # the 9-slot fleet stays dry unless a test says otherwise; test nodes ignore it
         "budget_cap_eur": Decimal("50.00"),
         "node_cap_total": 3,
         "creations_per_hour_cap": 3,
@@ -80,6 +80,13 @@ async def clean_live_tables(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM node_events"))
         await conn.execute(text("DELETE FROM cost_ledger"))
+        await conn.execute(text("DELETE FROM ip_history"))
+        await conn.execute(text("DELETE FROM fleet_alerts"))
+        await conn.execute(text("DELETE FROM fleet_plans"))
+        await conn.execute(text("DELETE FROM probe_node_state"))
+        # The live-fleet alert tests pair an owner chat and queue alerts: leave no trace for others.
+        await conn.execute(text("DELETE FROM outbox WHERE kind = 'alert'"))
+        await conn.execute(text("DELETE FROM settings WHERE key = 'telegram.owner'"))
         await conn.execute(text("DELETE FROM nodes"))  # node_operations and agent rows cascade
         await conn.execute(text("DELETE FROM hetzner_accounts"))  # observations/servers/offers cascade
         await conn.execute(text("DELETE FROM secrets WHERE name LIKE 'hcloud:%'"))

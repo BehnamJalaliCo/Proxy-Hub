@@ -437,3 +437,44 @@ async def remind_no_standby(db: Db, now: datetime) -> bool:
         result="no standby domain left; the owner was reminded to add one",
     )
     return True
+
+
+# --- taking a domain out for another reason (round 3, team fleet) ---------------------------------
+
+
+@dataclass(frozen=True)
+class TakeOut:
+    was_active: bool
+    replacement: str | None
+    standby_left: int
+
+
+async def take_out(
+    db: Db,
+    zone_id: str,
+    target: PoolState,
+    now: datetime,
+    why: str,
+    *,
+    exclude: Sequence[str] = (),
+    **context: Any,
+) -> TakeOut | None:
+    """Take a pool domain out of rotation for a reason other than a filter verdict (its registration
+    or delegation is lost: proxyhub/cloudflare/delegation.py), with the same steps as a filtered one:
+    the next usable standby (none of ``exclude``) becomes active in the same transaction, and with no
+    standby left the daily "buy a domain" reminder starts. The caller words and queues the alert.
+    None if the zone is not active or standby (any more)."""
+    zones = await load_zones(db, lock=True)
+    zone = next((z for z in zones if z.id == zone_id), None)
+    if zone is None or zone.pool_state not in (P.ACTIVE.value, P.STANDBY.value):
+        return None
+    was_active = zone.pool_state == P.ACTIVE.value
+    await move(db, zone, target, now, why, **context)
+    replacement: PoolZone | None = None
+    if was_active:
+        others = [z for z in await load_zones(db) if z.id != zone.id and z.id not in exclude]
+        replacement = await promote_standby(db, others, now, f"replaces_{why}")
+    left = sum(1 for z in await load_zones(db) if usable_standby(z) and z.id not in exclude)
+    if left == 0:
+        await _set_standby_alert(db, now)
+    return TakeOut(was_active, replacement.name if replacement else None, left)
