@@ -1,7 +1,8 @@
 """Agent reports: a strict schema of aggregate counters, stored without any IP (rule 7).
 
 What a node may tell us is closed: per Telemt user (secret) only ``current_connections`` and
-``total_octets``; for the node only process and system counters. Unknown fields are refused at every
+``total_octets``; for the node only process and system counters; and, optionally, the aggregate
+``usage_agg`` block of decision D39 (proxyhub/analytics/usage.py). Unknown fields are refused at every
 level, types are strict (no coercion), every string has a narrow pattern, and the whole decoded
 document is scanned for anything shaped like an IPv4/IPv6 address before it is even validated.
 """
@@ -24,6 +25,7 @@ from proxyhub.agent_api.validation import (
     find_ip_like,
     valid_user_name,
 )
+from proxyhub.analytics.usage import UsageAgg, store_usage_agg
 from proxyhub.db.models import MtproxyStat
 from proxyhub.db.models_agent import AgentNode, AgentNodeReport, TelemtUser
 
@@ -95,6 +97,9 @@ class AgentReport(_Strict):
     apply_error: ErrorCode | None
     telemt: TelemtCounters
     system: SystemCounters
+    # Optional (agents before D39 do not send it): proxy-usage counters made on the node from
+    # connection IPs IN MEMORY; no IP ever leaves the node (proxyhub/analytics/usage.py).
+    usage_agg: UsageAgg | None = None
 
 
 def parse_report(data: Any) -> AgentReport:
@@ -171,4 +176,6 @@ async def store_report(session: AsyncSession, node_id: uuid.UUID, report: AgentR
     if telemt.version is not None:
         values["telemt_version"] = telemt.version
     await session.execute(update(AgentNode).where(AgentNode.node_id == node_id).values(**values))
+    if report.usage_agg is not None:
+        await store_usage_agg(session, node_id, report.usage_agg, now)
     return stats_rows
