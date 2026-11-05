@@ -464,7 +464,7 @@ def _check_bot_chat_request(request: Any, bot_id: int | None) -> None:
 # cleanup opened with a removal permit (:meth:`BotChat.permit_removal`), under a message whose text
 # names one of the permitted proxy addresses. Any other button whose words take something away
 # (delete, revoke, reset, cancel, ...) never passes, on any connection.
-REMOVE_BUTTON: Final = re.compile(r"(?:🗑️?\s*)?(?:delete|remove)(?:\s+proxy)?", re.IGNORECASE)
+REMOVE_BUTTON: Final = re.compile(r"(?:🗑\ufe0f?\s*)?(?:delete|remove)(?:\s+proxy)?", re.IGNORECASE)
 CONFIRM_BUTTON: Final = re.compile(
     r"(?:✅\s*)?(?:yes|yes,?\s+(?:delete|remove)(?:\s+it)?|confirm)[.!]?", re.IGNORECASE
 )

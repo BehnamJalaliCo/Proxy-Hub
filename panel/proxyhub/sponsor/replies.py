@@ -245,8 +245,8 @@ _DNS_NAME: Final = re.compile(
     r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9\-]{0,61}[a-z0-9]"
 )
 NEXT_PAGE: Final = re.compile(
-    r"(?:(?:next|more)(?:\s+page)?\s*(?:»|›|>>|>|→|➡️?|▶️?|⏩)?"
-    r"|(?:»|›|>>|>|→|➡️?|▶️?|⏩)\s*(?:next|more)?)",
+    r"(?:(?:next|more)(?:\s+page)?\s*(?:»|›|>>|>|→|➡\ufe0f?|▶\ufe0f?|⏩)?"
+    r"|(?:»|›|>>|>|→|➡\ufe0f?|▶\ufe0f?|⏩)\s*(?:next|more)?)",
     re.IGNORECASE,
 )
 REMOVAL_DONE: Final = re.compile(r"\b(?:deleted|removed)\b", re.IGNORECASE)

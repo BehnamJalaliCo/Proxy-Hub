@@ -73,7 +73,7 @@ def allowed(request: Any, buttons: ReadButtons | None, removal: frozenset[str] =
 
 def test_the_removal_shapes_are_exactly_the_documented_ones() -> None:
     """A change of these patterns must be a visible decision (docs: proxyhub/sponsor/botlist.py)."""
-    assert REMOVE_BUTTON.pattern == r"(?:🗑️?\s*)?(?:delete|remove)(?:\s+proxy)?"
+    assert REMOVE_BUTTON.pattern == r"(?:🗑\ufe0f?\s*)?(?:delete|remove)(?:\s+proxy)?"
     assert CONFIRM_BUTTON.pattern == r"(?:✅\s*)?(?:yes|yes,?\s+(?:delete|remove)(?:\s+it)?|confirm)[.!]?"
     assert REMOVE_BUTTON.flags & re.IGNORECASE and CONFIRM_BUTTON.flags & re.IGNORECASE
 
