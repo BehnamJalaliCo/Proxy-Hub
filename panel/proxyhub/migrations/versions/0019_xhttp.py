@@ -5,6 +5,9 @@
   column default), so existing keys get one here and new keys without any code change.
 * ``reality_node_status.xhttp_port``: the port the node's agent says its XHTTP inbound runs on
   (NULL: none, or an agent before 0.4.0). An XHTTP link is published only for a node that says so.
+* ``agent_node_reports.me_route_drops_total`` and ``accept_permit_timeouts_total``: Telemt's two
+  throughput diagnostics from agent 0.4.0 on (middle-proxy data dropped for a full client queue;
+  connections refused at max_connections). Process counters, nothing per user or address.
 
 Revision ID: 0019_xhttp
 Revises: 0018_wstls
@@ -33,6 +36,10 @@ def upgrade() -> None:
         op.f("ck_reality_keys_xhttp_path"), "reality_keys", "xhttp_path ~ '^/[0-9a-f]{16}$'"
     )
     op.add_column("reality_node_status", sa.Column("xhttp_port", sa.Integer(), nullable=True))
+    op.add_column("agent_node_reports", sa.Column("me_route_drops_total", sa.BigInteger(), nullable=True))
+    op.add_column(
+        "agent_node_reports", sa.Column("accept_permit_timeouts_total", sa.BigInteger(), nullable=True)
+    )
     op.create_check_constraint(
         op.f("ck_reality_node_status_xhttp_port"),
         "reality_node_status",
@@ -41,6 +48,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_column("agent_node_reports", "accept_permit_timeouts_total")
+    op.drop_column("agent_node_reports", "me_route_drops_total")
     op.drop_constraint(op.f("ck_reality_node_status_xhttp_port"), "reality_node_status", type_="check")
     op.drop_column("reality_node_status", "xhttp_port")
     op.drop_constraint(op.f("ck_reality_keys_xhttp_path"), "reality_keys", type_="check")

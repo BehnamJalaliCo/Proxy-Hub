@@ -51,7 +51,12 @@ type Telemt struct {
 	ConnectionsTotal       *uint64  `json:"connections_total"`
 	ConnectionsBadTotal    *uint64  `json:"connections_bad_total"`
 	HandshakeTimeoutsTotal *uint64  `json:"handshake_timeouts_total"`
-	Users                  []User   `json:"users"`
+	// Throughput diagnostics (agent 0.4.0 on; left out when Telemt did not report them): data from
+	// the middle proxy dropped because a client's queue was full, and connections refused at
+	// Telemt's max_connections. Counters since Telemt started, nothing per user or per address.
+	MeRouteDropsTotal         *uint64 `json:"me_route_drops_total,omitempty"`
+	AcceptPermitTimeoutsTotal *uint64 `json:"accept_permit_timeouts_total,omitempty"`
+	Users                     []User  `json:"users"`
 }
 
 // User is one Telemt user's aggregate counters.
@@ -105,6 +110,8 @@ func Build(in Input) Report {
 		r.Telemt.ConnectionsTotal = in.Stats.ConnectionsTotal
 		r.Telemt.ConnectionsBadTotal = in.Stats.ConnectionsBadTotal
 		r.Telemt.HandshakeTimeoutsTotal = in.Stats.HandshakeTimeoutsTotal
+		r.Telemt.MeRouteDropsTotal = in.Stats.MeRouteDropsTotal
+		r.Telemt.AcceptPermitTimeoutsTotal = in.Stats.AcceptPermitTimeouts
 		names := make([]string, 0, len(in.Stats.Users))
 		for name := range in.Stats.Users {
 			if desired.ValidUserName(name) {

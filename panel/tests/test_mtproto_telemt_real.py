@@ -220,6 +220,9 @@ async def test_telemt_accepts_the_published_link_and_reloads_it_disabled_when_th
         metrics = (await http.get(f"http://127.0.0.1:{world.metrics_port}/metrics")).text
     assert 'telemt_build_info{version="3.5.16"}' in metrics
     assert f'user="{user_name_for(world.node)}"' in metrics  # Telemt loaded the panel's user
+    # The agent's throughput diagnostics (0.4.0) exist under exactly these unlabelled names.
+    for name in ("telemt_me_route_drop_queue_full_total", "telemt_accept_permit_timeout_total"):
+        assert f"\n{name} " in metrics, name
 
     # Not published before the agent reports the applied state with Telemt up.
     async with world.engine.begin() as conn:

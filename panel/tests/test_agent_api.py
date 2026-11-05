@@ -561,6 +561,28 @@ async def test_integral_numbers_are_accepted_for_float_fields(env: Env) -> None:
     assert rows == [(3725.0, 0.0)]
 
 
+async def test_throughput_diagnostics_are_stored_and_optional(env: Env) -> None:
+    """Agent 0.4.0 adds Telemt's two throughput diagnostics; an older agent's report (without them)
+    is still accepted, and a negative counter is refused like any other."""
+    node_id, fp = await registered(env)
+    body = report_body()
+    body["telemt"]["me_route_drops_total"] = 12
+    body["telemt"]["accept_permit_timeouts_total"] = 0
+    assert (await env.client.post("/agent/v1/report", json=body, headers=env.headers(fp))).status_code == 204
+    assert (
+        await env.client.post("/agent/v1/report", json=report_body(), headers=env.headers(fp))
+    ).status_code == 204
+    rows = await env.rows(
+        "SELECT me_route_drops_total, accept_permit_timeouts_total FROM agent_node_reports "
+        "WHERE node_id = :n ORDER BY id",
+        n=node_id,
+    )
+    assert rows == [(12, 0), (None, None)]
+    bad = report_body()
+    bad["telemt"]["me_route_drops_total"] = -1
+    assert (await env.client.post("/agent/v1/report", json=bad, headers=env.headers(fp))).status_code == 422
+
+
 def _with(path: list[str | int], value: Any) -> dict[str, Any]:
     body = report_body()
     target: Any = body

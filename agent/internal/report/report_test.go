@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/metrics"
@@ -66,6 +67,13 @@ func TestReportShape(t *testing.T) {
 	}
 	if got := keys(m["system"].(map[string]any)); !reflect.DeepEqual(got, []string{"cpu_count", "load1", "mem_available_bytes", "mem_total_bytes", "uptime_s"}) {
 		t.Fatalf("system keys = %v", got)
+	}
+	// The throughput diagnostics, when Telemt reported them.
+	drops, timeouts := uint64(3), uint64(0)
+	r.Telemt = Build(Input{TelemtUp: true, Stats: metrics.Stats{MeRouteDropsTotal: &drops, AcceptPermitTimeouts: &timeouts}}).Telemt
+	data, _ = json.Marshal(r.Telemt)
+	if !strings.Contains(string(data), `"me_route_drops_total":3,"accept_permit_timeouts_total":0,`) {
+		t.Fatalf("telemt = %s", data)
 	}
 }
 
