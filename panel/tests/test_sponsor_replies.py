@@ -264,14 +264,40 @@ def test_labels_with_emoji_or_a_domain_name_still_match_exactly() -> None:
         (Step.SENT_CHANNEL, seen("Done! Proxy deleted"), "channel_refused"),
         (Step.SENT_CHANNEL, seen("Saved. The proxy was removed."), "channel_refused"),
         (Step.SENT_CHANNEL, seen("Success! Promotion disabled."), "channel_refused"),
-        # A /myproxies button is pressed only when its whole label is our address.
+        # A /myproxies button is pressed only when its label names our address and nothing but hex.
         (Step.SENT_MYPROXIES, _list("🗑 Delete 1.2.3.4:443"), "proxy_not_in_list"),
         (Step.SENT_MYPROXIES, _list("1.2.3.4:443 remove"), "proxy_not_in_list"),
+        (Step.SENT_MYPROXIES, _list("11.2.3.4 1a2b3c"), "proxy_not_in_list"),
+        (Step.SENT_MYPROXIES, _list("1.2.3.4 1a2b 3c4d 5e6f"), "proxy_not_in_list"),
+        (Step.SENT_MYPROXIES, _list("1.2.3.4 1a2b", "1.2.3.4:443"), "proxy_listed_twice"),
     ],
 )
 def test_any_other_promotion_reply_stops_the_flow(step: Step, observation: Observation, reason: str) -> None:
     result = next_action(PROMO, step, observation)
     assert isinstance(result, Stuck) and result.step == step and result.reason == reason
+
+
+def test_the_real_myproxies_label_shape_is_matched() -> None:
+    # P13 on the panel server: @MTProxybot labels each /myproxies button "<host> <hex>".
+    job = PromoteJob(host="t7aae9f0c.ipoxxo.online", port=8443, channel="ipoxxo")
+    for label in (
+        "t7aae9f0c.ipoxxo.online 4f1c9a0b",
+        "t7aae9f0c.ipoxxo.online:8443",
+        "🌐 t7aae9f0c.ipoxxo.online 4f1c",
+    ):
+        assert replies.is_address_label(label, job.host, job.port), label
+    for label in (
+        "x.t7aae9f0c.ipoxxo.online 4f1c",  # another host that ends like ours
+        "t7aae9f0c.ipoxxo.online.evil.com 4f1c",
+        "Delete t7aae9f0c.ipoxxo.online",
+        "t7aae9f0c.ipoxxo.online 4f1c remove",
+        "91.107.189.145 4f1c",  # our old registration of another address
+    ):
+        assert not replies.is_address_label(label, job.host, job.port), label
+    pick = next_action(
+        job, Step.SENT_MYPROXIES, _list("91.107.189.145 9e8d7c6b", "t7aae9f0c.ipoxxo.online 4f1c9a0b")
+    )
+    assert isinstance(pick, Press) and pick.label == "t7aae9f0c.ipoxxo.online 4f1c9a0b"
 
 
 def test_a_refusal_is_explained_to_the_owner() -> None:
