@@ -191,8 +191,10 @@ def test_emoji_are_found_whole() -> None:
     assert [f[0] for f in found] == ["📡", "⌛️", "⌛", "🇮🇷", "👨‍👩‍👧", "1️⃣", "👍🏽", "♻️"]
     for emoji, offset, length in found:
         assert utf16_slice(text, offset, length) == emoji
-    # A Persian zero-width joiner between letters, dashes, bullets, math signs and digits: no emoji.
-    assert not [e for e in emoji_in("ها‍ی — • − ۱۲ 12 abc") if e.emoji]
+    # A Persian zero-width joiner between letters, dashes, bullets, math signs, plain arrows, shapes
+    # and digits: no emoji.
+    assert not [e for e in emoji_in("ها‍ی — • − ← → ■ ▲ ۱۲ 12 abc") if e.emoji]
+    assert [e.emoji for e in emoji_in("↔️ ↩ ▶️ ⬅️ ⭐")] == ["↔️", "↩", "▶️", "⬅️", "⭐"]
 
 
 def test_variation_selectors_do_not_matter_for_the_pack() -> None:

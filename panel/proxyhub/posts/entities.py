@@ -239,13 +239,17 @@ def _regional(cp: int) -> bool:
 
 
 _SYMBOL_BLOCKS: Final = (
-    (0x2190, 0x21FF),  # arrows (↔ ↩)
+    (0x2194, 0x2199),  # ↔ ↕ ↖ ↗ ↘ ↙ (the plain arrows ← → are text, not emoji)
+    (0x21A9, 0x21AA),  # ↩ ↪
     (0x2300, 0x23FF),  # technical (⌛ ⏳ ⏸ ⏰)
     (0x24C2, 0x24C2),  # Ⓜ
-    (0x25A0, 0x25FF),  # geometric shapes (▪ ▶ ◀ ◻)
+    (0x25AA, 0x25AB),  # ▪ ▫
+    (0x25B6, 0x25B6),  # ▶
+    (0x25C0, 0x25C0),  # ◀
+    (0x25FB, 0x25FE),  # ◻ ◼ ◽ ◾
     (0x2600, 0x27BF),  # symbols and dingbats (☀ ♻ ⚠ ✅ ❌ ➡)
-    (0x2900, 0x297F),  # ⤴ ⤵
-    (0x2B00, 0x2BFF),  # ⬅ ⬆ ⭐ ⭕
+    (0x2934, 0x2935),  # ⤴ ⤵
+    (0x2B05, 0x2B55),  # ⬅ ⬆ ⬇ ⬛ ⬜ ⭐ ⭕
 )
 
 

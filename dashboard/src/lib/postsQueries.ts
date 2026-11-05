@@ -3,6 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { isEndpointMissing } from "./api";
+import { getOperator } from "./operatorPoster";
 import { getContent, getPostingSettings, getPostPreview, getPostsStatus, getRecentPosts } from "./posts";
 
 export const postsKeys = {
@@ -12,6 +13,7 @@ export const postsKeys = {
   preview: ["posts", "preview"] as const,
   recent: ["posts", "recent"] as const,
   content: ["posts", "content"] as const,
+  operator: ["posts", "operator"] as const,
 };
 
 function every(ms: number) {
@@ -38,3 +40,7 @@ export const useRecentPosts = () =>
 
 export const useContent = () =>
   useQuery({ queryKey: postsKeys.content, queryFn: ({ signal }) => getContent(signal), refetchInterval: every(60_000) });
+
+/** The second account's posting (D38): poster, emoji pack, rights, fallbacks. */
+export const useOperator = () =>
+  useQuery({ queryKey: postsKeys.operator, queryFn: ({ signal }) => getOperator(signal), refetchInterval: every(60_000) });
