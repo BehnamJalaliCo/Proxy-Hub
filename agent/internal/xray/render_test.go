@@ -47,7 +47,7 @@ func testDesired() *desired.Xray {
 func render(t *testing.T, x *desired.Xray) []byte {
 	t.Helper()
 	users, _ := Effective(x.Users, enforce.NewUsage(), time.Now())
-	data, err := Render(x, users, "127.0.0.1:10085")
+	data, err := Render(x, users, "127.0.0.1:10085", TLSFiles{})
 	if err != nil {
 		t.Fatal(err)
 	}

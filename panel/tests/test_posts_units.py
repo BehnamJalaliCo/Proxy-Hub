@@ -65,9 +65,7 @@ def test_post_has_content_links_and_tag_in_that_order() -> None:
     post = render_post(CONTENT, [mt(1, sec=sec), mt(2), rl(1, expires=exp)], "@ipoxxo").text
     assert post.startswith("<b>💡 عنوان &lt;آزمایشی&gt;</b>\n\n<blockquote>متن <b>پررنگ</b>")
     assert (
-        post.index("</blockquote>")
-        < post.index("📡 <b>پروکسی تلگرام</b>")
-        < post.index("🔐 <b>کانفیگ ریلیتی")
+        post.index("</blockquote>") < post.index("📡 <b>پروکسی تلگرام</b>") < post.index("🔐 <b>کانفیگ VLESS")
     )
     assert post.endswith("\n\n🔗 \u200e@ipoxxo")
     assert (

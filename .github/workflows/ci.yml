@@ -36,6 +36,9 @@ jobs:
           cache: false
       # The agent e2e test runs the real Go agent through real Caddy mTLS; it skips without the image.
       - run: docker pull caddy:2-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
+      # Pebble (Let's Encrypt's test CA) and its DNS server: the ACME tests order real certificates.
+      - run: docker pull ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199
+      - run: docker pull ghcr.io/letsencrypt/pebble-challtestsrv@sha256:12ce21884def456bcf9786542113949e1f19dc7738d2c70e156c2d0c38a1405b
       - run: pip install uv==0.11.32
       - run: uv sync --frozen
       - run: uv run --frozen ruff check proxyhub tests

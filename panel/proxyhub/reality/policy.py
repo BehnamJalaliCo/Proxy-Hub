@@ -9,9 +9,15 @@ a user on servers that already exist, so the fleet caps and the kill switch (ser
 not involved; the owner's own switch is ``RealitySettings.enabled``.
 
 * A config ends as ``full`` (its data cap), ``expired`` (its time), or ``burned`` (its link can no
-  longer work: an IP link whose server left service, a slot link whose domain is no longer the
-  active one, a scope no server serves any more, or a target that failed and was replaced). The
-  node also enforces cap and time by itself.
+  longer work: an IP link whose server left service, a name link whose domain is no longer the
+  active one, a scope no server serves any more, a target that failed and was replaced, or a
+  config of the other transport after the owner switched it: a node serves one inbound on 443).
+  The node also enforces cap and time by itself.
+* Transport ``ws_tls`` (default): a config is made only on a node whose scope has its DNS name in
+  Cloudflare pointing at that node, while a valid certificate for the active domain exists, and
+  after the node's agent checked its own TLS inbound for that name (a TLS handshake with the
+  certificate, verified against the public roots) and found it working. Its link host is the name.
+  The REALITY target plays no part (no retarget, no target check).
 * Every scope's key carries the REALITY target and server name its links use (``sni=``). When the
   owner sets another target, :func:`retarget_scopes` moves each scope to it: at once when the scope
   has no active config, or when a node of the scope reports that the old target fails its check
@@ -44,12 +50,12 @@ from sqlalchemy import exists, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from proxyhub.cloudflare.rotation import current_active_domain
-from proxyhub.cloudflare.service import slot_name
+from proxyhub.cloudflare.service import NodeNames, node_dns_name, node_names
 from proxyhub.db.models import Node
 from proxyhub.db.models_reality import RealityConfig, RealityKey
 from proxyhub.fleet.lifecycle import NodeState
-from proxyhub.reality.keys import new_key_pair, new_short_id
-from proxyhub.reality.settings import RealitySettings
+from proxyhub.reality.keys import new_key_pair, new_short_id, new_ws_path
+from proxyhub.reality.settings import RealitySettings, Transport
 from proxyhub.reality.store import (
     SERVE_STATES,
     NodeView,
@@ -62,6 +68,7 @@ from proxyhub.reality.store import (
     node_scope,
     target_verdict,
     telemt_clash,
+    ws_tls_plan,
 )
 from proxyhub.vault import Vault, delete_secret
 
@@ -88,6 +95,7 @@ class ActiveConfig:
     expires_at: datetime
     data_cap_bytes: int
     used_bytes: int
+    transport: str = "reality"
 
 
 def end_status(
@@ -97,18 +105,20 @@ def end_status(
     own_node_state: str | None,
     scope_served: bool,
     active_domain: str | None,
+    transport: Transport,
 ) -> EndStatus | None:
-    """Why an active config ends now, or None while it still works."""
+    """Why an active config ends now, or None while it still works. ``transport`` is the one the
+    nodes serve now (the settings')."""
     if c.used_bytes >= c.data_cap_bytes:
         return "full"
     if now >= c.expires_at:
         return "expired"
-    if not scope_served:
+    if not scope_served or c.transport != transport:
         return "burned"
     if is_ip_host(c.host):
-        if own_node_state is None or S(own_node_state) not in IP_SERVING:
+        if c.transport != "reality" or own_node_state is None or S(own_node_state) not in IP_SERVING:
             return "burned"
-    elif c.slot is None or active_domain is None or c.host != slot_name(c.slot, active_domain):
+    elif active_domain is None or c.host != node_dns_name(c.slot, c.node_id, active_domain):
         return "burned"
     return None
 
@@ -168,12 +178,25 @@ def eligible_for_new_configs(
     target: tuple[str, str],
 ) -> bool:
     """A node may receive a new config: it serves Reality and its agent checked exactly this
-    (target, server name) from the node and it passed (TLS 1.3 + HTTP/2). Not checked yet, failed,
-    or checked for another target: no config."""
+    (target, server name) from the node and it passed (``reality``: the REALITY target, TLS 1.3 +
+    HTTP/2; ``ws_tls``: its own inbound for its own name, with our certificate). Not checked yet,
+    failed, or checked for something else: no config."""
     return (
         serves_reality(node, status, now=now, telemt_clashes=telemt_clashes)
         and target_verdict(status, *target) is True
     )
+
+
+async def ws_tls_target(
+    conn: AsyncConnection, node: NodeView, now: datetime, names: NodeNames
+) -> tuple[str, str] | None:
+    """For ``ws_tls``: the (target, server name) a node's own TLS check must have passed for the
+    node to get a config, or None when it cannot have one (no name pointing at it, no certificate,
+    an agent without ws_tls)."""
+    plan = await ws_tls_plan(conn, node, now, names=names)
+    if plan is None or not plan.own:
+        return None
+    return plan.check_pair
 
 
 scope_of = node_scope
@@ -206,10 +229,11 @@ async def _active(conn: AsyncConnection) -> list[ActiveConfig]:
                 RealityConfig.expires_at,
                 RealityConfig.data_cap_bytes,
                 RealityConfig.used_bytes,
+                RealityConfig.transport,
             ).where(RealityConfig.status == "active")
         )
     ).all()
-    return [ActiveConfig(*r) for r in rows]
+    return [ActiveConfig(**r._mapping) for r in rows]
 
 
 def renewal_due(c: ActiveConfig, *, now: datetime) -> bool:
@@ -222,7 +246,7 @@ async def renew_configs(conn: AsyncConnection, settings: RealitySettings, now: d
     the same link). Returns the renewed config ids."""
     if not (settings.enabled and settings.renew):
         return []
-    due = [c for c in await _active(conn) if renewal_due(c, now=now)]
+    due = [c for c in await _active(conn) if renewal_due(c, now=now) and c.transport == settings.transport]
     if not due:
         return []
     nodes = {n.id: n for n in await live_nodes(conn)}
@@ -244,12 +268,16 @@ async def renew_configs(conn: AsyncConnection, settings: RealitySettings, now: d
     serving_nodes = {n.id for n in nodes.values() if S(n.state) in SERVE_STATES}
     statuses = await all_statuses(conn)
     domain = await current_active_domain(conn)
+    names = await node_names(conn) if settings.transport == "ws_tls" else None
     period = timedelta(hours=settings.cap_hours)
-    healthy: dict[int, bool] = {}  # key id -> a node of its scope serves it and passed its target check
+    healthy: dict[int, bool] = {}  # key id -> a node of its scope serves it and passed its check
     renewed: list[int] = []
     for c in due:
         key = keys.get(c.key_id)
-        if key is None or (key.target, key.server_name) != (settings.target, settings.target_host):
+        if key is None:
+            continue
+        reality = settings.transport == "reality"
+        if reality and (key.target, key.server_name) != (settings.target, settings.target_host):
             continue  # its scope moves to the owner's new target once its configs have ended
         if key.id not in healthy:
             scope_nodes = [
@@ -259,12 +287,17 @@ async def renew_configs(conn: AsyncConnection, settings: RealitySettings, now: d
             ]
             healthy[key.id] = False
             for n in scope_nodes:
-                if eligible_for_new_configs(
+                if reality:
+                    target: tuple[str, str] | None = (key.target, key.server_name)
+                else:
+                    assert names is not None
+                    target = await ws_tls_target(conn, n, now, names)
+                if target is not None and eligible_for_new_configs(
                     n,
                     statuses.get(n.id),
                     now=now,
                     telemt_clashes=await telemt_clash(conn, n.id),
-                    target=(key.target, key.server_name),
+                    target=target,
                 ):
                     healthy[key.id] = True
                     break
@@ -279,6 +312,7 @@ async def renew_configs(conn: AsyncConnection, settings: RealitySettings, now: d
             own_node_state=own.state if own else None,
             scope_served=served,
             active_domain=domain,
+            transport=settings.transport,
         )
         if why is not None:
             continue
@@ -298,8 +332,9 @@ async def renew_configs(conn: AsyncConnection, settings: RealitySettings, now: d
     return renewed
 
 
-async def end_configs(conn: AsyncConnection, now: datetime) -> dict[int, EndStatus]:
-    """End every active config that no longer works. Returns config id -> new status."""
+async def end_configs(conn: AsyncConnection, now: datetime, transport: Transport) -> dict[int, EndStatus]:
+    """End every active config that no longer works (``transport``: the one the nodes serve now).
+    Returns config id -> new status."""
     configs = await _active(conn)
     if not configs:
         return {}
@@ -317,7 +352,12 @@ async def end_configs(conn: AsyncConnection, now: datetime) -> dict[int, EndStat
         served = key_slot in serving_slots if key_slot is not None else key_node in serving_nodes
         own = nodes.get(c.node_id)
         why = end_status(
-            c, now=now, own_node_state=own.state if own else None, scope_served=served, active_domain=domain
+            c,
+            now=now,
+            own_node_state=own.state if own else None,
+            scope_served=served,
+            active_domain=domain,
+            transport=transport,
         )
         if why is not None:
             ended[c.id] = why
@@ -350,7 +390,10 @@ async def retarget_scopes(
 ) -> list[Retargeted]:
     """Move every key scope whose target differs from the settings to the settings' target, as
     :func:`retarget_decision` says. Independent of any node being eligible: a scope whose old
-    target fails gets out of that state here, and its nodes then check the new target."""
+    target fails gets out of that state here, and its nodes then check the new target. Only with
+    the ``reality`` transport (``ws_tls`` has no REALITY target; a later switch back retargets)."""
+    if settings.transport != "reality":
+        return []
     wanted = (settings.target, settings.target_host)
     stale = sorted(
         (k for k in (await keys_by_scope(conn)).values() if k.target_pair != wanted), key=lambda k: k.id
@@ -502,6 +545,7 @@ async def ensure_keys(
                     target=settings.target,
                     server_name=settings.target_host,
                     secret_name=name,
+                    ws_path=new_ws_path(),
                 )
                 .returning(RealityKey.id)
             )
@@ -523,13 +567,16 @@ class Created:
 
 async def create_configs(conn: AsyncConnection, settings: RealitySettings, now: datetime) -> list[Created]:
     """At most one fresh config per due scope (and at most MAX_CREATIONS_PER_TICK in all), only on
-    a key that carries the settings' target and only on a node that confirmed that target."""
+    a node that confirmed what its links need: ``reality``: a key that carries the settings' target
+    and a node that confirmed that target; ``ws_tls``: a node whose own name points at it and whose
+    own TLS inbound for that name passed its check (:func:`ws_tls_target`)."""
     statuses = await all_statuses(conn)
     by_scope = await _serving_scopes(conn, now, statuses)
     if not by_scope:
         return []
     keys = await keys_by_scope(conn)
     domain = await current_active_domain(conn)
+    names = await node_names(conn) if settings.transport == "ws_tls" else None
     created: list[Created] = []
     for scope in sorted(by_scope, key=str):
         if len(created) >= MAX_CREATIONS_PER_TICK:
@@ -537,22 +584,29 @@ async def create_configs(conn: AsyncConnection, settings: RealitySettings, now: 
         key = keys.get(scope)
         if key is None:
             continue  # ensure_keys makes it; the node checks the target first
-        if key.target_pair != (settings.target, settings.target_host):
-            continue  # the scope moves to the new target once its configs ended (retarget_scopes)
         node = _newest(by_scope[scope])
-        if not eligible_for_new_configs(
+        if settings.transport == "reality":
+            if key.target_pair != (settings.target, settings.target_host):
+                continue  # the scope moves to the new target once its configs ended (retarget_scopes)
+            target: tuple[str, str] | None = key.target_pair
+        else:
+            assert names is not None
+            target = await ws_tls_target(conn, node, now, names)
+        if target is None or not eligible_for_new_configs(
             node,
             statuses.get(node.id),
             now=now,
             telemt_clashes=await telemt_clash(conn, node.id),
-            target=key.target_pair,
+            target=target,
         ):
-            continue  # its agent has not confirmed this target from the node (or it failed there)
+            continue  # its agent has not confirmed this from the node (or it failed there)
         active_created = list(
             (
                 await conn.execute(
                     select(RealityConfig.created_at).where(
-                        RealityConfig.key_id == key.id, RealityConfig.status == "active"
+                        RealityConfig.key_id == key.id,
+                        RealityConfig.status == "active",
+                        RealityConfig.transport == settings.transport,
                     )
                 )
             )
@@ -562,7 +616,13 @@ async def create_configs(conn: AsyncConnection, settings: RealitySettings, now: 
         if not creation_due(active_created, now=now, settings=settings):
             continue
         assert node.ipv4 is not None  # serves_reality
-        host = slot_name(node.slot, domain) if node.slot is not None and domain else node.ipv4
+        if settings.transport == "ws_tls":
+            assert target is not None
+            host = target[1]  # the node's own DNS name
+        else:
+            host = (
+                node_dns_name(node.slot, node.id, domain) if node.slot is not None and domain else node.ipv4
+            )
         expires = now + timedelta(hours=settings.cap_hours)
         config_id = (
             await conn.execute(
@@ -578,6 +638,7 @@ async def create_configs(conn: AsyncConnection, settings: RealitySettings, now: 
                     data_cap_bytes=settings.cap_bytes,
                     used_bytes=0,
                     status="active",
+                    transport=settings.transport,
                 )
                 .returning(RealityConfig.id)
             )

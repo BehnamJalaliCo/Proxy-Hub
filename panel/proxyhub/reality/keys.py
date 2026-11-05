@@ -50,3 +50,9 @@ def public_from_private(private_b64: str) -> str:
 def new_short_id() -> str:
     """16 hex characters (8 random bytes), the longest short id REALITY accepts."""
     return secrets.token_hex(8)
+
+
+def new_ws_path() -> str:
+    """A scope's WebSocket path for the ws_tls transport: "/" + 16 random hex characters. Not a
+    secret (it is in every link of the scope), only harder to stumble on than "/"."""
+    return "/" + secrets.token_hex(8)

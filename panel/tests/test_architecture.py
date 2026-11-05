@@ -118,6 +118,19 @@ def test_no_telegram_delete_anywhere() -> None:
     assert not hits, f"rule 6 violated in {hits}"
 
 
+ACME_IMPORT = re.compile(r"^\s*(?:from|import)\s+(?:acme|josepy)\b", re.MULTILINE)
+ACME_MODULE = PANEL / "acme" / "protocol.py"
+
+
+def test_the_acme_library_is_imported_only_by_the_protocol_module() -> None:
+    """certbot's ACME library logs request bodies at DEBUG; one module holds its logger at INFO and
+    turns every failure into a short code, so nothing else may talk to it directly."""
+    assert ACME_IMPORT.search("from acme import messages") and ACME_IMPORT.search("import josepy as jose")
+    assert not ACME_IMPORT.search("from proxyhub.acme import store")
+    importers = {p for p in _sources() if ACME_IMPORT.search(p.read_text(encoding="utf-8"))}
+    assert importers == {ACME_MODULE}, importers
+
+
 def test_server_mutations_only_in_mutations_module() -> None:
     hits = [
         p

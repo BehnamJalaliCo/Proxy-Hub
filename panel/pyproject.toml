@@ -24,6 +24,11 @@ dependencies = [
     # Telethon -> rsa -> pyasn1: pinned to a release that has been out for a long time (0.6.5 was
     # only days old when Telethon was added; a fresh release is a supply-chain risk).
     "pyasn1==0.6.1",
+    # ACME (Let's Encrypt, DNS-01) for the nodes' own certificates: certbot's ACME library, pinned to
+    # releases at least two weeks old on 2026-11-05 (acme 5.8.0: 2026-09-01; josepy 2.2.0:
+    # 2025-10-14). Imported only by proxyhub/acme/protocol.py (tests/test_architecture.py).
+    "acme==5.8.0",
+    "josepy==2.2.0",
 ]
 
 [dependency-groups]

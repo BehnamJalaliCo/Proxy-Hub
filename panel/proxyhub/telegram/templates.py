@@ -291,7 +291,7 @@ LinkStatus = Literal["active", "expired", "full", "burned"]
 ShownStatus = Literal["active", "paused", "expired", "full", "burned"]
 
 MTPROTO_HEADER: Final = "📡 <b>پروکسی تلگرام</b> — روی هر کدام بزنید"
-REALITY_HEADER: Final = "🔐 <b>کانفیگ ریلیتی (VLESS)</b> — برای کپی روی متن بزنید"
+REALITY_HEADER: Final = "🔐 <b>کانفیگ VLESS</b> — برای کپی روی متن بزنید"
 ALL_DEAD_LINE: Final = "♻️ <i>کانفیگ‌های این پست دیگر کار نمیکنند؛ کانفیگ تازه در پست‌های جدید کانال است.</i>"
 STATUS_MARKS: Final = {"expired": "⌛️", "full": "🔴", "burned": "🚫"}
 PAUSED_MARK: Final = "⏸"

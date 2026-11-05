@@ -5,7 +5,8 @@ slotless node that is gone.
 
 Every change goes to actions_log (actor ``reality``) without the config's UUID: that is the
 credential a link carries. The owner hears about what code cannot fix by itself: a node from which
-the REALITY target fails its TLS 1.3 + HTTP/2 check (at most one alert a day).
+the REALITY target fails its TLS 1.3 + HTTP/2 check, or (``ws_tls``) whose own TLS inbound fails
+its check (at most one alert a day).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Final
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from proxyhub.cloudflare.service import node_names
 from proxyhub.db.models_reality import RealityKey
 from proxyhub.fleet.actions import iso, log_action
 from proxyhub.reality.policy import (
@@ -29,7 +31,7 @@ from proxyhub.reality.policy import (
     retarget_scopes,
     scope_label,
 )
-from proxyhub.reality.settings import load_reality_settings, load_state, save_state
+from proxyhub.reality.settings import PORT, Transport, load_reality_settings, load_state, save_state
 from proxyhub.reality.store import all_statuses, live_nodes, target_verdict
 from proxyhub.reconcilers.base import Reconciler
 from proxyhub.telegram.store import enqueue_owner_alert
@@ -54,6 +56,15 @@ def target_alert_text(nodes: list[str]) -> str:
     )
 
 
+def tls_alert_text(nodes: list[str]) -> str:
+    names = "، ".join(html.escape(n) for n in nodes[:5]) + (" و …" if len(nodes) > 5 else "")
+    return (
+        "⚠️ <b>WebSocket + TLS</b>: آزمون TLS خود node با نام دامنه و گواهی خودش روی "
+        f"{fa_digits(len(nodes))} node رد شد ({names}). روی این nodeها کانفیگ تازه ساخته نمیشود. "
+        "node هر چند دقیقه دوباره میآزماید و اگر درست شد، ساخت کانفیگ خودش از سر گرفته میشود."
+    )
+
+
 class RealityReconciler(Reconciler):
     name = "reality"
     interval_seconds = 30.0
@@ -72,7 +83,7 @@ class RealityReconciler(Reconciler):
                 reasons=["still_working"],
                 context={"hours": settings.cap_hours, "gb": settings.cap_gb},
             )
-        for config_id, status in sorted((await end_configs(conn, now)).items()):
+        for config_id, status in sorted((await end_configs(conn, now, settings.transport)).items()):
             await self._ended(conn, config_id, [status])
         for node_id in await forget_gone_node_keys(conn):
             await log_action(
@@ -126,7 +137,7 @@ class RealityReconciler(Reconciler):
                         "cap_gb": settings.cap_gb,
                     },
                 )
-        await self._target_alert(conn, now)
+        await self._target_alert(conn, now, settings.transport)
 
     async def _ended(self, conn: AsyncConnection, config_id: int, reasons: list[str]) -> None:
         await log_action(
@@ -139,9 +150,10 @@ class RealityReconciler(Reconciler):
             reasons=reasons,
         )
 
-    async def _target_alert(self, conn: AsyncConnection, now: datetime) -> None:
-        """Nodes whose check of their scope's current target failed (a result about a target the
-        owner has replaced does not count)."""
+    async def _target_alert(self, conn: AsyncConnection, now: datetime, transport: Transport) -> None:
+        """Nodes whose check failed: ``reality``: of their scope's current target (a result about a
+        target the owner has replaced does not count); ``ws_tls``: of their own TLS inbound for
+        their scope's name."""
         statuses = await all_statuses(conn)
         targets = {
             (("slot", k.slot) if k.slot is not None else ("node", k.node_id)): (k.target, k.server_name)
@@ -151,9 +163,14 @@ class RealityReconciler(Reconciler):
                 )
             ).all()
         }
+        names = await node_names(conn) if transport == "ws_tls" else None
         failing: list[str] = []
         for n in await live_nodes(conn):
-            target = targets.get(("slot", n.slot) if n.slot is not None else ("node", n.id))
+            if names is not None:
+                name = names.scope_name(n.slot, n.id)
+                target = (f"{name}:{PORT}", name) if name is not None else None
+            else:
+                target = targets.get(("slot", n.slot) if n.slot is not None else ("node", n.id))
             if target is not None and target_verdict(statuses.get(n.id), *target) is False:
                 failing.append(n.name)
         if not failing:
@@ -163,7 +180,9 @@ class RealityReconciler(Reconciler):
         last = state.get("target_alert_at")
         if isinstance(last, str) and now - datetime.fromisoformat(last) < TARGET_ALERT_REPEAT:
             return
-        await enqueue_owner_alert(conn, target_alert_text(failing))
+        await enqueue_owner_alert(
+            conn, tls_alert_text(failing) if transport == "ws_tls" else target_alert_text(failing)
+        )
         await log_action(
             conn,
             actor=ACTOR,

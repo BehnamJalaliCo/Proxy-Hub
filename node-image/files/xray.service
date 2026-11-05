@@ -1,6 +1,8 @@
-# Xray VLESS + REALITY on TCP 443 on a Proxy-Hub node. The config is written only by proxyhub-agent
-# (log.access "none", warning level with addresses masked, statsUserOnline false, the gRPC API on
-# 127.0.0.1 only; the agent refuses any config that says otherwise).
+# Xray on TCP 443 on a Proxy-Hub node: VLESS + WebSocket + TLS with the panel's certificate for the
+# node's own name (files in /etc/xray/tls, 0640, written by the agent), or VLESS + REALITY. The config
+# is written only by proxyhub-agent (log.access "none", warning level with addresses masked,
+# statsUserOnline false, the gRPC API on 127.0.0.1 only; the agent refuses any config that says
+# otherwise).
 [Unit]
 Description=Xray VLESS Reality (managed by proxyhub-agent)
 After=network-online.target nftables.service

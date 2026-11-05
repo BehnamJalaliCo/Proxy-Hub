@@ -2,8 +2,10 @@
 
 The document served at ``GET /agent/v1/desired`` is plain JSON in a canonical form (sorted keys,
 no spaces), and its ETag is the SHA-256 of exactly those bytes: it changes when, and only when,
-something the node must apply changes. It carries Telemt user secrets, so it is only ever sent to
-the authenticated agent of that node and is never logged.
+something the node must apply changes. It carries Telemt user secrets and, in its ``xray`` section,
+the scope's REALITY private key or (transport ws_tls) the TLS certificate's private key for the
+node's own name, so it is only ever sent to the authenticated agent of that node and is never
+logged. The same builder serves the agent and the MTProto live check (one document, one ETag).
 
 Privacy and sponsorship invariants are constants here, not data: ``use_middle_proxy = true``
 (needed for the sponsor channel, decision D26), ``beobachten = false`` and ``log_level = "silent"``
@@ -67,7 +69,7 @@ async def build_desired_state(session: AsyncSession, seal_key: bytes, node_id: u
         "intervals": {"poll_s": POLL_INTERVAL_S, "report_s": REPORT_INTERVAL_S},
         "telemt": None,
     }
-    xray = await xray_section(session, node_id)  # VLESS Reality (proxyhub/reality); None: key left out
+    xray = await xray_section(session, node_id)  # VLESS (proxyhub/reality): ws_tls or reality; None: left out
     if xray is not None:
         doc["xray"] = xray
     if config is None:

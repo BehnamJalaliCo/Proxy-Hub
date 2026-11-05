@@ -1,14 +1,23 @@
-"""Links contract (cross-team contract item 3): the Reality configs the channel posts publish.
+"""Links contract (cross-team contract item 3): the VLESS configs the channel posts publish.
 
-``vless://<uuid>@<host>:443?encryption=none&security=reality&sni=<name>&fp=chrome&pbk=<key>&sid=<id>
-&type=tcp&flow=xtls-rprx-vision#<name>``. The host was fixed when the config was made (contract
-item 2: ``slot<N>.<active domain>``, else the node's IPv4). The name every user's app shows starts
-with the channel's name (decision N15), e.g. ``ipoxxo 🇩🇪 12``.
+Two shapes, by the transport the config was made for (the links contract kind stays ``reality``):
+
+* ``ws_tls`` (default): ``vless://<uuid>@<node name>:443?encryption=none&security=tls&sni=<name>
+  &alpn=http%2F1.1&fp=chrome&type=ws&host=<name>&path=<urlencoded path>#<name>``, the shape of the
+  owner's own working config: the node's own DNS name (``slot<N>.<domain>``, or a test node's
+  ``t<8 hex>.<domain>``) with a real certificate for it, so SNI and IP belong together.
+* ``reality``: ``vless://<uuid>@<host>:443?encryption=none&security=reality&sni=<name>&fp=chrome
+  &pbk=<key>&sid=<id>&type=tcp&flow=xtls-rprx-vision#<name>``, host ``slot<N>.<active domain>``,
+  else the node's IPv4 (contract item 2).
+
+The host was fixed when the config was made. The name every user's app shows starts with the
+channel's @name (D41), e.g. ``@ipoxxo 🇩🇪 12``; the post label is «کانفیگ N».
 
 Listed: every active config that a serving node of its scope has confirmed (its agent reported
-Xray up, without an error, after the config was made), and configs that ended in the last
-:data:`ENDED_KEPT_FOR`, so posts that carry them can be marked. The UUID in a link is what grants
-access: links leave the panel only through this provider and the owner's dashboard.
+Xray up, without an error, after the config was made; for ``ws_tls`` also its own TLS check for
+the config's name passed), and configs that ended in the last :data:`ENDED_KEPT_FOR`, so posts
+that carry them can be marked. The UUID in a link is what grants access: links leave the panel only
+through this provider and the owner's dashboard.
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ from proxyhub.reality.store import (
     all_statuses,
     live_nodes,
     recent_and_active_configs,
+    target_verdict,
 )
 from proxyhub.telegram.store import channels
 from proxyhub.telegram.templates import fa_digits
@@ -73,6 +83,43 @@ def vless_url(
     return f"vless://{user_id}@{host}:{PORT}?{query}#{quote(name, safe='')}"
 
 
+def vless_ws_url(*, user_id: uuid.UUID, host: str, path: str, name: str) -> str:
+    """VLESS + WebSocket + TLS to the node's own name (SNI and Host header are that name)."""
+    query = urlencode(
+        {
+            "encryption": "none",
+            "security": "tls",
+            "sni": host,
+            "alpn": "http/1.1",
+            "fp": "chrome",
+            "type": "ws",
+            "host": host,
+            "path": path,
+        },
+        quote_via=quote,
+    )
+    return f"vless://{user_id}@{host}:{PORT}?{query}#{quote(name, safe='')}"
+
+
+def config_url(row: Any, name: str) -> str:
+    """The link of a config row (from :func:`proxyhub.reality.store.recent_and_active_configs`)."""
+    if row.transport == "ws_tls":
+        return vless_ws_url(user_id=row.uuid, host=row.host, path=row.ws_path, name=name)
+    return vless_url(
+        user_id=row.uuid,
+        host=row.host,
+        server_name=row.server_name,
+        public_key=row.public_key,
+        short_id=row.short_id,
+        name=name,
+    )
+
+
+def config_label(config_id: int) -> str:
+    """The Persian label a post shows for the config: «کانفیگ N»."""
+    return f"کانفیگ {fa_digits(config_id)}"
+
+
 async def link_prefix(db: Db) -> str:
     """What config names start with: the owner's text, else the main channel's @username."""
     settings = await load_reality_settings(db)
@@ -92,6 +139,7 @@ def _confirmed(row: Any, scope_nodes: list[NodeView], statuses: dict[uuid.UUID, 
             and st.up
             and st.apply_error is None
             and st.reported_at >= row.created_at + CONFIRM_AFTER
+            and (row.transport != "ws_tls" or target_verdict(st, f"{row.host}:{PORT}", row.host) is True)
         ):
             return True
     return False
@@ -124,15 +172,8 @@ async def links_for(db: Db, now: datetime) -> list[tuple[ProxyLink, Any]]:
                     kind="reality",
                     key=f"reality:{r.id}",
                     slot=r.slot,
-                    label=f"ریلیتی {fa_digits(r.id)}",
-                    url=vless_url(
-                        user_id=r.uuid,
-                        host=r.host,
-                        server_name=r.server_name,
-                        public_key=r.public_key,
-                        short_id=r.short_id,
-                        name=config_name(prefix, r.location, r.id),
-                    ),
+                    label=config_label(r.id),
+                    url=config_url(r, config_name(prefix, r.location, r.id)),
                     expires_at=r.expires_at,
                     status=status,
                 ),

@@ -1,4 +1,5 @@
-"""The dashboard's view of Reality: settings, per-node Xray state, configs with what is left.
+"""The dashboard's view of Reality: settings, per-node Xray state (with the transport the node
+serves and its DNS name), the certificate, configs with what is left.
 
 Links (with their UUID) appear here for active configs only, because the owner publishes them on
 purpose (rule 3's one exception); ended configs show no link. Nothing here is per person.
@@ -12,11 +13,15 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
+from proxyhub.acme.store import cert_row, valid_now
+from proxyhub.cloudflare.service import node_names
 from proxyhub.db.models_reality import RealityConfig
 from proxyhub.fleet.actions import iso
-from proxyhub.reality.links import ENDED_KEPT_FOR, config_name, link_prefix, links_for, vless_url
+from proxyhub.reality.links import ENDED_KEPT_FOR, config_name, config_url, link_prefix, links_for
 from proxyhub.reality.settings import GB, PORT, RealitySettings, load_reality_settings
 from proxyhub.reality.store import (
+    agent_supports_ws_tls,
+    agent_version,
     all_statuses,
     keys_by_scope,
     live_nodes,
@@ -50,10 +55,17 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
             active_by_key[r.key_id] = active_by_key.get(r.key_id, 0) + 1
 
     keys = await keys_by_scope(db)
+    names = await node_names(db)
+    ws = settings.transport == "ws_tls"
     node_items: list[dict[str, Any]] = []
     for n in sorted(nodes, key=lambda n: (n.slot is None, n.slot or 0, n.name)):
         st = statuses.get(n.id)
         key = keys.get(node_scope(n))
+        dns_name = names.scope_name(n.slot, n.id)
+        if ws:
+            check = (f"{dns_name}:{PORT}", dns_name) if dns_name else None
+        else:
+            check = key.target_pair if key else None
         node_items.append(
             {
                 "node_id": str(n.id),
@@ -68,16 +80,23 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
                     "up": st.up,
                     "version": st.version,
                     "uptime_s": st.uptime_s,
-                    # Only a check of the scope's current target counts (null: not checked yet).
-                    "target_ok": target_verdict(st, *key.target_pair) if key else None,
+                    # Only a check of what the scope needs now counts (null: not checked yet):
+                    # reality: the scope's current target; ws_tls: the node's own TLS inbound.
+                    "target_ok": target_verdict(st, *check) if check else None,
                     "apply_error": st.apply_error,
                     "reported_at": iso(st.reported_at),
                 },
                 "public_key": key.public_key if key else None,
                 "target": key.target if key else None,
+                # The node's own DNS name (slot<N>.<domain> or t<8 hex>.<domain>), if Cloudflare has
+                # it, and whether it points at this node.
+                "dns_name": dns_name,
+                "dns_own": names.own_name(n.slot, n.id, n.ipv4) is not None,
+                "ws_path": key.ws_path if key else None,
+                "agent_ws_tls": agent_supports_ws_tls(await agent_version(db, n.id)),
                 # The owner's newer target, while this scope still waits for its configs to end.
                 "target_next": settings.target
-                if key and key.target_pair != (settings.target, settings.target_host)
+                if not ws and key and key.target_pair != (settings.target, settings.target_host)
                 else None,
                 "active_configs": active_by_key.get(key.id, 0) if key else 0,
             }
@@ -96,6 +115,7 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
                 "node_name": r.node_name,
                 "location": r.location,
                 "host": r.host,
+                "transport": r.transport,
                 "status": r.status,
                 "listed": link_key in listed,
                 "created_at": iso(r.created_at),
@@ -105,25 +125,31 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
                 "data_cap_bytes": r.data_cap_bytes,
                 "used_bytes": r.used_bytes,
                 "remaining_bytes": max(0, r.data_cap_bytes - r.used_bytes) if active else 0,
-                "url": vless_url(
-                    user_id=r.uuid,
-                    host=r.host,
-                    server_name=r.server_name,
-                    public_key=r.public_key,
-                    short_id=r.short_id,
-                    name=config_name(prefix, r.location, r.id),
-                )
-                if active
-                else None,
+                "url": config_url(r, config_name(prefix, r.location, r.id)) if active else None,
             }
         )
     counts = dict(
         (await db.execute(select(RealityConfig.status, func.count()).group_by(RealityConfig.status))).all()
     )
     total_used = (await db.execute(select(func.coalesce(func.sum(RealityConfig.used_bytes), 0)))).scalar_one()
+    cert = await cert_row(db, names.zone) if names.zone else None
+    certificate = (
+        None
+        if names.zone is None
+        else {
+            "domain": names.zone,
+            "names": [f"*.{names.zone}"],
+            "valid": valid_now(cert, now),
+            "not_after": iso(cert.not_after) if cert else None,
+            "issued_at": iso(cert.issued_at) if cert else None,
+            "last_error": cert.last_error if cert else None,
+            "retry_at": iso(cert.retry_at) if cert else None,
+        }
+    )
     return {
         "settings": settings_json(settings),
         "defaults": settings_json(RealitySettings()),
+        "certificate": certificate,
         "totals": {
             "active": int(counts.get("active", 0)),
             "expired": int(counts.get("expired", 0)),

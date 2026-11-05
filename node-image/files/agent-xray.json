@@ -5,6 +5,7 @@
   "api": "127.0.0.1:10085",
   "user": "xray",
   "version": "26.10.31",
+  "tls_dir": "/etc/xray/tls",
   "restart_command": ["systemctl", "restart", "xray.service"],
   "stop_command": ["systemctl", "stop", "xray.service"]
 }

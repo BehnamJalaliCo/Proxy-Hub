@@ -1,18 +1,19 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Clock3, HardDrive, Link2, Save, ServerCog, ShieldCheck, SlidersHorizontal, Undo2, Zap } from "lucide-react";
+import { Clock3, Globe, HardDrive, Link2, LockKeyhole, Save, ServerCog, ShieldCheck, SlidersHorizontal, Undo2, Zap } from "lucide-react";
 import { motion } from "motion/react";
 import { useState, type ReactNode, type SubmitEvent } from "react";
 
 import { Button } from "../components/ui/Button";
 import { Badge, Card, CardHeader, StatusDot } from "../components/ui/Card";
 import { AnimatedNumber, CopyButton, EmptyState, LoadError, Skeleton } from "../components/ui/Feedback";
-import { Field, TextInput, Toggle } from "../components/ui/Form";
+import { Field, Segmented, TextInput, Toggle } from "../components/ui/Form";
 import { PageHeader } from "../components/ui/PageHeader";
 import { errorMessage, isApiError } from "../lib/api";
 import { cn } from "../lib/browser";
 import { formatDurationSeconds, formatJalali, formatNumber, formatRelative } from "../lib/format";
 import type { Tone } from "../lib/labels";
 import {
+  certificateState,
   draftFrom,
   formatBytes,
   freshEveryHours,
@@ -23,14 +24,18 @@ import {
   savedMessage,
   sortConfigs,
   TARGET_HINT,
+  TRANSPORT,
   usage,
+  wsBlocker,
   xrayState,
+  type RealityCertificate,
   type RealityConfig,
   type RealityDraft,
   type RealityDraftErrors,
   type RealityNode,
   type RealitySettingsView,
   type RealitySummary,
+  type Transport,
 } from "../lib/reality";
 import { putRealitySettings, realityKey, useReality } from "../lib/realityApi";
 import { toast } from "../lib/toast";
@@ -124,6 +129,7 @@ function ConfigItem({ c, now }: { c: RealityConfig; now: Date }) {
           <Badge tone={st.tone} dot>
             {st.label}
           </Badge>
+          <Badge tone="neutral">{TRANSPORT[c.transport].short}</Badge>
           {active && !c.listed ? <Badge tone="info">منتظر تأیید node</Badge> : null}
         </div>
         {c.url ? <CopyButton text={c.url} label="کپی لینک" /> : null}
@@ -181,17 +187,51 @@ function ConfigsCard({ configs }: { configs: RealityConfig[] }) {
 
 // --- nodes ---------------------------------------------------------------------------------------
 
-function NodesCard({ nodes }: { nodes: RealityNode[] }) {
+function CertificateLine({ cert }: { cert: RealityCertificate | null }) {
+  const st = certificateState(cert);
+  return (
+    <div className="mb-3 rounded-2xl border border-line bg-surface-2/50 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <LockKeyhole className="size-4 text-brand" />
+        <span className="text-sm font-semibold text-fg">گواهی TLS</span>
+        <Badge tone={st.tone} dot>
+          {st.label}
+        </Badge>
+      </div>
+      {cert ? (
+        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-muted">
+          <span className="ltr inline-block font-mono">{cert.names.join(" ")}</span>
+          {cert.not_after ? <span title={formatJalali(cert.not_after)}>اعتبار تا {formatJalali(cert.not_after, "short")}</span> : null}
+          {cert.last_error ? <span className="ltr inline-block font-mono">{cert.last_error}</span> : null}
+          {!cert.valid && cert.retry_at ? <span>تلاش دوباره {formatRelative(cert.retry_at)}</span> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function NodesCard({ nodes, transport, cert }: { nodes: RealityNode[]; transport: Transport; cert: RealityCertificate | null }) {
+  const ws = transport === "ws_tls";
   return (
     <Card className="lg:col-span-5">
-      <CardHeader icon={<ServerCog className="size-5" />} title="Xray روی nodeها" subtitle="هر node وضعیت Xray و آزمون سایت هدف (TLS 1.3 و HTTP/2) را خودش گزارش میدهد." />
+      <CardHeader
+        icon={<ServerCog className="size-5" />}
+        title="Xray روی nodeها"
+        subtitle={
+          ws
+            ? `روش: ${TRANSPORT.ws_tls.label}. هر node با نام دامنه‌ی خودش و گواهی Let's Encrypt کار میکند و TLS خودش را میآزماید.`
+            : "هر node وضعیت Xray و آزمون سایت هدف (TLS 1.3 و HTTP/2) را خودش گزارش میدهد."
+        }
+      />
       <div className="p-3 sm:p-5">
+        {ws ? <CertificateLine cert={cert} /> : null}
         {nodes.length === 0 ? (
           <EmptyState icon={<ServerCog className="size-7" />} title="nodeی نیست" description="با ساخته شدن nodeها، وضعیت Xray هر کدام اینجا میآید." />
         ) : (
           <ul className="flex flex-col gap-2">
             {nodes.map((n) => {
-              const x = xrayState(n.xray);
+              const x = xrayState(n.xray, transport);
+              const blocker = ws ? wsBlocker(n, cert) : null;
               return (
                 <li key={n.node_id} className="rounded-2xl border border-line bg-surface-2/50 p-3">
                   <div className="flex items-center justify-between gap-2">
@@ -202,13 +242,29 @@ function NodesCard({ nodes }: { nodes: RealityNode[] }) {
                     <Badge tone="neutral">{n.slot !== null ? `جایگاه ${formatNumber(n.slot)}` : "آزمایشی"}</Badge>
                   </div>
                   <p className="mt-1 text-sm text-fg">{x.label}</p>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+                    <Badge tone={ws ? "info" : "neutral"}>{TRANSPORT[transport].short}</Badge>
+                    <span className="flex min-w-0 items-center gap-1 text-fg-muted">
+                      <Globe className="size-3.5 shrink-0" />
+                      {n.dns_name ? (
+                        <span className={cn("ltr truncate font-mono", n.dns_own ? "text-fg" : "text-fg-faint line-through")}>{n.dns_name}</span>
+                      ) : (
+                        <span>بی نام دامنه</span>
+                      )}
+                    </span>
+                  </div>
+                  {blocker ? <p className="mt-1 text-xs leading-5 text-warning">{blocker}</p> : null}
                   <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-muted">
                     <span>{formatNumber(n.active_configs)} کانفیگ فعال</span>
                     {n.xray?.version ? <span className="ltr inline-block">Xray {n.xray.version}</span> : null}
                     {n.xray?.reported_at ? <span>گزارش {formatRelative(n.xray.reported_at)}</span> : null}
-                    {n.target ? <span className="ltr inline-block font-mono">{n.target}</span> : null}
+                    {ws ? (
+                      n.ws_path ? <span className="ltr inline-block font-mono">{n.ws_path}</span> : null
+                    ) : n.target ? (
+                      <span className="ltr inline-block font-mono">{n.target}</span>
+                    ) : null}
                   </div>
-                  {n.target_next ? (
+                  {!ws && n.target_next ? (
                     <p className="mt-1.5 text-xs leading-5 text-fg-muted">
                       <Badge tone="info">سایت هدف تازه</Badge> <span className="ltr inline-block font-mono">{n.target_next}</span> پس از پایان کانفیگ‌های فعلی
                     </p>
@@ -225,7 +281,7 @@ function NodesCard({ nodes }: { nodes: RealityNode[] }) {
 
 // --- settings ------------------------------------------------------------------------------------
 
-const DRAFT_KEYS = new Set<string>(["enabled", "renew", "configs_per_node", "cap_hours", "cap_gb", "target_host", "target_port", "link_name"]);
+const DRAFT_KEYS = new Set<string>(["enabled", "transport", "renew", "configs_per_node", "cap_hours", "cap_gb", "target_host", "target_port", "link_name"]);
 
 /** 422 {"fields": ["cap_gb", ...]} -> which form fields the server refused. */
 function serverErrors(err: unknown): RealityDraftErrors {
@@ -282,6 +338,23 @@ function SettingsCard({ initial, defaults }: { initial: RealitySettingsView; def
         subtitle={`هر کانفیگ تا ${formatNumber(initial.cap_hours)} ساعت یا ${formatNumber(initial.cap_gb)} گیگ کار میکند، هر کدام زودتر برسد${initial.renew ? "، و اگر سالم باشد با همان لینک تمدید میشود" : ""}. node خودش هم این سقف‌ها را اجرا میکند، حتی اگر پنل در دسترس نباشد.`}
       />
       <form onSubmit={save} noValidate className="flex flex-col gap-5 p-5">
+        <div className="flex flex-col gap-2">
+          <span className="text-sm font-semibold text-fg">روش اتصال کانفیگ‌ها</span>
+          <Segmented<Transport>
+            label="روش اتصال کانفیگ‌ها"
+            value={draft.transport}
+            onChange={(v) => set("transport", v)}
+            options={[
+              { value: "ws_tls", label: TRANSPORT.ws_tls.label },
+              { value: "reality", label: TRANSPORT.reality.label },
+            ]}
+            className="w-full max-w-2xl flex-wrap sm:flex-nowrap"
+          />
+          <p className="text-xs leading-6 text-fg-muted">{TRANSPORT[draft.transport].hint}</p>
+          {draft.transport !== initial.transport ? (
+            <p className="text-xs leading-6 text-warning">با ذخیره، کانفیگ‌های فعال روش دیگر کنار میروند (🚫 روی پست‌ها)؛ هر node فقط یک روش را روی پورت ۴۴۳ دارد.</p>
+          ) : null}
+        </div>
         <Toggle
           checked={draft.enabled}
           onCheckedChange={(v) => set("enabled", v)}
@@ -309,17 +382,21 @@ function SettingsCard({ initial, defaults }: { initial: RealitySettingsView; def
           >
             <TextInput id="r-per" inputMode="numeric" latin value={draft.configs_per_node} onChange={(e) => set("configs_per_node", e.target.value)} invalid={Boolean(shown("configs_per_node"))} />
           </Field>
-          <Field
-            label="سایت هدف (target)"
-            htmlFor="r-target"
-            hint={TARGET_HINT}
-            error={shown("target_host")}
-          >
-            <TextInput id="r-target" latin autoComplete="off" value={draft.target_host} onChange={(e) => set("target_host", e.target.value)} invalid={Boolean(shown("target_host"))} placeholder={defaults.target_host} />
-          </Field>
-          <Field label="پورت سایت هدف" htmlFor="r-tport" hint="معمولاً ۴۴۳." error={shown("target_port")}>
-            <TextInput id="r-tport" inputMode="numeric" latin value={draft.target_port} onChange={(e) => set("target_port", e.target.value)} invalid={Boolean(shown("target_port"))} />
-          </Field>
+          {draft.transport === "reality" ? (
+            <>
+              <Field
+                label="سایت هدف (target)"
+                htmlFor="r-target"
+                hint={TARGET_HINT}
+                error={shown("target_host")}
+              >
+                <TextInput id="r-target" latin autoComplete="off" value={draft.target_host} onChange={(e) => set("target_host", e.target.value)} invalid={Boolean(shown("target_host"))} placeholder={defaults.target_host} />
+              </Field>
+              <Field label="پورت سایت هدف" htmlFor="r-tport" hint="معمولاً ۴۴۳." error={shown("target_port")}>
+                <TextInput id="r-tport" inputMode="numeric" latin value={draft.target_port} onChange={(e) => set("target_port", e.target.value)} invalid={Boolean(shown("target_port"))} />
+              </Field>
+            </>
+          ) : null}
           <Field label="نام کانفیگ در برنامه‌ی کاربر" htmlFor="r-name" hint="خالی: نام کانال اصلی (مثلاً ipoxxo). پرچم و شماره پس از آن میآید." error={shown("link_name")}>
             <TextInput id="r-name" latin autoComplete="off" value={draft.link_name} onChange={(e) => set("link_name", e.target.value)} invalid={Boolean(shown("link_name"))} placeholder="ipoxxo" />
           </Field>
@@ -359,7 +436,7 @@ export default function RealityPage() {
     <>
       <PageHeader
         title="Reality"
-        subtitle="کانفیگ‌های VLESS Reality که پست‌ها منتشر میکنند: هر کدام کوتاه‌عمر، با زمان و حجم محدود، و بی هیچ ردی از IP کاربر."
+        subtitle="کانفیگ‌های VLESS که پست‌ها منتشر میکنند (پیش‌فرض: WebSocket + TLS با دامنه‌ی خود هر node): هر کدام کوتاه‌عمر، با زمان و حجم محدود، و بی هیچ ردی از IP کاربر."
       />
       {q.isPending ? (
         <div className="grid gap-4 lg:grid-cols-12">
@@ -383,7 +460,7 @@ export default function RealityPage() {
           <Summary s={s} />
           <div className="grid gap-4 sm:gap-5 lg:grid-cols-12">
             <ConfigsCard configs={s.configs} />
-            <NodesCard nodes={s.nodes} />
+            <NodesCard nodes={s.nodes} transport={s.settings.transport} cert={s.certificate} />
             <SettingsCard key={JSON.stringify(s.settings)} initial={s.settings} defaults={s.defaults} />
           </div>
           <p className="flex items-center gap-2 text-xs leading-6 text-fg-faint">

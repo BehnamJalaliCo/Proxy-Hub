@@ -1,5 +1,8 @@
 """Reality settings, stored under key ``reality`` in the ``settings`` table (owner-editable).
 
+Transport (2026-11-05, see ``transport`` below): VLESS + WebSocket + TLS with the panel's own
+certificate for the node's own DNS name by default; VLESS Reality stays available as a switch.
+
 Defaults (owner decision D41, 2026-11-05): every config runs 48 hours or 1 TB, whichever comes
 first, and a config that still works is RENEWED in place an hour before its end (same link, 48 more
 hours, 1 TB more), so people who already use it never get stuck; two configs per serving slot (or
@@ -23,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
@@ -40,12 +43,22 @@ GB = 1_000_000_000  # caps are decimal gigabytes, like Hetzner's traffic figures
 _LINK_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_ .|-]{0,31}$")
 
 Db = AsyncConnection | AsyncSession
+Transport = Literal["ws_tls", "reality"]
 
 
 class RealitySettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
+    # The inbound every node serves on 443 and the shape of every new link (2026-11-05):
+    # * ``ws_tls`` (default): VLESS + WebSocket + TLS with the panel's own Let's Encrypt certificate
+    #   for the node's own DNS name (slot<N>.<domain>, or t<8 hex>.<domain> for a test node), so
+    #   the SNI a censor sees belongs to the IP it goes to. Mirrors the owner's own working config
+    #   (VLESS + WS + TLS, real certificate, grey-cloud A record).
+    # * ``reality``: VLESS + REALITY on TCP with the target below (SNI dl.google.com on a Hetzner IP;
+    #   carried 37 MB/s from Germany but no website opened from Iran in the owner's test).
+    # Switching ends the active configs of the other transport (as burned): a node serves one.
+    transport: Transport = "ws_tls"
     configs_per_node: int = Field(default=2, ge=1, le=20)
     cap_hours: int = Field(default=48, ge=1, le=24 * 30)
     cap_gb: int = Field(default=1000, ge=1, le=10_000)

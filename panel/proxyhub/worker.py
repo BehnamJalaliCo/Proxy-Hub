@@ -9,6 +9,7 @@ import signal
 from proxyhub.cloudflare.delegation import DelegationReconciler
 from proxyhub.db.session import get_engine
 from proxyhub.reconcilers.account_guard import AccountGuardReconciler
+from proxyhub.reconcilers.acme import AcmeReconciler
 from proxyhub.reconcilers.analytics import AnalyticsReconciler, ChannelStatsReconciler
 from proxyhub.reconcilers.base import Heartbeat, Reconciler
 from proxyhub.reconcilers.dns import DnsReconciler
@@ -44,6 +45,7 @@ def reconcilers() -> list[Reconciler]:
         TelegramOutboxReconciler(),
         ApiWatchdogReconciler(),
         DnsReconciler(),  # net: no-op until a verified Cloudflare token and an active domain exist
+        AcmeReconciler(),  # *.<active domain> certificate (Let's Encrypt DNS-01) for the ws_tls nodes
         ProbesReconciler(),  # net: records reachability verdicts from Iran only
         DomainsReconciler(),  # D35: filter checks of the pool domains, rotation, deletion of filtered zones
         MtproxyAccountReconciler(),  # D37: the operator account's session check (kill switch OFF only)

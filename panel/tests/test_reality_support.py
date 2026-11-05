@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from test_agent_support import SecretFiles, reset_config_caches, use_secret_files, write_secret_files
 
 from proxyhub.db.session import get_engine
+from proxyhub.reality.settings import RealitySettings, Transport, save_reality_settings
 from proxyhub.reality.store import XrayUserTotal, store_xray_report
 from proxyhub.vault import Vault
 
@@ -117,6 +118,12 @@ async def clean_reality(engine: AsyncEngine) -> None:
         await conn.execute(text("DELETE FROM secrets WHERE name LIKE 'reality:%'"))
         await conn.execute(text("DELETE FROM settings WHERE key IN ('reality', 'reality.state')"))
         await conn.execute(text("DELETE FROM actions_log WHERE actor = 'reality' OR target = 'reality'"))
+        await conn.execute(
+            text(
+                "DELETE FROM cf_records WHERE zone_id IN (SELECT id FROM cf_zones WHERE name LIKE 'rtzone-%')"
+            )
+        )
+        await conn.execute(text("DELETE FROM acme_certificates WHERE domain LIKE 'rtzone-%'"))
         await conn.execute(text("DELETE FROM cf_zones WHERE name LIKE 'rtzone-%'"))
         await conn.execute(
             text(
@@ -132,10 +139,19 @@ async def clean_reality(engine: AsyncEngine) -> None:
 async def world_fixture(
     migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> AsyncIterator[World]:
+    async for w in make_world(migrated_db, tmp_path, monkeypatch, "reality"):
+        yield w
+
+
+async def make_world(
+    migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: Transport
+) -> AsyncIterator[World]:
     files = write_secret_files(tmp_path / "secrets")
     use_secret_files(monkeypatch, files)
     engine = create_async_engine(migrated_db)
     await clean_reality(engine)
+    async with engine.begin() as conn:  # the REALITY tests; tests/test_wstls_db.py sets ws_tls
+        await save_reality_settings(conn, RealitySettings(transport=transport))
     try:
         yield World(engine=engine, files=files)
     finally:

@@ -5,7 +5,12 @@ One run (inside the ``mtproto`` control loop's transaction):
 1. Every node that holds a server and is coming up or in service (booting, registering, ready,
    unhealthy, repairing) gets the Telemt node settings from the owner's ``mtproto`` settings (port,
    fake-TLS domain, modes) and ONE long-lived Telemt user, its public proxy secret (16 random bytes,
-   sealed). Nodes are configured before they are ready on purpose: once a node has Telemt settings,
+   sealed). The fake-TLS domain is the node's OWN DNS name while the node serves that name with our
+   certificate (VLESS + WS + TLS on 443; proxyhub/reality/store.py ``telemt_tls_domain``): then
+   the SNI of its ``ee`` links belongs to the IP they lead to, and Telemt's TLS front is our own
+   Xray. Otherwise the owner's ``tls_domain`` setting (the fallback, e.g. while the node has no
+   name or no certificate yet). Its ``ee`` links follow the node's domain, so they change with it.
+   Nodes are configured before they are ready on purpose: once a node has Telemt settings,
    the node executor only calls it ready when its agent reports Telemt up, so "ready" means "the
    proxy runs" and a node never flaps ready -> unhealthy -> ready when its proxy is added.
 2. A ready node's proxy becomes *live* when its agent reports that it applied exactly the desired
@@ -46,6 +51,7 @@ from proxyhub.fleet.actions import log_action
 from proxyhub.fleet.lifecycle import NodeState
 from proxyhub.mtproto.settings import MtprotoSettings
 from proxyhub.mtproto.urls import user_name_for
+from proxyhub.reality.store import telemt_tls_domain
 
 ACTOR = "mtproto"
 S = NodeState
@@ -70,10 +76,10 @@ class PolicyOutcome:
         return bool(self.configured or self.created or self.live or self.disabled)
 
 
-def _wanted(settings: MtprotoSettings) -> dict[str, Any]:
+def _wanted(settings: MtprotoSettings, tls_domain: str) -> dict[str, Any]:
     return {
         "ports": [settings.port],
-        "tls_domain": settings.tls_domain,
+        "tls_domain": tls_domain,
         "tls": settings.mode_tls,
         "secure": settings.mode_secure,
         "classic": settings.mode_classic,
@@ -97,7 +103,8 @@ async def _ensure_config(
             ).where(TelemtNodeConfig.node_id == node.id)
         )
     ).first()
-    want = _wanted(settings)
+    own_name = await telemt_tls_domain(session, node.id)
+    want = _wanted(settings, own_name or settings.tls_domain)
     if current is not None:
         have = {
             "ports": list(current.ports),
@@ -124,7 +131,8 @@ async def _ensure_config(
         context={
             "node_id": str(node.id),
             "port": settings.port,
-            "tls_domain": settings.tls_domain,
+            "tls_domain": want["tls_domain"],
+            "tls_domain_source": "node_name" if own_name else "setting",
             "modes": {
                 "tls": settings.mode_tls,
                 "secure": settings.mode_secure,
