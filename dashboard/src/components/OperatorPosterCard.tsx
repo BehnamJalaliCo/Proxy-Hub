@@ -14,6 +14,7 @@ import { formatJalali, formatRelative, toFaDigits } from "../lib/format";
 import {
   checkOperator,
   effectivePoster,
+  ownPackText,
   packErrorText,
   parsePackLink,
   POSTER_LABEL,
@@ -144,7 +145,7 @@ function PackForm({ v, busy, onSave }: { v: OperatorView; busy: boolean; onSave:
             <span dir="ltr" className="inline-block">
               https://t.me/addemoji/…
             </span>
-            . خالی بگذارید تا ایموجی‌ها ساده بمانند.
+            . خالی بگذارید تا بسته‌ی اختصاصی کانال به‌کار رود.
           </>
         }
       >
@@ -165,6 +166,37 @@ function PackForm({ v, busy, onSave }: { v: OperatorView; busy: boolean; onSave:
         </Button>
       ) : null}
     </form>
+  );
+}
+
+function OwnPackLine({ v, busy, onUse }: { v: OperatorView; busy: boolean; onUse: (link: string) => void }) {
+  const own = v.own_pack;
+  if (!own) return null;
+  const { tone, text } = ownPackText(own);
+  const inUse = own.name !== null && v.emoji_pack?.toLowerCase() === own.name.toLowerCase();
+  return (
+    <div className="flex flex-col gap-1.5 rounded-xl bg-surface p-3 ring-1 ring-line">
+      <div className="flex flex-wrap items-center gap-1.5 text-[0.82rem]">
+        <Sparkles className="size-4 text-brand" aria-hidden />
+        <b>بسته‌ی اختصاصی کانال</b>
+        <Badge tone={tone}>{inUse ? "در حال استفاده" : own.state === "ready" ? "آماده" : "در انتظار"}</Badge>
+      </div>
+      <p className="text-[0.82rem] leading-6 text-fg-muted">
+        ایموجی‌های متحرک اینترنت و اپراتورها، با عنوان کانال. {text}
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        {own.link ? (
+          <a href={own.link} target="_blank" rel="noopener noreferrer" dir="ltr" className="text-[0.8rem] font-bold text-brand hover:underline">
+            {own.link}
+          </a>
+        ) : null}
+        {own.link && own.state === "ready" && !inUse ? (
+          <Button size="sm" variant="secondary" loading={busy} onClick={() => onUse(own.link ?? "")}>
+            استفاده از این بسته
+          </Button>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -332,6 +364,7 @@ function Body({ v, preview }: { v: OperatorView; preview: PostPreview | undefine
           </Button>
         }
       >
+        <OwnPackLine v={v} busy={busy} onUse={(link) => void save({ pack_link: link }, "بسته‌ی اختصاصی کانال انتخاب شد").catch(() => undefined)} />
         <PackForm key={v.pack_link ?? ""} v={v} busy={busy} onSave={(link) => save({ pack_link: link }, link ? "لینک بسته ذخیره شد؛ بسته از تلگرام خوانده میشود" : "بسته برداشته شد")} />
         <PackSummary v={v} now={now} />
         <NextPostEmoji preview={preview} v={v} />

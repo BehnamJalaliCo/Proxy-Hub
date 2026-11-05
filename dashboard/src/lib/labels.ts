@@ -305,6 +305,9 @@ const ACTION: Record<string, string> = {
   // posts through the second account with Premium emoji (D38)
   "posts.poster_fallback": "پست تازه به جای حساب دوم با ربات رفت",
   "posts.operator_set": "تغییر فرستنده‌ی پست یا بسته‌ی ایموجی",
+  "posts.own_pack_created": "بسته‌ی ایموجی اختصاصی کانال ساخته شد",
+  "posts.own_pack_extended": "ایموجی تازه به بسته‌ی کانال اضافه شد",
+  "posts.own_pack_chosen": "بسته‌ی اختصاصی کانال برای پست‌ها انتخاب شد",
   "posts.operator_not_sent": "پست حساب دوم برای کانال اصلی نرفت (انتشار اصلی خاموش شد)",
   "posts.operator_send_unknown": "معلوم نیست پست حساب دوم رفت یا نه (دوباره فرستاده نمیشود)",
 };

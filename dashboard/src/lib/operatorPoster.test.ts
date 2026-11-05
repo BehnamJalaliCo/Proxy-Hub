@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { actionLabel, actorLabel } from "./labels";
 import {
   effectivePoster,
+  ownPackText,
   packErrorText,
   parsePackLink,
   POSTER_LABEL,
@@ -10,6 +11,7 @@ import {
   rightsStatus,
   warningText,
   type OperatorView,
+  type OwnPack,
 } from "./operatorPoster";
 
 const PERSIAN = /[آ-ی]/;
@@ -123,5 +125,24 @@ describe("who takes the next new post", () => {
   it("the second account where it is ready, the bot where it is not", () => {
     expect(effectivePoster(view(), "test")).toBe("operator");
     expect(effectivePoster(view(), "main")).toBe("bot");
+  });
+});
+
+describe("the channel's own emoji pack", () => {
+  const base: OwnPack = { state: "ready", reason: null, name: "ipoxxo_by_bot", link: "https://t.me/addemoji/ipoxxo_by_bot", emoji: 28, total: 28, error: null };
+
+  it("reads a finished pack as ready", () => {
+    expect(ownPackText(base)).toEqual({ tone: "success", text: "ساخته شد؛ ۲۸ ایموجی متحرک." });
+  });
+
+  it("says the rest is added by itself when drawings were added later", () => {
+    expect(ownPackText({ ...base, emoji: 20 }).text).toContain("۲۰ از ۲۸");
+  });
+
+  it("explains what blocks it, in Persian", () => {
+    expect(ownPackText({ ...base, state: "waiting", reason: "no_owner", link: null, emoji: 0 }).text).toContain("جفت کنید");
+    expect(ownPackText({ ...base, state: "waiting", reason: "kill_switch", link: null, emoji: 0 }).text).toContain("کلید توقف");
+    expect(ownPackText({ ...base, state: "error", error: "x" }).tone).toBe("warning");
+    expect(ownPackText({ ...base, state: "pending", reason: null, emoji: 0 }).text).toContain("خودکار");
   });
 });

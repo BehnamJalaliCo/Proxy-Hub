@@ -5,6 +5,8 @@
   per-channel pacing. With no job due it only reads the outbox; the account's lock is not taken.
 * ``operator_checks``: every minute it looks (one short read) whether the daily read of the owner's
   emoji pack and of the account's rights in our channels is due, and does it then.
+* ``own_emoji_pack``: every minute it looks whether the bot should make, complete or check the
+  channel's own animated emoji pack (proxyhub/posts/own_pack.py), and does it then.
 
 Both stop while the fleet's kill switch is ON (posts then go with the bot, edits wait). Each runs
 under its own advisory lock, with no transaction open while Telegram answers.
@@ -18,9 +20,10 @@ from collections.abc import Callable
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from proxyhub.mtproxy.userclient import ClientOptions
-from proxyhub.posts import operator_checks, operator_outbox
+from proxyhub.posts import operator_checks, operator_outbox, own_pack
 from proxyhub.reconcilers.base import Reconciler
 from proxyhub.reconcilers.telegram import run_locked
+from proxyhub.telegram.client import BotClient
 from proxyhub.telegram.store import now_utc
 from proxyhub.vault import Vault, VaultError
 
@@ -109,3 +112,33 @@ class OperatorChecksReconciler(Reconciler):
         if vault is None:
             return "vault_unavailable"
         return await operator_checks.run_checks(engine, vault, now=now_utc(), options=self.options)
+
+
+class OwnEmojiPackReconciler(Reconciler):
+    name = "own_emoji_pack"
+    interval_seconds = 60.0
+
+    def __init__(
+        self,
+        *,
+        vault_factory: Callable[[], Vault] = Vault.from_config,
+        bot_factory: own_pack.BotFactory = BotClient,
+    ) -> None:
+        self._vault = _VaultOnce(vault_factory)
+        self.bot_factory = bot_factory
+        self.last_outcome: str | None = None
+
+    async def run_once(self, conn: AsyncConnection) -> None:
+        raise NotImplementedError("this loop manages its own transactions (try_run_once)")
+
+    async def try_run_once(self, engine: AsyncEngine) -> bool:
+        async def step() -> None:
+            self.last_outcome = await self.step(engine)
+
+        return await run_locked(engine, self.name, step)
+
+    async def step(self, engine: AsyncEngine) -> str:
+        vault = self._vault.get()
+        if vault is None:
+            return "vault_unavailable"
+        return await own_pack.ensure(engine, vault, now=now_utc(), bot_factory=self.bot_factory)
