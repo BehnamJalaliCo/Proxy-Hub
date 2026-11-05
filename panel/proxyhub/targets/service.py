@@ -380,10 +380,17 @@ async def apply_auto(db: Db, settings: TargetSettings, keys: Sequence[str], now:
         elif choice.why is not None:
             stuck.append("reality")
 
-    mt = await load_settings_for_update(db)
+    try:
+        mt: MtprotoSettings | None = await load_settings(db)
+    except SettingsCorrupt:
+        mt = None  # the owner repairs it on the MTProto page; nothing is chosen meanwhile
     if mt is not None and mt.target_mode == "auto":
         choice = choose_mtproto(mt.tls_domain, listed, states, keys, now)
         if choice.switch:
+            # Lock the row and look again: an owner's save in between wins.
+            locked = await load_settings_for_update(db)
+            if locked is None or locked != mt:
+                return out
             await save_settings(
                 db, MtprotoSettings.model_validate({**settings_json(mt), "tls_domain": choice.host})
             )

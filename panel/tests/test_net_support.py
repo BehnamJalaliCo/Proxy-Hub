@@ -444,8 +444,9 @@ CF_DELETE_ZONE_INVALID_TOKEN = {
 # "limit": 3}, {"asn": 57218, "limit": 2}, {"country": "IR", "limit": 3}]. Field names and values as
 # api.globalping.io returned them (FinishedHttpTestResult / FailedTestResult in its spec.yaml);
 # trimmed: rawOutput and rawHeaders to their first line, headers to content-type, tls to the fields
-# the dashboard could show. No MCI probe was online during the recording, so measurements "from MCI"
-# in the tests put the real MCI probe object (recorded 2026-11-03) next to these real result objects.
+# the dashboard could show. Until 17:19 UTC no MCI probe was online, so measurements "from MCI" in
+# the tests may put the real MCI probe object next to these real result objects; GP_HTTPS_PANEL_BLOCKED
+# and GP_HTTPS_GITHUB_MCI are real answers of the MCI probe (Tabriz) itself.
 # panel.beyra-ai.com is the owner's panel in fsn1 (P15: fsn1 is closed on MCI and Rightel).
 
 _IR_RIGHTEL = _ir_probe(
@@ -612,6 +613,30 @@ GP_HTTPS_PANEL_8443 = gp_https(
     [(_IR_RIGHTEL, HTTP_TLS_TIMEOUT_RIGHTEL_8443), (_IR_ARVAN, HTTP_TCP_TIMEOUT_ARVAN_8443)],
     at="2026-11-05T16:16:39.086Z",
     locations=[{"asn": 197207, "limit": 3}, {"asn": 57218, "limit": 2}, {"asn": 202468}],
+)
+# panel.beyra-ai.com:443 from MCI and Rightel (17:19 UTC): both "connected" over TCP in about 60 ms
+# (their own answer) and timed out in the TLS handshake. This is a blocked address (P15, fsn1).
+HTTP_TLS_TIMEOUT_MCI_443 = http_failed(PANEL_IP, TLS_TIMEOUT, 14850, 167, 64)
+HTTP_TLS_TIMEOUT_RIGHTEL_443_B = http_failed(PANEL_IP, TLS_TIMEOUT, 15001, 154, 52)
+GP_HTTPS_PANEL_BLOCKED = gp_https(
+    "25GOwzSgeEUHeKEGk00021Rux",
+    "panel.beyra-ai.com",
+    443,
+    [(_MCI_PROBE, HTTP_TLS_TIMEOUT_MCI_443), (_IR_RIGHTEL, HTTP_TLS_TIMEOUT_RIGHTEL_443_B)],
+    at="2026-11-05T17:20:09.821Z",
+    locations=[{"asn": 197207, "limit": 3}, {"asn": 57218, "limit": 2}],
+)
+# github.com:443 from MCI a moment later: 200 after a TLS 1.3 handshake.
+HTTP_OK_GITHUB_MCI = http_ok(
+    "140.82.121.3", (421, 11, 131, 140, 138, 1), _TLS_GITHUB, "Date: Thu, 05 Nov 2026 17:20:04 GMT"
+)
+GP_HTTPS_GITHUB_MCI = gp_https(
+    "277nJKG6DPsAZCXKU00021Ruy",
+    "github.com",
+    443,
+    [(_MCI_PROBE, HTTP_OK_GITHUB_MCI)],
+    at="2026-11-05T17:20:11.713Z",
+    locations=[{"asn": 197207, "limit": 3}],
 )
 # www.apple.com reusing the probes of a github.com control from MCI + Rightel (only Rightel had one).
 GP_HTTPS_APPLE_REUSED = gp_https(

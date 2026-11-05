@@ -20,8 +20,10 @@ from test_net_support import (
     ARVAN_PROBE,
     GP_HTTPS_APPLE_REUSED,
     GP_HTTPS_GITHUB,
+    GP_HTTPS_GITHUB_MCI,
     GP_HTTPS_PANEL_443,
     GP_HTTPS_PANEL_8443,
+    GP_HTTPS_PANEL_BLOCKED,
     HTTP_RESET_ARVAN,
     HTTP_TLS_TIMEOUT_RIGHTEL_443,
     PANEL_IP,
@@ -94,6 +96,33 @@ def test_parse_http_real_answers() -> None:
 
     apple = {n.network_key: n for n in parse_http(GP_HTTPS_APPLE_REUSED, KEY_ASNS)}
     assert apple["asn:57218"].state == "up" and apple["asn:57218"].detail["tls"] == "TLSv1.3"
+
+
+def test_the_real_p15_block_is_blocked_and_never_from_tcp() -> None:
+    """Real answers of 2026-11-05: the panel (fsn1) timed out in the TLS handshake from MCI and from
+    Rightel, after both had "connected" over TCP in about 60 ms, while github.com answered 200 from
+    both. Two such rounds are "blocked"."""
+    node = Measurement(
+        "globalping", "https", "node", "panel.beyra-ai.com", 443, "ok", T0,
+        networks=tuple(parse_http(GP_HTTPS_PANEL_BLOCKED, KEY_ASNS, PANEL_IP)),
+    )  # fmt: skip
+    nets = {n.network_key: n for n in node.networks}
+    assert nets["asn:197207"].detail == {"failure": "tls_timeout", "tcp_ms": 64.0}  # TCP "worked"
+    assert nets["asn:57218"].detail == {"failure": "tls_timeout", "tcp_ms": 52.0}
+    control_nets = [
+        *parse_http(GP_HTTPS_GITHUB_MCI, [197207]),
+        *(n for n in parse_http(GP_HTTPS_GITHUB, [57218]) if n.network_key == "asn:57218"),
+    ]
+    control = Measurement(
+        "globalping", "https", "control", "github.com", 443, "ok", T0, networks=tuple(control_nets)
+    )
+    obs = observe_tls([node], control, KEYS)
+    assert (obs.state, obs.valid_networks, obs.up_networks) == ("unreachable", 2, 0)
+    rounds = [RoundObs(T0 + timedelta(minutes=m), {"https": obs}) for m in (0, 30)]
+    assert decide(rounds, now=T0 + timedelta(minutes=31), sources=TLS_SOURCES) == (
+        "blocked",
+        ["all_unreachable"],
+    )
 
 
 def test_parse_http_gives_no_data_for_what_says_nothing_about_the_node() -> None:
