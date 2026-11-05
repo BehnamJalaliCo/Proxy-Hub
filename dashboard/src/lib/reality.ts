@@ -14,6 +14,10 @@ export type RealityStatus = "active" | "expired" | "full" | "burned";
  * reality: VLESS + REALITY with a foreign target site. */
 export type Transport = "ws_tls" | "reality";
 
+/** auto: the panel picks the target among the candidate sites measured from Iran (P15);
+ * manual: the owner's target_host stays. */
+export type TargetMode = "auto" | "manual";
+
 export interface RealitySettings {
   enabled: boolean;
   transport: Transport;
@@ -22,6 +26,8 @@ export interface RealitySettings {
   configs_per_node: number;
   cap_hours: number;
   cap_gb: number;
+  /** Missing on a panel older than the automatic choice (then the target is the owner's). */
+  target_mode?: TargetMode;
   target_host: string;
   target_port: number;
   link_name: string | null;
@@ -195,11 +201,20 @@ export function savedMessage(before: RealitySettings, after: RealitySettings): s
       ? "nodeها به WebSocket + TLS میروند؛ کانفیگ‌های Reality کنار میروند (🚫 روی پست) و کانفیگ تازه با نام دامنه‌ی هر node ساخته میشود."
       : "nodeها به Reality برمیگردند؛ کانفیگ‌های WebSocket + TLS کنار میروند (🚫 روی پست) و کانفیگ تازه‌ی Reality ساخته میشود.";
   }
+  if ((before.target_mode ?? "manual") !== (after.target_mode ?? "manual")) {
+    return after.target_mode === "auto"
+      ? "پنل از این پس سایت هدف را خودش از میان سایت‌های نامزد (صفحه‌ی «تنظیمات») برمیگزیند: بهترین سایتی که از همراه اول و رایتل باز است و nodeها قبولش دارند. هر تغییر به شما خبر داده میشود."
+      : "سایت هدف دیگر خودکار عوض نمیشود؛ همانی میماند که اینجا نوشته‌اید.";
+  }
   if (before.target_host !== after.target_host || before.target_port !== after.target_port) {
     return "هر جایگاه پس از پایان کانفیگ‌های فعلی‌اش به سایت هدف تازه میرود (اگر سایت قبلی از node جواب نمیداد، بی‌درنگ). node سایت تازه را میآزماید و بعد کانفیگ تازه میگیرد.";
   }
   return "کانفیگ‌های تازه با این عددها ساخته میشوند.";
 }
+
+/** Hint under the target field in automatic mode. */
+export const TARGET_AUTO_HINT =
+  "خودکار: پنل هر ۶ ساعت سایت‌های نامزد (صفحه‌ی «تنظیمات») را با دست‌دادن TLS از همراه اول و رایتل میسنجد و بهترین سایتی را که از ایران باز است و آزمون TLS 1.3 و HTTP/2 خود nodeها را قبول کرده برمیگزیند. تا وقتی سایت فعلی سالم است عوضش نمیکند.";
 
 /** Hint under the target field: what changing it really does. */
 export const TARGET_HINT =
@@ -259,6 +274,7 @@ export interface RealityDraft {
   enabled: boolean;
   transport: Transport;
   renew: boolean;
+  target_mode: TargetMode;
   configs_per_node: string;
   cap_hours: string;
   cap_gb: string;
@@ -277,6 +293,7 @@ export function draftFrom(s: RealitySettings): RealityDraft {
     enabled: s.enabled,
     transport: s.transport,
     renew: s.renew,
+    target_mode: s.target_mode ?? "manual",
     configs_per_node: String(s.configs_per_node),
     cap_hours: String(s.cap_hours),
     cap_gb: String(s.cap_gb),
@@ -319,6 +336,7 @@ export function parseDraft(d: RealityDraft): { settings: RealitySettings | null;
       enabled: d.enabled,
       transport: d.transport,
       renew: d.renew,
+      target_mode: d.target_mode,
       configs_per_node: configs,
       cap_hours: hours,
       cap_gb: gb,
@@ -335,6 +353,7 @@ export function sameSettings(a: RealitySettings, b: RealitySettings): boolean {
     a.enabled === b.enabled &&
     a.transport === b.transport &&
     a.renew === b.renew &&
+    (a.target_mode ?? "manual") === (b.target_mode ?? "manual") &&
     a.configs_per_node === b.configs_per_node &&
     a.cap_hours === b.cap_hours &&
     a.cap_gb === b.cap_gb &&
