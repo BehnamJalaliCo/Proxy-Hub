@@ -12,13 +12,18 @@ import {
   TARGET_HINT,
   sortConfigs,
   usage,
+  certificateState,
+  TRANSPORT,
+  wsBlocker,
   xrayState,
+  type RealityCertificate,
   type RealityConfig,
   type RealitySettings,
 } from "./reality";
 
 const DEFAULTS: RealitySettings = {
   enabled: true,
+  transport: "ws_tls",
   renew: true,
   configs_per_node: 2,
   cap_hours: 48,
@@ -37,6 +42,7 @@ function config(over: Partial<RealityConfig>): RealityConfig {
     node_name: "ph-slot1",
     location: "fsn1",
     host: "slot1.example.com",
+    transport: "ws_tls",
     status: "active",
     listed: true,
     created_at: "2026-11-04T00:00:00Z",
@@ -152,5 +158,51 @@ describe("reality words", () => {
     expect(xrayState({ ...base, target_ok: null, up: false }).tone).toBe("warning");
     expect(xrayState({ ...base, apply_error: "xray_config_refused" }).label).toContain("نپذیرفت");
     expect(xrayState({ ...base, apply_error: "something_new" }).tone).toBe("danger");
+  });
+});
+
+describe("transport (WebSocket + TLS)", () => {
+  const cert: RealityCertificate = {
+    domain: "ipoxxo.example",
+    names: ["*.ipoxxo.example"],
+    valid: true,
+    not_after: "2027-02-01T00:00:00Z",
+    issued_at: "2026-11-05T00:00:00Z",
+    last_error: null,
+    retry_at: null,
+  };
+  const node = { dns_name: "slot1.ipoxxo.example", dns_own: true, agent_ws_tls: true };
+
+  it("keeps the transport through the form and says what a switch does", () => {
+    const back = parseDraft({ ...draftFrom(DEFAULTS), transport: "reality" }).settings;
+    expect(back?.transport).toBe("reality");
+    expect(back && sameSettings(back, DEFAULTS)).toBe(false);
+    expect(savedMessage(DEFAULTS, { ...DEFAULTS, transport: "reality" })).toContain("Reality برمیگردند");
+    expect(savedMessage({ ...DEFAULTS, transport: "reality" }, DEFAULTS)).toContain("WebSocket + TLS");
+    expect(TRANSPORT.ws_tls.label).toMatch(/[؀-ۿ]/);
+    expect(TRANSPORT.reality.short).toBe("Reality");
+  });
+
+  it("says why a node has no WebSocket + TLS inbound yet", () => {
+    expect(wsBlocker(node, cert)).toBeNull();
+    expect(wsBlocker({ ...node, agent_ws_tls: false }, cert)).toContain("۰٫۳٫۰");
+    expect(wsBlocker({ ...node, dns_name: null }, cert)).toContain("نام دامنه");
+    expect(wsBlocker(node, { ...cert, valid: false })).toContain("گواهی");
+    expect(wsBlocker(node, null)).toContain("گواهی");
+    expect(wsBlocker({ ...node, dns_own: false }, cert)).toContain("سرور تازه");
+  });
+
+  it("names the certificate state", () => {
+    expect(certificateState(cert)).toEqual({ label: "گواهی معتبر است", tone: "success" });
+    expect(certificateState({ ...cert, valid: false, last_error: "acme_rateLimited" }).tone).toBe("danger");
+    expect(certificateState({ ...cert, valid: false }).tone).toBe("info");
+    expect(certificateState(null).tone).toBe("neutral");
+  });
+
+  it("explains the node's own TLS check", () => {
+    const base = { enabled: true, up: true, version: "26.10.31", uptime_s: 5, target_ok: false, apply_error: null, reported_at: null };
+    expect(xrayState(base, "ws_tls").label).toContain("گواهی");
+    expect(xrayState({ ...base, target_ok: null }, "ws_tls").label).toContain("TLS خود node");
+    expect(xrayState(base, "reality").label).toContain("سایت هدف");
   });
 });

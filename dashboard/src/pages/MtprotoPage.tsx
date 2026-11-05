@@ -200,13 +200,13 @@ function SettingsForm({ current, defaults, corrupt }: { current: MtprotoSettings
           </div>
         ) : null}
         <div className="grid gap-5 sm:grid-cols-2">
-          <Field label="پورت" htmlFor="mtp-port" hint="پیش‌فرض ۸۴۴۳. پورت ۴۴۳ مال VLESS Reality است. پورت دیگر فقط وقتی کار میکند که فایروال nodeها هم بازش کند." error={shown("port")}>
+          <Field label="پورت" htmlFor="mtp-port" hint="پیش‌فرض ۸۴۴۳. پورت ۴۴۳ مال VLESS (WebSocket + TLS یا Reality) است. پورت دیگر فقط وقتی کار میکند که فایروال nodeها هم بازش کند." error={shown("port")}>
             <TextInput id="mtp-port" inputMode="numeric" latin value={draft.port} onChange={(e) => set("port", e.target.value)} invalid={Boolean(shown("port"))} />
           </Field>
           <Field
-            label="دامنه‌ی TLS (برای لینک ee)"
+            label="دامنه‌ی TLS پشتیبان (برای لینک ee)"
             htmlFor="mtp-domain"
-            hint="سایت بزرگ و پایداری که در ایران فیلتر نیست. Telemt کسی را که secret ندارد به همین سایت میفرستد."
+            hint="nodeی که نام دامنه‌ی خودش و گواهی دارد (روش WebSocket + TLS)، نام خودش را به‌جای این میگذارد تا نام و IP یکی باشند. این دامنه فقط برای nodeهای بی‌نام است: سایت بزرگ و پایداری که در ایران فیلتر نیست."
             error={shown("tls_domain")}
           >
             <TextInput id="mtp-domain" latin value={draft.tls_domain} onChange={(e) => set("tls_domain", e.target.value)} invalid={Boolean(shown("tls_domain"))} placeholder="www.microsoft.com" />

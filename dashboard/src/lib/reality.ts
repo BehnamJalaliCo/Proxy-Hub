@@ -1,7 +1,8 @@
-// VLESS Reality (decision D18): the shape of GET /api/reality and pure, unit-tested helpers for the
-// Reality page (remaining time and volume, the words for each state, the settings form). The server
-// is always the authority; these only mirror its rules (panel/proxyhub/reality/settings.py).
-// Nothing here is about a person: a config is a link anyone in the channel may use.
+// VLESS configs (decision D18; transport ws_tls since 2026-11-05): the shape of GET /api/reality and
+// pure, unit-tested helpers for the Reality page (remaining time and volume, the words for each state,
+// the transport, the settings form). The server is always the authority; these only mirror its rules
+// (panel/proxyhub/reality/settings.py). Nothing here is about a person: a config is a link anyone in
+// the channel may use.
 
 import { formatNumber } from "./format";
 import type { Tone } from "./labels";
@@ -9,8 +10,13 @@ import { normalizeDigits } from "./validation";
 
 export type RealityStatus = "active" | "expired" | "full" | "burned";
 
+/** ws_tls: VLESS + WebSocket + TLS with the panel's certificate for the node's own name (default).
+ * reality: VLESS + REALITY with a foreign target site. */
+export type Transport = "ws_tls" | "reality";
+
 export interface RealitySettings {
   enabled: boolean;
+  transport: Transport;
   /** D41: a working config gets another period (same link) an hour before its end. */
   renew: boolean;
   configs_per_node: number;
@@ -52,7 +58,27 @@ export interface RealityNode {
   target: string | null;
   /** The owner's newer target, while this slot waits for its current configs to end. */
   target_next: string | null;
+  /** The node's own DNS name (slot<N>.<domain> or t<8 hex>.<domain>) if Cloudflare has it. */
+  dns_name: string | null;
+  /** That name points at exactly this node (a slot's name moves to the newest server). */
+  dns_own: boolean;
+  /** The scope's WebSocket path (ws_tls links). */
+  ws_path: string | null;
+  /** The node's agent can serve ws_tls (0.3.0 or newer). */
+  agent_ws_tls: boolean;
   active_configs: number;
+}
+
+export interface RealityCertificate {
+  domain: string;
+  names: string[];
+  /** Valid now (and not about to end): nodes may serve it. */
+  valid: boolean;
+  not_after: string | null;
+  issued_at: string | null;
+  /** Short code of the last failed order, while it has not succeeded since. */
+  last_error: string | null;
+  retry_at: string | null;
 }
 
 export interface RealityConfig {
@@ -63,6 +89,7 @@ export interface RealityConfig {
   node_name: string;
   location: string;
   host: string;
+  transport: Transport;
   status: RealityStatus;
   /** Handed to posts (its node confirmed it is serving). */
   listed: boolean;
@@ -80,6 +107,8 @@ export interface RealityConfig {
 export interface RealitySummary {
   settings: RealitySettingsView;
   defaults: RealitySettingsView;
+  /** The wildcard certificate of the active domain (null: no active domain). */
+  certificate: RealityCertificate | null;
   totals: {
     active: number;
     expired: number;
@@ -112,19 +141,60 @@ const APPLY_ERRORS: Record<string, string> = {
   xray_read_failed: "خواندن تنظیمات روی node نشد",
 };
 
-/** The Xray state of a node in one Persian phrase and a tone. */
-export function xrayState(x: RealityXray | null): { label: string; tone: Tone } {
+export const TRANSPORT: Record<Transport, { label: string; short: string; hint: string }> = {
+  ws_tls: {
+    label: "WebSocket + TLS با دامنه‌ی خود node",
+    short: "WS + TLS",
+    hint: "مثل کانفیگ سالم شما: هر node نام دامنه‌ی خودش را دارد (slot۱.دامنه یا t….دامنه) با گواهی واقعی Let's Encrypt، پس نامی که فیلتر میبیند با IP یکی است.",
+  },
+  reality: {
+    label: "Reality با سایت هدف خارجی",
+    short: "Reality",
+    hint: "نام سایت هدف (مثل dl.google.com) روی IP هتزنر؛ در آزمون ۵ نوامبر از ایران سایتی باز نشد.",
+  },
+};
+
+/** The Xray state of a node in one Persian phrase and a tone. With ws_tls, ``target_ok`` is the
+ * node's own TLS check of its inbound (its name and certificate), not a foreign target. */
+export function xrayState(x: RealityXray | null, transport: Transport = "reality"): { label: string; tone: Tone } {
   if (x === null) return { label: "عامل قدیمی؛ Xray ندارد", tone: "neutral" };
   if (!x.enabled) return { label: "Xray روی این node نصب نیست", tone: "neutral" };
   if (x.apply_error) return { label: APPLY_ERRORS[x.apply_error] ?? "خطا در اعمال تنظیمات Xray", tone: "danger" };
-  if (x.target_ok === false) return { label: "سایت هدف از این node جواب درست نداد", tone: "danger" };
+  const ws = transport === "ws_tls";
+  if (x.target_ok === false) {
+    return { label: ws ? "آزمون TLS خود node با گواهی‌اش رد شد" : "سایت هدف از این node جواب درست نداد", tone: "danger" };
+  }
   if (!x.up) return { label: "Xray هنوز بالا نیامده", tone: "warning" };
-  if (x.target_ok === null) return { label: "Xray فعال است؛ سایت هدف هنوز آزموده نشده", tone: "info" };
+  if (x.target_ok === null) {
+    return { label: ws ? "Xray فعال است؛ TLS خود node هنوز آزموده نشده" : "Xray فعال است؛ سایت هدف هنوز آزموده نشده", tone: "info" };
+  }
   return { label: "Xray فعال است", tone: "success" };
+}
+
+/** Why a node gets no ws_tls inbound yet (null: it has everything). */
+export function wsBlocker(n: Pick<RealityNode, "dns_name" | "dns_own" | "agent_ws_tls">, cert: RealityCertificate | null): string | null {
+  if (!n.agent_ws_tls) return "عامل این node قدیمی است (WS + TLS از نسخه‌ی ۰٫۳٫۰)";
+  if (n.dns_name === null) return "هنوز نام دامنه ندارد";
+  if (cert === null || !cert.valid) return "گواهی دامنه هنوز آماده نیست";
+  if (!n.dns_own) return "نامش به سرور تازه‌ی همین جایگاه رفته است";
+  return null;
+}
+
+/** The certificate in one Persian phrase and a tone. */
+export function certificateState(cert: RealityCertificate | null): { label: string; tone: Tone } {
+  if (cert === null) return { label: "دامنه‌ی فعالی نیست؛ گواهی گرفته نمیشود", tone: "neutral" };
+  if (cert.valid) return { label: "گواهی معتبر است", tone: "success" };
+  if (cert.last_error) return { label: "گرفتن گواهی نشد؛ پنل دوباره تلاش میکند", tone: "danger" };
+  return { label: "گواهی در راه است", tone: "info" };
 }
 
 /** What happens after the owner saves the target: the words for the toast. */
 export function savedMessage(before: RealitySettings, after: RealitySettings): string {
+  if (before.transport !== after.transport) {
+    return after.transport === "ws_tls"
+      ? "nodeها به WebSocket + TLS میروند؛ کانفیگ‌های Reality کنار میروند (🚫 روی پست) و کانفیگ تازه با نام دامنه‌ی هر node ساخته میشود."
+      : "nodeها به Reality برمیگردند؛ کانفیگ‌های WebSocket + TLS کنار میروند (🚫 روی پست) و کانفیگ تازه‌ی Reality ساخته میشود.";
+  }
   if (before.target_host !== after.target_host || before.target_port !== after.target_port) {
     return "هر جایگاه پس از پایان کانفیگ‌های فعلی‌اش به سایت هدف تازه میرود (اگر سایت قبلی از node جواب نمیداد، بی‌درنگ). node سایت تازه را میآزماید و بعد کانفیگ تازه میگیرد.";
   }
@@ -187,6 +257,7 @@ export function sortConfigs(configs: RealityConfig[]): RealityConfig[] {
 
 export interface RealityDraft {
   enabled: boolean;
+  transport: Transport;
   renew: boolean;
   configs_per_node: string;
   cap_hours: string;
@@ -204,6 +275,7 @@ const LINK_NAME = /^[A-Za-z0-9_][A-Za-z0-9_ .|-]{0,31}$/;
 export function draftFrom(s: RealitySettings): RealityDraft {
   return {
     enabled: s.enabled,
+    transport: s.transport,
     renew: s.renew,
     configs_per_node: String(s.configs_per_node),
     cap_hours: String(s.cap_hours),
@@ -245,6 +317,7 @@ export function parseDraft(d: RealityDraft): { settings: RealitySettings | null;
   return {
     settings: {
       enabled: d.enabled,
+      transport: d.transport,
       renew: d.renew,
       configs_per_node: configs,
       cap_hours: hours,
@@ -260,6 +333,7 @@ export function parseDraft(d: RealityDraft): { settings: RealitySettings | null;
 export function sameSettings(a: RealitySettings, b: RealitySettings): boolean {
   return (
     a.enabled === b.enabled &&
+    a.transport === b.transport &&
     a.renew === b.renew &&
     a.configs_per_node === b.configs_per_node &&
     a.cap_hours === b.cap_hours &&
