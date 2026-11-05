@@ -16,7 +16,7 @@ import { Badge, Card, CardHeader } from "./ui/Card";
 import { LoadError, SkeletonLines } from "./ui/Feedback";
 import { Field, TagInput } from "./ui/Form";
 
-const SUGGESTIONS = ["www.apple.com", "github.com", "aws.amazon.com", "www.speedtest.net", "www.cloudflare.com", "www.mozilla.org", "addons.mozilla.org", "www.samsung.com"];
+const SUGGESTIONS = ["github.com", "www.speedtest.net", "aws.amazon.com", "www.cloudflare.com", "www.mozilla.org", "addons.mozilla.org", "www.samsung.com"];
 
 function CandidatesEditor({ data }: { data: TargetsSummary }) {
   const qc = useQueryClient();
@@ -48,7 +48,7 @@ function CandidatesEditor({ data }: { data: TargetsSummary }) {
         hint="سایت‌های بزرگ خارجی با TLS 1.3 و HTTP/2؛ Enter برای افزودن. پنل هدف Reality و دامنه‌ی TLS پروکسی‌های MTProto را در حالت خودکار از میان همین‌ها برمیگزیند."
         error={dirty ? (problem ?? undefined) : undefined}
       >
-        <TagInput id="t-candidates" values={hosts} onChange={setHosts} suggestions={SUGGESTIONS} normalize={normalizeHost} placeholder="www.apple.com" invalid={dirty && problem !== null} />
+        <TagInput id="t-candidates" values={hosts} onChange={setHosts} suggestions={SUGGESTIONS} normalize={normalizeHost} placeholder="github.com" invalid={dirty && problem !== null} />
       </Field>
       {dirty ? (
         <div className="flex flex-wrap gap-2">

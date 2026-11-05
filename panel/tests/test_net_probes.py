@@ -610,7 +610,7 @@ async def test_due_targets(engine: AsyncEngine) -> None:
         "schedule",
         "slot2.example.com",  # its own name: the SNI its links use
         "slot2.example.com",
-        (443, 8443),
+        (443,),  # the MTProto port is not measured by TLS (P16: Telemt answers only its own domain)
         "fsn1",
     )
     a = by_id[asked]
@@ -631,6 +631,16 @@ async def test_due_targets(engine: AsyncEngine) -> None:
         assert {t.node_id for t in await service.due_targets(conn, s, now, None)} == {asked}
         later = now + timedelta(seconds=s.interval_s + 1)
         assert {t.node_id for t in await service.due_targets(conn, s, later, None)} == {ready, asked}
+    # A node that became READY a minute ago waits for its configs (P16); the owner's request does not.
+    fresh = await make_node(engine, state="ready", ipv4="203.0.113.23")
+    async with engine.begin() as conn:
+        await conn.execute(text("UPDATE nodes SET ready_at = :t WHERE id = :n"), {"t": now, "n": fresh})
+    async with engine.connect() as conn:
+        assert fresh not in {
+            t.node_id for t in await service.due_targets(conn, s, now + timedelta(minutes=1), None)
+        }
+        grace = now + service.READY_GRACE
+        assert fresh in {t.node_id for t in await service.due_targets(conn, s, grace, None)}
 
 
 @pytest.mark.db

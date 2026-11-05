@@ -338,6 +338,14 @@ class _Planner:
     def _usable(self, locations: list[str]) -> list[str]:
         return [loc for loc in locations if self._rank(loc) < CLASS_RANK["bad"]]
 
+    def _spread_key(self, location: str) -> tuple[int, int]:
+        """Placement order among usable locations (P16, the owner: "build other locations too, not
+        only hel1"): a location open from Iran and one without data yet count the same, so the slots
+        spread over them; one open on only one key network (mixed) comes after; then the location
+        holding fewer of our nodes. A closed one is never used (:meth:`_usable`)."""
+        mixed = 1 if self.snap.location_classes.get(location) == "mixed" else 0
+        return (mixed, self.run.per_location.get(location, 0))
+
     def _all_closed(self) -> bool:
         return bool(self.s.locations) and not self._usable(list(self.s.locations))
 
@@ -347,8 +355,8 @@ class _Planner:
             return []
         start = (slot - 1) % len(locs)
         rotated = [locs[(start + k) % len(locs)] for k in range(len(locs))]
-        # Stable: the slot's own rotation decides among locations of the same rank.
-        return sorted(self._usable(rotated), key=self._rank)
+        # Stable: the slot's own rotation decides among locations with the same key.
+        return sorted(self._usable(rotated), key=self._spread_key)
 
     def _slot_locations_all(self, slot: int) -> list[str]:
         locs = list(self.s.locations)
@@ -358,9 +366,7 @@ class _Planner:
     def _replacement_locations(self, avoid: set[str]) -> list[str]:
         locs = list(self.s.locations)
         others = self._usable([loc for loc in locs if loc not in avoid])
-        return sorted(
-            others, key=lambda loc: (self._rank(loc), self.run.per_location.get(loc, 0), locs.index(loc))
-        )
+        return sorted(others, key=lambda loc: (*self._spread_key(loc), self._rank(loc), locs.index(loc)))
 
     def _repair_over(self, n: NodeSnapshot) -> bool:
         since = n.state_since or n.created_at

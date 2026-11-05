@@ -165,6 +165,10 @@ async def test_rounds_and_node_checks_are_stored_per_site(engine: AsyncEngine) -
     assert apple.iran["asn:197207"].state == "up"  # its Iranian rounds are untouched
 
 
+# The P15 list (apple first): these tests pin the choice logic, not today's defaults (P16 dropped apple).
+P15 = TargetSettings(candidates=["www.apple.com", "github.com", "aws.amazon.com", "www.speedtest.net"])
+
+
 async def test_auto_mode_switches_targets_logs_and_tells_the_owner(engine: AsyncEngine) -> None:
     now = datetime.now(UTC)
     async with engine.begin() as conn:
@@ -175,7 +179,7 @@ async def test_auto_mode_switches_targets_logs_and_tells_the_owner(engine: Async
         await store_round(
             conn, site_round(now - timedelta(hours=1), ["www.apple.com"], ["www.microsoft.com"])
         )
-        switched = await apply_auto(conn, TargetSettings(), KEYS, now)
+        switched = await apply_auto(conn, P15, KEYS, now)
     assert [(s.kind, s.old, s.new, s.why) for s in switched] == [
         ("reality", "dl.google.com", "www.apple.com", "not_a_candidate"),
         ("mtproto", "www.microsoft.com", "www.apple.com", "blocked_from_iran"),
@@ -202,7 +206,7 @@ async def test_auto_mode_switches_targets_logs_and_tells_the_owner(engine: Async
     ]
     # Settled: the next pass changes nothing.
     async with engine.begin() as conn:
-        assert await apply_auto(conn, TargetSettings(), KEYS, now) == []
+        assert await apply_auto(conn, P15, KEYS, now) == []
 
 
 async def test_manual_mode_never_switches_and_no_open_site_is_told_daily(engine: AsyncEngine) -> None:
@@ -213,7 +217,7 @@ async def test_manual_mode_never_switches_and_no_open_site_is_told_daily(engine:
         await save_settings(conn, MtprotoSettings(target_mode="manual"))
         for at in (now - timedelta(hours=7), now - timedelta(hours=1)):
             await store_round(conn, site_round(at, ["www.apple.com"], ["www.microsoft.com"]))
-        assert await apply_auto(conn, TargetSettings(), KEYS, now) == []
+        assert await apply_auto(conn, P15, KEYS, now) == []
     async with engine.connect() as conn:
         assert (await load_reality_settings(conn)).target_host == "dl.google.com"
         assert (await load_settings(conn)).tls_domain == "www.microsoft.com"
@@ -249,7 +253,7 @@ async def test_corrupt_settings_are_never_overwritten_by_a_switch(engine: AsyncE
         )
         for at in (now - timedelta(hours=7), now - timedelta(hours=1)):
             await store_round(conn, site_round(at, ["www.apple.com"], ["www.microsoft.com"]))
-        assert await apply_auto(conn, TargetSettings(), KEYS, now) == []
+        assert await apply_auto(conn, P15, KEYS, now) == []
     async with engine.connect() as conn:
         stored = dict(
             (
@@ -293,14 +297,14 @@ async def test_the_targets_loop_keeps_the_allowance_for_the_node_probes(engine: 
             text(
                 "INSERT INTO probe_sources (name, ok, note, checked_at, ratelimit_limit, "
                 "ratelimit_remaining, ratelimit_reset_at, tls_probes) "
-                "VALUES ('globalping', true, 'x', now(), 250, 58, "
+                "VALUES ('globalping', true, 'x', now(), 250, 53, "
                 "now() + interval '20 minutes', 3)"
             )
         )
     async with engine.begin() as conn:
         await TargetsReconciler(gp_factory=closed_gp).run_once(conn)
-    # 5 probes x (the control + 9 sites; github.com is the control itself) = 50, plus 3 x 3 = 9 kept
-    # for one node's TLS cycle: 59 > 58, postponed.
+    # 5 probes x (the control + 8 sites; github.com is the control itself) = 45, plus 3 x 3 = 9 kept
+    # for one node's TLS cycle: 54 > 53, postponed.
     async with engine.connect() as conn:
         assert (await conn.execute(text("SELECT count(*) FROM probe_cycles"))).scalar_one() == 0
         assert await load_state(conn) == {}
@@ -360,7 +364,7 @@ async def test_targets_over_http(client: AsyncClient, engine: AsyncEngine) -> No
     assert body["reality"] == {"mode": "auto", "target": "dl.google.com", "transport": "ws_tls"}
     assert body["mtproto"] == {"mode": "auto", "tls_domain": "www.microsoft.com"}
     hosts = [c["host"] for c in body["candidates"]]
-    assert hosts[:8] == body["settings"]["candidates"] and hosts[8:] == ["dl.google.com", "www.microsoft.com"]
+    assert hosts[:7] == body["settings"]["candidates"] and hosts[7:] == ["dl.google.com", "www.microsoft.com"]
     (dl,) = [c for c in body["candidates"] if c["host"] == "dl.google.com"]
     assert dl == {
         "host": "dl.google.com",
@@ -390,8 +394,7 @@ async def test_targets_over_http(client: AsyncClient, engine: AsyncEngine) -> No
         ("asn:197207", "down", True),
         ("asn:57218", "up", True),
     ]
-    (apple,) = [c for c in body["candidates"] if c["host"] == "www.apple.com"]
-    assert apple["open"] is True and apple["ms"] == 548.0
+    assert "www.apple.com" not in [c["host"] for c in body["candidates"]]  # not listed (P16), not current
 
     r = await client.put(
         "/api/targets/settings", json={"candidates": ["WWW.Apple.com", "github.com"], "interval_h": 4}

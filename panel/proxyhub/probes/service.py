@@ -4,9 +4,14 @@ A cycle (P15, 2026-11-05: only a real TLS handshake tells the truth from Iran):
 
 1. **TLS, the part that decides.** One Globalping ``http`` measurement (HTTPS ``HEAD /``) of the TLS
    control host from MCI, Rightel and other Iranian networks; then, reusing exactly its probes, one
-   per due node and port: 443 and the node's MTProto port, on the node's own DNS name when its
-   record points at the node (the SNI its links use), else on its IP. A cycle takes only as many
-   nodes as Globalping's remaining hourly allowance covers (:func:`tls_fit`); the others stay due.
+   per due node on 443, on the node's own DNS name when its record points at the node (the SNI its
+   links use), else on its IP. The MTProto port is NOT measured by TLS: Telemt answers only its own
+   fake-TLS domain (P16: SNI = the node's name gets no answer even when the port is open), and
+   Globalping cannot send another SNI to our address; it shares the node's address with 443. A
+   cycle takes only as many nodes as Globalping's remaining hourly allowance covers
+   (:func:`tls_fit`); the others stay due.
+   A node is measured on schedule only :data:`READY_GRACE` after it became READY, so its first
+   round sees the configs it was given (P16: a round a minute too early counted as "closed").
 2. **Information only** (on what the allowance leaves): the earlier Globalping TCP ping of the
    MTProto port with its own TCP control, ICMP, and a DNS check of the node's slot name; check-host
    TCP from its Iranian nodes (no Globalping cost). MCI and Rightel answer a TCP SYN themselves for
@@ -28,7 +33,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
@@ -133,6 +138,10 @@ def _ipv4(value: Any) -> str | None:
     return str(ip) if ip.version == 4 else None
 
 
+# A READY node gets its configs applied within a minute or two (P16); the first scheduled round waits.
+READY_GRACE: Final = timedelta(minutes=5)
+
+
 async def due_targets(
     db: Db, settings: ProbeSettings, now: datetime, names: NodeNames | None
 ) -> list[Target]:
@@ -160,6 +169,7 @@ async def due_targets(
                 (ProbeNodeState.run_requested_at.is_not(None))
                 | (
                     (Node.state == NodeState.READY.value)
+                    & (Node.ready_at.is_(None) | (Node.ready_at <= now - READY_GRACE))
                     & (ProbeNodeState.last_round_at.is_(None) | (ProbeNodeState.last_round_at <= cutoff))
                 ),
             )
@@ -180,7 +190,7 @@ async def due_targets(
         port = int(r.ports[0]) if r.ports else settings.default_port
         dns_name = f"slot{r.slot}.{zone}" if zone and r.slot and r.slot > 0 else None
         tls_name = names.own_name(r.slot, r.id, ip) if names is not None else None
-        ports = (TLS_PORT,) if not r.ports or port == TLS_PORT else (TLS_PORT, port)
+        ports = (TLS_PORT,)  # see the module docstring: the MTProto port is not measured by TLS
         trigger = "manual" if r.run_requested_at is not None else "schedule"
         targets.append(Target(r.id, r.name, ip, port, dns_name, trigger, tls_name, r.location, ports))
     return targets

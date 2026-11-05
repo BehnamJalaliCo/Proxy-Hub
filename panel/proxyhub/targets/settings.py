@@ -6,6 +6,12 @@ Rightel (``www.microsoft.com`` was closed on MCI and ``dl.google.com`` slow, so 
 ``www.cloudflare.com``, ``www.mozilla.org``, ``addons.mozilla.org`` and ``www.samsung.com`` are big
 TLS 1.3 + HTTP/2 sites added for choice. Every candidate (and each current target) is measured from
 MCI and Rightel every ``interval_h`` hours; the owner edits the list in the dashboard's Settings.
+
+Order (P16, 2026-11-05): ``github.com`` first (its own addresses, not a CDN edge, and the owner's MCI
+test with it was fast). ``www.apple.com`` is no longer listed: Xray 26.10.31 itself warns that an SNI
+with apple, icloud or microsoft in it raises the block risk (infra/conf/transport_security.go), and
+3x-ui's and PasarGuard's checks agree. The CDN-hosted sites (Akamai, Cloudflare, CloudFront,
+Fastly) come after: an SNI whose real addresses are far from our node's is easier to spot.
 """
 
 from __future__ import annotations
@@ -26,10 +32,9 @@ SETTINGS_KEY = "targets"
 STATE_KEY = "targets.state"  # the loop's own bookkeeping (last full round, alert de-duplication)
 
 DEFAULT_CANDIDATES: tuple[str, ...] = (
-    "www.apple.com",
     "github.com",
-    "aws.amazon.com",
     "www.speedtest.net",
+    "aws.amazon.com",
     "www.cloudflare.com",
     "www.mozilla.org",
     "addons.mozilla.org",
