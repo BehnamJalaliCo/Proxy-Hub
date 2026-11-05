@@ -18,7 +18,8 @@ are matched by meaning (channel + link; success words without refusal or removal
 first real run records them in actions_log (docs/11 F11): the runbook checks them against these
 patterns before the module is relied on. A /myproxies button is pressed only when its label names
 the proxy's host (or ``host:port``) with nothing beside it but hex. Anything not recognised is
-"unknown": the flow stops there (proxyhub/sponsor/conversation.py). Every text that leaves the flow goes through :func:`mask`.
+"unknown": the flow stops there (proxyhub/sponsor/conversation.py). Every text that leaves the
+flow goes through :func:`mask`.
 """
 
 from __future__ import annotations
