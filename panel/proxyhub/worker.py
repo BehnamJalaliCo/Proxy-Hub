@@ -23,6 +23,7 @@ from proxyhub.reconcilers.probes import ProbesReconciler
 from proxyhub.reconcilers.publisher import PublisherReconciler
 from proxyhub.reconcilers.reality import RealityReconciler
 from proxyhub.reconcilers.sponsor import SponsorReconciler
+from proxyhub.reconcilers.targets import TargetsReconciler
 from proxyhub.reconcilers.telegram import (
     ApiWatchdogReconciler,
     TelegramOutboxReconciler,
@@ -46,7 +47,8 @@ def reconcilers() -> list[Reconciler]:
         ApiWatchdogReconciler(),
         DnsReconciler(),  # net: no-op until a verified Cloudflare token and an active domain exist
         AcmeReconciler(),  # *.<active domain> certificate (Let's Encrypt DNS-01) for the ws_tls nodes
-        ProbesReconciler(),  # net: records reachability verdicts from Iran only
+        ProbesReconciler(),  # P15: TLS handshakes from Iran decide (the live fleet burns on "blocked")
+        TargetsReconciler(),  # P15: candidate REALITY / fake-TLS sites from Iran; auto target choice
         DomainsReconciler(),  # D35: filter checks of the pool domains, rotation, deletion of filtered zones
         MtproxyAccountReconciler(),  # D37: the operator account's session check (kill switch OFF only)
         AnalyticsReconciler(),  # read-only: server traffic/CPU every 15 min, channel size hourly, alerts

@@ -16,10 +16,16 @@ Hetzner's fsn1/nbg1/hel1, and a download host that Iranian networks are expected
 serves Android and Chrome updates; not verified from Iran here: the panel-server runbook checks
 it). Every node checks the target itself (TLS 1.3 + h2) and reports the result together with the
 target it checked; a config is only made on a node that confirmed its scope's current target, and
-the owner is told about nodes where it fails. After the owner changes the target, every scope moves
-to it (proxyhub/reality/policy.py ``retarget_scopes``): at once if the old target fails there or
-the scope has no active config, otherwise once its active configs have ended, so links already
-posted keep working until their own end.
+the owner is told about nodes where it fails. After the target changes, every scope moves to it
+(proxyhub/reality/policy.py ``retarget_scopes``): at once if the old target fails there or the scope
+has no active config, otherwise once its active configs have ended, so links already posted keep
+working until their own end.
+
+``target_mode`` (P15, 2026-11-05): ``auto`` (default) lets the panel pick the target among the
+owner's candidate sites (proxyhub/targets): the best one that is open from Iran by a real TLS
+handshake on MCI and Rightel and that our nodes' own TLS 1.3 + HTTP/2 check passes (the default
+``dl.google.com`` was slow from Iran). Every switch is logged and told to the owner. ``manual``: the
+owner's ``target_host`` stays as it is.
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ _LINK_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_ .|-]{0,31}$")
 
 Db = AsyncConnection | AsyncSession
 Transport = Literal["ws_tls", "reality"]
+TargetMode = Literal["auto", "manual"]
 
 
 class RealitySettings(BaseModel):
@@ -64,6 +71,8 @@ class RealitySettings(BaseModel):
     cap_gb: int = Field(default=1000, ge=1, le=10_000)
     # D41: a working config gets another cap_hours and cap_gb before it ends (same link).
     renew: bool = True
+    # auto: proxyhub/targets picks target_host among the candidates (P15); manual: the owner's.
+    target_mode: TargetMode = "auto"
     target_host: str = "dl.google.com"
     target_port: int = Field(default=443, ge=1, le=65535)
     # The name every config gets in the user's app starts with this (decision N15). None: the main

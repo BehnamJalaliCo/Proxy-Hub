@@ -681,8 +681,9 @@ def test_worker_registers_the_net_loops() -> None:
     from proxyhub.worker import reconcilers
 
     loops = {r.name: r for r in reconcilers()}
-    assert {"dns", "probes"} <= set(loops)
+    assert {"dns", "probes", "targets"} <= set(loops)
     assert loops["probes"].interval_seconds == 60 and loops["dns"].interval_seconds == 60
+    assert loops["targets"].interval_seconds == 60
 
 
 # --- API ------------------------------------------------------------------------------------------
