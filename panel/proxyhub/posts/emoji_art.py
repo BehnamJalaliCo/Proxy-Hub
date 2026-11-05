@@ -21,7 +21,7 @@ each operator's colour only, never a logo or a name.
 
 ``alt`` is the plain emoji a drawing stands for. The poster swaps a plain emoji in a post for the
 drawing with the same alt (proxyhub/posts/entities.py), so the alts below are the emoji the post
-templates use (📡 🔐 🔗 ⏳ ⌛ 🔴 🚫 ⏸ ♻️) and the ones the channel's texts use most.
+templates use (📡 🔐 🔗 ⚡ ⏳ ⌛ 🔴 🚫 ⏸ ♻️) and the ones the channel's texts use most.
 
 The output is deterministic: the same code gives the same bytes (gzip without a timestamp), so
 the pack's contents only change when this file does.

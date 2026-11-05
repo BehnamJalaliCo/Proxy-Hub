@@ -2,9 +2,9 @@
 
 Same environment as tests/test_telegram_real.py (PROXYHUB_TELEGRAM_TEST_TOKEN_FILE and
 PROXYHUB_TELEGRAM_TEST_CHANNEL). It sends one post in the publisher's full layout (bold title,
-blockquote, MTProto link words, a Reality config in <code>, the channel tag) to the private TEST
-channel, then edits it to a paused/ended state and to the all-dead state, proving Telegram accepts
-every HTML text. The links
+blockquote, MTProto connect words, VLESS configs in <pre> blocks, a TCP/XHTTP pair marked by the
+blocks' language, the channel tag) to the private TEST channel, then edits it to a paused/ended
+state and to the all-dead state, proving Telegram accepts every HTML text. The links
 point at documentation addresses (RFC 5737, example.com) and a random secret, so nobody can use
 them. Nothing is ever removed (rule 6).
 """
@@ -42,31 +42,53 @@ async def test_publisher_layout_is_accepted_and_edited_by_telegram() -> None:
         "این پست را آزمون خودکار پنل در کانال آزمایشی گذاشته است.\n<b>پروکسی‌ها ساختگی‌اند</b> و کار نمیکنند.",
     )
     sec = secrets.token_hex(16)
+    until = datetime.now(UTC) + timedelta(hours=24)
     live = [
         PostLink(
             kind="mtproto",
-            label=f"پروکسی {i}",
             status="active",
             url=mtproto_url(f"https://t.me/proxy?server=192.0.2.{i}&port=8443&secret={sec}"),
         )
-        for i in (1, 2, 3)
+        for i in (1, 2, 3, 4)
     ] + [
         PostLink(
             kind="reality",
-            label="ریلیتی ۱",
             status="active",
             url=vless_url(
                 "vless://00000000-0000-4000-8000-000000000000@192.0.2.1:443"
                 "?security=reality&sni=www.example.com&type=tcp#proxyhub-test"
             ),
-            expires_at=datetime.now(UTC) + timedelta(hours=24),
-        )
+            expires_at=until,
+            variant="TCP",
+        ),
+        PostLink(
+            kind="reality",
+            status="active",
+            url=vless_url(
+                "vless://00000000-0000-4000-8000-000000000000@192.0.2.1:2083"
+                "?security=reality&sni=www.example.com&type=xhttp#proxyhub-test%20XHTTP"
+            ),
+            expires_at=until,
+            variant="XHTTP",
+            companion=True,
+        ),
+        PostLink(
+            kind="reality",
+            status="active",
+            url=vless_url(
+                "vless://00000000-0000-4000-8000-000000000001@192.0.2.2:443"
+                "?security=tls&sni=t.example.com&type=ws#proxyhub-test"
+            ),
+            expires_at=until,
+        ),
     ]
     mixed = [
-        PostLink(kind=x.kind, label=x.label, status="paused" if i % 2 else "expired")
+        PostLink(
+            kind=x.kind, status="paused" if i % 2 else "expired", variant=x.variant, companion=x.companion
+        )
         for i, x in enumerate(live)
     ]
-    dead = [PostLink(kind=x.kind, label=x.label, status="burned") for x in live]
+    dead = [PostLink(kind=x.kind, status="burned", variant=x.variant, companion=x.companion) for x in live]
     with all_logs(logging.DEBUG) as logs:
         async with BotClient(token) as bot:
             chat = await bot.get_chat(channel)

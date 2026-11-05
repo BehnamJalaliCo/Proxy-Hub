@@ -1,9 +1,12 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Final, Literal
 
 from sqlalchemy.ext.asyncio import AsyncConnection
+
+# The key of a REALITY config's XHTTP link is the config's own key + this suffix.
+XHTTP_KEY_SUFFIX: Final = ":xhttp"
 
 
 @dataclass(frozen=True)
@@ -13,7 +16,9 @@ class ProxyLink:
     # link "reality:<config_id>:xhttp"
     key: str
     slot: int | None
-    label: str  # short Persian label for the post, e.g. "پروکسی ۱", "کانفیگ ۱ (XHTTP)"
+    # short Persian label for the owner (dashboard, logs), e.g. "پروکسی ۱", "کانفیگ ۱ (XHTTP)"; a
+    # channel post never shows it (proxyhub/telegram/templates.py)
+    label: str
     url: str  # https://t.me/proxy?server=..&port=..&secret=.. or vless://...
     expires_at: datetime | None
     status: Literal["active", "expired", "full", "burned"]

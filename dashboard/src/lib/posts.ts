@@ -334,7 +334,8 @@ export function validateContent(title: string, body: string, tagsRaw: string): {
 
 export type TgNode =
   | { type: "text"; text: string }
-  | { type: "el"; tag: TgTag; href?: string; children: TgNode[] };
+  /** ``lang``: a pre block's language (``<pre><code class="language-x">``), shown in its header. */
+  | { type: "el"; tag: TgTag; href?: string; lang?: string; children: TgNode[] };
 
 export type TgTag = "b" | "i" | "u" | "s" | "code" | "pre" | "blockquote" | "a" | "spoiler";
 
@@ -376,8 +377,11 @@ export function decodeEntities(s: string): string {
 }
 
 const SAFE_HREF = /^(https?:\/\/|tg:\/\/)[^\s"<>]+$/i;
+const LANGUAGE = /class\s*=\s*"language-([A-Za-z0-9_+-]{1,30})"/i;
 
-/** The tags Telegram shows, as a tree. Unknown tags keep their text; only http(s)/tg links are kept. */
+/** The tags Telegram shows, as a tree. Unknown tags keep their text; only http(s)/tg links are kept.
+ * A ``code`` right inside a ``pre`` is no node of its own: it names the pre block's language, as in
+ * Telegram (a VLESS config's "TCP" / "XHTTP" marker). */
 export function parseTgHtml(html: string): TgNode[] {
   const root: TgNode[] = [];
   const stack: { tag: string; node: Extract<TgNode, { type: "el" }> | null }[] = [];
@@ -408,7 +412,11 @@ export function parseTgHtml(html: string): TgNode[] {
     }
     const tag = TAG_ALIASES[name];
     let node: Extract<TgNode, { type: "el" }> | null = null;
-    if (tag && !(name === "span" && !/class\s*=\s*"tg-spoiler"/i.test(attrs ?? ""))) {
+    const pre = stack.at(-1)?.node;
+    if (tag === "code" && pre?.tag === "pre") {
+      const lang = LANGUAGE.exec(attrs ?? "")?.[1];
+      if (lang && pre.lang === undefined) pre.lang = lang;
+    } else if (tag && !(name === "span" && !/class\s*=\s*"tg-spoiler"/i.test(attrs ?? ""))) {
       node = { type: "el", tag, children: [] };
       if (tag === "a") {
         const href = decodeEntities(/href\s*=\s*"([^"]*)"/i.exec(attrs ?? "")?.[1] ?? "");
