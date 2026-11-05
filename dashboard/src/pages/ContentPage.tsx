@@ -132,10 +132,13 @@ function TgNodes({ nodes }: { nodes: TgNode[] }) {
               </code>
             );
           case "pre":
+            // As Telegram draws a code block: its language (a config's "TCP" / "XHTTP") in the
+            // header, long lines wrapped.
             return (
-              <pre key={i} dir="ltr" className="my-1 overflow-x-auto rounded-lg bg-surface-3 p-2 font-mono text-[0.78rem]">
-                {inner}
-              </pre>
+              <div key={i} dir="ltr" className="my-1 overflow-hidden rounded-lg bg-surface-3">
+                {n.lang ? <div className="px-2 pt-1.5 font-mono text-[0.68rem] font-bold text-brand">{n.lang}</div> : null}
+                <pre className="p-2 font-mono text-[0.78rem] leading-5 break-all whitespace-pre-wrap">{inner}</pre>
+              </div>
             );
           case "blockquote":
             return (
