@@ -5,12 +5,14 @@ import { useState, type ReactNode, type SubmitEvent } from "react";
 
 import { Button } from "../components/ui/Button";
 import { Badge, Card, CardHeader, StatusDot } from "../components/ui/Card";
+import { EndedSection } from "../components/ui/EndedSection";
 import { AnimatedNumber, CopyButton, EmptyState, LoadError, Skeleton } from "../components/ui/Feedback";
 import { Field, Segmented, TextInput, Toggle } from "../components/ui/Form";
 import { PageHeader } from "../components/ui/PageHeader";
 import { errorMessage, isApiError } from "../lib/api";
 import { cn } from "../lib/browser";
-import { formatDurationSeconds, formatJalali, formatNumber, formatRelative } from "../lib/format";
+import { isEndedConfig, isEndedNode, splitEnded } from "../lib/ended";
+import { formatDurationSeconds, formatJalali, formatNumber, formatRelative, toFaDigits } from "../lib/format";
 import type { Tone } from "../lib/labels";
 import {
   certificateState,
@@ -27,12 +29,14 @@ import {
   TRANSPORT,
   usage,
   wsBlocker,
+  xhttpState,
   xrayState,
   type RealityCertificate,
   type RealityConfig,
   type RealityDraft,
   type RealityDraftErrors,
   type RealityNode,
+  type RealitySettings,
   type RealitySettingsView,
   type RealitySummary,
   type Transport,
@@ -116,11 +120,24 @@ function Meter({ label, ratio, text }: { label: string; ratio: number; text: str
   );
 }
 
+function LinkRow({ label, listed, url, active }: { label: string; listed: boolean; url: string | null; active: boolean }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-surface-3/40 px-2.5 py-1.5">
+      <span className="flex items-center gap-2 text-xs font-semibold text-fg-muted">
+        <span className="ltr inline-block">{label}</span>
+        {active && !listed ? <Badge tone="info">منتظر تأیید node</Badge> : null}
+      </span>
+      {url ? <CopyButton text={url} label={`کپی لینک ${label}`} /> : null}
+    </div>
+  );
+}
+
 function ConfigItem({ c, now }: { c: RealityConfig; now: Date }) {
   const st = REALITY_STATUS[c.status];
   const active = c.status === "active";
   const u = usage(c, now);
   const left = Math.max(0, (new Date(c.expires_at).getTime() - now.getTime()) / 1000);
+  const xhttp = c.xhttp;
   return (
     <li className={cn("rounded-2xl border border-line p-3 sm:p-4", active ? "bg-surface-2/50" : "bg-surface-2/20 opacity-80")}>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -130,10 +147,17 @@ function ConfigItem({ c, now }: { c: RealityConfig; now: Date }) {
             {st.label}
           </Badge>
           <Badge tone="neutral">{TRANSPORT[c.transport].short}</Badge>
+          {xhttp ? <Badge tone="brand">+ XHTTP</Badge> : null}
           {active && !c.listed ? <Badge tone="info">منتظر تأیید node</Badge> : null}
         </div>
-        {c.url ? <CopyButton text={c.url} label="کپی لینک" /> : null}
+        {c.url && !xhttp ? <CopyButton text={c.url} label="کپی لینک" /> : null}
       </div>
+      {xhttp && active ? (
+        <div className="mt-2 flex flex-col gap-1.5">
+          <LinkRow label="TCP" listed={c.listed} url={c.url} active={active} />
+          <LinkRow label="XHTTP" listed={xhttp.listed} url={xhttp.url} active={active} />
+        </div>
+      ) : null}
       <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-muted">
         <span>
           {c.slot !== null ? `جایگاه ${formatNumber(c.slot)}` : "بی جایگاه"} · <span className="ltr inline-block">{c.node_name}</span>
@@ -158,28 +182,35 @@ function ConfigItem({ c, now }: { c: RealityConfig; now: Date }) {
 
 function ConfigsCard({ configs }: { configs: RealityConfig[] }) {
   const now = useNow(30_000);
-  const sorted = sortConfigs(configs);
+  const { current, ended } = splitEnded(sortConfigs(configs), isEndedConfig);
   return (
     <Card className="lg:col-span-7">
       <CardHeader
         icon={<Link2 className="size-5" />}
         title="کانفیگ‌ها"
-        subtitle="کانفیگ‌های فعال و آن‌هایی که در ۷ روز گذشته تمام شدند. پست‌ها فقط کانفیگی را میگیرند که node آن را تأیید کرده است."
+        subtitle="کانفیگ‌های فعال؛ آن‌هایی که در ۷ روز گذشته تمام شدند در «پایان‌یافته‌ها» هستند. پست‌ها فقط کانفیگی را میگیرند که node آن را تأیید کرده است."
       />
-      <div className="p-3 sm:p-5">
-        {sorted.length === 0 ? (
+      <div className="flex flex-col gap-3 p-3 sm:p-5">
+        {current.length === 0 ? (
           <EmptyState
             icon={<Link2 className="size-7" />}
-            title="هنوز کانفیگی ساخته نشده"
+            title={ended.length ? "کانفیگ فعالی نیست" : "هنوز کانفیگی ساخته نشده"}
             description="وقتی node آماده‌ای با عامل تازه (Xray) گزارش بدهد، پنل خودش کانفیگ میسازد. کاری از شما لازم نیست."
           />
         ) : (
           <ul className="flex flex-col gap-2.5">
-            {sorted.map((c) => (
+            {current.map((c) => (
               <ConfigItem key={c.id} c={c} now={now} />
             ))}
           </ul>
         )}
+        <EndedSection count={ended.length} hint="زمان یا حجمشان تمام شد یا سرورشان کنار رفت.">
+          <ul className="flex flex-col gap-2.5">
+            {ended.map((c) => (
+              <ConfigItem key={c.id} c={c} now={now} />
+            ))}
+          </ul>
+        </EndedSection>
       </div>
     </Card>
   );
@@ -210,8 +241,63 @@ function CertificateLine({ cert }: { cert: RealityCertificate | null }) {
   );
 }
 
-function NodesCard({ nodes, transport, cert }: { nodes: RealityNode[]; transport: Transport; cert: RealityCertificate | null }) {
+function NodeItem({ n, settings, cert }: { n: RealityNode; settings: RealitySettings; cert: RealityCertificate | null }) {
+  const transport = settings.transport;
   const ws = transport === "ws_tls";
+  const x = xrayState(n.xray, transport);
+  const xh = xhttpState(n, settings);
+  const blocker = ws ? wsBlocker(n, cert) : null;
+  return (
+    <li className="rounded-2xl border border-line bg-surface-2/50 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-2">
+          <StatusDot tone={x.tone} pulse={x.tone === "success"} />
+          <span className="ltr truncate font-semibold text-fg">{n.name}</span>
+        </span>
+        <Badge tone="neutral">{n.slot !== null ? `جایگاه ${formatNumber(n.slot)}` : "آزمایشی"}</Badge>
+      </div>
+      <p className="mt-1 text-sm text-fg">{x.label}</p>
+      {xh ? (
+        <p className="mt-1 flex items-center gap-1.5 text-xs text-fg-muted">
+          <StatusDot tone={xh.tone} />
+          {xh.label}
+        </p>
+      ) : null}
+      <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+        <Badge tone={ws ? "info" : "neutral"}>{TRANSPORT[transport].short}</Badge>
+        <span className="flex min-w-0 items-center gap-1 text-fg-muted">
+          <Globe className="size-3.5 shrink-0" />
+          {n.dns_name ? (
+            <span className={cn("ltr truncate font-mono", n.dns_own ? "text-fg" : "text-fg-faint line-through")}>{n.dns_name}</span>
+          ) : (
+            <span>بی نام دامنه</span>
+          )}
+        </span>
+      </div>
+      {blocker ? <p className="mt-1 text-xs leading-5 text-warning">{blocker}</p> : null}
+      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-muted">
+        <span>{formatNumber(n.active_configs)} کانفیگ فعال</span>
+        {n.xray?.version ? <span className="ltr inline-block">Xray {n.xray.version}</span> : null}
+        {n.xray?.reported_at ? <span>گزارش {formatRelative(n.xray.reported_at)}</span> : null}
+        {ws ? (
+          n.ws_path ? <span className="ltr inline-block font-mono">{n.ws_path}</span> : null
+        ) : n.target ? (
+          <span className="ltr inline-block font-mono">{n.target}</span>
+        ) : null}
+      </div>
+      {!ws && n.target_next ? (
+        <p className="mt-1.5 text-xs leading-5 text-fg-muted">
+          <Badge tone="info">سایت هدف تازه</Badge> <span className="ltr inline-block font-mono">{n.target_next}</span> پس از پایان کانفیگ‌های فعلی
+        </p>
+      ) : null}
+    </li>
+  );
+}
+
+function NodesCard({ nodes, settings, cert }: { nodes: RealityNode[]; settings: RealitySettings; cert: RealityCertificate | null }) {
+  const transport = settings.transport;
+  const ws = transport === "ws_tls";
+  const { current, ended } = splitEnded(nodes, isEndedNode);
   return (
     <Card className="lg:col-span-5">
       <CardHeader
@@ -225,55 +311,22 @@ function NodesCard({ nodes, transport, cert }: { nodes: RealityNode[]; transport
       />
       <div className="p-3 sm:p-5">
         {ws ? <CertificateLine cert={cert} /> : null}
-        {nodes.length === 0 ? (
+        {current.length === 0 ? (
           <EmptyState icon={<ServerCog className="size-7" />} title="nodeی نیست" description="با ساخته شدن nodeها، وضعیت Xray هر کدام اینجا میآید." />
         ) : (
           <ul className="flex flex-col gap-2">
-            {nodes.map((n) => {
-              const x = xrayState(n.xray, transport);
-              const blocker = ws ? wsBlocker(n, cert) : null;
-              return (
-                <li key={n.node_id} className="rounded-2xl border border-line bg-surface-2/50 p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="flex min-w-0 items-center gap-2">
-                      <StatusDot tone={x.tone} pulse={x.tone === "success"} />
-                      <span className="ltr truncate font-semibold text-fg">{n.name}</span>
-                    </span>
-                    <Badge tone="neutral">{n.slot !== null ? `جایگاه ${formatNumber(n.slot)}` : "آزمایشی"}</Badge>
-                  </div>
-                  <p className="mt-1 text-sm text-fg">{x.label}</p>
-                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
-                    <Badge tone={ws ? "info" : "neutral"}>{TRANSPORT[transport].short}</Badge>
-                    <span className="flex min-w-0 items-center gap-1 text-fg-muted">
-                      <Globe className="size-3.5 shrink-0" />
-                      {n.dns_name ? (
-                        <span className={cn("ltr truncate font-mono", n.dns_own ? "text-fg" : "text-fg-faint line-through")}>{n.dns_name}</span>
-                      ) : (
-                        <span>بی نام دامنه</span>
-                      )}
-                    </span>
-                  </div>
-                  {blocker ? <p className="mt-1 text-xs leading-5 text-warning">{blocker}</p> : null}
-                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-fg-muted">
-                    <span>{formatNumber(n.active_configs)} کانفیگ فعال</span>
-                    {n.xray?.version ? <span className="ltr inline-block">Xray {n.xray.version}</span> : null}
-                    {n.xray?.reported_at ? <span>گزارش {formatRelative(n.xray.reported_at)}</span> : null}
-                    {ws ? (
-                      n.ws_path ? <span className="ltr inline-block font-mono">{n.ws_path}</span> : null
-                    ) : n.target ? (
-                      <span className="ltr inline-block font-mono">{n.target}</span>
-                    ) : null}
-                  </div>
-                  {!ws && n.target_next ? (
-                    <p className="mt-1.5 text-xs leading-5 text-fg-muted">
-                      <Badge tone="info">سایت هدف تازه</Badge> <span className="ltr inline-block font-mono">{n.target_next}</span> پس از پایان کانفیگ‌های فعلی
-                    </p>
-                  ) : null}
-                </li>
-              );
-            })}
+            {current.map((n) => (
+              <NodeItem key={n.node_id} n={n} settings={settings} cert={cert} />
+            ))}
           </ul>
         )}
+        <EndedSection count={ended.length} hint="سوخته یا در حال کنار رفتن." className="mt-3">
+          <ul className="flex flex-col gap-2">
+            {ended.map((n) => (
+              <NodeItem key={n.node_id} n={n} settings={settings} cert={cert} />
+            ))}
+          </ul>
+        </EndedSection>
       </div>
     </Card>
   );
@@ -281,7 +334,7 @@ function NodesCard({ nodes, transport, cert }: { nodes: RealityNode[]; transport
 
 // --- settings ------------------------------------------------------------------------------------
 
-const DRAFT_KEYS = new Set<string>(["enabled", "transport", "renew", "configs_per_node", "cap_hours", "cap_gb", "target_host", "target_port", "link_name"]);
+const DRAFT_KEYS = new Set<string>(["enabled", "transport", "xhttp_enabled", "renew", "configs_per_node", "cap_hours", "cap_gb", "target_host", "target_port", "link_name"]);
 
 /** 422 {"fields": ["cap_gb", ...]} -> which form fields the server refused. */
 function serverErrors(err: unknown): RealityDraftErrors {
@@ -355,6 +408,14 @@ function SettingsCard({ initial, defaults }: { initial: RealitySettingsView; def
             <p className="text-xs leading-6 text-warning">با ذخیره، کانفیگ‌های فعال روش دیگر کنار میروند (🚫 روی پست‌ها)؛ هر node فقط یک روش را روی پورت ۴۴۳ دارد.</p>
           ) : null}
         </div>
+        {draft.transport === "reality" ? (
+          <Toggle
+            checked={draft.xhttp_enabled}
+            onCheckedChange={(v) => set("xhttp_enabled", v)}
+            label={`XHTTP روی پورت ${toFaDigits(initial.xhttp_port)}`}
+            description="هر کانفیگ دو لینک میگیرد: «کانفیگ N (TCP)» و «کانفیگ N (XHTTP)»، با همان زمان و حجم. XHTTP همان کلید Reality را دارد و روی پورت جدا اجرا میشود؛ لینکش وقتی منتشر میشود که node بگوید آن را بالا آورده است."
+          />
+        ) : null}
         <Toggle
           checked={draft.enabled}
           onCheckedChange={(v) => set("enabled", v)}
@@ -419,7 +480,7 @@ function SettingsCard({ initial, defaults }: { initial: RealitySettingsView; def
             برگرداندن
           </Button>
           <span className="text-xs text-fg-faint">
-            پورت Xray روی همه‌ی nodeها {formatNumber(initial.port)} است (ثابت).
+            پورت Xray روی همه‌ی nodeها {toFaDigits(initial.port)} است و XHTTP {toFaDigits(initial.xhttp_port)} (ثابت).
           </span>
         </div>
       </form>
@@ -436,7 +497,7 @@ export default function RealityPage() {
     <>
       <PageHeader
         title="Reality"
-        subtitle="کانفیگ‌های VLESS که پست‌ها منتشر میکنند (پیش‌فرض: WebSocket + TLS با دامنه‌ی خود هر node): هر کدام کوتاه‌عمر، با زمان و حجم محدود، و بی هیچ ردی از IP کاربر."
+        subtitle="کانفیگ‌های VLESS که پست‌ها منتشر میکنند (Reality روی TCP و XHTTP، یا WebSocket + TLS با دامنه‌ی خود هر node): هر کدام کوتاه‌عمر، با زمان و حجم محدود، و بی هیچ ردی از IP کاربر."
       />
       {q.isPending ? (
         <div className="grid gap-4 lg:grid-cols-12">
@@ -460,7 +521,7 @@ export default function RealityPage() {
           <Summary s={s} />
           <div className="grid gap-4 sm:gap-5 lg:grid-cols-12">
             <ConfigsCard configs={s.configs} />
-            <NodesCard nodes={s.nodes} transport={s.settings.transport} cert={s.certificate} />
+            <NodesCard nodes={s.nodes} settings={s.settings} cert={s.certificate} />
             <SettingsCard key={JSON.stringify(s.settings)} initial={s.settings} defaults={s.defaults} />
           </div>
           <p className="flex items-center gap-2 text-xs leading-6 text-fg-faint">

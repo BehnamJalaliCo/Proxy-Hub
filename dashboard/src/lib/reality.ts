@@ -4,7 +4,7 @@
 // (panel/proxyhub/reality/settings.py). Nothing here is about a person: a config is a link anyone in
 // the channel may use.
 
-import { formatNumber } from "./format";
+import { formatNumber, toFaDigits } from "./format";
 import type { Tone } from "./labels";
 import { normalizeDigits } from "./validation";
 
@@ -17,6 +17,9 @@ export type Transport = "ws_tls" | "reality";
 export interface RealitySettings {
   enabled: boolean;
   transport: Transport;
+  /** With transport reality: the same configs also through VLESS + XHTTP + REALITY on its own port
+   * (each config gets a second link). */
+  xhttp_enabled: boolean;
   /** D41: a working config gets another period (same link) an hour before its end. */
   renew: boolean;
   configs_per_node: number;
@@ -30,6 +33,8 @@ export interface RealitySettings {
 export interface RealitySettingsView extends RealitySettings {
   /** Fixed by the cross-team contract: Xray listens on TCP 443 on every node. */
   port: number;
+  /** Fixed as well: the XHTTP inbound's port (2083). */
+  xhttp_port: number;
   /** Bytes per GB the caps use (decimal, 10^9). */
   gb_bytes: number;
 }
@@ -43,6 +48,8 @@ export interface RealityXray {
   target_ok: boolean | null;
   apply_error: string | null;
   reported_at: string | null;
+  /** The XHTTP inbound's port while the node runs it (null: none). */
+  xhttp_port: number | null;
 }
 
 export interface RealityNode {
@@ -66,6 +73,8 @@ export interface RealityNode {
   ws_path: string | null;
   /** The node's agent can serve ws_tls (0.3.0 or newer). */
   agent_ws_tls: boolean;
+  /** The node's agent can serve XHTTP (0.4.0 or newer). */
+  agent_xhttp: boolean;
   active_configs: number;
 }
 
@@ -101,6 +110,16 @@ export interface RealityConfig {
   used_bytes: number;
   remaining_bytes: number;
   /** The vless:// link (active configs only): the owner publishes it on purpose. */
+  url: string | null;
+  /** The same config through VLESS + XHTTP + REALITY (null: ws_tls, or XHTTP off). */
+  xhttp: RealityXhttpLink | null;
+}
+
+export interface RealityXhttpLink {
+  key: string;
+  /** Handed to posts (its node reported the XHTTP inbound up). */
+  listed: boolean;
+  /** Active configs only. */
   url: string | null;
 }
 
@@ -150,7 +169,7 @@ export const TRANSPORT: Record<Transport, { label: string; short: string; hint: 
   reality: {
     label: "Reality با سایت هدف خارجی",
     short: "Reality",
-    hint: "نام سایت هدف (مثل dl.google.com) روی IP هتزنر؛ در آزمون ۵ نوامبر از ایران سایتی باز نشد.",
+    hint: "VLESS + REALITY روی TCP با نام سایت هدف (مثل dl.google.com). با XHTTP روشن، هر کانفیگ لینک دومی هم دارد: همان کانفیگ با XHTTP روی پورت ۲۰۸۳.",
   },
 };
 
@@ -169,6 +188,15 @@ export function xrayState(x: RealityXray | null, transport: Transport = "reality
     return { label: ws ? "Xray فعال است؛ TLS خود node هنوز آزموده نشده" : "Xray فعال است؛ سایت هدف هنوز آزموده نشده", tone: "info" };
   }
   return { label: "Xray فعال است", tone: "success" };
+}
+
+/** The XHTTP inbound of a node in one Persian phrase and a tone (null: nothing to say, e.g. ws_tls). */
+export function xhttpState(n: Pick<RealityNode, "agent_xhttp" | "xray">, s: Pick<RealitySettings, "transport" | "xhttp_enabled">): { label: string; tone: Tone } | null {
+  if (s.transport !== "reality") return null;
+  if (!s.xhttp_enabled) return { label: "XHTTP خاموش است", tone: "neutral" };
+  if (!n.agent_xhttp) return { label: "عامل این node قدیمی است (XHTTP از نسخه‌ی ۰٫۴٫۰)", tone: "neutral" };
+  if (n.xray?.up && n.xray.xhttp_port !== null) return { label: `XHTTP روی پورت ${toFaDigits(String(n.xray.xhttp_port))} فعال است`, tone: "success" };
+  return { label: "XHTTP هنوز روی node بالا نیامده", tone: "info" };
 }
 
 /** Why a node gets no ws_tls inbound yet (null: it has everything). */
@@ -194,6 +222,11 @@ export function savedMessage(before: RealitySettings, after: RealitySettings): s
     return after.transport === "ws_tls"
       ? "nodeها به WebSocket + TLS میروند؛ کانفیگ‌های Reality کنار میروند (🚫 روی پست) و کانفیگ تازه با نام دامنه‌ی هر node ساخته میشود."
       : "nodeها به Reality برمیگردند؛ کانفیگ‌های WebSocket + TLS کنار میروند (🚫 روی پست) و کانفیگ تازه‌ی Reality ساخته میشود.";
+  }
+  if (before.xhttp_enabled !== after.xhttp_enabled && after.transport === "reality") {
+    return after.xhttp_enabled
+      ? "nodeها XHTTP را روی پورت ۲۰۸۳ بالا میآورند؛ هر کانفیگ پس از تأیید node لینک XHTTP هم میگیرد."
+      : "XHTTP از nodeها برداشته میشود؛ لینک‌های XHTTP پست‌ها بی‌لینک (⏸) میمانند و کانفیگ‌ها با TCP کار میکنند.";
   }
   if (before.target_host !== after.target_host || before.target_port !== after.target_port) {
     return "هر جایگاه پس از پایان کانفیگ‌های فعلی‌اش به سایت هدف تازه میرود (اگر سایت قبلی از node جواب نمیداد، بی‌درنگ). node سایت تازه را میآزماید و بعد کانفیگ تازه میگیرد.";
@@ -258,6 +291,7 @@ export function sortConfigs(configs: RealityConfig[]): RealityConfig[] {
 export interface RealityDraft {
   enabled: boolean;
   transport: Transport;
+  xhttp_enabled: boolean;
   renew: boolean;
   configs_per_node: string;
   cap_hours: string;
@@ -276,6 +310,7 @@ export function draftFrom(s: RealitySettings): RealityDraft {
   return {
     enabled: s.enabled,
     transport: s.transport,
+    xhttp_enabled: s.xhttp_enabled,
     renew: s.renew,
     configs_per_node: String(s.configs_per_node),
     cap_hours: String(s.cap_hours),
@@ -318,6 +353,7 @@ export function parseDraft(d: RealityDraft): { settings: RealitySettings | null;
     settings: {
       enabled: d.enabled,
       transport: d.transport,
+      xhttp_enabled: d.xhttp_enabled,
       renew: d.renew,
       configs_per_node: configs,
       cap_hours: hours,
@@ -334,6 +370,7 @@ export function sameSettings(a: RealitySettings, b: RealitySettings): boolean {
   return (
     a.enabled === b.enabled &&
     a.transport === b.transport &&
+    a.xhttp_enabled === b.xhttp_enabled &&
     a.renew === b.renew &&
     a.configs_per_node === b.configs_per_node &&
     a.cap_hours === b.cap_hours &&

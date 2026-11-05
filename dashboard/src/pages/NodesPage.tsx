@@ -28,10 +28,12 @@ import { ProbeGrid } from "../components/ProbeGrid";
 import { Button, IconButton } from "../components/ui/Button";
 import { Badge, Card, CardHeader, StatusDot } from "../components/ui/Card";
 import { ConfirmDialog, Drawer } from "../components/ui/Dialogs";
+import { EndedSection } from "../components/ui/EndedSection";
 import { CopyButton, EmptyState, LoadError, Skeleton, SkeletonLines } from "../components/ui/Feedback";
 import { PageHeader } from "../components/ui/PageHeader";
 import { errorList, errorMessage, isApiError } from "../lib/api";
 import { cn } from "../lib/browser";
+import { isEndedNode, splitEnded } from "../lib/ended";
 import * as api from "../lib/endpoints";
 import {
   modeInfo,
@@ -632,6 +634,7 @@ export default function NodesPage() {
   const [eventsOf, setEventsOf] = useState<NodeInfo | null>(null);
 
   const list = sortNodes(nodes.data ?? []);
+  const split = splitEnded(list, isEndedNode);
   const live = list.filter(isLiveNode);
   const counts = countByState(list);
   const testNode = liveTestNode(list);
@@ -722,21 +725,50 @@ export default function NodesPage() {
                 />
               </Card>
             ) : (
-              <ul className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                {list.map((n, i) => (
-                  <NodeCard
-                    key={n.id}
-                    node={n}
-                    index={i}
-                    probe={targetOf(probes.data?.targets, n.id)}
-                    onEvents={() => setEventsOf(n)}
-                    onRetire={() => {
-                      setRetireError(null);
-                      setRetire(n);
-                    }}
-                  />
-                ))}
-              </ul>
+              <>
+                {split.current.length === 0 ? (
+                  <Card>
+                    <EmptyState
+                      icon={<Server className="size-7" />}
+                      title="node فعالی نیست"
+                      description="همه‌ی nodeها کنار رفته یا حذف شده‌اند؛ پایین‌تر در «پایان‌یافته‌ها» هستند."
+                    />
+                  </Card>
+                ) : (
+                  <ul className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {split.current.map((n, i) => (
+                      <NodeCard
+                        key={n.id}
+                        node={n}
+                        index={i}
+                        probe={targetOf(probes.data?.targets, n.id)}
+                        onEvents={() => setEventsOf(n)}
+                        onRetire={() => {
+                          setRetireError(null);
+                          setRetire(n);
+                        }}
+                      />
+                    ))}
+                  </ul>
+                )}
+                <EndedSection count={split.ended.length} hint="سوخته، در حال کنار رفتن یا حذف‌شده (حذف‌شده‌ها تا یک هفته).">
+                  <ul className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {split.ended.map((n, i) => (
+                      <NodeCard
+                        key={n.id}
+                        node={n}
+                        index={i}
+                        probe={targetOf(probes.data?.targets, n.id)}
+                        onEvents={() => setEventsOf(n)}
+                        onRetire={() => {
+                          setRetireError(null);
+                          setRetire(n);
+                        }}
+                      />
+                    ))}
+                  </ul>
+                </EndedSection>
+              </>
             )}
           </>
         )}

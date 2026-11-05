@@ -15,6 +15,7 @@ import {
   certificateState,
   TRANSPORT,
   wsBlocker,
+  xhttpState,
   xrayState,
   type RealityCertificate,
   type RealityConfig,
@@ -24,6 +25,7 @@ import {
 const DEFAULTS: RealitySettings = {
   enabled: true,
   transport: "ws_tls",
+  xhttp_enabled: true,
   renew: true,
   configs_per_node: 2,
   cap_hours: 48,
@@ -53,6 +55,7 @@ function config(over: Partial<RealityConfig>): RealityConfig {
     used_bytes: 0,
     remaining_bytes: 50e9,
     url: "vless://x",
+    xhttp: null,
     ...over,
   };
 }
@@ -148,7 +151,7 @@ describe("reality words", () => {
   });
 
   it("explains a node's Xray state", () => {
-    const base = { enabled: true, up: true, version: "26.10.31", uptime_s: 5, target_ok: true, apply_error: null, reported_at: null };
+    const base = { enabled: true, up: true, version: "26.10.31", uptime_s: 5, target_ok: true, apply_error: null, reported_at: null, xhttp_port: null };
     expect(xrayState(null).tone).toBe("neutral");
     expect(xrayState({ ...base, enabled: false }).tone).toBe("neutral");
     expect(xrayState(base)).toEqual({ label: "Xray فعال است", tone: "success" });
@@ -200,9 +203,43 @@ describe("transport (WebSocket + TLS)", () => {
   });
 
   it("explains the node's own TLS check", () => {
-    const base = { enabled: true, up: true, version: "26.10.31", uptime_s: 5, target_ok: false, apply_error: null, reported_at: null };
+    const base = { enabled: true, up: true, version: "26.10.31", uptime_s: 5, target_ok: false, apply_error: null, reported_at: null, xhttp_port: null };
     expect(xrayState(base, "ws_tls").label).toContain("گواهی");
     expect(xrayState({ ...base, target_ok: null }, "ws_tls").label).toContain("TLS خود node");
     expect(xrayState(base, "reality").label).toContain("سایت هدف");
+  });
+});
+
+describe("XHTTP (VLESS + XHTTP + REALITY next to every REALITY inbound)", () => {
+  const xray = { enabled: true, up: true, version: "26.10.31", uptime_s: 5, target_ok: true, apply_error: null, reported_at: null, xhttp_port: 2083 };
+  const reality = { transport: "reality" as const, xhttp_enabled: true };
+
+  it("keeps the switch through the form and says what turning it off or on does", () => {
+    const off = parseDraft({ ...draftFrom({ ...DEFAULTS, transport: "reality" }), xhttp_enabled: false }).settings;
+    expect(off?.xhttp_enabled).toBe(false);
+    expect(off && sameSettings(off, { ...DEFAULTS, transport: "reality" })).toBe(false);
+    const on = { ...DEFAULTS, transport: "reality" as const };
+    expect(savedMessage(on, { ...on, xhttp_enabled: false })).toContain("XHTTP");
+    expect(savedMessage({ ...on, xhttp_enabled: false }, on)).toContain("۲۰۸۳");
+    // A transport switch is the bigger news; ws_tls has no XHTTP to talk about.
+    expect(savedMessage(DEFAULTS, { ...on, xhttp_enabled: false })).toContain("Reality برمیگردند");
+    expect(savedMessage(DEFAULTS, { ...DEFAULTS, xhttp_enabled: false })).not.toContain("XHTTP");
+  });
+
+  it("says where each node's XHTTP inbound stands", () => {
+    const node = { agent_xhttp: true, xray };
+    expect(xhttpState(node, reality)).toEqual({ label: "XHTTP روی پورت ۲۰۸۳ فعال است", tone: "success" });
+    expect(xhttpState({ ...node, xray: { ...xray, xhttp_port: null } }, reality)?.tone).toBe("info");
+    expect(xhttpState({ ...node, xray: { ...xray, up: false } }, reality)?.tone).toBe("info");
+    expect(xhttpState({ ...node, xray: null }, reality)?.tone).toBe("info");
+    expect(xhttpState({ ...node, agent_xhttp: false }, reality)?.label).toContain("۰٫۴٫۰");
+    expect(xhttpState(node, { ...reality, xhttp_enabled: false })?.tone).toBe("neutral");
+    expect(xhttpState(node, { transport: "ws_tls", xhttp_enabled: true })).toBeNull();
+  });
+
+  it("names the REALITY transport with its XHTTP link", () => {
+    expect(TRANSPORT.reality.hint).toContain("XHTTP");
+    const c = config({ transport: "reality", xhttp: { key: "reality:1:xhttp", listed: true, url: "vless://y" } });
+    expect(c.xhttp?.key).toBe(`${c.key}:xhttp`);
   });
 });

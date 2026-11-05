@@ -5,11 +5,13 @@ import { useState, type ReactNode, type SubmitEvent } from "react";
 
 import { Button } from "../components/ui/Button";
 import { Badge, Card, CardHeader } from "../components/ui/Card";
+import { EndedSection } from "../components/ui/EndedSection";
 import { CopyButton, EmptyState, LoadError, Skeleton } from "../components/ui/Feedback";
 import { Field, TextInput, Toggle } from "../components/ui/Form";
 import { PageHeader } from "../components/ui/PageHeader";
 import { errorList, errorMessage, isApiError } from "../lib/api";
 import { cn } from "../lib/browser";
+import { isEndedProxy, splitEnded } from "../lib/ended";
 import { formatJalali, formatNumber, formatRelative, toFaDigits } from "../lib/format";
 import { nodeStateInfo } from "../lib/labels";
 import {
@@ -257,6 +259,7 @@ export default function MtprotoPage() {
   const q = useMtproto();
   const data = q.data;
   const s = data ? summarize(data.proxies) : null;
+  const split = data ? splitEnded(data.proxies, isEndedProxy) : null;
 
   return (
     <>
@@ -298,21 +301,30 @@ export default function MtprotoPage() {
               )}
             </div>
 
-            {data.proxies.length === 0 ? (
+            {split && split.current.length === 0 ? (
               <Card>
                 <EmptyState
                   icon={<ShieldCheck className="size-6" />}
-                  title="هنوز پروکسی‌ای نیست"
+                  title={split.ended.length ? "پروکسی فعالی نیست" : "هنوز پروکسی‌ای نیست"}
                   description="وقتی nodeی ساخته شود، پنل خودش Telemt و secret آن را تنظیم میکند و لینکش اینجا میآید."
                 />
               </Card>
-            ) : (
+            ) : split ? (
               <ul className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                {data.proxies.map((p, i) => (
+                {split.current.map((p, i) => (
                   <ProxyCard key={p.key} p={p} index={i} />
                 ))}
               </ul>
-            )}
+            ) : null}
+            {split ? (
+              <EndedSection count={split.ended.length} hint="nodeهای کنارگذاشته یا فیلترشده؛ لینکشان دیگر منتشر نمیشود.">
+                <ul className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  {split.ended.map((p, i) => (
+                    <ProxyCard key={p.key} p={p} index={i} />
+                  ))}
+                </ul>
+              </EndedSection>
+            ) : null}
 
             <SettingsForm
               key={JSON.stringify(data.settings ?? data.defaults)}
