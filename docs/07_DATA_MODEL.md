@@ -56,5 +56,13 @@
 | `posts`، `post_links`، `content_items` | role، plan_day، plan_slot، لینک‌های هر پست | پست خودکار؛ فقط ویرایش، هرگز حذف. لینک node آزمایشی هرگز در کانال اصلی نمیآید. |
 | `reality_keys` / `reality_configs` / `reality_usage` / `reality_node_status` | slot، کلید رمزشده، uuid، انقضا، حجم، checked_target | کانفیگ ۲۴ ساعته یا ۵۰ گیگ؛ مصرف فقط برای هر کانفیگ، نه هر فرد. |
 
+## سنجش TLS از ایران (migration `0019_iranprobe`، P15)
+| جدول | ستون‌های اصلی | توضیح |
+|---|---|---|
+| `probe_measurements` (نوع `https`، نقش `target`) | kind، role، target، port | دست‌دادن TLS از ایران؛ نقش `target` یعنی سایت نامزد، بی node. |
+| `probe_location_reach` | node_id، network_key، location، state، at | آخرین نتیجه‌ی TLS هر node ما از هر شبکه (`open`/`closed`)؛ برنامه‌ریز ناوگان از ۷ روز اخیر آن امتیاز location میسازد. |
+| `target_states` | host، iran، iran_prev، node_ok_at، node_fail_at | دو دور آخر هر سایت نامزد از ایران و آزمون خود nodeها؛ انتخاب خودکار هدف Reality و دامنه‌ی MTProto از روی آن. |
+| `probe_sources.tls_probes` | — | شمار نقطه‌هایی که آخرین کنترل TLS گرفت (برای بودجه‌ی Globalping). |
+
 ## چیزهایی که **هیچ‌جا** نیست
 IP کاربر، زمان اتصال هر کاربر، و مقصد ترافیک (قانون ۷).
