@@ -8,6 +8,9 @@ not inside a no-post window (D21), at least ``post_interval_min`` since the last
 channels), and no earlier post still waiting in the outbox. **A post never goes without at least
 one live link** (docs/04): then nothing is queued, the slot stays due until its grace ends, and the
 owner hears it at most once a day (not while the fleet's kill switch is on: nothing can run then).
+The post goes through the owner's poster (proxyhub/posts/poster.py); when that is the operator
+account and it cannot take the post now, the post goes to the bot and the reason is logged
+(``posts.poster_fallback``, shown on the Content page).
 
 **Status edits** (:func:`refresh_posts`): every sent post younger than ``edit_window_hours`` is
 rendered again from what it carries: a link the provider now REPORTS expired/full/burned (or whose
@@ -47,7 +50,7 @@ from proxyhub.db.models_telegram import ChannelPost
 from proxyhub.fleet.actions import iso, log_action
 from proxyhub.fleet.settings_store import SettingsCorrupt, load_fleet_settings
 from proxyhub.links.contract import ProxyLink
-from proxyhub.posts import content, links, plan, settings
+from proxyhub.posts import content, links, operator, plan, settings
 from proxyhub.posts.messages import (
     CONTENT_RECYCLED_ALERT_FA,
     EDITS_GIVEN_UP_FA,
@@ -55,7 +58,7 @@ from proxyhub.posts.messages import (
     NO_CONTENT_ALERT_FA,
     NO_LINKS_ALERT_FA,
 )
-from proxyhub.posts.poster import BOT, POSTERS, Poster
+from proxyhub.posts.poster import BOT, POSTERS, Poster, for_new_post
 from proxyhub.telegram import store as tg_store
 from proxyhub.telegram.schedule import quiet_until
 from proxyhub.telegram.templates import (
@@ -254,6 +257,7 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
     rendered, chosen = fit(content_for(item), chosen, where.tag, cfg.texts())
     if not chosen:
         return "no_links"
+    poster, fallback = await for_new_post(db, poster, role=where.role, now=now)
     job = await poster.queue_post(db, role=where.role, text_html=rendered.text)
     post_id = (
         await db.execute(
@@ -289,6 +293,10 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
             for i, x in enumerate(chosen)
         ],
     )
+    if fallback is not None:
+        await operator.log_fallback(
+            db, actor=ACTOR, role=where.role, post_id=post_id, reason=fallback, stage="queue", outbox_id=job
+        )
     if item is not None:
         await content.mark_used(db, item.id, now)
         if recycled:
@@ -311,6 +319,7 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
             "recycled": recycled,
             "mtproto": sum(1 for x in chosen if x.kind == "mtproto"),
             "reality": sum(1 for x in chosen if x.kind == "reality"),
+            "poster": poster.name,
         },
     )
     return "queued"

@@ -17,7 +17,7 @@ from proxyhub.db.models import Outbox
 from proxyhub.db.models_posts import ContentItem, Post, PostLink
 from proxyhub.db.models_telegram import ChannelPost
 from proxyhub.fleet.actions import iso
-from proxyhub.posts import content, links, plan, publisher, settings
+from proxyhub.posts import content, entities, links, operator, plan, publisher, settings
 from proxyhub.telegram import store as tg_store
 from proxyhub.telegram.schedule import TEHRAN, quiet_until
 from proxyhub.telegram.templates import utf16_len, visible_text
@@ -75,11 +75,15 @@ async def preview(db: AsyncConnection, now: datetime, h: links.Harvest) -> dict[
     item, recycled = await content.next_item(db, now, cfg.recycle_after_days)
     rendered, chosen = publisher.fit(publisher.content_for(item), chosen, tag, cfg.texts())
     where = await publisher.target(db, cfg)
+    pack = await operator.emoji_map(db)
     return {
         "target": cfg.target_role,
         "blocked": where if isinstance(where, str) else ("no_links" if not chosen else None),
         "text": rendered.text,
         "chars": utf16_len(visible_text(rendered.text)),
+        # Which emoji the operator account's post would show animated (decision D38); the bot's
+        # post always keeps plain emoji.
+        "emoji": [{"emoji": e, "animated": a} for e, a in entities.emoji_report(rendered.text, pack)],
         "content_item": {"id": item.id, "title": item.title, "recycled": recycled} if item else None,
         "links": {
             "mtproto": sum(1 for x in chosen if x.kind == "mtproto"),
@@ -111,6 +115,7 @@ async def recent(db: AsyncConnection, now: datetime, limit: int = 20) -> list[di
                 Post.edits,
                 Post.last_edit_at,
                 Post.edit_failures,
+                Post.poster,
                 ContentItem.title,
                 Outbox.done_at,
                 Outbox.last_error,
@@ -165,6 +170,7 @@ async def recent(db: AsyncConnection, now: datetime, limit: int = 20) -> list[di
                 "edits_stopped": int(r.edit_failures) >= publisher.MAX_EDIT_FAILURES,
                 "watching": now - r.created_at < window,
                 "message_url": message_url,
+                "poster": r.poster,
             }
         )
     return out

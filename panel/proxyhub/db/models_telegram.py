@@ -54,8 +54,8 @@ class TelegramPairing(Base):
 
 
 class ChannelPost(Base):
-    """A message the bot posted in a channel. Posts are only ever edited, never removed (rule 6),
-    and only through the message_id recorded here."""
+    """A message the bot (or, decision D38, the operator account) posted in a channel. Posts are only
+    ever edited, never removed (rule 6), and only through the message_id recorded here."""
 
     __tablename__ = "channel_posts"
     __table_args__ = (

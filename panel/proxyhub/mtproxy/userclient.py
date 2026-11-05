@@ -23,17 +23,33 @@ connection opened with a :class:`ChannelScope` that names the configured main an
   ``stats.getBroadcastStats`` and ``stats.loadAsyncGraph`` (only for tokens Telegram handed out in
   that same answer),
 * :meth:`OperatorSession.messages_views`: ``messages.getMessagesViews`` of our posts, never
-  incrementing the view counter.
+  incrementing the view counter,
 
-Any other peer, any delete request and any send outside the @MTProxybot chat are refused before a
-byte leaves.
+and, for the operator poster (decision D38; proxyhub/posts/operator.py), Premium posts with animated
+custom emoji in OUR channels:
+
+* :meth:`OperatorSession.post_in_channel` / :meth:`OperatorSession.edit_channel_post`:
+  ``messages.sendMessage`` / ``messages.editMessage`` with a text and its formatting entities, only
+  in the channels the connection's :class:`ChannelScope` names in ``post_ids`` (the configured test
+  channel, and the main channel only while the owner's main switch is on). No buttons, media,
+  scheduling, "send as", reply or forward ever rides along,
+* :meth:`OperatorSession.my_rights`: ``channels.getParticipant`` of the account ITSELF in one of
+  our channels (can it post and edit; does it wrongly have the delete right),
+* :meth:`OperatorSession.emoji_pack`: ``messages.getStickerSet`` of the ONE emoji pack the owner
+  configured (``ChannelScope.emoji_set``), by its short name.
+
+Any other peer, any delete request, any forward and any send outside the @MTProxybot chat and our
+configured channels are refused before a byte leaves.
 
 Locks (docs/11 section 2.1):
 
 * Every request passes :meth:`_OperatorClient._call`, which refuses any request type outside
   :data:`ALLOWED_REQUESTS` and :data:`BOT_CHAT_REQUESTS` and checks the arguments of those that could reach
   further (``users.getUsers`` only for the account itself, ``contacts.resolveUsername`` only for @MTProxybot
-  and our own channels, the statistics requests only for our configured channels, see :class:`ChannelScope`).
+  and our own channels, the statistics requests only for our configured channels, see :class:`ChannelScope`;
+  posts and edits only in the scope's ``post_ids`` with the fields in :data:`_POST_FIELDS` and the
+  entity kinds in :data:`POST_ENTITY_TYPES`; ``channels.getParticipant`` only for the account itself;
+  ``messages.getStickerSet`` only for the scope's one emoji pack).
   The three chat requests (``messages.sendMessage``, ``messages.getHistory`` with a small limit,
   ``messages.getBotCallbackAnswer``) pass only when their peer is the @MTProxybot user that
   :meth:`OperatorSession.open_mtproxybot_chat` resolved on this connection AND whose id equals the id the
@@ -61,16 +77,18 @@ import re
 import time
 import traceback
 from collections import Counter
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
 
 from telethon import TelegramClient, errors, functions, types
 from telethon import password as tl_password
+from telethon.errors import rpcerrorlist
 from telethon.sessions import StringSession
 
 from proxyhub import __version__
+from proxyhub.posts.entities import TextEntity
 from proxyhub.vault import SecretValue
 
 log = logging.getLogger(__name__)
@@ -275,7 +293,18 @@ _TRANSPORT_TROUBLE: Final = (
 )
 
 
+# Telethon builds a known error (MessageNotModifiedError, UserNotParticipantError, ...) from
+# Telegram's error name, but its ``message`` is only the class's generic one (BAD_REQUEST); the name
+# itself is the key of the library's own table.
+_RPC_NAMES: Final[dict[type[Exception], str]] = {
+    cls: name for name, cls in rpcerrorlist.rpc_errors_dict.items() if _RPC_NAME_RE.fullmatch(name)
+}
+
+
 def _rpc_name(exc: Exception) -> str | None:
+    known = _RPC_NAMES.get(type(exc))
+    if known is not None:
+        return known
     message = getattr(exc, "message", None)
     return message if isinstance(message, str) and _RPC_NAME_RE.fullmatch(message) else None
 
@@ -322,6 +351,14 @@ CHANNEL_STATS_REQUESTS: Final[frozenset[type[Any]]] = frozenset(
         functions.messages.GetMessagesViewsRequest,
     }
 )
+# The operator poster's two reads (decision D38): the account's OWN membership in one of our
+# channels (its admin rights) and the owner's one custom-emoji pack. Neither returns a message.
+POSTER_READ_REQUESTS: Final[frozenset[type[Any]]] = frozenset(
+    {
+        functions.channels.GetParticipantRequest,
+        functions.messages.GetStickerSetRequest,
+    }
+)
 ALLOWED_REQUESTS: Final[frozenset[type[Any]]] = frozenset(
     {
         functions.auth.SendCodeRequest,
@@ -335,6 +372,7 @@ ALLOWED_REQUESTS: Final[frozenset[type[Any]]] = frozenset(
         functions.updates.GetStateRequest,
     }
     | CHANNEL_STATS_REQUESTS
+    | POSTER_READ_REQUESTS
 )
 MAX_VIEWS_IDS: Final = 100
 
@@ -343,11 +381,17 @@ MAX_VIEWS_IDS: Final = 100
 class ChannelScope:
     """The only channels a session may ask about: bare channel ids and their public usernames
     (lower case, no @). ``graph_tokens`` collects the async-graph tokens Telegram handed out in this
-    session for those channels; stats.loadAsyncGraph accepts only those."""
+    session for those channels; stats.loadAsyncGraph accepts only those.
+
+    ``post_ids``: the channels this connection may post and edit in (a subset of ``channel_ids``;
+    empty unless the operator poster opened it for one post or edit). ``emoji_set``: the short name
+    (lower case) of the one emoji pack messages.getStickerSet may read, or None."""
 
     channel_ids: frozenset[int] = frozenset()
     usernames: frozenset[str] = frozenset()
     graph_tokens: set[str] = field(default_factory=set)
+    post_ids: frozenset[int] = frozenset()
+    emoji_set: str | None = None
 
 
 def _channel_id(peer: Any) -> int | None:
@@ -407,17 +451,128 @@ def _check_bot_chat_request(request: Any, bot_id: int | None) -> None:
             raise RequestNotAllowed("messages.getBotCallbackAnswer: an inline button's data only")
 
 
+# Posting in OUR channels (decision D38, proxyhub/posts/operator.py): a new post and the edit of a
+# post. Allowed ONLY with a channel peer in the scope's ``post_ids``; see :func:`_check_channel_post`.
+# messages.sendMessage with any other peer is the @MTProxybot chat request above (or refused).
+CHANNEL_POST_REQUESTS: Final[frozenset[type[Any]]] = frozenset(
+    {functions.messages.SendMessageRequest, functions.messages.EditMessageRequest}
+)
+# The fields a post or an edit may carry; every other field must be empty (None or False), so no
+# reply markup, media, scheduling, "send as", reply, silent flag, paid stars or effect rides along.
+_POST_FIELDS: Final[dict[type[Any], frozenset[str]]] = {
+    functions.messages.SendMessageRequest: frozenset(
+        {"peer", "message", "entities", "no_webpage", "random_id"}
+    ),
+    functions.messages.EditMessageRequest: frozenset({"peer", "id", "message", "entities", "no_webpage"}),
+}
+# The formatting a post may carry: what our HTML template renders (proxyhub/posts/entities.py) plus
+# the animated custom emoji. No mention of a user, no "mention name" entity, nothing that pings.
+POST_ENTITY_TYPES: Final[frozenset[type[Any]]] = frozenset(
+    {
+        types.MessageEntityBold,
+        types.MessageEntityItalic,
+        types.MessageEntityUnderline,
+        types.MessageEntityStrike,
+        types.MessageEntitySpoiler,
+        types.MessageEntityCode,
+        types.MessageEntityPre,
+        types.MessageEntityTextUrl,
+        types.MessageEntityBlockquote,
+        types.MessageEntityCustomEmoji,
+    }
+)
+MAX_POST_TEXT: Final = 4096  # UTF-16 code units, Telegram's limit for one message
+MAX_POST_ENTITIES: Final = 200
+_LINK_SCHEMES: Final = ("https://", "http://", "tg://")
+
+
+def _post_channel(request: Any, scope: ChannelScope) -> bool:
+    """The request names, as its peer, one of the channels this connection may post in."""
+    peer: Any = getattr(request, "peer", None)
+    return type(peer) is types.InputPeerChannel and int(peer.channel_id) in scope.post_ids
+
+
+def _check_entities(entities: Any, text_units: int) -> None:
+    if entities is None:
+        return
+    if not isinstance(entities, list) or len(entities) > MAX_POST_ENTITIES:
+        raise RequestNotAllowed("channel post: a short list of formatting entities only")
+    for entity in entities:
+        if type(entity) not in POST_ENTITY_TYPES:
+            raise RequestNotAllowed(f"channel post: entity not allowed: {type(entity).__name__}")
+        offset, length = entity.offset, entity.length
+        if (
+            not isinstance(offset, int)
+            or not isinstance(length, int)
+            or offset < 0
+            or length <= 0
+            or offset + length > text_units
+        ):
+            raise RequestNotAllowed("channel post: an entity outside the text")
+        if type(entity) is types.MessageEntityTextUrl and not (
+            isinstance(entity.url, str) and entity.url.lower().startswith(_LINK_SCHEMES)
+        ):
+            raise RequestNotAllowed("channel post: links are http(s) or tg only")
+        if type(entity) is types.MessageEntityCustomEmoji and (
+            not isinstance(entity.document_id, int) or isinstance(entity.document_id, bool)
+        ):
+            raise RequestNotAllowed("channel post: a custom emoji needs its document id")
+
+
+def _check_channel_post(request: Any) -> None:
+    """A post or an edit in one of our channels (the peer was checked by :func:`_post_channel`)."""
+    kind = type(request)
+    extra = [
+        name
+        for name, value in vars(request).items()
+        if name not in _POST_FIELDS[kind] and value is not None and value is not False
+    ]
+    if extra:
+        raise RequestNotAllowed(f"{kind.__name__}: fields not allowed: {sorted(extra)}")
+    text = request.message
+    units = len(text.encode("utf-16-le")) // 2 if isinstance(text, str) else 0
+    if not isinstance(text, str) or not text.strip() or units > MAX_POST_TEXT:
+        raise RequestNotAllowed(f"{kind.__name__}: a text of 1 to {MAX_POST_TEXT} characters only")
+    if kind is functions.messages.EditMessageRequest and not (
+        isinstance(request.id, int) and not isinstance(request.id, bool) and request.id > 0
+    ):
+        raise RequestNotAllowed("messages.editMessage: the id of one of our posts")
+    _check_entities(request.entities, units)
+
+
+def _check_poster_read(request: Any, scope: ChannelScope) -> None:
+    if type(request) is functions.channels.GetParticipantRequest:
+        if _channel_id(request.channel) not in scope.channel_ids or type(request.participant) is not (
+            types.InputPeerSelf
+        ):
+            raise RequestNotAllowed("channels.getParticipant: the account itself, in our channels only")
+        return
+    stickerset = request.stickerset
+    if (  # without an emoji_set (None) no name equals it
+        type(stickerset) is not types.InputStickerSetShortName
+        or str(stickerset.short_name).lower() != scope.emoji_set
+        or request.hash != 0
+    ):
+        raise RequestNotAllowed("messages.getStickerSet: only the emoji pack the owner configured")
+
+
 def check_request(request: Any, scope: ChannelScope | None = None, *, bot_id: int | None = None) -> None:
     """Raise :class:`RequestNotAllowed` unless ``request`` is allowed with these arguments.
-    ``scope``: our configured channels (statistics requests are allowed only for them).
+    ``scope``: our configured channels (statistics requests are allowed only for them; posts and
+    edits only for its ``post_ids``; the sticker set read only for its ``emoji_set``).
     ``bot_id``: @MTProxybot's user id once its chat is open on this connection, else None."""
     kind = type(request)
+    scope = scope or ChannelScope()
+    if kind in CHANNEL_POST_REQUESTS and _post_channel(request, scope):
+        _check_channel_post(request)
+        return
     if kind in BOT_CHAT_REQUESTS:
         _check_bot_chat_request(request, bot_id)
         return
-    scope = scope or ChannelScope()
     if kind not in ALLOWED_REQUESTS:
         raise RequestNotAllowed(f"request not allowed: {kind.__name__}")
+    if kind in POSTER_READ_REQUESTS:
+        _check_poster_read(request, scope)
     if kind is functions.users.GetUsersRequest and not (
         request.id and all(isinstance(u, types.InputUserSelf) for u in request.id)
     ):
@@ -716,6 +871,61 @@ class OperatorSession:
             out.append((msg_id, int(item.views or 0), int(item.forwards or 0)))
         return out
 
+    # --- the operator poster (decision D38): posts, edits, own rights, the owner's emoji pack ---
+
+    async def post_in_channel(self, ref: ChannelRef, text: str, entities: Sequence[TextEntity]) -> int | None:
+        """A new post in one of OUR channels (the scope's ``post_ids``), link previews off. The new
+        message's id, or None when Telegram's answer does not say it (the post may exist anyway)."""
+        request = functions.messages.SendMessageRequest(
+            peer=ref.input_peer(), message=text, entities=tl_entities(entities) or None, no_webpage=True
+        )
+        result = await self._run(self._client(request))
+        return channel_post_id(result, random_id=request.random_id, channel_id=ref.channel_id)
+
+    async def edit_channel_post(
+        self, ref: ChannelRef, message_id: int, text: str, entities: Sequence[TextEntity]
+    ) -> None:
+        """The new text of one of our posts (the scope's ``post_ids``). Never anything else."""
+        await self._run(
+            self._client(
+                functions.messages.EditMessageRequest(
+                    peer=ref.input_peer(),
+                    id=message_id,
+                    message=text,
+                    entities=tl_entities(entities) or None,
+                    no_webpage=True,
+                )
+            )
+        )
+
+    async def my_rights(self, ref: ChannelRef) -> ChannelRights:
+        """The account's own membership and admin rights in one of our channels."""
+        try:
+            result = await self._run(
+                self._client(
+                    functions.channels.GetParticipantRequest(
+                        channel=ref.input_channel(), participant=types.InputPeerSelf()
+                    )
+                )
+            )
+        except MtpError as exc:
+            if exc.rpc == "USER_NOT_PARTICIPANT":
+                return ChannelRights(status="not_member", can_post=False, can_edit=False, can_delete=False)
+            raise
+        return channel_rights(getattr(result, "participant", None))
+
+    async def emoji_pack(self, short_name: str) -> EmojiPack:
+        """The custom-emoji pack ``short_name`` (the scope's ``emoji_set``): its title and every
+        emoji's document id with its ``alt`` emoji."""
+        result = await self._run(
+            self._client(
+                functions.messages.GetStickerSetRequest(
+                    stickerset=types.InputStickerSetShortName(short_name=short_name), hash=0
+                )
+            )
+        )
+        return emoji_pack_of(result)
+
 
 @dataclass(frozen=True)
 class ChannelRef:
@@ -730,6 +940,140 @@ class ChannelRef:
 
     def input_peer(self) -> Any:
         return types.InputPeerChannel(channel_id=self.channel_id, access_hash=self.access_hash)
+
+
+# --- the operator poster's data (decision D38): plain values in, plain values out ---------------------
+
+_TL_ENTITY: Final[dict[str, type[Any]]] = {
+    "bold": types.MessageEntityBold,
+    "italic": types.MessageEntityItalic,
+    "underline": types.MessageEntityUnderline,
+    "strike": types.MessageEntityStrike,
+    "spoiler": types.MessageEntitySpoiler,
+    "code": types.MessageEntityCode,
+    "pre": types.MessageEntityPre,
+    "text_url": types.MessageEntityTextUrl,
+    "blockquote": types.MessageEntityBlockquote,
+    "custom_emoji": types.MessageEntityCustomEmoji,
+}
+
+
+def tl_entity(e: TextEntity) -> Any:
+    """The real TL MessageEntity for one :class:`~proxyhub.posts.entities.TextEntity`."""
+    cls = _TL_ENTITY[e.kind]
+    if cls is types.MessageEntityPre:
+        return cls(offset=e.offset, length=e.length, language=e.language or "")
+    if cls is types.MessageEntityTextUrl:
+        return cls(offset=e.offset, length=e.length, url=e.url or "")
+    if cls is types.MessageEntityBlockquote:
+        return cls(offset=e.offset, length=e.length, collapsed=True if e.collapsed else None)
+    if cls is types.MessageEntityCustomEmoji:
+        return cls(offset=e.offset, length=e.length, document_id=int(e.document_id or 0))
+    return cls(offset=e.offset, length=e.length)
+
+
+def tl_entities(entities: Sequence[TextEntity]) -> list[Any]:
+    return [tl_entity(e) for e in entities]
+
+
+def channel_post_id(result: Any, *, random_id: int | None, channel_id: int) -> int | None:
+    """Our new post's id from a messages.sendMessage answer in a channel: the UpdateMessageID that
+    carries our random_id, else the new message of that channel. None if neither is there."""
+    updates = getattr(result, "updates", None) or []
+    for update in updates:
+        if (
+            isinstance(update, types.UpdateMessageID)
+            and random_id is not None
+            and update.random_id == random_id
+        ):
+            return int(update.id)
+    for update in updates:
+        message = getattr(update, "message", None)
+        peer = getattr(message, "peer_id", None)
+        if (
+            isinstance(update, types.UpdateNewChannelMessage)
+            and isinstance(message, types.Message)
+            and isinstance(peer, types.PeerChannel)
+            and int(peer.channel_id) == channel_id
+        ):
+            return int(message.id)
+    return None
+
+
+@dataclass(frozen=True)
+class ChannelRights:
+    """The operator account in one of our channels. ``status``: creator, admin, member,
+    not_member, banned or left."""
+
+    status: str
+    can_post: bool
+    can_edit: bool
+    can_delete: bool
+
+
+def channel_rights(participant: Any) -> ChannelRights:
+    """A ChannelParticipant* of the account itself -> its rights as plain data."""
+    if isinstance(participant, types.ChannelParticipantCreator | types.ChannelParticipantAdmin):
+        admin_rights = participant.admin_rights
+        status = "creator" if isinstance(participant, types.ChannelParticipantCreator) else "admin"
+        return ChannelRights(
+            status=status,
+            can_post=bool(getattr(admin_rights, "post_messages", False)),
+            can_edit=bool(getattr(admin_rights, "edit_messages", False)),
+            can_delete=bool(admin_rights.delete_messages),
+        )
+    if isinstance(participant, types.ChannelParticipantBanned):
+        status = "banned"
+    elif isinstance(participant, types.ChannelParticipantLeft):
+        status = "left"
+    else:
+        status = "member"
+    return ChannelRights(status=status, can_post=False, can_edit=False, can_delete=False)
+
+
+@dataclass(frozen=True)
+class EmojiPack:
+    """A custom-emoji pack: ``entries`` are (document id, alt emoji) in the pack's order."""
+
+    short_name: str
+    title: str
+    is_emoji: bool
+    entries: tuple[tuple[int, str], ...]
+
+
+MAX_PACK_ENTRIES: Final = 300
+
+
+def emoji_pack_of(result: Any) -> EmojiPack:
+    """messages.StickerSet -> plain data. The alt of each emoji comes from its
+    DocumentAttributeCustomEmoji, else from the pack's emoticon list."""
+    sticker_set = getattr(result, "set", None)
+    if not isinstance(result, types.messages.StickerSet) or not isinstance(sticker_set, types.StickerSet):
+        raise MtpError("telegram_refused", rpc="STICKERSET_NOT_RETURNED")
+    from_packs: dict[int, str] = {}
+    for pack in result.packs or []:
+        for document_id in pack.documents or []:
+            from_packs.setdefault(int(document_id), str(pack.emoticon or ""))
+    entries: list[tuple[int, str]] = []
+    for document in (result.documents or [])[:MAX_PACK_ENTRIES]:
+        if not isinstance(document, types.Document):
+            continue
+        alt = next(
+            (
+                str(a.alt)
+                for a in document.attributes or []
+                if isinstance(a, types.DocumentAttributeCustomEmoji) and a.alt
+            ),
+            from_packs.get(int(document.id), ""),
+        )
+        if alt:
+            entries.append((int(document.id), alt))
+    return EmojiPack(
+        short_name=str(sticker_set.short_name),
+        title=str(sticker_set.title or ""),
+        is_emoji=bool(sticker_set.emojis),
+        entries=tuple(entries),
+    )
 
 
 # --- the chat with @MTProxybot (proxyhub/sponsor) ------------------------------------------------------

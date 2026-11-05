@@ -226,10 +226,15 @@ def test_only_six_operations_worth_of_requests_are_allowed() -> None:
         "GetBroadcastStatsRequest",
         "LoadAsyncGraphRequest",
         "GetMessagesViewsRequest",
+        # D38, the operator poster's two reads: the account's OWN rights in our channels and the
+        # owner's one emoji pack (tests/test_operator_poster_allowlist.py proves the argument checks).
+        "GetParticipantRequest",
+        "GetStickerSetRequest",
     }
-    # Nothing sends: the only request of the messages namespace is the read-only views counter.
+    # Nothing here sends: the messages namespace has the read-only views counter and the emoji pack.
+    # (A post or an edit is CHANNEL_POST_REQUESTS, allowed only for a scope's post channels.)
     messages = {kind.__name__ for kind in ALLOWED_REQUESTS if kind.__module__.endswith(".messages")}
-    assert messages == {"GetMessagesViewsRequest"}
+    assert messages == {"GetMessagesViewsRequest", "GetStickerSetRequest"}
 
 
 @pytest.mark.parametrize(

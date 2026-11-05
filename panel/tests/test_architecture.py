@@ -12,9 +12,15 @@ PANEL = Path(__file__).resolve().parents[1] / "proxyhub"
 REPO = PANEL.parents[1]
 
 # Rule 6: posts are never deleted. No Telegram delete call may exist anywhere in the code. Reading
-# the admin flag can_delete_messages (to warn the owner) is allowed; the bot client also refuses
-# every method outside its allowlist (proxyhub/telegram/client.py).
-TG_DELETE = re.compile(r"(?<!can_)delete_?messages?\b|deleteMessages?\b", re.IGNORECASE)
+# the admin flag to warn the owner is allowed: the Bot API's can_delete_messages, and (D38) the
+# operator account's own ``admin_rights.delete_messages`` as an attribute, never called. The bot
+# client also refuses every method outside its allowlist (proxyhub/telegram/client.py), and the
+# operator client every request outside its own (proxyhub/mtproxy/userclient.py).
+TG_DELETE = re.compile(
+    r"(?<!can_)(?<!admin_rights\.)delete_?messages?\b|admin_rights\.delete_?messages?\s*\(|deleteMessages?\b"
+    r"|\bDelete\w*Request\b|delete_?history\b",
+    re.IGNORECASE,
+)
 # Rule 5: only proxyhub/hetzner/mutations.py may create or delete servers.
 HCLOUD_MUTATION = re.compile(r"\.servers\.(create|delete|rebuild)\(|\bdelete_server\(|\bcreate_server\(")
 # Rule 7: never call APIs that return user IPs (Xray online-IP stats, telemt IP lists).
@@ -45,12 +51,48 @@ USER_ACCOUNT_READS = re.compile(
 # proxyhub/sponsor talks to @MTProxybot, and only through userclient.BotChat: the raw requests that
 # write to or read a chat are named in userclient.py alone (where the allowlist pins their peer to
 # the bot), and no other request of Telegram's messages namespace is named anywhere.
-BOT_CHAT_REQUEST_NAMES = re.compile(r"SendMessageRequest|GetHistoryRequest|GetBotCallbackAnswerRequest")
+BOT_CHAT_REQUEST_NAMES = re.compile(
+    r"SendMessageRequest|GetHistoryRequest|GetBotCallbackAnswerRequest|EditMessageRequest"
+)
 MESSAGES_NAMESPACE = re.compile(r"functions\.messages\.(\w+)")
+CHANNELS_NAMESPACE = re.compile(r"functions\.channels\.(\w+)")
 BOT_CHAT_ONLY = {"SendMessageRequest", "GetHistoryRequest", "GetBotCallbackAnswerRequest"}
 # D38: the one messages.* read outside the bot chat. Channel statistics read the view and forward
 # counts of OUR channels' posts, never incrementing a view (proxyhub/mtproxy/channel_stats.py).
 CHANNEL_STATS_MESSAGES = {"GetMessagesViewsRequest"}
+# D38, the operator poster (proxyhub/posts/operator_outbox.py): a post (messages.sendMessage, the
+# same request class as the bot chat's, pinned to the scope's post channels) and the EDIT of a post
+# in OUR channels, and the read of the owner's one emoji pack. Nothing else of messages.*.
+CHANNEL_POST_MESSAGES = {"EditMessageRequest", "GetStickerSetRequest"}
+# channels.*: the statistics' full channel, and (D38) the account's own membership (its rights).
+CHANNELS_REQUESTS = {"GetFullChannelRequest", "GetParticipantRequest"}
+# Every request class the operator client can EVER let through (any scope, any bot chat), by TL
+# name. Nothing that deletes, forwards, uploads, joins, leaves, reports, invites or changes rights.
+OPERATOR_PASSABLE = {
+    "auth.SendCodeRequest",
+    "auth.SignInRequest",
+    "auth.CheckPasswordRequest",
+    "auth.LogOutRequest",
+    "account.GetPasswordRequest",
+    "users.GetUsersRequest",
+    "contacts.ResolveUsernameRequest",
+    "help.GetConfigRequest",
+    "updates.GetStateRequest",
+    "channels.GetFullChannelRequest",
+    "channels.GetParticipantRequest",
+    "stats.GetBroadcastStatsRequest",
+    "stats.LoadAsyncGraphRequest",
+    "messages.GetMessagesViewsRequest",
+    "messages.GetStickerSetRequest",
+    "messages.SendMessageRequest",
+    "messages.EditMessageRequest",
+    "messages.GetHistoryRequest",
+    "messages.GetBotCallbackAnswerRequest",
+}
+FORBIDDEN_REQUEST_WORDS = re.compile(
+    r"Delete|Forward|Upload|Media|Join|Leave|Report|Invite|Edit(?:Admin|Banned|Creator|Title|Photo)|"
+    r"Block|Import|Export|Install|Save|Read|Clear|Pin|Search|Dialog|Contact",
+)
 # Telethon's high-level helpers that write to, or read, any chat (the sponsor code must not reach
 # around the allowlisted BotChat).
 USER_ACCOUNT_WRITES = re.compile(
@@ -75,6 +117,26 @@ def test_negative_controls_match() -> None:
     assert TG_DELETE.search('requests.post(url + "/deleteMessage")')
     assert TG_DELETE.search("client.delete_messages(chat, [1, 2])")
     assert not TG_DELETE.search('member.get("can_delete_messages")')
+    # D38: the operator account's own delete flag may be READ (to warn the owner), never called,
+    # and no other object's delete_messages may even be named.
+    assert not TG_DELETE.search("can_delete=bool(admin_rights.delete_messages),")
+    assert TG_DELETE.search("await admin_rights.delete_messages(chat, [1])")
+    assert TG_DELETE.search("await admin_rights.delete_messages (chat, [1])")
+    assert TG_DELETE.search("rights.delete_messages")
+    assert TG_DELETE.search('getattr(rights, "delete_messages")')
+    # MTProto's delete requests by their TL names (no word boundary inside "DeleteMessagesRequest").
+    assert TG_DELETE.search("functions.channels.DeleteMessagesRequest(c, [1])")
+    assert TG_DELETE.search("functions.messages.DeleteMessagesRequest(id=[1], revoke=True)")
+    assert TG_DELETE.search("functions.messages.DeleteHistoryRequest(peer, max_id=0)")
+    assert TG_DELETE.search("functions.channels.DeleteHistoryRequest(channel, max_id=0)")
+    assert TG_DELETE.search("await client.delete_history(peer)")
+    assert FORBIDDEN_REQUEST_WORDS.search("messages.DeleteMessagesRequest")
+    assert FORBIDDEN_REQUEST_WORDS.search("channels.DeleteHistoryRequest")
+    assert FORBIDDEN_REQUEST_WORDS.search("messages.ForwardMessagesRequest")
+    assert FORBIDDEN_REQUEST_WORDS.search("channels.EditAdminRequest")
+    assert not FORBIDDEN_REQUEST_WORDS.search("messages.EditMessageRequest")
+    assert CHANNELS_NAMESPACE.findall("functions.channels.LeaveChannelRequest(c)") == ["LeaveChannelRequest"]
+    assert BOT_CHAT_REQUEST_NAMES.search("functions.messages.EditMessageRequest(peer=p, id=1, message=m)")
     assert HCLOUD_MUTATION.search("client.servers.delete(server)")
     assert IP_APIS.search('httpx.get("http://127.0.0.1:9091/v1/users")')
     assert IP_APIS.search('"statsUserOnline": true')
@@ -181,10 +243,16 @@ def test_chat_requests_are_named_only_by_the_operator_client() -> None:
     # a chat, and its allowlist pins every one of them to @MTProxybot.
     named = {p for p in PANEL.rglob("*.py") if BOT_CHAT_REQUEST_NAMES.search(p.read_text(encoding="utf-8"))}
     assert named == {TELETHON_MODULE}, f"chat requests named outside userclient.py: {named}"
-    used = set()
+    used: set[str] = set()
+    channels: set[str] = set()
     for p in _sources():
-        used |= set(MESSAGES_NAMESPACE.findall(_strip_comments(p.read_text(encoding="utf-8"))))
-    assert used == BOT_CHAT_ONLY | CHANNEL_STATS_MESSAGES, f"messages.* requests in the panel: {sorted(used)}"
+        text = _strip_comments(p.read_text(encoding="utf-8"))
+        used |= set(MESSAGES_NAMESPACE.findall(text))
+        channels |= set(CHANNELS_NAMESPACE.findall(text))
+    assert used == BOT_CHAT_ONLY | CHANNEL_STATS_MESSAGES | CHANNEL_POST_MESSAGES, (
+        f"messages.* requests in the panel: {sorted(used)}"
+    )
+    assert channels == CHANNELS_REQUESTS, f"channels.* requests in the panel: {sorted(channels)}"
 
 
 def _operator_account_code() -> list[Path]:
@@ -225,7 +293,8 @@ def test_the_bot_chat_allowlist_is_exactly_three_requests_pinned_to_the_bot() ->
     assert {k.__name__ for k in BOT_CHAT_REQUESTS} == BOT_CHAT_ONLY
     assert not BOT_CHAT_REQUESTS & ALLOWED_REQUESTS
     in_messages = {k.__name__ for k in ALLOWED_REQUESTS if k.__module__.endswith(".messages")}
-    assert in_messages == CHANNEL_STATS_MESSAGES  # read-only, our channels only (D38)
+    # read-only: our channels' view counts, and the owner's one emoji pack (D38)
+    assert in_messages == CHANNEL_STATS_MESSAGES | {"GetStickerSetRequest"}
     other = types.InputPeerChannel(channel_id=1_234_567, access_hash=1)
     for views in (
         functions.messages.GetMessagesViewsRequest(peer=other, id=[1], increment=False),
@@ -246,3 +315,78 @@ def test_the_bot_chat_allowlist_is_exactly_three_requests_pinned_to_the_bot() ->
         except RequestNotAllowed:
             continue
         raise AssertionError(f"sendMessage passed with bot_id={bot_id}")
+
+
+def _tl_name(kind: type) -> str:
+    return f"{kind.__module__.rsplit('.', 1)[-1]}.{kind.__name__}"
+
+
+def test_the_operator_client_can_let_through_exactly_these_requests() -> None:
+    """D38 adds exactly: a post and an edit in our channels, the account's own rights and the
+    owner's emoji pack. Nothing that deletes, forwards or changes anything else, in any scope."""
+    from proxyhub.mtproxy.userclient import (
+        ALLOWED_REQUESTS,
+        BOT_CHAT_REQUESTS,
+        CHANNEL_POST_REQUESTS,
+        POSTER_READ_REQUESTS,
+    )
+
+    passable = {_tl_name(k) for k in ALLOWED_REQUESTS | BOT_CHAT_REQUESTS | CHANNEL_POST_REQUESTS}
+    assert passable == OPERATOR_PASSABLE, sorted(passable ^ OPERATOR_PASSABLE)
+    assert {_tl_name(k) for k in CHANNEL_POST_REQUESTS} == {
+        "messages.SendMessageRequest",
+        "messages.EditMessageRequest",
+    }
+    assert {_tl_name(k) for k in POSTER_READ_REQUESTS} == {
+        "channels.GetParticipantRequest",
+        "messages.GetStickerSetRequest",
+    }
+    for name in passable:  # editing a POST is allowed; editing admins, titles or photos is not
+        assert not FORBIDDEN_REQUEST_WORDS.search(name), name
+
+
+def test_a_full_scope_still_refuses_every_delete_forward_and_media_request() -> None:
+    """Even a connection allowed to post in the channel, read its rights and the emoji pack, with
+    the bot chat open, cannot delete, forward, send media or post anywhere else."""
+    from telethon import functions, types
+
+    from proxyhub.mtproxy.userclient import ChannelScope, RequestNotAllowed, check_request
+
+    ours = 1_234_567_890
+    scope = ChannelScope(
+        channel_ids=frozenset({ours}),
+        usernames=frozenset({"ipoxxo"}),
+        post_ids=frozenset({ours}),
+        emoji_set="pack",
+    )
+    peer = types.InputPeerChannel(channel_id=ours, access_hash=1)
+    channel = types.InputChannel(channel_id=ours, access_hash=1)
+    check_request(functions.messages.SendMessageRequest(peer=peer, message="سلام"), scope)  # the control
+    check_request(functions.messages.EditMessageRequest(peer=peer, id=7, message="سلام"), scope)
+    for bad in (
+        functions.messages.DeleteMessagesRequest(id=[7], revoke=True),
+        functions.channels.DeleteMessagesRequest(channel=channel, id=[7]),
+        functions.messages.DeleteHistoryRequest(peer=peer, max_id=0, revoke=True),
+        functions.channels.DeleteHistoryRequest(channel=channel, max_id=0),
+        functions.channels.DeleteChannelRequest(channel=channel),
+        functions.messages.ForwardMessagesRequest(from_peer=peer, id=[7], to_peer=types.InputPeerSelf()),
+        functions.messages.ForwardMessagesRequest(from_peer=types.InputPeerSelf(), id=[7], to_peer=peer),
+        functions.messages.SendMediaRequest(peer=peer, media=types.InputMediaEmpty(), message="x"),
+        functions.messages.SendMessageRequest(peer=types.InputPeerSelf(), message="x"),
+        functions.messages.SendMessageRequest(
+            peer=types.InputPeerChannel(channel_id=ours + 1, access_hash=1), message="x"
+        ),
+        functions.messages.EditMessageRequest(
+            peer=types.InputPeerChannel(channel_id=ours + 1, access_hash=1), id=7, message="x"
+        ),
+        functions.channels.EditAdminRequest(
+            channel=channel, user_id=types.InputUserSelf(), admin_rights=types.ChatAdminRights(), rank=""
+        ),
+        functions.channels.LeaveChannelRequest(channel=channel),
+        functions.messages.UpdatePinnedMessageRequest(peer=peer, id=7),
+    ):
+        try:
+            check_request(bad, scope, bot_id=93_372_553)
+        except RequestNotAllowed:
+            continue
+        raise AssertionError(f"passed with a full scope: {type(bad).__name__}")

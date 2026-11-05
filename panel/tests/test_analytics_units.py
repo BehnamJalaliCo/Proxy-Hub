@@ -396,7 +396,9 @@ def test_exactly_four_channel_requests_were_added() -> None:
         functions.stats.LoadAsyncGraphRequest,
         functions.messages.GetMessagesViewsRequest,
     }
-    assert CHANNEL_STATS_REQUESTS <= ALLOWED_REQUESTS and len(ALLOWED_REQUESTS) == 13
+    # 9 for the login and the bot chat's helpers, these 4, and the operator poster's 2 reads (D38:
+    # the account's own rights, the owner's emoji pack; tests/test_operator_poster_allowlist.py).
+    assert CHANNEL_STATS_REQUESTS <= ALLOWED_REQUESTS and len(ALLOWED_REQUESTS) == 15
 
 
 def _ours() -> types.InputChannel:
