@@ -237,6 +237,30 @@ async def test_manual_mode_never_switches_and_no_open_site_is_told_daily(engine:
     assert [a["action"] for a in await actions(engine)] == ["target_no_candidate", "target_no_candidate"]
 
 
+async def test_corrupt_settings_are_never_overwritten_by_a_switch(engine: AsyncEngine) -> None:
+    now = datetime.now(UTC)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO settings (key, value) VALUES ('reality', CAST(:r AS jsonb)), "
+                "('mtproto', CAST(:m AS jsonb))"
+            ),
+            {"r": '{"cap_gb": -1}', "m": '{"port": 22}'},
+        )
+        for at in (now - timedelta(hours=7), now - timedelta(hours=1)):
+            await store_round(conn, site_round(at, ["www.apple.com"], ["www.microsoft.com"]))
+        assert await apply_auto(conn, TargetSettings(), KEYS, now) == []
+    async with engine.connect() as conn:
+        stored = dict(
+            (
+                await conn.execute(
+                    text("SELECT key, value FROM settings WHERE key IN ('reality', 'mtproto')")
+                )
+            ).all()
+        )
+    assert stored == {"reality": {"cap_gb": -1}, "mtproto": {"port": 22}}  # left for the owner to repair
+
+
 async def test_the_targets_loop_with_globalping_unreachable(engine: AsyncEngine) -> None:
     rec = TargetsReconciler(gp_factory=closed_gp)
     async with engine.begin() as conn:

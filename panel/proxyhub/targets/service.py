@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
@@ -39,6 +40,7 @@ from proxyhub.probes.globalping import GlobalpingClient, RateLimit, https_body, 
 from proxyhub.probes.service import store_measurement
 from proxyhub.probes.settings import ProbeSettings
 from proxyhub.probes.types import IRAN_NETWORKS_FA, Measurement
+from proxyhub.reality.settings import SETTINGS_KEY as REALITY_KEY
 from proxyhub.reality.settings import RealitySettings, load_reality_settings, save_reality_settings
 from proxyhub.reality.store import all_statuses
 from proxyhub.targets.choice import (
@@ -53,7 +55,7 @@ from proxyhub.targets.choice import (
     open_from_iran,
 )
 from proxyhub.targets.settings import TargetSettings, load_state, save_state
-from proxyhub.telegram.store import enqueue_owner_alert
+from proxyhub.telegram.store import enqueue_owner_alert, get_setting
 
 log = logging.getLogger(__name__)
 
@@ -364,7 +366,7 @@ async def apply_auto(db: Db, settings: TargetSettings, keys: Sequence[str], now:
     stuck: list[str] = []
 
     reality = await load_reality_settings(db)
-    if reality.target_mode == "auto":
+    if reality.target_mode == "auto" and not await _reality_corrupt(db):
         choice = choose_reality(reality.target_host, listed, states, keys, now)
         if choice.switch:
             new = RealitySettings.model_validate(
@@ -421,6 +423,19 @@ async def apply_auto(db: Db, settings: TargetSettings, keys: Sequence[str], now:
             state["no_candidate_alert_at"] = now.isoformat()
             await save_state(db, state)
     return out
+
+
+async def _reality_corrupt(db: Db) -> bool:
+    """Stored Reality settings that no longer validate: the loop then works on the defaults, and
+    saving a switch would silently replace the owner's values with them. Leave it to the owner."""
+    raw = await get_setting(db, REALITY_KEY)
+    if raw is None:
+        return False
+    try:
+        RealitySettings.model_validate(raw)
+    except ValidationError:
+        return True
+    return False
 
 
 async def _logged_switch(db: Db, kind: str, old: str, choice: Choice) -> None:
