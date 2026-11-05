@@ -336,18 +336,112 @@ export interface ProbeNetwork {
   ok: number;
   fail: number;
   at: string;
+  source?: string;
+  /** False when the network had no probe in that measurement. */
+  probe?: boolean;
+  /** "https": a real TLS handshake (what decides, P15); absent on TCP information. */
+  kind?: "https";
+  port?: number | null;
+  /** Why a handshake failed: tls_timeout, tcp_timeout, reset, other. */
+  failure?: string | null;
 }
 
 export interface ProbeTarget {
   node_id: string;
   name: string;
   ipv4: string;
+  location?: string;
   verdict: ProbeVerdict;
+  verdict_at?: string | null;
+  verdict_reasons?: string[];
+  /** TLS handshakes per network and port (443 and the MTProto port). */
   networks: ProbeNetwork[];
+  /** The name (or IP) the handshakes went to: the node's own DNS name when it points at the node. */
+  tls_target?: string | null;
+  /** TCP pings: information only (MCI and Rightel answer a SYN themselves for blocked addresses). */
+  tcp_networks?: ProbeNetwork[];
+}
+
+export type LocationClass = "good" | "mixed" | "unknown" | "bad";
+
+export interface LocationNetwork {
+  key: string;
+  network: string;
+  asn: number | null;
+  state: "open" | "closed";
+  at: string;
+  nodes_open: number;
+  nodes_closed: number;
+  /** MCI or Rightel: the networks that decide. */
+  key_network: boolean;
+}
+
+export interface LocationReach {
+  location: string;
+  /** In the owner's allowed list (fleet settings). */
+  allowed: boolean;
+  class: LocationClass;
+  networks: LocationNetwork[];
+}
+
+export interface LocationsSummary {
+  window_days: number;
+  key_networks: string[];
+  locations: LocationReach[];
 }
 
 export interface ProbeSummary {
   last_run_at: string | null;
   sources: ProbeSource[];
   targets: ProbeTarget[];
+  /** Missing on a panel older than the location scores. */
+  locations?: LocationsSummary;
+}
+
+// --- candidate REALITY targets / fake-TLS domains measured from Iran (P15) -----------------------
+
+export interface TargetSettings {
+  enabled: boolean;
+  candidates: string[];
+  interval_h: number;
+}
+
+export interface TargetNetwork {
+  key: string;
+  state: "up" | "down" | "nodata";
+  network: string;
+  asn: number | null;
+  ms: number | null;
+  key_network: boolean;
+}
+
+export interface TargetCandidate {
+  host: string;
+  /** In the owner's candidate list (else it is only a current target). */
+  listed: boolean;
+  current_for: ("reality" | "mtproto")[];
+  measured_at: string | null;
+  networks: TargetNetwork[];
+  prev_measured_at: string | null;
+  prev_networks: TargetNetwork[];
+  /** Open from Iran: up on a key network and down on none, in the latest round. */
+  open: boolean;
+  /** Key networks it was closed on in the latest two rounds. */
+  blocked_on: string[];
+  ms: number | null;
+  /** Our nodes' own TLS 1.3 + HTTP/2 check of it (REALITY), if any node checked it lately. */
+  node_check: "passed" | "failed" | null;
+  node_ok_at: string | null;
+  node_fail_at: string | null;
+}
+
+export interface TargetsSummary {
+  settings: TargetSettings;
+  defaults: TargetSettings;
+  key_networks: string[];
+  reality: { mode: "auto" | "manual"; target: string; transport: string };
+  mtproto: { mode: "auto" | "manual"; tls_domain: string } | null;
+  last_full_at: string | null;
+  next_full_at: string | null;
+  candidates: TargetCandidate[];
 }

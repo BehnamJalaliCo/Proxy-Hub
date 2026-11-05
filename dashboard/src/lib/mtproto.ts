@@ -10,11 +10,15 @@ import type { Tone } from "./labels";
 import { asciiDigits } from "./validation";
 
 export type MtprotoMode = "tls" | "secure" | "classic";
+/** auto: the panel replaces a tls_domain that is blocked from Iran by a candidate site (P15). */
+export type MtprotoTargetMode = "auto" | "manual";
 export type MtprotoStatus = "pending" | "active" | "expired" | "burned";
 
 export interface MtprotoSettings {
   port: number;
   tls_domain: string;
+  /** Missing on a panel older than the automatic choice (then the domain is the owner's). */
+  target_mode?: MtprotoTargetMode;
   mode_tls: boolean;
   mode_secure: boolean;
   mode_classic: boolean;
@@ -112,6 +116,7 @@ export const MODE_LABEL: Record<MtprotoMode, { label: string; short: string; hin
 export const FORBIDDEN_PORTS: ReadonlyMap<number, string> = new Map([
   [22, "پورت ۲۲ برای SSH است و فایروال node آن را میبندد."],
   [443, "پورت ۴۴۳ مال VLESS Reality روی همه‌ی nodeهاست."],
+  [2083, "پورت ۲۰۸۳ مال VLESS + XHTTP روی همه‌ی nodeهاست."],
   [9090, "پورت ۹۰۹۰ مال آمار داخلی Telemt است."],
   [9091, "پورت ۹۰۹۱ مال API داخلی Telemt است."],
 ]);
@@ -119,6 +124,7 @@ export const FORBIDDEN_PORTS: ReadonlyMap<number, string> = new Map([
 export interface MtprotoDraft {
   port: string;
   tls_domain: string;
+  target_mode: MtprotoTargetMode;
   mode_tls: boolean;
   mode_secure: boolean;
   mode_classic: boolean;
@@ -130,6 +136,7 @@ export function draftFromMtproto(s: MtprotoSettings): MtprotoDraft {
   return {
     port: String(s.port),
     tls_domain: s.tls_domain,
+    target_mode: s.target_mode ?? "manual",
     mode_tls: s.mode_tls,
     mode_secure: s.mode_secure,
     mode_classic: s.mode_classic,
@@ -184,6 +191,7 @@ export function mtprotoFromDraft(d: MtprotoDraft): { value: MtprotoSettingsInput
     value: {
       port: port.value,
       tls_domain: normalizeDomain(d.tls_domain),
+      target_mode: d.target_mode,
       mode_tls: d.mode_tls,
       mode_secure: d.mode_secure,
       mode_classic: d.mode_classic,
@@ -207,7 +215,7 @@ export function serverErrors(fields: string[]): MtprotoDraftErrors {
   const out: MtprotoDraftErrors = {};
   for (const f of fields) {
     if (f === "port") out.port = "سرور این پورت را نپذیرفت.";
-    else if (f === "tls_domain") out.tls_domain = "سرور این دامنه را نپذیرفت.";
+    else if (f === "tls_domain" || f === "target_mode") out.tls_domain = "سرور این دامنه را نپذیرفت.";
     else if (f === "modes" || f.startsWith("mode_")) out.modes = "سرور این ترکیب حالت‌ها را نپذیرفت.";
   }
   return out;

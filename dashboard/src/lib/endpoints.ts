@@ -22,6 +22,8 @@ import type {
   SessionInfo,
   SetupBegin,
   SetupStatus,
+  TargetSettings,
+  TargetsSummary,
   TestNodeRequested,
   TgPairing,
   TgSettings,
@@ -178,3 +180,7 @@ export const getProbeSummary = (signal?: AbortSignal) =>
   request<ProbeSummary>("GET", "/api/probes/summary", undefined, opts(signal));
 
 export const runProbe = (node_id: string) => request<Record<string, never>>("POST", "/api/probes/run", { node_id });
+
+export const getTargets = (signal?: AbortSignal) => request<TargetsSummary>("GET", "/api/targets", undefined, opts(signal));
+
+export const putTargetSettings = (s: TargetSettings) => request<TargetsSummary>("PUT", "/api/targets/settings", s);

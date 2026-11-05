@@ -2,7 +2,8 @@
 //
 // Metric names are Telemt 3.5.16's own (src/metrics/render/process.rs, connections.rs, users.rs).
 // Only an allow-list is ever kept: per user (secret) the current connection count and the octet
-// counters, and a few process counters. Everything else is dropped while parsing, including the
+// counters, and a few process counters (among them two throughput diagnostics: data the middle
+// proxy sent that a client's queue had no room for, and connections refused at max_connections). Everything else is dropped while parsing, including the
 // per-user unique-IP gauges: the agent never handles anything derived from client addresses, and
 // it never requests any other Telemt endpoint (CLAUDE.md rule 7).
 package metrics
@@ -30,12 +31,18 @@ const (
 	UserConnectionsCurrent = "telemt_user_connections_current"
 	UserOctetsFromClient   = "telemt_user_octets_from_client_total"
 	UserOctetsToClient     = "telemt_user_octets_to_client_total"
+	// MeRouteDropsQueueFull: data from Telegram's middle proxy dropped because the client's route
+	// queue was full (a client slower than the middle proxy; src/transport/middle_proxy/reader.rs).
+	MeRouteDropsQueueFull = "telemt_me_route_drop_queue_full_total"
+	// AcceptPermitTimeouts: accepted connections dropped while waiting for a permit
+	// (server.max_connections reached).
+	AcceptPermitTimeouts = "telemt_accept_permit_timeout_total"
 )
 
 var kept = map[string]bool{
 	BuildInfo: true, Uptime: true, ConnectionsTotal: true, ConnectionsBadTotal: true,
 	HandshakeTimeoutsTotal: true, UserConnectionsCurrent: true, UserOctetsFromClient: true,
-	UserOctetsToClient: true,
+	UserOctetsToClient: true, MeRouteDropsQueueFull: true, AcceptPermitTimeouts: true,
 }
 
 // MaxBody bounds a scrape (Telemt caps user-labelled series at 4096 users).
@@ -184,6 +191,8 @@ type Stats struct {
 	ConnectionsTotal       *uint64
 	ConnectionsBadTotal    *uint64
 	HandshakeTimeoutsTotal *uint64
+	MeRouteDropsTotal      *uint64
+	AcceptPermitTimeouts   *uint64
 	Users                  map[string]UserStats
 }
 
@@ -208,7 +217,7 @@ func Extract(samples []Sample) Stats {
 				v := s.Value
 				st.UptimeS = &v
 			}
-		case ConnectionsTotal, ConnectionsBadTotal, HandshakeTimeoutsTotal:
+		case ConnectionsTotal, ConnectionsBadTotal, HandshakeTimeoutsTotal, MeRouteDropsQueueFull, AcceptPermitTimeouts:
 			if len(s.Labels) != 0 {
 				continue
 			}
@@ -218,6 +227,10 @@ func Extract(samples []Sample) Stats {
 				st.ConnectionsTotal = c
 			case ConnectionsBadTotal:
 				st.ConnectionsBadTotal = c
+			case MeRouteDropsQueueFull:
+				st.MeRouteDropsTotal = c
+			case AcceptPermitTimeouts:
+				st.AcceptPermitTimeouts = c
 			default:
 				st.HandshakeTimeoutsTotal = c
 			}

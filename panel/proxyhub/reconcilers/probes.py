@@ -1,10 +1,12 @@
-"""Probes loop (docs/10 M4.1): reachability of every READY node from Iran, every 10 minutes per
-node by default (settings key ``probes``), plus rounds the owner asks for (POST /api/probes/run).
+"""Probes loop (docs/10 M4.1, P15): reachability of every READY node from Iran by a real TLS
+handshake, every 30 minutes per node by default (settings key ``probes``), plus rounds the owner
+asks for (POST /api/probes/run).
 
-Each tick (one minute) takes up to ``max_nodes_per_tick`` due nodes, measures them together with
-one shared control target per source, stores the results and the recomputed verdicts. Verdicts
-are only recorded: nothing is replaced or deleted because of them in this round. With no READY
-node (today) it does nothing at all, and calls nothing.
+Each tick (one minute) takes up to ``max_nodes_per_tick`` due nodes, as many as Globalping's
+remaining hourly allowance covers, measures them together with one shared TLS control, stores the
+results and the recomputed verdicts (proxyhub/probes/service.py). The live fleet acts on a
+``blocked`` verdict (proxyhub/fleet/live.py). With no READY node it does nothing at all, and calls
+nothing.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from proxyhub.cloudflare.service import active_zone
+from proxyhub.cloudflare.service import node_names
 from proxyhub.probes.checkhost import CheckHostClient
 from proxyhub.probes.globalping import GlobalpingClient
 from proxyhub.probes.service import (
@@ -22,6 +24,7 @@ from proxyhub.probes.service import (
     GpFactory,
     due_targets,
     globalping_rate,
+    last_tls_probes,
     prune,
     run_cycle,
     store_cycle,
@@ -55,8 +58,8 @@ class ProbesReconciler(Reconciler):
                 log.info("probes: removed %d cycles older than %d days", removed, settings.retention_days)
         if not settings.enabled:
             return
-        zone = await active_zone(conn)
-        targets = await due_targets(conn, settings, now, zone.name if zone else None)
+        names = await node_names(conn)
+        targets = await due_targets(conn, settings, now, names)
         if not targets:
             return
         result = await run_cycle(
@@ -65,10 +68,14 @@ class ProbesReconciler(Reconciler):
             gp_factory=self._gp_factory,
             ch_factory=self._ch_factory,
             gp_rate=await globalping_rate(conn),
+            tls_probes=await last_tls_probes(conn),
         )
-        verdicts = await store_cycle(conn, result, targets, settings)
+        if result is None:
+            log.debug("probes: Globalping's hourly allowance covers no node now; %d stay due", len(targets))
+            return
+        verdicts = await store_cycle(conn, result, result.measured, settings)
         log.info(
-            "probes: %d node(s) measured: %s",
+            "probes: %d node(s) measured by TLS from Iran: %s",
             len(verdicts),
-            ", ".join(f"{t.name}={verdicts[t.node_id][0]}" for t in targets if t.node_id in verdicts),
+            ", ".join(f"{t.name}={verdicts[t.node_id][0]}" for t in result.measured if t.node_id in verdicts),
         )

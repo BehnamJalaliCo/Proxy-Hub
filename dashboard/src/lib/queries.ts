@@ -23,6 +23,7 @@ export const keys = {
   nodeEvents: (id: string) => ["nodes", id, "events"] as const,
   cloudflare: ["cloudflare"] as const,
   probes: ["probes"] as const,
+  targets: ["targets"] as const,
   mtproxyAccount: ["mtproxy", "account"] as const,
 };
 
@@ -144,6 +145,13 @@ export const useProbeSummary = () =>
   useQuery({
     queryKey: keys.probes,
     queryFn: ({ signal }) => api.getProbeSummary(signal),
+    refetchInterval: pollUnlessMissing(60_000),
+  });
+
+export const useTargets = () =>
+  useQuery({
+    queryKey: keys.targets,
+    queryFn: ({ signal }) => api.getTargets(signal),
     refetchInterval: pollUnlessMissing(60_000),
   });
 

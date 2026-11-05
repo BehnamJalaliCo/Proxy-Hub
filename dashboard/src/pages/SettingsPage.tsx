@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { useState, type SubmitEvent, type ReactNode } from "react";
 
 import { KillSwitchControl } from "../components/KillSwitchControl";
+import { TargetCandidates } from "../components/TargetCandidates";
 import { Button } from "../components/ui/Button";
 import { Card, CardHeader } from "../components/ui/Card";
 import { ErrorState, Skeleton } from "../components/ui/Feedback";
@@ -24,7 +25,7 @@ import {
   type SettingsDraft,
 } from "../lib/validation";
 
-const LOCATIONS = ["fsn1", "nbg1", "hel1"];
+const LOCATIONS = ["fsn1", "nbg1", "hel1", "ash", "hil"];
 const SERVER_TYPES = ["cpx02", "cx23", "cpx12"];
 
 /** 422 {"fields":[{"loc":[...,"<field>"],"type":...}]} -> which form fields the server rejected. */
@@ -170,7 +171,7 @@ function SettingsForm({ initial, onSaved }: { initial: FleetSettings; onSaved: (
               </span>
             }
             htmlFor="s-locs"
-            hint="دیتاسنترهای هتزنر برای nodeها؛ پخش شدن در چند location جلوی IP تکراری را میگیرد."
+            hint="دیتاسنترهای هتزنر برای nodeها؛ پخش شدن در چند location جلوی IP تکراری را میگیرد. ناوگان از این فهرست بیرون نمیرود: locationهایی را که از همراه اول و رایتل باز بوده‌اند ترجیح میدهد و بسته‌ها را کنار میگذارد (جدول «locationها از ایران» در صفحه‌ی nodeها)."
             error={shown("locations")}
           >
             <TagInput
@@ -278,6 +279,7 @@ export default function SettingsPage() {
         <div className="flex flex-col gap-4 sm:gap-5">
           <KillSwitchControl on={data.kill_switch} budgetSet={data.budget_cap_eur !== null} nodeCapSet={data.node_cap_total !== null} />
           <SettingsForm key={version} initial={data} onSaved={() => setVersion((v) => v + 1)} />
+          <TargetCandidates />
         </div>
       ) : null}
     </>

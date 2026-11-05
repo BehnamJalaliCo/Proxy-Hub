@@ -1,6 +1,5 @@
-"""Reachability from Iran (docs/10 M4.1): GET /api/probes/summary, POST /api/probes/run.
-
-Verdicts are recorded only; nothing is replaced automatically in this round.
+"""Reachability from Iran by TLS handshakes (docs/10 M4.1, P15): GET /api/probes/summary (per node
+and network, plus the location x network table the fleet plans with), POST /api/probes/run.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from proxyhub.api.deps import AdminIdentity, ApiError, ApiRoute, db_session, require_admin
+from proxyhub.fleet.locations import locations_summary
 from proxyhub.probes import service
 
 router = APIRouter(prefix="/api/probes", tags=["probes"], route_class=ApiRoute)
@@ -35,7 +35,9 @@ class RunIn(BaseModel):
 
 @router.get("/summary")
 async def probes_summary(admin: Admin, db: Db) -> dict[str, Any]:
-    return await service.summary(db)
+    body = await service.summary(db)
+    body["locations"] = await locations_summary(db, datetime.now(UTC))
+    return body
 
 
 @router.post("/run", status_code=202)

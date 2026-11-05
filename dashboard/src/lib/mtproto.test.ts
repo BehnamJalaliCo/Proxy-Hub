@@ -24,6 +24,7 @@ const PERSIAN = /[آ-ی]/;
 const DEFAULTS: MtprotoSettings = {
   port: 8443,
   tls_domain: "www.microsoft.com",
+  target_mode: "auto",
   mode_tls: true,
   mode_secure: false,
   mode_classic: false,
@@ -60,7 +61,7 @@ describe("port", () => {
     expect(parsePort("1")).toEqual({ ok: true, value: 1 });
     expect(parsePort("65535")).toEqual({ ok: true, value: 65535 });
   });
-  it.each(["", "0", "65536", "84a3", "-1", "8443.0", "443", "22", "9090", "9091"])("refuses %j with a Persian hint", (raw) => {
+  it.each(["", "0", "65536", "84a3", "-1", "8443.0", "443", "2083", "22", "9090", "9091"])("refuses %j with a Persian hint", (raw) => {
     const r = parsePort(raw);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toMatch(PERSIAN);
@@ -88,10 +89,31 @@ describe("settings draft", () => {
   it("round-trips the defaults", () => {
     const { value, errors } = mtprotoFromDraft(draftFromMtproto(DEFAULTS));
     expect(errors).toEqual({});
-    expect(value).toEqual({ port: 8443, tls_domain: "www.microsoft.com", mode_tls: true, mode_secure: false, mode_classic: false });
+    expect(value).toEqual({
+      port: 8443,
+      tls_domain: "www.microsoft.com",
+      target_mode: "auto",
+      mode_tls: true,
+      mode_secure: false,
+      mode_classic: false,
+    });
+  });
+  it("keeps the automatic domain choice through the form; an older panel means manual", () => {
+    expect(mtprotoFromDraft({ ...draftFromMtproto(DEFAULTS), target_mode: "manual" }).value?.target_mode).toBe("manual");
+    const older: MtprotoSettings = { ...DEFAULTS };
+    delete older.target_mode;
+    expect(draftFromMtproto(older).target_mode).toBe("manual");
+    expect(serverErrors(["target_mode"]).tls_domain).toBeTruthy();
   });
   it("collects every problem and sends nothing", () => {
-    const { value, errors } = mtprotoFromDraft({ port: "443", tls_domain: "1.2.3.4", mode_tls: false, mode_secure: false, mode_classic: false });
+    const { value, errors } = mtprotoFromDraft({
+      port: "443",
+      tls_domain: "1.2.3.4",
+      target_mode: "manual",
+      mode_tls: false,
+      mode_secure: false,
+      mode_classic: false,
+    });
     expect(value).toBeNull();
     expect(Object.keys(errors).sort()).toEqual(["modes", "port", "tls_domain"]);
   });

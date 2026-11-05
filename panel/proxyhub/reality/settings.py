@@ -9,6 +9,11 @@ hours, 1 TB more), so people who already use it never get stuck; two configs per
 slotless node); port 443 (contract item 1, fixed). Every config name starts with the channel's
 @username (the ad users see in their app).
 
+XHTTP (owner, 2026-11-05: "XHTTP works well in Iran"): with transport ``reality`` and ``xhttp_enabled``
+(default on) every node also serves VLESS + XHTTP + REALITY on :data:`XHTTP_PORT`, with its scope's
+REALITY key and target and the same configs, so each config has two links: «کانفیگ N (TCP)» and
+«کانفیگ N (XHTTP)», one uuid, one time and data cap (D41) for both. ws_tls has no XHTTP inbound.
+
 The REALITY target (docs/10 X5: foreign, TLS 1.3 + HTTP/2, not a redirect, not behind a third-party
 CDN, near the nodes) defaults to ``dl.google.com``: Google's own edge (no third-party CDN), TLS 1.3
 with HTTP/2 and X25519, served from Google's front ends in Frankfurt and Hamina right next to
@@ -16,10 +21,16 @@ Hetzner's fsn1/nbg1/hel1, and a download host that Iranian networks are expected
 serves Android and Chrome updates; not verified from Iran here: the panel-server runbook checks
 it). Every node checks the target itself (TLS 1.3 + h2) and reports the result together with the
 target it checked; a config is only made on a node that confirmed its scope's current target, and
-the owner is told about nodes where it fails. After the owner changes the target, every scope moves
-to it (proxyhub/reality/policy.py ``retarget_scopes``): at once if the old target fails there or
-the scope has no active config, otherwise once its active configs have ended, so links already
-posted keep working until their own end.
+the owner is told about nodes where it fails. After the target changes, every scope moves to it
+(proxyhub/reality/policy.py ``retarget_scopes``): at once if the old target fails there or the scope
+has no active config, otherwise once its active configs have ended, so links already posted keep
+working until their own end.
+
+``target_mode`` (P15, 2026-11-05): ``auto`` (default) lets the panel pick the target among the
+owner's candidate sites (proxyhub/targets): the best one that is open from Iran by a real TLS
+handshake on MCI and Rightel and that our nodes' own TLS 1.3 + HTTP/2 check passes (the default
+``dl.google.com`` was slow from Iran). Every switch is logged and told to the owner. ``manual``: the
+owner's ``target_host`` stays as it is.
 """
 
 from __future__ import annotations
@@ -39,11 +50,15 @@ log = logging.getLogger(__name__)
 SETTINGS_KEY = "reality"
 STATE_KEY = "reality.state"  # the policy's own bookkeeping (alert de-duplication)
 PORT = 443  # contract item 1: Xray VLESS Reality listens on TCP 443 on every node
+# VLESS + XHTTP + REALITY on every REALITY node (agent 0.4.0 on): fixed like PORT, because it is in
+# every XHTTP link already posted. 2083 is a common HTTPS port; the node firewall lets it in.
+XHTTP_PORT = 2083
 GB = 1_000_000_000  # caps are decimal gigabytes, like Hetzner's traffic figures
 _LINK_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_ .|-]{0,31}$")
 
 Db = AsyncConnection | AsyncSession
 Transport = Literal["ws_tls", "reality"]
+TargetMode = Literal["auto", "manual"]
 
 
 class RealitySettings(BaseModel):
@@ -59,11 +74,16 @@ class RealitySettings(BaseModel):
     #   carried 37 MB/s from Germany but no website opened from Iran in the owner's test).
     # Switching ends the active configs of the other transport (as burned): a node serves one.
     transport: Transport = "ws_tls"
+    # With ``reality``: also VLESS + XHTTP + REALITY on XHTTP_PORT for the same configs (a second
+    # link per config). Off: the XHTTP inbound goes away and its links show as paused in posts.
+    xhttp_enabled: bool = True
     configs_per_node: int = Field(default=2, ge=1, le=20)
     cap_hours: int = Field(default=48, ge=1, le=24 * 30)
     cap_gb: int = Field(default=1000, ge=1, le=10_000)
     # D41: a working config gets another cap_hours and cap_gb before it ends (same link).
     renew: bool = True
+    # auto: proxyhub/targets picks target_host among the candidates (P15); manual: the owner's.
+    target_mode: TargetMode = "auto"
     target_host: str = "dl.google.com"
     target_port: int = Field(default=443, ge=1, le=65535)
     # The name every config gets in the user's app starts with this (decision N15). None: the main

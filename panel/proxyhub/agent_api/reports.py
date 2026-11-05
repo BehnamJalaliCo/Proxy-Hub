@@ -73,6 +73,11 @@ class TelemtCounters(_Strict):
     connections_total: Counter | None
     connections_bad_total: Counter | None
     handshake_timeouts_total: Counter | None
+    # Throughput diagnostics (agent 0.4.0 on, absent before): data from Telegram's middle proxy
+    # dropped because a client's queue was full, and connections refused at Telemt's
+    # max_connections. Process counters only.
+    me_route_drops_total: Counter | None = None
+    accept_permit_timeouts_total: Counter | None = None
     users: Annotated[list[UserCounters], Field(max_length=MAX_REPORT_USERS)]
 
     @model_validator(mode="after")
@@ -163,6 +168,8 @@ async def store_report(session: AsyncSession, node_id: uuid.UUID, report: AgentR
             connections_total=telemt.connections_total,
             connections_bad_total=telemt.connections_bad_total,
             handshake_timeouts_total=telemt.handshake_timeouts_total,
+            me_route_drops_total=telemt.me_route_drops_total,
+            accept_permit_timeouts_total=telemt.accept_permit_timeouts_total,
             users_reported=len(telemt.users),
             sys_uptime_s=system.uptime_s,
             load1=system.load1,
@@ -199,5 +206,6 @@ async def store_report(session: AsyncSession, node_id: uuid.UUID, report: AgentR
             apply_error=x.apply_error,
             users=[XrayUserTotal(u.email, u.total_octets) for u in x.users],
             now=now,
+            xhttp_port=x.xhttp_port,
         )
     return stats_rows

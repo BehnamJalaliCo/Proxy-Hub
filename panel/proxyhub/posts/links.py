@@ -8,10 +8,12 @@
   (the MTProto link is rebuilt in canonical form). A link that fails is left out and its key is
   remembered in :attr:`Harvest.doubtful`, so posts that carry it are not edited this round.
 * Nothing here logs or returns a URL: a log line names the provider and the link key only.
-* A new post takes at most ``max_mtproto`` / ``max_reality`` links (:func:`for_new_post`): one per
-  slot before a second one of any slot, the one that lasts longest first within a slot, and each new
-  post starts one slot further (``rotate``), so the posts spread the users over the slots instead of
-  sending everyone to the lowest ones (a Reality config ends at its traffic cap).
+* A new post takes at most ``max_mtproto`` links and ``max_reality`` Reality configs
+  (:func:`for_new_post`): one per slot before a second one of any slot, the one that lasts longest
+  first within a slot, and each new post starts one slot further (``rotate``), so the posts spread
+  the users over the slots instead of sending everyone to the lowest ones (a Reality config ends at
+  its traffic cap). A companion link (``companion_of``: the XHTTP link of a REALITY config) does not
+  count on its own: it comes right after the link it belongs to, when that one is chosen.
 """
 
 from __future__ import annotations
@@ -65,6 +67,13 @@ def checked(link: object) -> ProxyLink | None:
         return None
     if link.expires_at is not None and (
         not isinstance(link.expires_at, datetime) or link.expires_at.tzinfo is None
+    ):
+        return None
+    if link.companion_of is not None and (
+        not isinstance(link.companion_of, str)
+        or not link.companion_of
+        or len(link.companion_of) > MAX_KEY_CHARS
+        or link.companion_of == link.key
     ):
         return None
     try:
@@ -170,13 +179,15 @@ def for_new_post(
         return x.slot is not None or not slots_only
 
     mtproto = spread([x for x in h.active("mtproto") if ours(x)], max_mtproto, rotate)
-    reality = spread(
-        [
-            x
-            for x in h.active("reality")
-            if ours(x) and (x.expires_at is None or x.expires_at - now >= MIN_REMAINING)
-        ],
-        max_reality,
-        rotate,
-    )
+    usable = [
+        x
+        for x in h.active("reality")
+        if ours(x) and (x.expires_at is None or x.expires_at - now >= MIN_REMAINING)
+    ]
+    companions: dict[str, list[ProxyLink]] = {}
+    for x in usable:
+        if x.companion_of is not None:
+            companions.setdefault(x.companion_of, []).append(x)
+    configs = spread([x for x in usable if x.companion_of is None], max_reality, rotate)
+    reality = [y for x in configs for y in (x, *sorted(companions.get(x.key, []), key=lambda c: c.key))]
     return [*mtproto, *reality]

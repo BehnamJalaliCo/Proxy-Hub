@@ -7,8 +7,10 @@ from datetime import datetime
 from typing import Any, Literal
 
 Source = Literal["globalping", "check-host"]
-Kind = Literal["tcp", "icmp", "dns"]
-Role = Literal["node", "control"]
+Kind = Literal["tcp", "icmp", "dns", "https"]
+# node: one of our nodes; control: a public host that proves the probes work; target: a candidate
+# REALITY / fake-TLS site (proxyhub/targets), measured without any node.
+Role = Literal["node", "control", "target"]
 # ok: the source answered (results may still say "unreachable"); the others mean "no usable data".
 MeasurementStatus = Literal["ok", "no_probes", "rate_limited", "error", "timeout", "skipped"]
 

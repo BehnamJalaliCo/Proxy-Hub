@@ -18,12 +18,17 @@ import (
 // Fixed parts of every rendered config.
 const (
 	// InboundTag is the REALITY inbound, WSInboundTag the VLESS + WebSocket + TLS one (one of the two
-	// is rendered, on the same port).
-	InboundTag   = "reality-in"
-	WSInboundTag = "vless-ws-in"
-	// Flow is XTLS Vision, the flow every REALITY link the panel publishes asks for. A WebSocket
-	// link has no flow (Vision needs the raw TLS stream).
+	// is rendered, on the same port). XHTTPInboundTag is the second inbound a REALITY section may
+	// add on its own port: VLESS + XHTTP + REALITY with the same key and users.
+	InboundTag      = "reality-in"
+	WSInboundTag    = "vless-ws-in"
+	XHTTPInboundTag = "vless-xhttp-in"
+	// Flow is XTLS Vision, the flow every REALITY (TCP) link the panel publishes asks for. A
+	// WebSocket or XHTTP link has no flow (Vision needs the raw TLS stream).
 	Flow = "xtls-rprx-vision"
+	// XHTTPMode: the server accepts every XHTTP mode (packet-up, stream-up, stream-one); the
+	// client picks (a REALITY client: stream-one over HTTP/2).
+	XHTTPMode = "auto"
 	// ALPN and TLSMinVersion of the ws_tls inbound: HTTP/1.1 (WebSocket upgrades), TLS 1.2 or 1.3.
 	ALPN          = "http/1.1"
 	TLSMinVersion = "1.2"
@@ -156,6 +161,14 @@ type inboundStream struct {
 	Reality  *realitySettings `json:"realitySettings,omitempty"`
 	TLS      *tlsSettings     `json:"tlsSettings,omitempty"`
 	WS       *wsSettings      `json:"wsSettings,omitempty"`
+	XHTTP    *xhttpSettings   `json:"xhttpSettings,omitempty"`
+}
+
+// xhttpSettings: only the path and the mode; no host (any Host header; with REALITY a client
+// sends the server name) and Xray's defaults for everything else.
+type xhttpSettings struct {
+	Path string `json:"path"`
+	Mode string `json:"mode"`
 }
 
 // tlsSettings: only certificate FILES, never inline key material in the config.
@@ -242,20 +255,20 @@ func InboundOf(x *desired.Xray) (tag, flow string) {
 	return InboundTag, Flow
 }
 
+func renderReality(x *desired.Xray) *realitySettings {
+	return &realitySettings{
+		Show:        false,
+		Target:      x.Target,
+		Xver:        0,
+		ServerNames: x.ServerNames,
+		PrivateKey:  x.PrivateKey,
+		ShortIDs:    x.ShortIDs,
+	}
+}
+
 func renderStream(x *desired.Xray, files TLSFiles) (inboundStream, error) {
 	if !x.WSTLS() {
-		return inboundStream{
-			Network:  "tcp",
-			Security: "reality",
-			Reality: &realitySettings{
-				Show:        false,
-				Target:      x.Target,
-				Xver:        0,
-				ServerNames: x.ServerNames,
-				PrivateKey:  x.PrivateKey,
-				ShortIDs:    x.ShortIDs,
-			},
-		}, nil
+		return inboundStream{Network: "tcp", Security: "reality", Reality: renderReality(x)}, nil
 	}
 	if !filepath.IsAbs(files.Cert) || !filepath.IsAbs(files.Key) {
 		return inboundStream{}, errors.New("xray: the ws_tls inbound needs absolute certificate and key files")
@@ -272,9 +285,33 @@ func renderStream(x *desired.Xray, files TLSFiles) (inboundStream, error) {
 	}, nil
 }
 
-// Render builds the Xray config for the desired section and the effective users: a REALITY inbound,
-// or (ws_tls) a VLESS + WebSocket + TLS inbound that reads files (written by the agent). The result
-// passes CheckInvariants (it is checked here before it is returned).
+func clientsOf(users []User, flow string) []client {
+	clients := make([]client, 0, len(users))
+	for _, u := range users {
+		clients = append(clients, client{ID: u.ID, Email: u.Email, Flow: flow, Level: userLevel})
+	}
+	return clients
+}
+
+// newInbound is a VLESS inbound on every address with the settings every inbound shares: no
+// decryption, and sniffing only to route (the bittorrent block); destinations are never rewritten.
+func newInbound(tag string, port int, clients []client, stream inboundStream) inbound {
+	return inbound{
+		Tag:            tag,
+		Listen:         inboundListen,
+		Port:           port,
+		Protocol:       "vless",
+		Settings:       inboundSettings{Clients: clients, Decryption: "none"},
+		StreamSettings: stream,
+		Sniffing:       sniffing{Enabled: true, DestOverride: []string{"http", "tls", "quic"}, RouteOnly: true},
+	}
+}
+
+// Render builds the Xray config for the desired section and the effective users: a REALITY inbound
+// (and, with an xhttp part, a VLESS + XHTTP + REALITY inbound on its own port with the same key
+// and users), or (ws_tls) a VLESS + WebSocket + TLS inbound that reads files (written by the
+// agent). Log, API, policy, outbounds and routing are shared, so every inbound has the same
+// privacy settings. The result passes CheckInvariants (it is checked here before it is returned).
 func Render(x *desired.Xray, users []User, apiListen string, files TLSFiles) ([]byte, error) {
 	if x == nil {
 		return nil, errors.New("xray: nothing to render")
@@ -284,9 +321,17 @@ func Render(x *desired.Xray, users []User, apiListen string, files TLSFiles) ([]
 	if err != nil {
 		return nil, err
 	}
-	clients := make([]client, 0, len(users))
-	for _, u := range users {
-		clients = append(clients, client{ID: u.ID, Email: u.Email, Flow: flow, Level: userLevel})
+	inbounds := []inbound{newInbound(tag, x.Port, clientsOf(users, flow), stream)}
+	if x.XHTTP != nil {
+		if x.WSTLS() {
+			return nil, errors.New("xray: xhttp needs the reality transport")
+		}
+		inbounds = append(inbounds, newInbound(XHTTPInboundTag, x.XHTTP.Port, clientsOf(users, ""), inboundStream{
+			Network:  "xhttp",
+			Security: "reality",
+			Reality:  renderReality(x),
+			XHTTP:    &xhttpSettings{Path: x.XHTTP.Path, Mode: XHTTPMode},
+		}))
 	}
 	cfg := config{
 		Log: logConfig{Access: accessNone, Error: "", Level: LogLevel, DNSLog: false, MaskAddress: maskFull},
@@ -294,16 +339,7 @@ func Render(x *desired.Xray, users []User, apiListen string, files TLSFiles) ([]
 		Policy: policyConfig{
 			Levels: map[string]levelPolicy{"0": {StatsUserUplink: true, StatsUserDownlink: true, StatsUserOnline: false}},
 		},
-		Inbounds: []inbound{{
-			Tag:            tag,
-			Listen:         inboundListen,
-			Port:           x.Port,
-			Protocol:       "vless",
-			Settings:       inboundSettings{Clients: clients, Decryption: "none"},
-			StreamSettings: stream,
-			// Sniffing only to route (bittorrent block); destinations are never rewritten.
-			Sniffing: sniffing{Enabled: true, DestOverride: []string{"http", "tls", "quic"}, RouteOnly: true},
-		}},
+		Inbounds: inbounds,
 		Outbounds: []outbound{
 			{
 				Tag:      directTag,
@@ -380,20 +416,28 @@ func CheckInvariants(data []byte) error {
 	if c.Policy.System != (systemPolicy{}) {
 		return refuse("only per-user counters are kept")
 	}
-	if len(c.Inbounds) != 1 {
-		return refuse("exactly one inbound")
+	if len(c.Inbounds) < 1 || len(c.Inbounds) > 2 {
+		return refuse("one inbound, or a REALITY inbound and its XHTTP one")
 	}
-	in := c.Inbounds[0]
-	if in.Listen != inboundListen || in.Protocol != "vless" || in.Settings.Decryption != "none" || !in.Sniffing.RouteOnly {
-		return refuse("the inbound must be VLESS on every address, without decryption")
+	if len(c.Inbounds) == 2 && (c.Inbounds[0].Tag != InboundTag || c.Inbounds[1].Tag != XHTTPInboundTag ||
+		c.Inbounds[0].Port == c.Inbounds[1].Port) {
+		return refuse("a second inbound is only the XHTTP one, next to REALITY, on its own port")
 	}
-	flow, err := checkStream(in.Tag, in.StreamSettings)
-	if err != nil {
-		return err
-	}
-	for _, cl := range in.Settings.Clients {
-		if !desired.ValidXrayEmail(cl.Email) || cl.Flow != flow || cl.Level != userLevel {
-			return refuse("bad client entry")
+	for i, in := range c.Inbounds {
+		if in.Listen != inboundListen || in.Protocol != "vless" || in.Settings.Decryption != "none" || !in.Sniffing.RouteOnly {
+			return refuse("the inbound must be VLESS on every address, without decryption")
+		}
+		if i == 0 && in.Tag == XHTTPInboundTag {
+			return refuse("the XHTTP inbound only comes second")
+		}
+		flow, err := checkStream(in.Tag, in.StreamSettings)
+		if err != nil {
+			return err
+		}
+		for _, cl := range in.Settings.Clients {
+			if !desired.ValidXrayEmail(cl.Email) || cl.Flow != flow || cl.Level != userLevel {
+				return refuse("bad client entry")
+			}
 		}
 	}
 	if len(c.Outbounds) != 2 || c.Outbounds[0].Tag != directTag || c.Outbounds[0].Protocol != "freedom" ||
@@ -414,18 +458,26 @@ func CheckInvariants(data []byte) error {
 	return nil
 }
 
-// checkStream accepts exactly the two inbounds Render makes and returns their client flow.
+// checkStream accepts exactly the three inbounds Render makes and returns their client flow.
 func checkStream(tag string, st inboundStream) (string, error) {
 	switch tag {
 	case InboundTag:
 		r := st.Reality
-		if st.Security != "reality" || st.Network != "tcp" || r == nil || st.TLS != nil || st.WS != nil || r.Show || r.Xver != 0 {
+		if st.Security != "reality" || st.Network != "tcp" || r == nil || st.TLS != nil || st.WS != nil || st.XHTTP != nil ||
+			r.Show || r.Xver != 0 {
 			return "", refuse("the REALITY inbound must be VLESS REALITY on TCP")
 		}
 		return Flow, nil
+	case XHTTPInboundTag:
+		r, h := st.Reality, st.XHTTP
+		if st.Security != "reality" || st.Network != "xhttp" || r == nil || h == nil || st.TLS != nil || st.WS != nil ||
+			r.Show || r.Xver != 0 || h.Mode != XHTTPMode || len(h.Path) < 2 || !strings.HasPrefix(h.Path, "/") {
+			return "", refuse("the XHTTP inbound must be VLESS + XHTTP + REALITY on its own path")
+		}
+		return "", nil
 	case WSInboundTag:
 		t := st.TLS
-		if st.Security != "tls" || st.Network != "ws" || t == nil || st.WS == nil || st.Reality != nil ||
+		if st.Security != "tls" || st.Network != "ws" || t == nil || st.WS == nil || st.Reality != nil || st.XHTTP != nil ||
 			!sameStrings(t.ALPN, []string{ALPN}) || t.MinVersion != TLSMinVersion || len(t.Certificates) != 1 ||
 			!filepath.IsAbs(t.Certificates[0].CertificateFile) || !filepath.IsAbs(t.Certificates[0].KeyFile) ||
 			!strings.HasPrefix(st.WS.Path, "/") {

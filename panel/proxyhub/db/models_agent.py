@@ -189,6 +189,10 @@ class AgentNodeReport(Base):
     connections_total: Mapped[int | None] = mapped_column(BigInteger)
     connections_bad_total: Mapped[int | None] = mapped_column(BigInteger)
     handshake_timeouts_total: Mapped[int | None] = mapped_column(BigInteger)
+    # Telemt's throughput diagnostics (agent 0.4.0 on): middle-proxy data dropped for a full client
+    # queue, and connections refused at max_connections (counters since Telemt started).
+    me_route_drops_total: Mapped[int | None] = mapped_column(BigInteger)
+    accept_permit_timeouts_total: Mapped[int | None] = mapped_column(BigInteger)
     users_reported: Mapped[int] = mapped_column(Integer, nullable=False)
     sys_uptime_s: Mapped[float | None] = mapped_column(Float)
     load1: Mapped[float | None] = mapped_column(Float)

@@ -29,11 +29,44 @@ func (k Kind) String() string { return [...]string{"none", "live", "restart"}[k]
 // Plan says how to get from the current config to the next one.
 type Plan struct {
 	Kind Kind
-	// KindLive: the inbound the users change in, and the flow its clients have.
-	Tag    string
-	Flow   string
-	Add    []User   // KindLive: users to add
-	Remove []string // KindLive: labels to remove (a changed id is a remove plus an add)
+	// KindLive: the inbounds the users change in, each with the flow its clients have. Every
+	// inbound of a rendered config has the same users, so Add and Remove apply to each of them.
+	Inbounds []LiveInbound
+	Add      []User   // KindLive: users to add
+	Remove   []string // KindLive: labels to remove (a changed id is a remove plus an add)
+}
+
+// LiveInbound is an inbound whose users a live plan changes.
+type LiveInbound struct {
+	Tag  string
+	Flow string
+}
+
+// flowOf is the client flow of an inbound Render makes (XTLS Vision on REALITY TCP only).
+func flowOf(tag string) string {
+	if tag == InboundTag {
+		return Flow
+	}
+	return ""
+}
+
+// sameUsers: every inbound of cfg has exactly the users (label and id) of the first one.
+func sameUsers(cfg config) bool {
+	first := map[string]string{}
+	for _, c := range cfg.Inbounds[0].Settings.Clients {
+		first[c.Email] = c.ID
+	}
+	for _, in := range cfg.Inbounds[1:] {
+		if len(in.Settings.Clients) != len(first) {
+			return false
+		}
+		for _, c := range in.Settings.Clients {
+			if id, ok := first[c.Email]; !ok || id != c.ID {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Decide compares the current file (nil if absent) with the next rendered config.
@@ -42,15 +75,18 @@ func Decide(current, next []byte) (Plan, error) {
 		return Plan{Kind: KindNone}, nil
 	}
 	var nextCfg config
-	if err := json.Unmarshal(next, &nextCfg); err != nil || len(nextCfg.Inbounds) != 1 {
+	if err := json.Unmarshal(next, &nextCfg); err != nil || len(nextCfg.Inbounds) < 1 || !sameUsers(nextCfg) {
 		return Plan{}, refuse("next config unreadable")
 	}
 	var curCfg config
-	if current == nil || json.Unmarshal(current, &curCfg) != nil || len(curCfg.Inbounds) != 1 {
-		return Plan{Kind: KindRestart}, nil // first start, or a file we did not write
+	if current == nil || json.Unmarshal(current, &curCfg) != nil || len(curCfg.Inbounds) != len(nextCfg.Inbounds) ||
+		!sameUsers(curCfg) {
+		return Plan{Kind: KindRestart}, nil // first start, an inbound added or removed, or a file we did not write
 	}
 	curClients, nextClients := curCfg.Inbounds[0].Settings.Clients, nextCfg.Inbounds[0].Settings.Clients
-	curCfg.Inbounds[0].Settings.Clients, nextCfg.Inbounds[0].Settings.Clients = nil, nil
+	for i := range curCfg.Inbounds {
+		curCfg.Inbounds[i].Settings.Clients, nextCfg.Inbounds[i].Settings.Clients = nil, nil
+	}
 	a, errA := json.Marshal(curCfg)
 	b, errB := json.Marshal(nextCfg)
 	if errA != nil || errB != nil || !bytes.Equal(a, b) {
@@ -66,9 +102,8 @@ func Decide(current, next []byte) (Plan, error) {
 	}
 	var plan Plan
 	plan.Kind = KindLive
-	plan.Tag = nextCfg.Inbounds[0].Tag
-	if plan.Tag == InboundTag {
-		plan.Flow = Flow
+	for _, in := range nextCfg.Inbounds {
+		plan.Inbounds = append(plan.Inbounds, LiveInbound{Tag: in.Tag, Flow: flowOf(in.Tag)})
 	}
 	for _, c := range curClients {
 		if id, ok := want[c.Email]; !ok || id != c.ID {

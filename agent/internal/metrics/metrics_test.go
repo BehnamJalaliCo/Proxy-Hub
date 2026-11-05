@@ -107,6 +107,32 @@ func TestExtractIgnoresUnexpectedLabelsAndNegativeValues(t *testing.T) {
 	}
 }
 
+// The two throughput diagnostics are read as plain process counters (Telemt 3.5.16 renders them
+// unlabelled: src/metrics/render/me_lifecycle.rs and connections.rs); labelled or negative series
+// are ignored, and without them the fields stay unknown.
+func TestThroughputDiagnostics(t *testing.T) {
+	samples, err := Parse(strings.NewReader(strings.Join([]string{
+		"# TYPE telemt_me_route_drop_queue_full_total counter",
+		"telemt_me_route_drop_queue_full_total 42",
+		"telemt_accept_permit_timeout_total 0",
+		`telemt_me_route_drop_queue_full_profile_total{profile="x"} 7`,
+	}, "\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := Extract(samples)
+	if st.MeRouteDropsTotal == nil || *st.MeRouteDropsTotal != 42 || st.AcceptPermitTimeouts == nil || *st.AcceptPermitTimeouts != 0 {
+		t.Fatalf("diagnostics %v %v", st.MeRouteDropsTotal, st.AcceptPermitTimeouts)
+	}
+	samples, _ = Parse(strings.NewReader(`telemt_me_route_drop_queue_full_total{dc="2"} 1` + "\ntelemt_accept_permit_timeout_total -3\n"))
+	if st := Extract(samples); st.MeRouteDropsTotal != nil || st.AcceptPermitTimeouts != nil {
+		t.Fatal("a labelled or negative diagnostic was used")
+	}
+	if st := Extract(nil); st.MeRouteDropsTotal != nil || st.AcceptPermitTimeouts != nil {
+		t.Fatal("diagnostics invented without samples")
+	}
+}
+
 func TestLabelEscapes(t *testing.T) {
 	labels, rest, err := parseLabels(`{user="a\"b\\c\nd",x="y",} 1`)
 	if err != nil {

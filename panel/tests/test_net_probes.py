@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from test_fleet_support import ADMIN, CSRF
 from test_net_support import (
+    ARVAN_PROBE,
     CH_LIMIT_EXCEEDED,
     CH_NODES,
     CH_TCP_CREATED,
@@ -29,13 +30,20 @@ from test_net_support import (
     GP_TCP_CLOSED_PORT,
     GP_TCP_HETZNER,
     GP_TCP_ONE,
+    HTTP_OK_GITHUB_RIGHTEL,
+    HTTP_OK_PANEL_ARVAN,
+    HTTP_TLS_TIMEOUT_RIGHTEL_443,
+    MCI_PROBE,
+    RIGHTEL_PROBE,
     actions,
     clean_net_tables,
     deep,
+    gp_https,
     make_node,
 )
 
 from proxyhub.api.deps import require_admin
+from proxyhub.cloudflare.service import NodeNames
 from proxyhub.probes import service
 from proxyhub.probes.checkhost import CheckHostClient, classify_start, parse_nodes, parse_tcp_result
 from proxyhub.probes.globalping import (
@@ -43,6 +51,7 @@ from proxyhub.probes.globalping import (
     RateLimit,
     dns_body,
     parse_dns,
+    parse_http,
     parse_ping,
     parse_rate_limit,
     tcp_body,
@@ -278,11 +287,80 @@ async def engine(migrated_db: str) -> AsyncIterator[AsyncEngine]:
     await eng.dispose()
 
 
-def real_cycle(node_id: uuid.UUID, ip: str, *, at: datetime, node_up: bool) -> service.CycleResult:
-    """A cycle assembled from the real answers above: the control is www.hetzner.com:443 (Rightel
-    connected, MCI failed internally); the node either connects like 1.1.1.1:443 or fails like
-    1.1.1.1:9; check-host likewise."""
+KEY_ASNS = [197207, 57218]
+
+
+def tls_up(ip: str) -> dict[str, Any]:
+    """A real finished HTTPS test (200 after a TLS 1.3 handshake), as if to ``ip``."""
+    return {**HTTP_OK_PANEL_ARVAN, "resolvedAddress": ip}
+
+
+def tls_timeout(ip: str) -> dict[str, Any]:
+    """A real failed HTTPS test: TCP "connected" (MCI/Rightel's own answer), the handshake timed out."""
+    return {**HTTP_TLS_TIMEOUT_RIGHTEL_443, "resolvedAddress": ip}
+
+
+def https_m(
+    raw: dict[str, Any],
+    *,
+    role: str,
+    target: str,
+    port: int,
+    at: datetime,
+    ip: str | None,
+    node_id: Any = None,
+) -> Measurement:
+    return Measurement(
+        "globalping", "https", role, target, port, "ok", at, ref=raw["id"],  # type: ignore[arg-type]
+        networks=tuple(parse_http(raw, KEY_ASNS, ip)), node_id=node_id,
+    )  # fmt: skip
+
+
+def tls_control_raw(*, mci: bool = True, rightel: bool = True) -> dict[str, Any]:
+    """github.com from MCI and Rightel: real result objects (Rightel's own 200, or the TLS timeout)."""
+    ok, bad = HTTP_OK_GITHUB_RIGHTEL, {**HTTP_TLS_TIMEOUT_RIGHTEL_443, "resolvedAddress": "140.82.121.4"}
+    return gp_https(
+        "2ezQw50QA0u8rglRt00021Rtv",
+        "github.com",
+        443,
+        [(MCI_PROBE, ok if mci else bad), (RIGHTEL_PROBE, ok if rightel else bad)],
+        at="2026-11-05T16:15:37.146Z",
+    )
+
+
+def node_raw(ip: str, port: int, *, mci: bool, rightel: bool) -> dict[str, Any]:
+    return gp_https(
+        "2hlXQWvTwWkidFxHE00021Rtv",
+        "slot1.example.com",
+        port,
+        [
+            (MCI_PROBE, tls_up(ip) if mci else tls_timeout(ip)),
+            (RIGHTEL_PROBE, tls_up(ip) if rightel else tls_timeout(ip)),
+            (ARVAN_PROBE, tls_up(ip)),  # a datacenter network: information only
+        ],
+        at="2026-11-05T16:16:08.167Z",
+    )
+
+
+def real_cycle(
+    node_id: uuid.UUID,
+    ip: str,
+    *,
+    at: datetime,
+    node_up: bool,
+    tcp_up: bool | None = None,
+    control: dict[str, Any] | None = None,
+    ports: tuple[int, ...] = (443, 8443),
+) -> service.CycleResult:
+    """A cycle assembled from the real answers above. TLS (decides): the control is github.com from
+    MCI and Rightel; the node's 443 and 8443 either answer 200 or time out in the TLS handshake on
+    both key networks. TCP (information): the control is www.hetzner.com:443; the node connects like
+    1.1.1.1:443 or fails like 1.1.1.1:9 (``tcp_up``, default: like TLS); check-host likewise."""
+    tcp = node_up if tcp_up is None else tcp_up
     ch_nodes = parse_nodes(CH_NODES)[:2]
+    tls_ctrl = https_m(
+        control or tls_control_raw(), role="control", target="github.com", port=443, at=at, ip=None
+    )
     gp_ctrl = Measurement(
         "globalping", "tcp", "control", "www.hetzner.com", 443, "ok", at,
         ref=GP_TCP_HETZNER["id"], networks=tuple(parse_ping(GP_TCP_HETZNER, ASNS)),
@@ -291,15 +369,22 @@ def real_cycle(node_id: uuid.UUID, ip: str, *, at: datetime, node_up: bool) -> s
         "check-host", "tcp", "control", "www.hetzner.com", 443, "ok", at,
         ref="555dc965k7ff", networks=tuple(parse_tcp_result(CH_TCP_RESULT_OK, ch_nodes)),
     )  # fmt: skip
-    gp_raw = GP_TCP_ONE if node_up else GP_TCP_CLOSED_PORT
-    ch_raw = CH_TCP_RESULT_OK if node_up else CH_TCP_RESULT_FAIL
+    gp_raw = GP_TCP_ONE if tcp else GP_TCP_CLOSED_PORT
+    ch_raw = CH_TCP_RESULT_OK if tcp else CH_TCP_RESULT_FAIL
     nodes = [
+        https_m(
+            node_raw(ip, p, mci=node_up, rightel=node_up), role="node", target="slot1.example.com", port=p,
+            at=at, ip=ip, node_id=node_id,
+        )
+        for p in ports
+    ]  # fmt: skip
+    nodes += [
         Measurement(
-            "globalping", "tcp", "node", ip, 443, "ok", at, ref=gp_raw["id"],
+            "globalping", "tcp", "node", ip, 8443, "ok", at, ref=gp_raw["id"],
             networks=tuple(parse_ping(gp_raw, ASNS)), node_id=node_id,
         ),
         Measurement(
-            "check-host", "tcp", "node", ip, 443, "ok", at, ref="555dcbc8k213",
+            "check-host", "tcp", "node", ip, 8443, "ok", at, ref="555dcbc8k213",
             networks=tuple(parse_tcp_result(ch_raw, ch_nodes)), node_id=node_id,
         ),
     ]  # fmt: skip
@@ -309,6 +394,14 @@ def real_cycle(node_id: uuid.UUID, ip: str, *, at: datetime, node_up: bool) -> s
         controls={"globalping": gp_ctrl, "check-host": ch_ctrl},
         nodes=nodes,
         gp_rate=RateLimit(250, 240, at + timedelta(minutes=50)),
+        tls_control=tls_ctrl,
+        tls_probes=2,
+    )
+
+
+def target_of(node_id: uuid.UUID, ip: str) -> service.Target:
+    return service.Target(
+        node_id, "net-test", ip, 8443, None, "schedule", "slot1.example.com", "fsn1", (443, 8443)
     )
 
 
@@ -320,7 +413,7 @@ async def store(engine: AsyncEngine, result: service.CycleResult, target: servic
 @pytest.mark.db
 async def test_verdicts_over_rounds_are_stored_and_logged_on_change(engine: AsyncEngine) -> None:
     node_id = await make_node(engine, state="ready", ipv4="203.0.113.10")
-    target = service.Target(node_id, "net-test", "203.0.113.10", 443, None, "schedule")
+    target = target_of(node_id, "203.0.113.10")
     now = datetime.now(UTC)
     v1 = await store(
         engine, real_cycle(node_id, target.ip, at=now - timedelta(minutes=20), node_up=False), target
@@ -345,46 +438,140 @@ async def test_verdicts_over_rounds_are_stored_and_logged_on_change(engine: Asyn
         ("probe_verdict", "blocked", "suspect"),
         ("probe_verdict", "suspect", "ok"),
     ]
+    first = (await actions(engine))[0]["reasons"]["context"]
+    assert first["tls_target"] == "slot1.example.com" and first["tls_ports"] == [443, 8443]
     async with engine.connect() as conn:
         rows = (
             await conn.execute(text("SELECT count(*) FROM probe_rounds WHERE node_id = :n"), {"n": node_id})
         ).scalar_one()
         nets = (await conn.execute(text("SELECT count(*) FROM probe_network_results"))).scalar_one()
+        obs = (
+            await conn.execute(
+                text("SELECT observations FROM probe_rounds WHERE node_id = :n ORDER BY started_at LIMIT 1"),
+                {"n": node_id},
+            )
+        ).scalar_one()
+        reach = (
+            await conn.execute(
+                text("SELECT network_key, location, state FROM probe_location_reach WHERE node_id = :n"),
+                {"n": node_id},
+            )
+        ).all()
         summary = await service.summary(conn)
     assert rows == 4 and nets > 0
+    assert obs["https"]["state"] == "unreachable" and obs["https"]["cells"]["8443"]["asn:197207"] == "down"
+    # AbrArvan had no control result (the control ran on MCI and Rightel only): recorded, invalid.
+    assert obs["https"]["cells"]["443"]["asn:202468"] == "invalid"
+    assert obs["globalping"]["state"] == "unreachable"  # the TCP information is still there
+    assert sorted(tuple(r) for r in reach) == [("asn:197207", "fsn1", "open"), ("asn:57218", "fsn1", "open")]
     (t,) = [t for t in summary["targets"] if t["node_id"] == str(node_id)]
-    assert t["verdict"] == "ok" and t["ipv4"] == "203.0.113.10"
-    by_net = {(n["source"], n["network"]): n for n in t["networks"]}
-    assert by_net[("globalping", "رایتل")]["ok"] == 3 and by_net[("globalping", "همراه اول")]["ok"] == 3
-    assert by_net[("globalping", "ایرانسل")]["probe"] is False  # no probe there: recorded as such
-    assert by_net[("check-host", "check-host ir1 (Tehran)")]["ok"] == 1
-    assert all(set(n) >= {"network", "asn", "ok", "fail", "at"} for n in t["networks"])
+    assert t["verdict"] == "ok" and t["ipv4"] == "203.0.113.10" and t["location"] == "fsn1"
+    assert t["tls_target"] == "slot1.example.com"
+    by_net = {(n["port"], n["network"]): n for n in t["networks"]}
+    assert by_net[(8443, "رایتل")]["ok"] == 1 and by_net[(443, "همراه اول")]["ok"] == 1
+    assert all(n["kind"] == "https" and n["source"] == "globalping" for n in t["networks"])
+    tcp = {(n["source"], n["network"]): n for n in t["tcp_networks"]}
+    assert tcp[("globalping", "ایرانسل")]["probe"] is False  # no probe there: recorded as such
+    assert tcp[("check-host", "check-host ir1 (Tehran)")]["ok"] == 1
     sources = {s["name"]: s for s in summary["sources"]}
-    assert sources["globalping"]["ok"] and "ایرانسل" in sources["globalping"]["note"]
+    assert sources["globalping"]["ok"] and "TLS" in sources["globalping"]["note"]
     assert sources["check-host"]["ok"]
     assert all(s["checked"] is True for s in sources.values())
     assert summary["last_run_at"].endswith("Z")
+    async with engine.connect() as conn:
+        assert await service.last_tls_probes(conn) == 2
+
+
+@pytest.mark.db
+async def test_tcp_answers_never_make_a_blocked_node_reachable(engine: AsyncEngine) -> None:
+    """P15: MCI and Rightel answer a TCP SYN themselves for blocked addresses. Every TCP probe
+    connects, every TLS handshake times out: the node is blocked."""
+    node_id = await make_node(engine, state="ready", ipv4="203.0.113.12")
+    target = target_of(node_id, "203.0.113.12")
+    now = datetime.now(UTC)
+    for minutes in (20, 10):
+        cycle = real_cycle(
+            node_id, target.ip, at=now - timedelta(minutes=minutes), node_up=False, tcp_up=True
+        )
+        verdicts = await store(engine, cycle, target)
+    assert verdicts[node_id] == ("blocked", ["all_unreachable"])
+    async with engine.connect() as conn:
+        obs = (
+            await conn.execute(
+                text(
+                    "SELECT observations FROM probe_rounds WHERE node_id = :n "
+                    "ORDER BY started_at DESC LIMIT 1"
+                ),
+                {"n": node_id},
+            )
+        ).scalar_one()
+    assert obs["globalping"]["state"] == "reachable" and obs["check-host"]["state"] == "reachable"
+    assert obs["https"]["state"] == "unreachable"
 
 
 @pytest.mark.db
 async def test_a_failed_control_gives_unknown_never_blocked(engine: AsyncEngine) -> None:
     node_id = await make_node(engine, state="ready", ipv4="203.0.113.11")
-    target = service.Target(node_id, "net-test", "203.0.113.11", 443, None, "schedule")
+    target = target_of(node_id, "203.0.113.11")
     now = datetime.now(UTC)
     for minutes in (20, 10):
-        cycle = real_cycle(node_id, target.ip, at=now - timedelta(minutes=minutes), node_up=False)
-        # The control could not be reached from any network either: the probes prove nothing.
-        bad = cycle.controls["check-host"]
-        cycle.controls["check-host"] = Measurement(
-            bad.source, bad.kind, bad.role, bad.target, bad.port, "ok", bad.at,
-            networks=tuple(parse_tcp_result(CH_TCP_RESULT_FAIL, parse_nodes(CH_NODES)[:2])),
+        # The TLS control could not be reached from any network either: the probes prove nothing.
+        cycle = real_cycle(
+            node_id, target.ip, at=now - timedelta(minutes=minutes), node_up=False,
+            control=tls_control_raw(mci=False, rightel=False),
         )  # fmt: skip
         verdicts = await store(engine, cycle, target)
     assert verdicts[node_id][0] == "unknown"
-    assert "round0:check-host:control_failed" in verdicts[node_id][1]
+    assert "round0:https:control_failed" in verdicts[node_id][1]
     async with engine.connect() as conn:
         sources = {s["name"]: s for s in (await service.summary(conn))["sources"]}
-    assert sources["check-host"]["ok"] is False and "کنترل" in sources["check-host"]["note"]
+        reach = (await conn.execute(text("SELECT count(*) FROM probe_location_reach"))).scalar_one()
+    assert sources["globalping"]["ok"] is False and "کنترل" in sources["globalping"]["note"]
+    assert reach == 0  # nothing valid: no location record either
+
+
+@pytest.mark.db
+async def test_one_key_network_open_is_never_blocked(engine: AsyncEngine) -> None:
+    """Closed from MCI but open from Rightel (or a key network without a valid probe): never blocked."""
+    node_id = await make_node(engine, state="ready", ipv4="203.0.113.13")
+    target = target_of(node_id, "203.0.113.13")
+    now = datetime.now(UTC)
+    for minutes in (20, 10):
+        cycle = real_cycle(node_id, target.ip, at=now - timedelta(minutes=minutes), node_up=False)
+        for i, m in enumerate(cycle.nodes):
+            if m.kind == "https":
+                raw = gp_https(
+                    "2hlXQWvTwWkidFxHE00021Rtv", "slot1.example.com", m.port or 443,
+                    [(MCI_PROBE, tls_timeout(target.ip)), (RIGHTEL_PROBE, tls_up(target.ip))],
+                    at="2026-11-05T16:16:08.167Z",
+                )  # fmt: skip
+                cycle.nodes[i] = https_m(
+                    raw,
+                    role="node",
+                    target=m.target,
+                    port=m.port or 443,
+                    at=m.at,
+                    ip=target.ip,
+                    node_id=node_id,
+                )
+        verdicts = await store(engine, cycle, target)
+    assert verdicts[node_id][0] == "suspect"
+    # MCI had no probe at all (Rightel down): "incomplete", so unknown, not blocked.
+    node2 = await make_node(engine, state="ready", ipv4="203.0.113.14")
+    t2 = target_of(node2, "203.0.113.14")
+    for minutes in (20, 10):
+        cycle = real_cycle(node2, t2.ip, at=now - timedelta(minutes=minutes), node_up=False)
+        for i, m in enumerate(cycle.nodes):
+            if m.kind == "https":
+                raw = gp_https(
+                    "2BxvEpnwulLDMY5XJ00021Rtw", "slot1.example.com", m.port or 443,
+                    [(RIGHTEL_PROBE, tls_timeout(t2.ip))], at="2026-11-05T16:16:39.086Z",
+                )  # fmt: skip
+                cycle.nodes[i] = https_m(
+                    raw, role="node", target=m.target, port=m.port or 443, at=m.at, ip=t2.ip, node_id=node2
+                )
+        verdicts = await store(engine, cycle, t2)
+    assert verdicts[node2][0] == "unknown" and "round0:https:incomplete" in verdicts[node2][1]
 
 
 @pytest.mark.db
@@ -410,16 +597,28 @@ async def test_due_targets(engine: AsyncEngine) -> None:
         )
     s = ProbeSettings()
     now = datetime.now(UTC)
+    names = NodeNames(zone="example.com", records={"slot2.example.com": ("203.0.113.20", ready)})
     async with engine.connect() as conn:
-        targets = await service.due_targets(conn, s, now, "example.com")
+        targets = await service.due_targets(conn, s, now, names)
     by_id = {t.node_id: t for t in targets}
     assert set(by_id) == {ready, asked}
     assert by_id[asked].trigger == "manual" and targets[0].node_id == asked  # owner requests first
-    assert (by_id[ready].port, by_id[ready].dns_name, by_id[ready].trigger) == (
+    r = by_id[ready]
+    assert (r.port, r.dns_name, r.trigger, r.tls_name, r.tls_host, r.tls_ports, r.location) == (
         8443,
         "slot2.example.com",
         "schedule",
+        "slot2.example.com",  # its own name: the SNI its links use
+        "slot2.example.com",
+        (443, 8443),
+        "fsn1",
     )
+    a = by_id[asked]
+    assert (a.tls_name, a.tls_host, a.tls_ports) == (None, "203.0.113.22", (443,))  # no name, no Telemt
+    moved = NodeNames(zone="example.com", records={"slot2.example.com": ("203.0.113.99", ready)})
+    async with engine.connect() as conn:
+        (r2,) = [t for t in await service.due_targets(conn, s, now, moved) if t.node_id == ready]
+    assert r2.tls_name is None and r2.tls_host == "203.0.113.20"  # the name points elsewhere: the IP
     async with engine.begin() as conn:
         await conn.execute(
             text(
@@ -473,7 +672,7 @@ async def test_reconciler_with_unreachable_sources_records_unknown(engine: Async
         ).one()
         summary = await service.summary(conn)
     assert set(statuses) == {"error"}
-    assert state.verdict == "unknown" and any("control_error" in r for r in state.verdict_reasons)
+    assert state.verdict == "unknown" and any("https:control_error" in r for r in state.verdict_reasons)
     assert all(s["ok"] is False for s in summary["sources"])
     assert await actions(engine) == []  # unknown -> unknown is not a change
 
@@ -482,8 +681,9 @@ def test_worker_registers_the_net_loops() -> None:
     from proxyhub.worker import reconcilers
 
     loops = {r.name: r for r in reconcilers()}
-    assert {"dns", "probes"} <= set(loops)
+    assert {"dns", "probes", "targets"} <= set(loops)
     assert loops["probes"].interval_seconds == 60 and loops["dns"].interval_seconds == 60
+    assert loops["targets"].interval_seconds == 60
 
 
 # --- API ------------------------------------------------------------------------------------------
@@ -548,11 +748,20 @@ async def test_summary_and_run_over_http(client: AsyncClient, engine: AsyncEngin
         "node_id": str(node),
         "name": t["name"],
         "ipv4": "203.0.113.40",
+        "location": "fsn1",
         "verdict": "unknown",
         "verdict_at": None,
         "verdict_reasons": [],
         "networks": [],
+        "tls_target": None,
+        "tcp_networks": [],
     }
+    locations = (await client.get("/api/probes/summary")).json()["locations"]
+    assert locations["window_days"] == 7 and locations["key_networks"] == ["asn:197207", "asn:57218"]
+    assert [x["location"] for x in locations["locations"]] == ["fsn1", "nbg1", "hel1"]  # the defaults
+    assert all(
+        x["class"] == "unknown" and x["allowed"] and x["networks"] == [] for x in locations["locations"]
+    )
     assert str(gone) not in {x["node_id"] for x in targets}
     r = await client.post("/api/probes/run", json={"node_id": str(node)})
     assert r.status_code == 202 and r.json() == {}

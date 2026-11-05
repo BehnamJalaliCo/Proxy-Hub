@@ -88,6 +88,7 @@ const REASON: Record<string, string> = {
   no_location_configured: "هیچ location تعیین نشده",
   spare_in_use: "جای خالی در حال استفاده است",
   no_other_location: "location دیگری در دسترس نیست",
+  all_locations_closed: "همه‌ی locationهای مجاز از ایران بسته‌اند",
   account_observation_stale: "داده‌ی حساب کهنه است",
   prices_stale: "قیمت‌های هتزنر کهنه است (بیش از ۶ ساعت)",
   no_hetzner_id: "شناسه‌ی هتزنر ثبت نشده",

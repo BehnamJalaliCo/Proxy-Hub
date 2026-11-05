@@ -10,7 +10,8 @@ dashboard and record the intended actions in ``actions_log``.
 **Live** (the owner turned dry-run off in the dashboard, the kill switch is off, the stored
 settings are valid): the loop also (proxyhub/fleet/live.py)
 
-1. marks slot nodes that Iran blocks (fresh probe verdict ``blocked`` from both sources) ``burned``
+1. marks slot nodes that Iran blocks (fresh probe verdict ``blocked``: TLS failed from MCI and
+   Rightel in two rounds while the control worked) ``burned``
    and remembers their IP and /24 (``ip_history``),
 2. applies the plan's ALLOWED actions as rows only: a ``requested`` slot node for each allowed
    creation, ``retiring`` for each allowed deletion. The node executor (proxyhub/nodes/executor.py)

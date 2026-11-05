@@ -1,6 +1,7 @@
 // Package xray drives Xray-core on a node from the panel's desired state (docs/10 sections 3.5 and
 // 3.14, decision D18): VLESS + REALITY on TCP, or (transport ws_tls, 2026-11-05) VLESS + WebSocket +
-// TLS with the panel's certificate for the node's own DNS name:
+// TLS with the panel's certificate for the node's own DNS name. A REALITY section may add (agent
+// 0.4.0) a second inbound on its own port: VLESS + XHTTP + REALITY with the same key and users:
 //
 //   - Render turns the desired "xray" section into Xray's JSON config. The privacy settings are
 //     constants here, not data: access log "none", warning level with every address masked, no DNS

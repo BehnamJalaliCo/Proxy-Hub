@@ -246,8 +246,11 @@ def test_check_cadence() -> None:
 def test_globalping_budget_is_shared_with_the_node_probes() -> None:
     s = ProbeSettings()
     assert node_probe_reserve(s, 0) == 0
-    assert node_probe_reserve(s, 1) == 4 * 2 + 4 + 4  # control + TCP, ICMP, DNS for one node
-    assert node_probe_reserve(s, 50) == node_probe_reserve(s, 10) == 4 * 11 + 40 + 40
+    # A TLS cycle: the control + 443 + the MTProto port per node, each run by up to 8 probes (MCI 3,
+    # Rightel 2, 3 more in Iran) until the last control said how many really ran.
+    assert node_probe_reserve(s, 1) == 8 * (1 + 2)
+    assert node_probe_reserve(s, 50) == node_probe_reserve(s, 10) == 8 * (1 + 2 * 10)
+    assert node_probe_reserve(s, 9, tls_probes=4) == 4 * 19 and node_probe_reserve(s, 9, 0) == 8 * 19
     assert node_probe_reserve(s.model_copy(update={"enabled": False}), 5) == 0
     window = T0 + timedelta(minutes=30)
     assert budget_allows(None, T0, 124)
@@ -1005,13 +1008,15 @@ async def test_loop_keeps_globalping_tests_for_the_node_probes(engine: AsyncEngi
     _, cf_factory = counting_cf()
     rec = DomainsReconciler(vault_factory=lambda: vault, client_factory=cf_factory, gp_factory=gp_factory)
     await add_zone(engine, ZONE_ID, "live.example", pool="active")
-    await make_node(engine, state="ready", ipv4="203.0.113.40")  # node probes need 16 tests per cycle
+    # The node probes keep 3 probes x (control + 443 + MTProto port) = 9 tests for one node (the last
+    # TLS control ran on 3 probes).
+    await make_node(engine, state="ready", ipv4="203.0.113.40")
     async with engine.begin() as conn:
         await conn.execute(
             text(
                 "INSERT INTO probe_sources (name, ok, note, checked_at, ratelimit_limit, "
-                "ratelimit_remaining, ratelimit_reset_at) "
-                "VALUES ('globalping', true, 'x', now(), 250, 19, now() + interval '20 minutes')"
+                "ratelimit_remaining, ratelimit_reset_at, tls_probes) "
+                "VALUES ('globalping', true, 'x', now(), 250, 12, now() + interval '20 minutes', 3)"
             )
         )
     for _ in range(3):
@@ -1020,8 +1025,8 @@ async def test_loop_keeps_globalping_tests_for_the_node_probes(engine: AsyncEngi
     assert gp.attempts == 0
     log = [(a["action"], a["reasons"]["reasons"]) for a in await actions(engine)]
     assert log == [("domain_check_skipped", ["globalping_budget_low"])]  # logged once, not every minute
-    async with engine.begin() as conn:  # 20 = 4 for the check + 16 kept for the nodes
-        await conn.execute(text("UPDATE probe_sources SET ratelimit_remaining = 20"))
+    async with engine.begin() as conn:  # 13 = 4 for the check + 9 kept for the nodes
+        await conn.execute(text("UPDATE probe_sources SET ratelimit_remaining = 13"))
     async with engine.begin() as conn:
         await rec.run_once(conn)
     assert gp.attempts == 1

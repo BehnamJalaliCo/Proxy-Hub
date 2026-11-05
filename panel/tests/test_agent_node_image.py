@@ -104,7 +104,7 @@ def test_xray_unit_never_runs_unconfigured_or_logs() -> None:
     assert "ReadWritePaths=/etc/telemt /etc/xray /etc/proxyhub-agent /var/lib/proxyhub-agent" in agent_unit
     # Contract item 1: both proxy ports open; Xray's API port closed from outside (loopback only).
     nft = (FILES / "nftables.conf").read_text()
-    assert "tcp dport { 443, 8443 } accept" in nft and "tcp dport 10085 counter drop" in nft
+    assert "tcp dport { 443, 2083, 8443 } accept" in nft and "tcp dport 10085 counter drop" in nft
 
 
 @requires_go

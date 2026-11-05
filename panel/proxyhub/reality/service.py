@@ -2,7 +2,8 @@
 serves and its DNS name), the certificate, configs with what is left.
 
 Links (with their UUID) appear here for active configs only, because the owner publishes them on
-purpose (rule 3's one exception); ended configs show no link. Nothing here is per person.
+purpose (rule 3's one exception); ended configs show no link. A ``reality`` config also shows its
+XHTTP link (``xhttp``) while XHTTP is on. Nothing here is per person.
 """
 
 from __future__ import annotations
@@ -17,10 +18,19 @@ from proxyhub.acme.store import cert_row, valid_now
 from proxyhub.cloudflare.service import node_names
 from proxyhub.db.models_reality import RealityConfig
 from proxyhub.fleet.actions import iso
-from proxyhub.reality.links import ENDED_KEPT_FOR, config_name, config_url, link_prefix, links_for
-from proxyhub.reality.settings import GB, PORT, RealitySettings, load_reality_settings
+from proxyhub.reality.links import (
+    ENDED_KEPT_FOR,
+    config_name,
+    config_url,
+    link_prefix,
+    links_for,
+    xhttp_key,
+    xhttp_url,
+)
+from proxyhub.reality.settings import GB, PORT, XHTTP_PORT, RealitySettings, load_reality_settings
 from proxyhub.reality.store import (
     agent_supports_ws_tls,
+    agent_supports_xhttp,
     agent_version,
     all_statuses,
     keys_by_scope,
@@ -37,6 +47,7 @@ def settings_json(s: RealitySettings) -> dict[str, Any]:
     return {
         **s.model_dump(mode="json"),
         "port": PORT,
+        "xhttp_port": XHTTP_PORT,
         "gb_bytes": GB,
     }
 
@@ -60,6 +71,7 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
     node_items: list[dict[str, Any]] = []
     for n in sorted(nodes, key=lambda n: (n.slot is None, n.slot or 0, n.name)):
         st = statuses.get(n.id)
+        version = await agent_version(db, n.id)
         key = keys.get(node_scope(n))
         dns_name = names.scope_name(n.slot, n.id)
         if ws:
@@ -85,6 +97,8 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
                     "target_ok": target_verdict(st, *check) if check else None,
                     "apply_error": st.apply_error,
                     "reported_at": iso(st.reported_at),
+                    # The XHTTP inbound's port while the node runs it (null: none).
+                    "xhttp_port": st.xhttp_port,
                 },
                 "public_key": key.public_key if key else None,
                 "target": key.target if key else None,
@@ -93,7 +107,9 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
                 "dns_name": dns_name,
                 "dns_own": names.own_name(n.slot, n.id, n.ipv4) is not None,
                 "ws_path": key.ws_path if key else None,
-                "agent_ws_tls": agent_supports_ws_tls(await agent_version(db, n.id)),
+                "agent_ws_tls": agent_supports_ws_tls(version),
+                # The node's agent knows the XHTTP inbound (0.4.0 on).
+                "agent_xhttp": agent_supports_xhttp(version),
                 # The owner's newer target, while this scope still waits for its configs to end.
                 "target_next": settings.target
                 if not ws and key and key.target_pair != (settings.target, settings.target_host)
@@ -106,11 +122,21 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
     for r in rows:
         active = r.status == "active"
         link_key = f"reality:{r.id}"
+        name = config_name(prefix, r.location, r.id)
+        xhttp = (
+            {
+                "key": xhttp_key(link_key),
+                "listed": xhttp_key(link_key) in listed,
+                "url": xhttp_url(r, name) if active else None,
+            }
+            if r.transport == "reality" and (settings.xhttp_enabled or not active)
+            else None
+        )
         config_items.append(
             {
                 "id": r.id,
                 "key": link_key,
-                "name": config_name(prefix, r.location, r.id),
+                "name": name,
                 "slot": r.slot,
                 "node_name": r.node_name,
                 "location": r.location,
@@ -125,7 +151,9 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
                 "data_cap_bytes": r.data_cap_bytes,
                 "used_bytes": r.used_bytes,
                 "remaining_bytes": max(0, r.data_cap_bytes - r.used_bytes) if active else 0,
-                "url": config_url(r, config_name(prefix, r.location, r.id)) if active else None,
+                "url": config_url(r, name) if active else None,
+                # The same config through VLESS + XHTTP + REALITY (null: ws_tls, or XHTTP off).
+                "xhttp": xhttp,
             }
         )
     counts = dict(

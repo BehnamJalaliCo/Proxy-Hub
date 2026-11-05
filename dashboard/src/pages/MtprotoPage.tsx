@@ -5,11 +5,13 @@ import { useState, type ReactNode, type SubmitEvent } from "react";
 
 import { Button } from "../components/ui/Button";
 import { Badge, Card, CardHeader } from "../components/ui/Card";
+import { EndedSection } from "../components/ui/EndedSection";
 import { CopyButton, EmptyState, LoadError, Skeleton } from "../components/ui/Feedback";
-import { Field, TextInput, Toggle } from "../components/ui/Form";
+import { Field, Segmented, TextInput, Toggle } from "../components/ui/Form";
 import { PageHeader } from "../components/ui/PageHeader";
 import { errorList, errorMessage, isApiError } from "../lib/api";
 import { cn } from "../lib/browser";
+import { isEndedProxy, splitEnded } from "../lib/ended";
 import { formatJalali, formatNumber, formatRelative, toFaDigits } from "../lib/format";
 import { nodeStateInfo } from "../lib/labels";
 import {
@@ -30,6 +32,7 @@ import {
   type MtprotoProxy,
   type MtprotoSettings,
   type MtprotoState,
+  type MtprotoTargetMode,
 } from "../lib/mtproto";
 import { toast } from "../lib/toast";
 import { TONE_SOFT } from "../lib/tones";
@@ -147,6 +150,11 @@ function ProxyCard({ p, index }: { p: MtprotoProxy; index: number }) {
 
 // --- settings -----------------------------------------------------------------------------------------
 
+const DOMAIN_MANUAL_HINT =
+  "nodeی که نام دامنه‌ی خودش و گواهی دارد (روش WebSocket + TLS)، نام خودش را به‌جای این میگذارد تا نام و IP یکی باشند. این دامنه فقط برای nodeهای بی‌نام است: سایت بزرگ و پایداری که در ایران فیلتر نیست.";
+const DOMAIN_AUTO_HINT =
+  "خودکار: اگر این دامنه در دو سنجش پشت‌سرهم از همراه اول یا رایتل بسته باشد، پنل آن را با بهترین سایت نامزدِ باز (صفحه‌ی «تنظیمات») عوض میکند و خبر میدهد. فقط برای nodeهای بی‌نام است؛ nodeی که نام دامنه‌ی خودش را دارد همان را نگه میدارد (D42).";
+
 function SettingsForm({ current, defaults, corrupt }: { current: MtprotoSettings; defaults: MtprotoSettings; corrupt: boolean }) {
   const qc = useQueryClient();
   const [draft, setDraft] = useState<MtprotoDraft>(() => draftFromMtproto(current));
@@ -200,17 +208,39 @@ function SettingsForm({ current, defaults, corrupt }: { current: MtprotoSettings
           </div>
         ) : null}
         <div className="grid gap-5 sm:grid-cols-2">
-          <Field label="پورت" htmlFor="mtp-port" hint="پیش‌فرض ۸۴۴۳. پورت ۴۴۳ مال VLESS (WebSocket + TLS یا Reality) است. پورت دیگر فقط وقتی کار میکند که فایروال nodeها هم بازش کند." error={shown("port")}>
+          <Field label="پورت" htmlFor="mtp-port" hint="پیش‌فرض ۸۴۴۳. پورت ۴۴۳ مال VLESS (WebSocket + TLS یا Reality) و ۲۰۸۳ مال XHTTP است. پورت دیگر فقط وقتی کار میکند که فایروال nodeها هم بازش کند." error={shown("port")}>
             <TextInput id="mtp-port" inputMode="numeric" latin value={draft.port} onChange={(e) => set("port", e.target.value)} invalid={Boolean(shown("port"))} />
           </Field>
           <Field
             label="دامنه‌ی TLS پشتیبان (برای لینک ee)"
             htmlFor="mtp-domain"
-            hint="nodeی که نام دامنه‌ی خودش و گواهی دارد (روش WebSocket + TLS)، نام خودش را به‌جای این میگذارد تا نام و IP یکی باشند. این دامنه فقط برای nodeهای بی‌نام است: سایت بزرگ و پایداری که در ایران فیلتر نیست."
+            hint={draft.target_mode === "auto" ? DOMAIN_AUTO_HINT : DOMAIN_MANUAL_HINT}
             error={shown("tls_domain")}
           >
-            <TextInput id="mtp-domain" latin value={draft.tls_domain} onChange={(e) => set("tls_domain", e.target.value)} invalid={Boolean(shown("tls_domain"))} placeholder="www.microsoft.com" />
+            <TextInput
+              id="mtp-domain"
+              latin
+              value={draft.tls_domain}
+              onChange={(e) => set("tls_domain", e.target.value)}
+              invalid={Boolean(shown("tls_domain"))}
+              placeholder="www.microsoft.com"
+              readOnly={draft.target_mode === "auto"}
+              aria-readonly={draft.target_mode === "auto"}
+            />
           </Field>
+        </div>
+        <div className="flex flex-col gap-2">
+          <span className="text-sm font-semibold text-fg">انتخاب دامنه‌ی TLS</span>
+          <Segmented<MtprotoTargetMode>
+            label="انتخاب دامنه‌ی TLS"
+            value={draft.target_mode}
+            onChange={(v) => set("target_mode", v)}
+            options={[
+              { value: "auto", label: "خودکار (از سنجش ایران)" },
+              { value: "manual", label: "دستی" },
+            ]}
+            className="w-full max-w-md"
+          />
         </div>
         <div className="flex flex-col gap-4 rounded-2xl border border-line bg-surface-2/60 p-4">
           <Toggle checked={draft.mode_tls} onCheckedChange={(v) => set("mode_tls", v)} label={MODE_LABEL.tls.label} description={MODE_LABEL.tls.hint} />
@@ -257,6 +287,7 @@ export default function MtprotoPage() {
   const q = useMtproto();
   const data = q.data;
   const s = data ? summarize(data.proxies) : null;
+  const split = data ? splitEnded(data.proxies, isEndedProxy) : null;
 
   return (
     <>
@@ -298,21 +329,30 @@ export default function MtprotoPage() {
               )}
             </div>
 
-            {data.proxies.length === 0 ? (
+            {split && split.current.length === 0 ? (
               <Card>
                 <EmptyState
                   icon={<ShieldCheck className="size-6" />}
-                  title="هنوز پروکسی‌ای نیست"
+                  title={split.ended.length ? "پروکسی فعالی نیست" : "هنوز پروکسی‌ای نیست"}
                   description="وقتی nodeی ساخته شود، پنل خودش Telemt و secret آن را تنظیم میکند و لینکش اینجا میآید."
                 />
               </Card>
-            ) : (
+            ) : split ? (
               <ul className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                {data.proxies.map((p, i) => (
+                {split.current.map((p, i) => (
                   <ProxyCard key={p.key} p={p} index={i} />
                 ))}
               </ul>
-            )}
+            ) : null}
+            {split ? (
+              <EndedSection count={split.ended.length} hint="nodeهای کنارگذاشته یا فیلترشده؛ لینکشان دیگر منتشر نمیشود.">
+                <ul className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  {split.ended.map((p, i) => (
+                    <ProxyCard key={p.key} p={p} index={i} />
+                  ))}
+                </ul>
+              </EndedSection>
+            ) : null}
 
             <SettingsForm
               key={JSON.stringify(data.settings ?? data.defaults)}
