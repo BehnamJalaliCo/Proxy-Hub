@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +42,10 @@ func TestPanelDocument(t *testing.T) {
 	if want := os.Getenv("PROXYHUB_TEST_EXPECT_TRANSPORT"); want != "" && (want == "ws_tls") != doc.Xray.WSTLS() {
 		t.Fatalf("the document's transport is not %s", want)
 	}
+	// PROXYHUB_TEST_EXPECT_XHTTP: "1" the document asks for the XHTTP inbound, "0" it does not.
+	if want := os.Getenv("PROXYHUB_TEST_EXPECT_XHTTP"); want != "" && (want == "1") != (doc.Xray.XHTTP != nil) {
+		t.Fatalf("the document's xhttp part: want %s", want)
+	}
 	dir := t.TempDir()
 	var files TLSFiles
 	if doc.Xray.WSTLS() {
@@ -60,6 +65,9 @@ func TestPanelDocument(t *testing.T) {
 	out := filepath.Join(dir, "config.json")
 	if err := WriteConfig(out, data, fsutil.KeepOwner); err != nil {
 		t.Fatal(err)
+	}
+	if doc.Xray.XHTTP != nil && !strings.Contains(string(data), `"tag": "`+XHTTPInboundTag+`"`) {
+		t.Fatal("the XHTTP inbound is missing from the rendered config")
 	}
 	if os.Getenv("PROXYHUB_TEST_XRAY") == "" {
 		t.Log("panel document accepted and rendered (no Xray binary given)")

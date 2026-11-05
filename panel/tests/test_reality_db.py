@@ -800,11 +800,13 @@ async def test_links_provider(world: World) -> None:
     )
     assert link.url.endswith("#%40ipoxxo_main%20%F0%9F%87%AB%F0%9F%87%AE%20" + str(c.id))
     assert link.label.startswith("کانفیگ ") and link.expires_at == c.expires_at
-    # An ended config stays listed (so its post can be marked), with its status.
+    # An ended config stays listed (so its post can be marked), with its status; so does its XHTTP
+    # link (tests/test_xhttp_db.py), for posts that carry that one.
     await world.rows("UPDATE reality_configs SET status = 'full', ended_at = now()")
     async with world.engine.connect() as conn:
-        [ended] = await provide_links(conn)
+        [ended, ended_xhttp] = await provide_links(conn)
     assert ended.status == "full" and ended.key == link.key
+    assert ended_xhttp.status == "full" and ended_xhttp.companion_of == link.key
     async with world.engine.begin() as conn:
         await save_reality_settings(conn, reality_settings(link_name="My Channel"))
     async with world.engine.connect() as conn:

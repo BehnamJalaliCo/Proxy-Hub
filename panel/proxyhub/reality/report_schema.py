@@ -2,8 +2,9 @@
 
 Per Reality user only its label and cumulative byte total; for Xray only up/version/uptime, the
 target check (with the target and server name it was about: both come from the panel's own desired
-state, DNS names only) and an apply error code. Nothing can carry an address (rule 7): every string
-has a narrow pattern and the whole report is scanned for anything address-shaped before validation.
+state, DNS names only), an apply error code and the port of the XHTTP inbound it runs. Nothing can
+carry an address (rule 7): every string has a narrow pattern and the whole report is scanned for
+anything address-shaped before validation.
 """
 
 from __future__ import annotations
@@ -44,6 +45,8 @@ class XrayCounters(_Strict):
     checked_server_name: Annotated[str, StringConstraints(pattern=CHECKED_SERVER_NAME)] | None
     apply_error: Annotated[str, StringConstraints(pattern=f"^{ERROR_CODE.pattern}$")] | None
     users: Annotated[list[XrayUserCounters], Field(max_length=MAX_XRAY_USERS)]
+    # The port of the VLESS + XHTTP + REALITY inbound Xray runs (agent 0.4.0 on; absent: none).
+    xhttp_port: Annotated[int, Field(ge=1, le=65535)] | None = None
 
     @model_validator(mode="after")
     def _unique(self) -> XrayCounters:

@@ -33,8 +33,9 @@ MTPROTO_KEY = "mtproto"
 DEFAULT_PORT = 8443
 DEFAULT_TLS_DOMAIN = "www.microsoft.com"
 # Never a proxy port: SSH (22, dropped by the node firewall), Xray VLESS Reality (443 on every node),
-# Telemt's own metrics and API (9090/9091, loopback only and dropped by the node firewall).
-FORBIDDEN_PORTS = frozenset({22, 443, 9090, 9091})
+# Xray VLESS + XHTTP + REALITY (2083, proxyhub/reality/settings.py XHTTP_PORT), Telemt's own
+# metrics and API (9090/9091, loopback only and dropped by the node firewall).
+FORBIDDEN_PORTS = frozenset({22, 443, 2083, 9090, 9091})
 
 Mode = Literal["tls", "secure", "classic"]
 Db = AsyncConnection | AsyncSession

@@ -10,6 +10,11 @@ TLS for its scope's DNS name (``slot<N>.<domain>``, or a test node's ``t<8 hex>.
 panel's wildcard certificate for the active domain (proxyhub/acme). Without the name, the
 certificate, or an agent that knows the transport (0.3.0 on), the node gets no inbound at all and
 no link is made or published for it (:func:`ws_tls_plan`).
+
+XHTTP (transport ``reality`` with ``xhttp_enabled``): the section also carries ``xhttp`` (port and
+the scope's path) for an agent from 0.4.0 on whose node's Telemt does not use the XHTTP port. The
+agent then serves VLESS + XHTTP + REALITY there with the same key and users, and reports the port
+while it runs it (``reality_node_status.xhttp_port``), which is what the links provider checks.
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ from proxyhub.db.models import Node
 from proxyhub.db.models_agent import AgentNode, TelemtNodeConfig
 from proxyhub.db.models_reality import RealityConfig, RealityKey, RealityNodeStatus, RealityUsage
 from proxyhub.fleet.lifecycle import NodeState
-from proxyhub.reality.settings import PORT, load_reality_settings
+from proxyhub.reality.settings import PORT, XHTTP_PORT, load_reality_settings
 from proxyhub.vault import Vault, VaultError
 
 Db = AsyncConnection | AsyncSession
@@ -46,6 +51,8 @@ SERVE_STATES: Final = frozenset({S.READY, S.UNHEALTHY, S.REPAIRING, S.BURNED, S.
 XRAY_API_PORT: Final = 10085  # node-image/files/agent-xray.json; Telemt may not use it
 # The first agent that renders the ws_tls inbound; an older one would refuse the whole document.
 WS_TLS_AGENT: Final = (0, 3, 0)
+# The first agent that renders the XHTTP inbound (an older one would refuse the "xhttp" key).
+XHTTP_AGENT: Final = (0, 4, 0)
 EMAIL_DOMAIN: Final = "proxyhub"
 _EMAIL = re.compile(r"cfg-([1-9][0-9]{0,17})@proxyhub")
 
@@ -134,6 +141,7 @@ class KeyView:
     server_name: str
     secret_name: str
     ws_path: str
+    xhttp_path: str = "/"
 
     @property
     def scope(self) -> Scope:
@@ -158,7 +166,12 @@ _KEY_COLS = (
     RealityKey.server_name,
     RealityKey.secret_name,
     RealityKey.ws_path,
+    RealityKey.xhttp_path,
 )
+
+
+def _key(r: Any) -> KeyView:
+    return KeyView(**r._mapping)
 
 
 def scope_filter(slot: int | None, node_id: uuid.UUID) -> Any:
@@ -167,19 +180,23 @@ def scope_filter(slot: int | None, node_id: uuid.UUID) -> Any:
 
 async def scope_key(db: Db, node: NodeView) -> KeyView | None:
     r = (await db.execute(select(*_KEY_COLS).where(scope_filter(node.slot, node.id)))).first()
-    return KeyView(*r) if r is not None else None
+    return _key(r) if r is not None else None
 
 
 async def keys_by_scope(db: Db) -> dict[Scope, KeyView]:
-    return {(k := KeyView(*r)).scope: k for r in (await db.execute(select(*_KEY_COLS))).all()}
+    return {(k := _key(r)).scope: k for r in (await db.execute(select(*_KEY_COLS))).all()}
+
+
+async def telemt_ports(db: Db, node_id: uuid.UUID) -> set[int]:
+    ports = (
+        await db.execute(select(TelemtNodeConfig.ports).where(TelemtNodeConfig.node_id == node_id))
+    ).scalar_one_or_none()
+    return set(ports or [])
 
 
 async def telemt_clash(db: Db, node_id: uuid.UUID) -> bool:
     """True if the node's Telemt config uses Xray's port or API port (the agent would refuse it)."""
-    ports = (
-        await db.execute(select(TelemtNodeConfig.ports).where(TelemtNodeConfig.node_id == node_id))
-    ).scalar_one_or_none()
-    return bool(ports) and bool({PORT, XRAY_API_PORT} & set(ports or []))
+    return bool({PORT, XRAY_API_PORT} & await telemt_ports(db, node_id))
 
 
 @dataclass(frozen=True)
@@ -196,6 +213,8 @@ class StatusView:
     # What the node's last target check was about (None with target_ok: never checked).
     checked_target: str | None = None
     checked_server_name: str | None = None
+    # The port of the XHTTP inbound the agent says it runs (None: none).
+    xhttp_port: int | None = None
 
 
 _STATUS_COLS = (
@@ -210,6 +229,7 @@ _STATUS_COLS = (
     RealityNodeStatus.reported_at,
     RealityNodeStatus.checked_target,
     RealityNodeStatus.checked_server_name,
+    RealityNodeStatus.xhttp_port,
 )
 
 
@@ -237,10 +257,19 @@ def _utc_text(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _agent_at_least(version: str | None, least: tuple[int, int, int]) -> bool:
+    m = re.match(r"([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})", version or "")
+    return m is not None and tuple(int(g) for g in m.groups()) >= least
+
+
 def agent_supports_ws_tls(version: str | None) -> bool:
     """True for an agent version from 0.3.0 on (``X.Y.Z``, anything after it ignored)."""
-    m = re.match(r"([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})", version or "")
-    return m is not None and tuple(int(g) for g in m.groups()) >= WS_TLS_AGENT
+    return _agent_at_least(version, WS_TLS_AGENT)
+
+
+def agent_supports_xhttp(version: str | None) -> bool:
+    """True for an agent version from 0.4.0 on (``X.Y.Z``, anything after it ignored)."""
+    return _agent_at_least(version, XHTTP_AGENT)
 
 
 async def agent_version(db: Db, node_id: uuid.UUID) -> str | None:
@@ -350,8 +379,9 @@ async def xray_section(db: Db, node_id: uuid.UUID, vault: Vault | None = None) -
         # scope is handed to posts (proxyhub/reality/links.py needs Xray up on a serving node).
         log.error("reality: the private key of key %s is unusable (%s); xray left out", key.id, problem)
         return None
-    # The REALITY section has exactly the shape agents before 0.3.0 know (no "transport" key).
-    return {
+    # The REALITY section has exactly the shape agents before 0.3.0 know (no "transport" key), and
+    # the "xhttp" key only for an agent that knows it (0.4.0 on).
+    section: dict[str, Any] = {
         "port": PORT,
         "private_key": secret.reveal(),
         "target": key.target,
@@ -359,6 +389,19 @@ async def xray_section(db: Db, node_id: uuid.UUID, vault: Vault | None = None) -
         "short_ids": [key.short_id],
         "users": users,
     }
+    if await serves_xhttp(db, node_id, settings.xhttp_enabled):
+        section["xhttp"] = {"port": XHTTP_PORT, "path": key.xhttp_path}
+    return section
+
+
+async def serves_xhttp(db: Db, node_id: uuid.UUID, enabled: bool) -> bool:
+    """Whether a REALITY node's section gets the XHTTP inbound: the owner's switch is on, its agent
+    knows the key (0.4.0 on), and its Telemt does not listen on the XHTTP port."""
+    return (
+        enabled
+        and agent_supports_xhttp(await agent_version(db, node_id))
+        and XHTTP_PORT not in await telemt_ports(db, node_id)
+    )
 
 
 async def telemt_tls_domain(db: Db, node_id: uuid.UUID) -> str | None:
@@ -396,6 +439,7 @@ async def store_xray_report(
     users: Sequence[XrayUserTotal],
     now: datetime,
     checked: tuple[str, str] | None = None,
+    xhttp_port: int | None = None,
 ) -> int:
     """Store one report's Xray section: node status, and per config the bytes this node counted.
 
@@ -418,6 +462,7 @@ async def store_xray_report(
         "apply_error": apply_error,
         "users_reported": len(users),
         "reported_at": now,
+        "xhttp_port": xhttp_port,
     }
     await db.execute(
         insert(RealityNodeStatus)
@@ -502,6 +547,7 @@ async def recent_and_active_configs(db: Db, since: datetime) -> list[Any]:
                     RealityKey.short_id,
                     RealityKey.server_name,
                     RealityKey.ws_path,
+                    RealityKey.xhttp_path,
                     Node.name.label("node_name"),
                     Node.location,
                 )

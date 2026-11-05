@@ -35,6 +35,7 @@ from sqlalchemy import (
     Integer,
     String,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -48,6 +49,8 @@ TRANSPORTS = ("reality", "ws_tls")
 PUBLIC_KEY_RE = "^[A-Za-z0-9_-]{43}$"
 SHORT_ID_RE = "^([0-9a-f]{2}){1,8}$"
 WS_PATH_RE = "^/[0-9a-f]{16}$"
+# The database makes every key's XHTTP path: "/" + 16 hex of a random UUID (migration 0019).
+RANDOM_PATH_SQL = "'/' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 16)"
 
 
 def _in(values: tuple[str, ...]) -> str:
@@ -66,6 +69,7 @@ class RealityKey(Base):
         CheckConstraint(f"public_key ~ '{PUBLIC_KEY_RE}'", name="public_key"),
         CheckConstraint(f"short_id ~ '{SHORT_ID_RE}'", name="short_id"),
         CheckConstraint(f"ws_path ~ '{WS_PATH_RE}'", name="ws_path"),
+        CheckConstraint(f"xhttp_path ~ '{WS_PATH_RE}'", name="xhttp_path"),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     slot: Mapped[int | None] = mapped_column(Integer, unique=True)
@@ -82,6 +86,9 @@ class RealityKey(Base):
     # The scope's WebSocket path for the ws_tls transport: "/" + 16 random hex, made with the key, so
     # a slot's links keep their path when a new server takes the slot over.
     ws_path: Mapped[str] = mapped_column(String(17), nullable=False)
+    # The scope's XHTTP path (VLESS + XHTTP + REALITY on its own port), made by the database with
+    # the key and kept with it like ws_path.
+    xhttp_path: Mapped[str] = mapped_column(String(17), nullable=False, server_default=text(RANDOM_PATH_SQL))
     created_at: Mapped[datetime] = _now()
 
 
@@ -142,6 +149,7 @@ class RealityNodeStatus(Base):
             "AND (checked_target IS NULL) = (checked_server_name IS NULL)",
             name="checked",
         ),
+        CheckConstraint("xhttp_port IS NULL OR xhttp_port BETWEEN 1 AND 65535", name="xhttp_port"),
     )
     node_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("nodes.id", ondelete="CASCADE"), primary_key=True
@@ -158,3 +166,5 @@ class RealityNodeStatus(Base):
     apply_error: Mapped[str | None] = mapped_column(String(60))
     users_reported: Mapped[int] = mapped_column(Integer, nullable=False)
     reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # The port the agent's VLESS + XHTTP + REALITY inbound runs on (NULL: none, or agent < 0.4.0).
+    xhttp_port: Mapped[int | None] = mapped_column(Integer)

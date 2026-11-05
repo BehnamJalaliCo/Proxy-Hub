@@ -10,6 +10,14 @@ Two shapes, by the transport the config was made for (the links contract kind st
   &pbk=<key>&sid=<id>&type=tcp&flow=xtls-rprx-vision#<name>``, host ``slot<N>.<active domain>``,
   else the node's IPv4 (contract item 2).
 
+  With ``xhttp_enabled`` a ``reality`` config has a second link, key ``reality:<id>:xhttp``:
+  ``vless://<uuid>@<host>:2083?encryption=none&security=reality&sni=<name>&fp=chrome&pbk=<key>
+  &sid=<id>&type=xhttp&path=<urlencoded path>&mode=auto#<name> XHTTP`` (VLESS + XHTTP + REALITY,
+  same uuid, so the same time and data cap). It is listed while the config is, and only once a
+  serving node of the scope reports its XHTTP inbound up; the two links are then labelled
+  «کانفیگ N (TCP)» and «کانفیگ N (XHTTP)». An ended config lists its XHTTP link too (with the
+  config's status), so posts that carry it are marked.
+
 The host was fixed when the config was made. The name every user's app shows starts with the
 channel's @name (D41), e.g. ``@ipoxxo 🇩🇪 12``; the post label is «کانفیگ N».
 
@@ -31,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from proxyhub.fleet.lifecycle import NodeState
 from proxyhub.links.contract import ProxyLink
-from proxyhub.reality.settings import PORT, load_reality_settings
+from proxyhub.reality.settings import PORT, XHTTP_PORT, load_reality_settings
 from proxyhub.reality.store import (
     SERVE_STATES,
     NodeView,
@@ -83,6 +91,35 @@ def vless_url(
     return f"vless://{user_id}@{host}:{PORT}?{query}#{quote(name, safe='')}"
 
 
+def vless_xhttp_url(
+    *,
+    user_id: uuid.UUID,
+    host: str,
+    server_name: str,
+    public_key: str,
+    short_id: str,
+    path: str,
+    name: str,
+) -> str:
+    """VLESS + XHTTP + REALITY on the XHTTP port: the scope's REALITY key and server name, the
+    scope's XHTTP path, mode auto (a REALITY client then uses stream-one over HTTP/2), no flow."""
+    query = urlencode(
+        {
+            "encryption": "none",
+            "security": "reality",
+            "sni": server_name,
+            "fp": "chrome",
+            "pbk": public_key,
+            "sid": short_id,
+            "type": "xhttp",
+            "path": path,
+            "mode": "auto",
+        },
+        quote_via=quote,
+    )
+    return f"vless://{user_id}@{host}:{XHTTP_PORT}?{query}#{quote(name, safe='')}"
+
+
 def vless_ws_url(*, user_id: uuid.UUID, host: str, path: str, name: str) -> str:
     """VLESS + WebSocket + TLS to the node's own name (SNI and Host header are that name)."""
     query = urlencode(
@@ -115,9 +152,28 @@ def config_url(row: Any, name: str) -> str:
     )
 
 
-def config_label(config_id: int) -> str:
-    """The Persian label a post shows for the config: «کانفیگ N»."""
-    return f"کانفیگ {fa_digits(config_id)}"
+def xhttp_url(row: Any, name: str) -> str:
+    """The XHTTP link of a ``reality`` config row (its name gets " XHTTP" in the user's app)."""
+    return vless_xhttp_url(
+        user_id=row.uuid,
+        host=row.host,
+        server_name=row.server_name,
+        public_key=row.public_key,
+        short_id=row.short_id,
+        path=row.xhttp_path,
+        name=f"{name} XHTTP",
+    )
+
+
+def config_label(config_id: int, variant: str | None = None) -> str:
+    """The Persian label a post shows for the config: «کانفیگ N», or with both links
+    «کانفیگ N (TCP)» and «کانفیگ N (XHTTP)»."""
+    label = f"کانفیگ {fa_digits(config_id)}"
+    return f"{label} ({variant})" if variant else label
+
+
+def xhttp_key(config_key: str) -> str:
+    return f"{config_key}:xhttp"
 
 
 async def link_prefix(db: Db) -> str:
@@ -149,37 +205,68 @@ def config_name(prefix: str, location: str, config_id: int) -> str:
     return f"{prefix} {flag(location)} {config_id}"
 
 
+def _xhttp_confirmed(row: Any, scope_nodes: list[NodeView], statuses: dict[uuid.UUID, StatusView]) -> bool:
+    """A serving node of the scope runs the XHTTP inbound now (and serves the config, see
+    :func:`_confirmed`)."""
+    for node in scope_nodes:
+        st = statuses.get(node.id)
+        if st is not None and st.xhttp_port == XHTTP_PORT and _confirmed(row, [node], statuses):
+            return True
+    return False
+
+
 async def links_for(db: Db, now: datetime) -> list[tuple[ProxyLink, Any]]:
-    """(link, row) for every listed config, newest first."""
+    """(link, row) for every listed config, newest first; a config's XHTTP link right after its
+    own."""
     rows = await recent_and_active_configs(db, now - ENDED_KEPT_FOR)
     if not rows:
         return []
     prefix = await link_prefix(db)
     nodes = await live_nodes(db)
     statuses = await all_statuses(db)
+    xhttp_on = (await load_reality_settings(db)).xhttp_enabled
     out: list[tuple[ProxyLink, Any]] = []
     for r in rows:
+        with_xhttp = r.transport == "reality" and r.status != "active"  # ended: listed to be marked
         if r.status == "active":
             scope_nodes = [
                 n for n in nodes if (n.slot == r.slot if r.slot is not None else n.id == r.node_id)
             ]
             if not _confirmed(r, scope_nodes, statuses):
                 continue
+            with_xhttp = r.transport == "reality" and xhttp_on and _xhttp_confirmed(r, scope_nodes, statuses)
         status: LinkStatus = r.status
+        key, name = f"reality:{r.id}", config_name(prefix, r.location, r.id)
         out.append(
             (
                 ProxyLink(
                     kind="reality",
-                    key=f"reality:{r.id}",
+                    key=key,
                     slot=r.slot,
-                    label=config_label(r.id),
-                    url=config_url(r, config_name(prefix, r.location, r.id)),
+                    label=config_label(r.id, "TCP" if with_xhttp else None),
+                    url=config_url(r, name),
                     expires_at=r.expires_at,
                     status=status,
                 ),
                 r,
             )
         )
+        if with_xhttp:
+            out.append(
+                (
+                    ProxyLink(
+                        kind="reality",
+                        key=xhttp_key(key),
+                        slot=r.slot,
+                        label=config_label(r.id, "XHTTP"),
+                        url=xhttp_url(r, name),
+                        expires_at=r.expires_at,
+                        status=status,
+                        companion_of=key,
+                    ),
+                    r,
+                )
+            )
     return out
 
 

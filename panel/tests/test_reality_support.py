@@ -80,9 +80,11 @@ class World:
         checked: tuple[str, str] = DEFAULT_TARGET,
         apply_error: str | None = None,
         users: dict[str, int] | None = None,
+        xhttp_port: int | None = None,
     ) -> int:
         """Store an Xray report as the agent sends it. ``target_ok`` is the node's check of
-        ``checked`` (target, server name): by default the default target, which passed."""
+        ``checked`` (target, server name): by default the default target, which passed.
+        ``xhttp_port``: the XHTTP inbound the agent (0.4.0 on) says it runs."""
         async with self.engine.begin() as conn:
             return await store_xray_report(
                 conn,
@@ -96,6 +98,7 @@ class World:
                 apply_error=apply_error,
                 users=[XrayUserTotal(e, n) for e, n in (users or {}).items()],
                 now=now or datetime.now(UTC),
+                xhttp_port=xhttp_port,
             )
 
     async def zone(self, label: str, pool_state: str = "active") -> str:

@@ -199,5 +199,6 @@ async def store_report(session: AsyncSession, node_id: uuid.UUID, report: AgentR
             apply_error=x.apply_error,
             users=[XrayUserTotal(u.email, u.total_octets) for u in x.users],
             now=now,
+            xhttp_port=x.xhttp_port,
         )
     return stats_rows
