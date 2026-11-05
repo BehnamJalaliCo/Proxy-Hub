@@ -23,6 +23,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState, type ReactNode, type SubmitEvent } from "react";
 
 import { MtproxyAccountCard } from "../components/MtproxyAccountCard";
+import { TestChannelCleanupButton } from "../components/TestChannelCleanup";
 import { Button } from "../components/ui/Button";
 import { Badge, Card, CardHeader, StatusDot } from "../components/ui/Card";
 import { CopyButton, LoadError, Skeleton, SkeletonLines } from "../components/ui/Feedback";
@@ -434,7 +435,9 @@ function ChannelForm({ role, channel, botSet, index }: { role: ChannelRole; chan
         void qc.invalidateQueries({ queryKey: ["events"] });
         setValue("");
         const ch = status.channels[role];
-        if (ch?.can_delete) toast.warning("کانال ثبت شد، ولی ربات اجازه‌ی حذف دارد", "این اجازه را در تنظیمات ادمین کانال بردارید.");
+        if (ch?.can_delete && role === "test")
+          toast.warning("کانال ثبت شد، ربات اجازه‌ی حذف دارد", "این اجازه فقط هنگام «پاک کردن کانال آزمایشی» لازم است؛ بعدش آن را بردارید.");
+        else if (ch?.can_delete) toast.warning("کانال ثبت شد، ولی ربات اجازه‌ی حذف دارد", "این اجازه را در تنظیمات ادمین کانال اصلی بردارید.");
         else toast.success("کانال ثبت شد", ch ? `${ch.title || ch.username}: ارسال و ویرایش درست است.` : undefined);
       })
       .catch((e: unknown) => setError(errorMessage(e)))
@@ -488,12 +491,20 @@ function ChannelForm({ role, channel, botSet, index }: { role: ChannelRole; chan
             <Permission ok={channel.can_edit} label="ویرایش پیام" />
             <Permission ok={channel.can_delete} label={channel.can_delete ? "اجازه‌ی حذف دارد" : "بی اجازه‌ی حذف"} invert />
           </div>
-          {channel.can_delete ? (
+          {channel.can_delete && role === "test" ? (
+            <p role="alert" className="flex gap-2 rounded-xl border border-warning/30 bg-warning-soft p-3 text-[0.84rem] leading-7 text-fg">
+              <ShieldAlert className="mt-1 size-4 shrink-0 text-warning" />
+              <span>
+                <b>ربات در کانال آزمایشی اجازه‌ی «حذف پیام‌ها» دارد.</b> این اجازه فقط در همین کانال و فقط برای «پاک کردن کانال آزمایشی» درست
+                است. پس از پاک کردن، در تلگرام آن را برای ربات خاموش کنید و «وارسی دوباره» را بزنید.
+              </span>
+            </p>
+          ) : channel.can_delete ? (
             <p role="alert" className="flex gap-2 rounded-xl border border-danger/30 bg-danger-soft p-3 text-[0.84rem] leading-7 text-fg">
               <ShieldAlert className="mt-1 size-4 shrink-0 text-danger" />
               <span>
-                <b className="text-danger">ربات نباید اجازه‌ی حذف پیام داشته باشد.</b> پست‌های کانال هرگز پاک نمیشوند. در تلگرام، در تنظیمات
-                ادمین‌های کانال، «حذف پیام‌ها» را برای ربات خاموش کنید و بعد «وارسی دوباره» را بزنید.
+                <b className="text-danger">ربات در کانال اصلی نباید اجازه‌ی حذف پیام داشته باشد.</b> پست‌های کانال اصلی هرگز پاک نمیشوند. در
+                تلگرام، در تنظیمات ادمین‌های کانال، «حذف پیام‌ها» را برای ربات خاموش کنید و بعد «وارسی دوباره» را بزنید.
               </span>
             </p>
           ) : null}
@@ -512,7 +523,11 @@ function ChannelForm({ role, channel, botSet, index }: { role: ChannelRole; chan
           label={channel ? "کانال دیگری؟" : "نام کانال"}
           htmlFor={id}
           error={error}
-          hint="ربات را ادمین کانال کنید: «ارسال پیام» و «ویرایش پیام‌های دیگران» روشن، «حذف پیام‌ها» خاموش."
+          hint={
+            role === "test"
+              ? "ربات را ادمین کانال کنید: «ارسال پیام» و «ویرایش پیام‌های دیگران» روشن، «حذف پیام‌ها» خاموش (فقط هنگام پاک کردن کانال آزمایشی روشن)."
+              : "ربات را ادمین کانال کنید: «ارسال پیام» و «ویرایش پیام‌های دیگران» روشن، «حذف پیام‌ها» خاموش."
+          }
         >
           <TextInput
             id={id}
@@ -543,6 +558,12 @@ function ChannelForm({ role, channel, botSet, index }: { role: ChannelRole; chan
         </div>
         {!botSet ? <p className="text-xs text-fg-faint">اول توکن ربات را وارد کنید.</p> : null}
       </form>
+      {role === "test" && channel ? (
+        <div className="flex flex-wrap items-center gap-2 border-t border-line pt-3">
+          <TestChannelCleanupButton disabled={!botSet} />
+          <span className="text-xs leading-6 text-fg-faint">همه‌ی پیام‌های همین کانال آزمایشی را پاک میکند؛ کانال اصلی هرگز.</span>
+        </div>
+      ) : null}
     </motion.div>
   );
 }
@@ -880,7 +901,7 @@ export default function TelegramPage() {
           </div>
           <div className="grid gap-4 sm:gap-5 lg:grid-cols-12">
             <Card className="lg:col-span-7">
-              <CardHeader icon={<Megaphone className="size-5" />} title="کانال‌ها" subtitle="ربات در هر دو کانال ادمین با «ارسال» و «ویرایش»، بی «حذف»." />
+              <CardHeader icon={<Megaphone className="size-5" />} title="کانال‌ها" subtitle="ربات در هر دو کانال ادمین با «ارسال» و «ویرایش»، بی «حذف» (در کانال آزمایشی فقط هنگام پاک کردنش)." />
               <div className="grid gap-3 p-4 sm:p-5 xl:grid-cols-2">
                 <ChannelForm role="main" channel={s.channels.main} botSet={s.bot !== null} index={0} />
                 <ChannelForm role="test" channel={s.channels.test} botSet={s.bot !== null} index={1} />
