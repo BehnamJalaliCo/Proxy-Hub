@@ -172,6 +172,29 @@ def test_when_a_check_is_due() -> None:
     assert own_pack.due(failed, PACK, NOW + timedelta(hours=1))
 
 
+def test_a_429_waits_exactly_what_telegram_asked() -> None:
+    """P17: createNewStickerSet got "429 retry after 301" twice; the next try waited a fixed hour."""
+    found = own_pack.Target(name=PACK, title="@ipoxxo", owner_id=OWNER)
+    talk = own_pack.Talk(
+        "rate_limited", error="createNewStickerSet: 429 Too Many Requests", retry_after_s=301
+    )
+    st = own_pack.failed_state(None, found, talk, NOW)
+    assert st.retry_at == NOW + timedelta(seconds=301) + own_pack.RETRY_MARGIN and st.error
+    assert not own_pack.due(st, PACK, NOW + timedelta(seconds=300))
+    assert own_pack.due(st, PACK, NOW + timedelta(seconds=307))  # not an hour
+    # A partly filled pack keeps what it had through a failure.
+    partial = own_pack.PackState(name=PACK, title="@ipoxxo", alts=("📡", "📶"), checked_at=NOW)
+    kept = own_pack.failed_state(partial, found, own_pack.Talk("failed", error="x"), NOW)
+    assert kept.alts == ("📡", "📶") and kept.retry_at is None and kept.title == "@ipoxxo"
+    assert own_pack.due(kept, PACK, NOW + own_pack.AFTER_FAILURE)
+    assert not own_pack.due(kept, PACK, NOW + own_pack.AFTER_FAILURE - timedelta(seconds=1))
+    # The next minute's step fills it a few at a time, until it is complete.
+    filling = own_pack.PackState(name=PACK, alts=("📡",), checked_at=NOW, attempted_at=NOW)
+    assert own_pack.due(filling, PACK, NOW + timedelta(minutes=1)) and not own_pack.complete(filling)
+    full = own_pack.PackState(name=PACK, alts=tuple(a.alt for a in emoji_art.ART), checked_at=NOW)
+    assert own_pack.complete(full) and own_pack.ADD_PER_RUN <= 5
+
+
 # --- the bot's sticker-set methods -------------------------------------------------------------------------
 
 
@@ -323,6 +346,25 @@ async def test_a_ready_pack_becomes_the_posters_pack_only_when_the_owner_chose_n
     await fleet_kill_switch(engine, on=False)
     await setup_telegram(engine, vault, test=True, main=True, owner=True)
     full = tuple(a.alt for a in emoji_art.ART)
+    async with engine.begin() as conn:
+        await own_pack.save_state(
+            conn,
+            own_pack.PackState(
+                name=PACK, title="@ipoxxo", owner_id=OWNER, alts=full, checked_at=NOW, attempted_at=NOW
+            ),
+        )
+        await operator.save_config(conn, operator.OperatorConfig(poster="operator", emoji_pack=EMOJI_SET))
+    # a partly filled pack is not chosen yet (the poster reads the pack once a day)
+    async with engine.begin() as conn:
+        await own_pack.save_state(
+            conn,
+            own_pack.PackState(
+                name=PACK, title="@ipoxxo", owner_id=OWNER, alts=full[:3], checked_at=NOW, attempted_at=NOW
+            ),
+        )
+        await operator.save_config(conn, operator.OperatorConfig(poster="operator", emoji_pack=None))
+    assert await own_pack.ensure(engine, vault, now=NOW, bot_factory=closed_port_bot()) == "failed"
+    assert (await _config(engine)).emoji_pack is None
     async with engine.begin() as conn:
         await own_pack.save_state(
             conn,
