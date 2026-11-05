@@ -7,7 +7,8 @@ out burned IPs again and again.
 
 Each kind is one row in ``fleet_alerts``: an alert goes out when the condition has lasted a short
 while (transient blocks stay quiet), is repeated at most every 12 hours while it lasts, and once it
-cleared, a new occurrence is told again (at most hourly). Every alert is also in ``actions_log``.
+cleared, a new occurrence is told again (at most hourly). "Every allowed location is closed from
+Iran" is told at most once a day (:data:`DAILY`). Every alert is also in ``actions_log``.
 Nothing secret is ever part of an alert.
 """
 
@@ -57,7 +58,12 @@ CREATE_BLOCKS: dict[str, timedelta] = {
     "no_other_location": timedelta(minutes=30),
     "spare_in_use": timedelta(hours=1),
     "agent_domain_not_set": timedelta(minutes=5),
+    "all_locations_closed": timedelta(minutes=5),
 }
+# Told at most once a day, also after the condition cleared and came back (P15: the owner asked
+# for a daily note when every allowed location is closed from Iran).
+DAILY = frozenset({"all_locations_closed"})
+DAY = timedelta(days=1)
 # can_delete refusals the code cannot fix (server_not_observed and the kill switch clear by themselves).
 DELETE_BLOCKS = frozenset(
     {
@@ -130,6 +136,13 @@ def _create_text(code: str, slots: list[int], plan: FleetPlan, snap: FleetSnapsh
         "agent_domain_not_set": (
             "دامنه‌ی سایت عامل‌ها (AGENT_DOMAIN) روی سرور پنل تنظیم نشده است؛ بی آن هیچ node تازه‌ای "
             "نمیتواند در پنل ثبت شود. پرامپت استقرار پنل را دوباره اجرا کنید."
+        ),
+        "all_locations_closed": (
+            "همه‌ی locationهای مجاز در «تنظیمات» ("
+            + "، ".join(html.escape(loc) for loc in s.locations)
+            + ") در ۷ روز گذشته از همراه اول و رایتل بسته بوده‌اند (دست‌دادن TLS از ایران ناموفق). "
+            "سرور تازه در آن‌ها ساخته نمیشود، چون از ایران باز نمیشود. location دیگری را در «تنظیمات» "
+            "اضافه کنید؛ جدول «دسترسی locationها از ایران» در صفحه‌ی nodeها نشان میدهد کدام باز بوده است."
         ),
         "spare_in_use": (
             "چند جایگاه هم‌زمان سرور جایگزین میخواهند و جای خالی (سرور دهم) بیش از یک ساعت است در کار است. "
@@ -223,6 +236,8 @@ async def raise_alerts(db: Db, found: list[Finding], now: datetime) -> list[str]
             continue
         if last_sent is None:
             due = True
+        elif f.code in DAILY:
+            due = now - last_sent >= DAY
         elif last_sent < since:  # a new streak after the condition had cleared
             due = now - last_sent >= RENOTIFY_GAP
         else:

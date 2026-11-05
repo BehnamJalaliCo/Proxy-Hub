@@ -15,9 +15,11 @@ from proxyhub.db.models_fleet import AccountObservation, AccountServer, HetznerO
 from proxyhub.db.models_live import NodeOperation
 from proxyhub.db.models_net import ProbeNodeState
 from proxyhub.fleet.lifecycle import NodeState
+from proxyhub.fleet.locations import load_location_reach, location_classes
 from proxyhub.fleet.planner import CREATION_WINDOW, AccountOffer, AccountSnapshot, FleetSnapshot, NodeSnapshot
 from proxyhub.fleet.settings_store import SettingsCorrupt, load_fleet_settings
 from proxyhub.nodes.settings import get_live_settings
+from proxyhub.probes.settings import load_probe_settings
 from proxyhub.safety.budget import Price, month_bounds
 from proxyhub.safety.gates import ServerView
 from proxyhub.settings_schema import FleetSettings
@@ -161,6 +163,9 @@ async def load_snapshot(db: Db, now: datetime) -> FleetSnapshot:
         settings = await load_fleet_settings(db)
     except SettingsCorrupt:
         settings, problem = FleetSettings(), "settings_invalid"  # defaults block every creation
+    probes = await load_probe_settings(db)
+    reach = await load_location_reach(db, now)
+    classes = location_classes(reach, settings.locations, probes.key_networks)
     return FleetSnapshot(
         now=now,
         settings=settings,
@@ -170,4 +175,5 @@ async def load_snapshot(db: Db, now: datetime) -> FleetSnapshot:
         servers=await load_servers(db),
         settings_problem=problem,
         blockers=() if get_live_settings().checked_agent_domain() else ("agent_domain_not_set",),
+        location_classes=classes,
     )

@@ -40,8 +40,11 @@ RECORD_TYPES = ("A", "AAAA", "TXT")
 # _acme-challenge TXT records of a certificate order (proxyhub/acme); test: real Cloudflare tests.
 RECORD_PURPOSES = ("slot", "test", "acme")
 PROBE_SOURCES = ("globalping", "check-host")
-PROBE_KINDS = ("tcp", "icmp", "dns")
-PROBE_ROLES = ("node", "control")
+# https: a real TLS handshake (Globalping ``http``, HTTPS HEAD /), the one that decides (P15).
+PROBE_KINDS = ("tcp", "icmp", "dns", "https")
+# target: a candidate REALITY / fake-TLS site measured from Iran (proxyhub/targets), no node involved.
+PROBE_ROLES = ("node", "control", "target")
+LOCATION_REACH_STATES = ("open", "closed")
 MEASUREMENT_STATUSES = ("ok", "no_probes", "rate_limited", "error", "timeout", "skipped")
 VERDICTS = ("ok", "suspect", "blocked", "unknown")
 ROUND_TRIGGERS = ("schedule", "manual")
@@ -309,3 +312,42 @@ class ProbeSource(Base):
     ratelimit_limit: Mapped[int | None] = mapped_column(Integer)
     ratelimit_remaining: Mapped[int | None] = mapped_column(Integer)
     ratelimit_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Globalping: how many probes the last TLS control measurement used (each is one test), so the
+    # budget of the next cycle and of the other Globalping users is planned on real numbers.
+    tls_probes: Mapped[int | None] = mapped_column(Integer)
+
+
+class ProbeLocationReach(Base):
+    """Per node and measuring network: the latest valid TLS outcome from Iran (all the node's ports
+    together: ``open`` if any handshake worked, ``closed`` if every one failed while the control
+    worked from that network), with the node's Hetzner location. The fleet scores its locations
+    from the rows of the last 7 days (proxyhub/fleet/locations.py). Our servers only (rule 7)."""
+
+    __tablename__ = "probe_location_reach"
+    __table_args__ = (
+        CheckConstraint(f"state IN ({_in(LOCATION_REACH_STATES)})", name="state"),
+        Index("ix_probe_location_reach_location_at", "location", "at"),
+    )
+    node_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("nodes.id", ondelete="CASCADE"), primary_key=True)
+    network_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    network: Mapped[str] = mapped_column(String(100), nullable=False)
+    asn: Mapped[int | None] = mapped_column(BigInteger)
+    location: Mapped[str] = mapped_column(String(20), nullable=False)
+    state: Mapped[str] = mapped_column(String(10), nullable=False)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class TargetState(Base):
+    """A candidate REALITY target / fake-TLS domain (proxyhub/targets): its last two rounds of TLS
+    handshakes from Iran (per network: ``up``, ``down`` or ``nodata``, and the time it took) and
+    what our nodes' own TLS 1.3 + HTTP/2 check of it said (``target_ok``), with when."""
+
+    __tablename__ = "target_states"
+    host: Mapped[str] = mapped_column(String(253), primary_key=True)
+    measured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    iran: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    prev_measured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    iran_prev: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    node_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    node_fail_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = _now()

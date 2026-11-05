@@ -1,38 +1,52 @@
-"""Verdict logic for one node (pure; docs/10 M4.2 rules, recorded only in this round).
+"""Verdict logic for one node (pure; docs/10 M4.2 rules).
 
-Per round and per source, an *observation*:
+**What decides (2026-11-05, P15):** a real TLS handshake from Iran, source ``https`` (Globalping
+``http`` measurements, HTTPS ``HEAD /`` on the node's own name, on 443 and on the MTProto port). MCI
+and Rightel answer a TCP SYN themselves for blocked addresses, so TCP results ("globalping" and
+"check-host" TCP pings) are kept as information only and never make a node reachable again.
 
-* The source must have answered for both the node and the control target.
-* Only networks where the CONTROL target was reachable count ("valid networks"): a network that
-  cannot reach a stable public host says nothing about our node.
-* All valid networks reached the node -> ``reachable``; none did -> ``unreachable``; some did ->
-  ``partial``. No valid network, a failed control, or a missing source -> ``invalid``.
+Per round, the ``https`` observation (:func:`observe_tls`) looks at the *key networks* (MCI and
+Rightel by default) on every measured port. A cell (port x key network) counts only where the TLS
+control target was reachable from that same network in the same round; otherwise it is invalid.
 
-The verdict uses the latest ``min_rounds`` rounds (at least 2), all younger than ``max_age``:
+* every valid cell up -> ``reachable`` (at least one valid cell);
+* every cell valid and down (both key networks, every port) -> ``unreachable``;
+* some up, some down -> ``partial``;
+* no valid cell, a failed control, a missing or failed measurement, or "down" cells next to invalid
+  ones -> ``invalid`` (nothing can be concluded).
+
+The verdict (:func:`decide`, ``sources=("https",)``) uses the latest ``min_rounds`` rounds (at
+least 2), all younger than ``max_age``:
 
 * any invalid observation, a missing source, too few or too old rounds -> ``unknown``
-* every observation (2 sources x N rounds) ``reachable`` -> ``ok``
-* every observation ``unreachable`` -> ``blocked``
-* anything else (partial, or sources/rounds disagreeing) -> ``suspect``
+* every observation ``reachable`` -> ``ok``
+* every observation ``unreachable`` -> ``blocked`` (TLS failed from MCI AND Rightel, on every port,
+  in 2 rounds, while the control worked from both)
+* anything else (partial, or rounds disagreeing) -> ``suspect``
 
-So no single source and no single round can produce ``ok`` or ``blocked``, and a failed control
-always gives ``unknown``.
+So no single round can produce ``ok`` or ``blocked``, and a failed control always gives ``unknown``.
+:func:`observe` (per TCP source, the earlier rule) is still computed for the information it gives.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from proxyhub.probes.types import Measurement, NetworkObs
 
+# TCP sources: information only (see the module docstring).
 SOURCES: tuple[str, ...] = ("globalping", "check-host")
+# The source that decides: TLS handshakes from Iran.
+TLS_SOURCE = "https"
+TLS_SOURCES: tuple[str, ...] = (TLS_SOURCE,)
 MIN_ROUNDS_FLOOR = 2
 
 ObsState = Literal["reachable", "unreachable", "partial", "invalid"]
 Verdict = Literal["ok", "suspect", "blocked", "unknown"]
+CellState = Literal["up", "down", "invalid"]
 
 
 @dataclass(frozen=True)
@@ -41,25 +55,37 @@ class SourceObservation:
     reason: str | None = None
     valid_networks: int = 0
     up_networks: int = 0
+    # ``https`` only: port -> network key -> cell state, for every network that measured (the key
+    # networks decide; the others are information for the dashboard and the location scores).
+    cells: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "state": self.state,
             "reason": self.reason,
             "valid_networks": self.valid_networks,
             "up_networks": self.up_networks,
         }
+        if self.cells:
+            out["cells"] = {port: dict(c) for port, c in self.cells.items()}
+        return out
 
     @classmethod
     def from_json(cls, value: Mapping[str, Any]) -> SourceObservation:
         state = value.get("state")
         if state not in ("reachable", "unreachable", "partial", "invalid"):
             return cls("invalid", "unreadable")
+        cells = value.get("cells")
         return cls(
             state=state,
             reason=value.get("reason"),
             valid_networks=int(value.get("valid_networks") or 0),
             up_networks=int(value.get("up_networks") or 0),
+            cells={
+                str(port): {str(k): str(v) for k, v in c.items()}
+                for port, c in (cells.items() if isinstance(cells, Mapping) else ())
+                if isinstance(c, Mapping)
+            },
         )
 
 
@@ -98,6 +124,55 @@ def observe(node: Measurement | None, control: Measurement | None) -> SourceObse
     else:
         state = "partial"
     return SourceObservation(state, None, len(valid), up)
+
+
+def _cell(n: NetworkObs | None, control_up: set[str]) -> CellState:
+    if n is None or n.network_key not in control_up or n.state == "nodata":
+        return "invalid"
+    return "up" if n.state == "up" else "down"
+
+
+def observe_tls(
+    nodes: Sequence[Measurement], control: Measurement | None, key_networks: Sequence[str]
+) -> SourceObservation:
+    """One round of TLS handshakes to one node (one measurement per port) against the same round's
+    TLS control. Only the ``key_networks`` (e.g. ``asn:197207``, ``asn:57218``) decide."""
+    if control is None or not nodes:
+        return SourceObservation("invalid", "source_missing")
+    if control.status != "ok":
+        return SourceObservation("invalid", f"control_{control.status}")
+    if not control_ok(control):
+        return SourceObservation("invalid", "control_failed")
+    control_up = {n.network_key for n in control.networks if n.state == "up"}
+    cells: dict[str, dict[str, str]] = {}
+    key_cells: list[CellState] = []
+    for m in sorted(nodes, key=lambda x: x.port or 0):
+        if m.status != "ok":
+            return SourceObservation("invalid", f"node_{m.status}")
+        by_key = {n.network_key: n for n in m.networks}
+        port_cells: dict[str, str] = {}
+        for key in key_networks:
+            cell = _cell(by_key.get(key), control_up)
+            port_cells[key] = cell
+            key_cells.append(cell)
+        for n in m.networks:
+            if n.network_key not in port_cells and n.had_probe:
+                port_cells[n.network_key] = _cell(n, control_up)
+        cells[str(m.port)] = port_cells
+    valid = [c for c in key_cells if c != "invalid"]
+    up = sum(1 for c in valid if c == "up")
+    if not valid:
+        return SourceObservation("invalid", "no_valid_networks", cells=cells)
+    if up == len(valid):
+        state: ObsState = "reachable"
+    elif up == 0 and len(valid) < len(key_cells):
+        # Down where it was measured, but a key network (or a port) gave nothing: never "blocked".
+        return SourceObservation("invalid", "incomplete", len(valid), 0, cells)
+    elif up == 0:
+        state = "unreachable"
+    else:
+        state = "partial"
+    return SourceObservation(state, None, len(valid), up, cells)
 
 
 def decide(
