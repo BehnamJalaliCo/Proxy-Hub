@@ -63,6 +63,10 @@ type xrayRuntime struct {
 	certChecked   string
 	targetAt      time.Time
 	lastRestart   time.Time
+	// xhttpPort: the port of the VLESS + XHTTP + REALITY inbound in the config last applied without
+	// an error (0: none). Reported while Xray is up, so the panel publishes XHTTP links only for a
+	// node that really serves them.
+	xhttpPort int
 }
 
 // initXray loads the node's Xray settings. Without the file this node simply serves no Xray; a
@@ -158,6 +162,10 @@ func (a *Agent) ApplyXray(ctx context.Context) error {
 		return err
 	}
 	a.xr.applyErr = ""
+	a.xr.xhttpPort = 0
+	if x := a.doc.Xray; x != nil && x.XHTTP != nil && !x.WSTLS() {
+		a.xr.xhttpPort = x.XHTTP.Port
+	}
 	if err := a.pruneCertFiles(files); err != nil {
 		a.log.Warn("could not remove old certificate files", "error", err.Error())
 	}
@@ -339,14 +347,16 @@ func (a *Agent) pruneCertFiles(keep xray.TLSFiles) error {
 // liveUsers applies a user-only change to the running Xray. Any failure makes the caller restart
 // Xray from the file instead, so the running state never stays half-changed.
 func (a *Agent) liveUsers(ctx context.Context, plan xray.Plan) error {
-	for _, email := range plan.Remove {
-		if err := a.xr.api.RemoveUser(ctx, plan.Tag, email); err != nil {
-			return err
+	for _, in := range plan.Inbounds {
+		for _, email := range plan.Remove {
+			if err := a.xr.api.RemoveUser(ctx, in.Tag, email); err != nil {
+				return err
+			}
 		}
-	}
-	for _, u := range plan.Add {
-		if err := a.xr.api.AddUser(ctx, plan.Tag, plan.Flow, u); err != nil {
-			return err
+		for _, u := range plan.Add {
+			if err := a.xr.api.AddUser(ctx, in.Tag, in.Flow, u); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -416,6 +426,7 @@ func (a *Agent) xrayReport() *report.Xray {
 		CheckedTarget:     checkedTarget,
 		CheckedServerName: checkedSNI,
 		ApplyError:        a.xr.applyErr,
+		XHTTPPort:         a.xr.xhttpPort,
 		Totals:            totals,
 	})
 }

@@ -40,6 +40,9 @@ var (
 	uuidRE      = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	shortIDRE   = regexp.MustCompile(`^(?:[0-9a-f]{2}){1,8}$`)
 	wsPathRE    = regexp.MustCompile(`^/[A-Za-z0-9_-]{0,64}$`)
+	// The XHTTP path: "/" and 1 to 64 of [A-Za-z0-9_-] (the panel's is "/" + 16 hex). Never "/"
+	// alone, so the inbound only answers on the scope's own path.
+	xhttpPathRE = regexp.MustCompile(`^/[A-Za-z0-9_-]{1,64}$`)
 )
 
 // Xray is the node's VLESS configuration (docs/10 sections 3.5 and 3.14) for one of two transports.
@@ -55,11 +58,22 @@ type Xray struct {
 	ServerNames []string `json:"server_names,omitempty"`
 	ShortIDs    []string `json:"short_ids,omitempty"`
 	// ws_tls only: the node's own DNS name, the WebSocket path, the PEM chain (leaf first) and key.
-	ServerName   string     `json:"server_name,omitempty"`
-	WSPath       string     `json:"ws_path,omitempty"`
-	TLSCertChain string     `json:"tls_cert_chain,omitempty"`
-	TLSKey       string     `json:"tls_key,omitempty"`
-	Users        []XrayUser `json:"users"`
+	ServerName   string `json:"server_name,omitempty"`
+	WSPath       string `json:"ws_path,omitempty"`
+	TLSCertChain string `json:"tls_cert_chain,omitempty"`
+	TLSKey       string `json:"tls_key,omitempty"`
+	// XHTTP (agent 0.4.0 on, REALITY only): a second inbound, VLESS + XHTTP + REALITY on its own
+	// port, with the same REALITY key, target, server names and short ids and the same users.
+	XHTTP *XHTTP     `json:"xhttp,omitempty"`
+	Users []XrayUser `json:"users"`
+}
+
+// XHTTP is the second inbound of a REALITY section: Xray's XHTTP (SplitHTTP) transport on Port,
+// answering only on Path. Every other XHTTP setting is Xray's default (mode "auto": the server
+// accepts packet-up, stream-up and stream-one; a REALITY client picks stream-one over HTTP/2).
+type XHTTP struct {
+	Port int    `json:"port"`
+	Path string `json:"path"`
 }
 
 // WSTLS reports whether the section asks for VLESS + WebSocket + TLS.
@@ -133,6 +147,9 @@ func (x *Xray) Validate(telemtPorts []int) error {
 		if x.PrivateKey != "" || x.Target != "" || len(x.ServerNames) > 0 || len(x.ShortIDs) > 0 {
 			return errors.New("desired state: reality fields in a ws_tls xray section")
 		}
+		if x.XHTTP != nil {
+			return errors.New("desired state: xhttp needs the reality transport")
+		}
 		if !ValidDNSName(x.ServerName) {
 			return errors.New("desired state: xray server_name is not a DNS name")
 		}
@@ -145,7 +162,27 @@ func (x *Xray) Validate(telemtPorts []int) error {
 	default:
 		return errors.New("desired state: unknown xray transport")
 	}
+	if x.XHTTP != nil {
+		if err := x.XHTTP.validate(x.Port, telemtPorts); err != nil {
+			return err
+		}
+	}
 	return x.validateUsers()
+}
+
+func (h *XHTTP) validate(mainPort int, telemtPorts []int) error {
+	if h.Port < 1 || h.Port > 65535 || h.Port == mainPort || h.Port == MetricsPort || h.Port == XrayAPIPort {
+		return errors.New("desired state: xhttp port out of range, reserved or the main port")
+	}
+	for _, p := range telemtPorts {
+		if p == h.Port {
+			return errors.New("desired state: a Telemt port clashes with the xhttp port")
+		}
+	}
+	if !xhttpPathRE.MatchString(h.Path) {
+		return errors.New("desired state: xhttp path must be / and 1 to 64 of [A-Za-z0-9_-]")
+	}
+	return nil
 }
 
 func (x *Xray) validateReality() error {

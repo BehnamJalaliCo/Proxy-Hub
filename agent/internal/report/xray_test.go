@@ -28,6 +28,16 @@ func TestBuildXray(t *testing.T) {
 		!strings.Contains(string(data), `"apply_error":"xray_config_refused"`) {
 		t.Fatalf("got %s", data)
 	}
+	// The XHTTP inbound's port only while Xray is up, and only a real port.
+	data, _ = json.Marshal(BuildXray(XrayInput{Enabled: true, Up: true, XHTTPPort: 2083}))
+	if !strings.Contains(string(data), `"apply_error":null,"xhttp_port":2083,"users":[]`) {
+		t.Fatalf("got %s", data)
+	}
+	for _, in := range []XrayInput{{Enabled: true, XHTTPPort: 2083}, {Enabled: true, Up: true, XHTTPPort: 70000}, {Up: true}} {
+		if data, _ := json.Marshal(BuildXray(in)); strings.Contains(string(data), "xhttp") {
+			t.Fatalf("got %s", data)
+		}
+	}
 	// A node without Xray still says so (the panel learns this agent understands Xray).
 	data, _ = json.Marshal(BuildXray(XrayInput{}))
 	if string(data) != `{"enabled":false,"up":false,"version":null,"uptime_s":null,"target_ok":null,`+

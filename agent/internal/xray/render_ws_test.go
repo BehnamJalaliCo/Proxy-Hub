@@ -140,10 +140,11 @@ func TestRenderWSTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan, err := Decide(data, fewer)
-	if err != nil || plan.Kind != KindLive || plan.Tag != WSInboundTag || plan.Flow != "" || len(plan.Remove) != 1 {
+	if err != nil || plan.Kind != KindLive || len(plan.Inbounds) != 1 || plan.Inbounds[0] != (LiveInbound{Tag: WSInboundTag}) ||
+		len(plan.Remove) != 1 {
 		t.Fatalf("live ws change %+v %v", plan, err)
 	}
-	if plan, _ := Decide(fewer, data); plan.Kind != KindLive || len(plan.Add) != 1 || plan.Tag != WSInboundTag {
+	if plan, _ := Decide(fewer, data); plan.Kind != KindLive || len(plan.Add) != 1 || plan.Inbounds[0].Tag != WSInboundTag {
 		t.Fatalf("live ws add %+v", plan)
 	}
 	if plan, _ := Decide(render(t, testDesired()), render(t, testDesired())); plan.Kind != KindNone {

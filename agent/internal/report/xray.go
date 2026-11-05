@@ -24,10 +24,14 @@ type Xray struct {
 	// CheckedTarget and CheckedServerName say which target ("host:port") and server name the check
 	// was about, so the panel never counts a result for a target it has since replaced. Both come
 	// from the panel's own desired state (DNS names only); nil exactly when TargetOK is nil.
-	CheckedTarget     *string    `json:"checked_target"`
-	CheckedServerName *string    `json:"checked_server_name"`
-	ApplyError        *string    `json:"apply_error"`
-	Users             []XrayUser `json:"users"`
+	CheckedTarget     *string `json:"checked_target"`
+	CheckedServerName *string `json:"checked_server_name"`
+	ApplyError        *string `json:"apply_error"`
+	// XHTTPPort: the port of the VLESS + XHTTP + REALITY inbound Xray runs now (agent 0.4.0 on);
+	// left out while Xray is down or serves no XHTTP inbound (so only a panel that asked for
+	// XHTTP ever sees the key).
+	XHTTPPort *int       `json:"xhttp_port,omitempty"`
+	Users     []XrayUser `json:"users"`
 }
 
 // XrayUser is one Reality user's total traffic (uplink + downlink) as counted on this node.
@@ -47,6 +51,7 @@ type XrayInput struct {
 	CheckedTarget     string
 	CheckedServerName string
 	ApplyError        string
+	XHTTPPort         int               // 0: no XHTTP inbound in the applied config
 	Totals            map[string]uint64 // label -> cumulative octets
 }
 
@@ -64,6 +69,10 @@ func BuildXray(in XrayInput) *Xray {
 	}
 	if in.Up {
 		x.UptimeS = in.UptimeS
+		if in.XHTTPPort >= 1 && in.XHTTPPort <= 65535 {
+			port := in.XHTTPPort
+			x.XHTTPPort = &port
+		}
 	}
 	if in.ApplyError != "" {
 		code := in.ApplyError
