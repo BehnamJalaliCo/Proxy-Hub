@@ -79,7 +79,8 @@ def cand(
 
 UP = {"asn:197207": "up", "asn:57218": "up"}
 MCI_DOWN = {"asn:197207": "down", "asn:57218": "up"}
-LISTED = list(DEFAULT_CANDIDATES)
+# The choice logic on a fixed list (the P15 order, apple first); the defaults are pinned below.
+LISTED = ["www.apple.com", "github.com", "aws.amazon.com", "www.speedtest.net", "www.cloudflare.com"]
 
 
 def states(*cs: Candidate) -> dict[str, Candidate]:
