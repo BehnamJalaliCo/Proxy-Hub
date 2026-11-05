@@ -14,8 +14,9 @@ account and it cannot take the post now, the post goes to the bot and the reason
 
 **Status edits** (:func:`refresh_posts`): every sent post younger than ``edit_window_hours`` is
 rendered again from what it carries, in the order it was posted (a post shows no label: an MTProto
-link is numbered by its place, a config's TCP/XHTTP marker follows from the keys): a link the provider now REPORTS expired/full/burned (or whose
-own expiry passed) gets its status mark and loses its link; a live link takes its provider's current
+link is numbered by its place, a config's TCP/XHTTP marker follows from the keys): a link the
+provider now REPORTS expired/full/burned (or whose own expiry passed) gets its status mark and
+loses its link; a live link takes its provider's current
 URL, so a new active domain (proxyhub.cloudflare.rotation) or a node's slot name replaces the old
 host. When the text differs from the one the channel shows (the last edit that finished without an
 error, else ``channel_posts.text_sha256``) an ``edit_post`` job is queued, through the poster that
