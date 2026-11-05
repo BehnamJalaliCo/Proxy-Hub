@@ -9,21 +9,29 @@ units after entity parsing), so it always fits one message.
   attribute is escaped again, and links may only be http(s) or tg links. If the post would be too
   long, the content (and only the content) is shortened at a word boundary with an ellipsis and every
   open tag is closed.
-* Each proxy is a Persian link word ("پروکسی ۱", ...) whose target is
+* Each proxy is a short Persian connect word ("⚡ اتصال ۱", three to a row) whose target is
   ``https://t.me/proxy?server=..&port=..&secret=..`` (core.telegram.org/api/links#mtproxy-links),
   with each value URL-encoded and the whole href HTML-escaped (docs/10 section 3.12: links hide
   behind words so the post stays short).
 * The last line is the channel tag (owner's wish: the channel name under every post).
 
 ``render_post`` is the publisher's richer layout (posts team, M3.2-M3.4): a bold title and the
-body in a blockquote, the MTProto links as Persian link words, the Reality configs as copyable
-``<code>`` lines, then the channel tag. A link that is no longer active keeps its label with a
-status mark and LOSES its link or config (docs/04: nobody should tap a dead config); when every
-link of a post is dead a closing line points to the newer posts. A ``paused`` link (its provider has
-not listed it for a while, see proxyhub/posts/publisher.py) keeps its label, without a strike, with
-a pause mark and without its link; it is not dead and gets its link back when it is listed again.
-The same inputs always give the same text, so a status edit is queued only when something really
-changed.
+body in a blockquote, the MTProto links as connect words numbered by their place in the post, the
+VLESS configs each in a code block (``<pre>``: Telegram draws a copy button on it, and a tap copies
+it), then the channel tag. The owner (2026-11-05): no «کانفیگ N» next to a config. So a post never
+shows a provider's label; the only text by a config is its end time and, for a REALITY config that
+comes with its XHTTP link, a tiny transport marker ("TCP" / "XHTTP") as the code block's language,
+which Telegram shows in the block's header. The name inside the config itself (``#@ipoxxo …``,
+D41) is the provider's and stays.
+
+A link that is no longer active keeps its place with a status mark and LOSES its link or config
+(docs/04: nobody should tap or copy a dead config): a connect word is struck through behind the
+status mark, a config's code block becomes its status line. When every link of a post is dead a
+closing line points to the newer posts. A ``paused`` link (its provider has not listed it for a
+while, see proxyhub/posts/publisher.py) keeps its place, without a strike, with a pause mark and
+without its link; it is not dead and gets its link back when it is listed again. Everything shown
+follows from the links' order, kinds, statuses, end times and markers alone, so the same inputs
+always give the same text and a status edit is queued only when something really changed.
 """
 
 from __future__ import annotations
@@ -42,8 +50,14 @@ from proxyhub.telegram.schedule import TEHRAN
 
 MAX_MESSAGE_CHARS: Final = 4096
 PROXY_HEADER: Final = "📡 <b>پروکسی‌ها</b>"
-PROXY_WORD: Final = "پروکسی"
-SEPARATOR: Final = " • "
+# An MTProto link is a connect word: "⚡ اتصال ۱". No-break spaces inside a word, so a narrow screen
+# never wraps between the mark, the word and its number; two plain spaces between words, three
+# words to a row (a grid of buttons on a phone).
+CONNECT_WORD: Final = "اتصال"
+LIVE_MARK: Final = "⚡"
+NBSP: Final = "\u00a0"
+WORD_GAP: Final = "  "
+WORDS_PER_ROW: Final = 3
 TAG_PREFIX: Final = "🔗 "
 ELLIPSIS: Final = "…"
 
@@ -122,13 +136,28 @@ def proxy_link(server: str, port: int, secret: str) -> str:
     return f"https://t.me/proxy?{query}"
 
 
+def connect_word(n: int) -> str:
+    """The visible word of the n-th MTProto link of a post: "اتصال ۱" (with a no-break space)."""
+    return f"{CONNECT_WORD}{NBSP}{fa_digits(n)}"
+
+
+def live_word(url: str, n: int) -> str:
+    """``⚡ <a href=url>اتصال n</a>``: the mark stays outside the link (a custom emoji may not sit
+    inside a text link, see proxyhub/posts/entities.py)."""
+    return f'{LIVE_MARK}{NBSP}<a href="{html.escape(url, quote=True)}">{connect_word(n)}</a>'
+
+
+def word_rows(words: Sequence[str]) -> str:
+    """The connect words, :data:`WORDS_PER_ROW` to a row."""
+    return "\n".join(WORD_GAP.join(words[i : i + WORDS_PER_ROW]) for i in range(0, len(words), WORDS_PER_ROW))
+
+
 def proxy_block(proxies: Sequence[tuple[str, int, str]]) -> str:
-    links = [
-        f'<a href="{html.escape(proxy_link(server, port, secret), quote=True)}">'
-        f"{PROXY_WORD} {fa_digits(i)}</a>"
+    words = [
+        live_word(proxy_link(server, port, secret), i)
         for i, (server, port, secret) in enumerate(proxies, start=1)
     ]
-    return f"{PROXY_HEADER}\n{SEPARATOR.join(links)}"
+    return f"{PROXY_HEADER}\n{word_rows(words)}"
 
 
 def render_proxy_post(
@@ -313,6 +342,8 @@ BODY_TAGS: Final = frozenset(
 )
 _VLESS_RE = re.compile(r"^vless://[\x21-\x7e]+$")
 _SPACES = re.compile(r"\s+")
+# A config's transport marker is its code block's language: letters, digits, _ + - only.
+_VARIANT_RE = re.compile(r"^[A-Za-z0-9_+-]{1,16}$")
 
 
 @dataclass(frozen=True)
@@ -334,13 +365,18 @@ class StatusTexts:
 @dataclass(frozen=True)
 class PostLink:
     """One link as a post shows it. ``url`` is a checked URL (:func:`mtproto_url`,
-    :func:`vless_url`) and is only used while ``status`` is active."""
+    :func:`vless_url`) and is only used while ``status`` is active. No label: a post never shows a
+    provider's label (the module doc). ``variant``: a config's tiny transport marker ("TCP",
+    "XHTTP"), or None. ``companion``: this config link is another way into the config of the link
+    right before it (a REALITY config's XHTTP link after its TCP link), so the two stay together and
+    the end time is not repeated. proxyhub/posts/links.py :func:`transport_marks` sets both."""
 
     kind: LinkKind
-    label: str
     status: ShownStatus
     url: str | None = None
     expires_at: datetime | None = None
+    variant: str | None = None
+    companion: bool = False
 
     @property
     def live(self) -> bool:
@@ -381,7 +417,8 @@ def vless_url(url: str) -> str:
 
 
 def clean_label(label: str) -> str:
-    """One short line of plain text (HTML is escaped when rendered)."""
+    """One short line of plain text: a link's label for the owner (dashboard, logs). A post never
+    shows it."""
     text = _SPACES.sub(" ", label).strip()
     if not text:
         raise ValueError("empty label")
@@ -427,39 +464,75 @@ def tehran_until(at: datetime) -> str:
     return f"{WEEKDAYS_FA[local.weekday()]} ساعت {_tehran_clock(local)}"
 
 
-def _label(link: PostLink) -> str:
-    return html.escape(clean_label(link.label), quote=False)
+def _mtproto_word(link: PostLink, n: int) -> str:
+    """A live link is a connect word; a paused one keeps its word and a pause mark, without the
+    link; a dead one is struck through behind its status mark, without the link."""
+    if link.live:
+        assert link.url is not None
+        return live_word(link.url, n)
+    if link.status == "paused":
+        return f"{PAUSED_MARK}{NBSP}{connect_word(n)}"
+    mark = STATUS_MARKS.get(link.status, STATUS_MARKS["burned"])
+    return f"{mark}{NBSP}<s>{connect_word(n)}</s>"
 
 
 def _mtproto_block(links: Sequence[PostLink]) -> str:
-    words: list[str] = []
-    for link in links:
-        if link.live:
-            assert link.url is not None
-            words.append(f'<a href="{html.escape(link.url, quote=True)}">{_label(link)}</a>')
-        elif link.status == "paused":
-            words.append(f"{_label(link)} {PAUSED_MARK}")
-        else:
-            mark = STATUS_MARKS.get(link.status, STATUS_MARKS["burned"])
-            words.append(f"<s>{_label(link)}</s> {mark}")
-    return f"{MTPROTO_HEADER}\n{SEPARATOR.join(words)}"
+    """Numbered by their place among the post's MTProto links, which never changes (an edit
+    renders a post's links in the order they were posted)."""
+    words = [_mtproto_word(link, n) for n, link in enumerate(links, start=1)]
+    return f"{MTPROTO_HEADER}\n{word_rows(words)}"
+
+
+def _variant(link: PostLink) -> str | None:
+    return link.variant if link.variant and _VARIANT_RE.fullmatch(link.variant) else None
+
+
+def config_block(url: str, variant: str | None = None) -> str:
+    """A config in a code block: Telegram draws a copy button on it and a tap copies it. The
+    transport marker, if any, is the block's language, shown in the block's header."""
+    body = html.escape(url, quote=False)
+    if variant and _VARIANT_RE.fullmatch(variant):
+        return f'<pre><code class="language-{variant}">{body}</code></pre>'
+    return f"<pre>{body}</pre>"
+
+
+def _until(link: PostLink) -> str | None:
+    return f"⏳ اعتبار تا {tehran_until(link.expires_at)}" if link.expires_at is not None else None
+
+
+def _ended_line(link: PostLink, texts: StatusTexts) -> str:
+    """Where a config that is not live was: its status line (and its marker), nothing to copy."""
+    if link.status == "paused":
+        line = PAUSED_LINE
+    else:
+        line = html.escape(
+            texts.for_status(link.status if link.status != "active" else "burned"), quote=False
+        )
+    variant = _variant(link)
+    return f"{line} — {variant}" if variant else line
 
 
 def _reality_block(links: Sequence[PostLink], texts: StatusTexts) -> str:
-    lines: list[str] = []
+    """Each config: its end time, then its code block (a companion link's block right under it,
+    without the end time again). A config that is not live: one status line in its place."""
+    groups: list[str] = []
+    before: PostLink | None = None
     for link in links:
+        together = link.companion and before is not None and before.live == link.live
         if link.live:
             assert link.url is not None
-            head = f"<b>{_label(link)}</b>"
-            if link.expires_at is not None:
-                head += f" — ⏳ اعتبار تا {tehran_until(link.expires_at)}"
-            lines.append(f"{head}\n<code>{html.escape(link.url, quote=False)}</code>")
-        elif link.status == "paused":
-            lines.append(f"<b>{_label(link)}</b> — {PAUSED_LINE}")
+            block = config_block(link.url, _variant(link))
+            head = _until(link)
+            if together and before is not None and _until(before) == head:
+                groups[-1] += "\n" + block
+            else:
+                groups.append(f"{head}\n{block}" if head else block)
+        elif together:
+            groups[-1] += "\n" + _ended_line(link, texts)
         else:
-            status = link.status if link.status != "active" else "burned"
-            lines.append(f"<s>{_label(link)}</s> — {html.escape(texts.for_status(status), quote=False)}")
-    return REALITY_HEADER + "\n" + "\n\n".join(lines)
+            groups.append(_ended_line(link, texts))
+        before = link
+    return REALITY_HEADER + "\n" + "\n\n".join(groups)
 
 
 def post_tail(links: Sequence[PostLink], channel_username: str, texts: StatusTexts) -> str:

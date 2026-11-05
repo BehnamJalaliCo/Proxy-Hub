@@ -13,7 +13,8 @@ account and it cannot take the post now, the post goes to the bot and the reason
 (``posts.poster_fallback``, shown on the Content page).
 
 **Status edits** (:func:`refresh_posts`): every sent post younger than ``edit_window_hours`` is
-rendered again from what it carries: a link the provider now REPORTS expired/full/burned (or whose
+rendered again from what it carries, in the order it was posted (a post shows no label: an MTProto
+link is numbered by its place, a config's TCP/XHTTP marker follows from the keys): a link the provider now REPORTS expired/full/burned (or whose
 own expiry passed) gets its status mark and loses its link; a live link takes its provider's current
 URL, so a new active domain (proxyhub.cloudflare.rotation) or a node's slot name replaces the old
 host. When the text differs from the one the channel shows (the last edit that finished without an
@@ -101,11 +102,18 @@ def channel_tag_for(channels: Mapping[str, Mapping[str, Any]]) -> str:
     return tg_store.DEFAULT_CHANNEL_TAG
 
 
-def views_for_new_post(chosen: Sequence[ProxyLink]) -> list[LinkView]:
+def with_marks(views: Sequence[LinkView], keys: Sequence[tuple[str, str]]) -> list[LinkView]:
+    """The views with the transport markers their keys give (:func:`links.transport_marks`)."""
+    marks = links.transport_marks(keys)
     return [
-        LinkView(kind=x.kind, label=x.label, status="active", url=x.url, expires_at=x.expires_at)
-        for x in chosen
+        replace(v, variant=variant, companion=companion)
+        for v, (variant, companion) in zip(views, marks, strict=True)
     ]
+
+
+def views_for_new_post(chosen: Sequence[ProxyLink]) -> list[LinkView]:
+    views = [LinkView(kind=x.kind, status="active", url=x.url, expires_at=x.expires_at) for x in chosen]
+    return with_marks(views, [(x.kind, x.key) for x in chosen])
 
 
 def fit(
@@ -513,7 +521,7 @@ class Shown:
 
 
 def _as(carried: _Carried, status: str) -> LinkView:
-    return LinkView(kind=cast(LinkKind, carried.kind), label=carried.label, status=cast(ShownStatus, status))
+    return LinkView(kind=cast(LinkKind, carried.kind), status=cast(ShownStatus, status))
 
 
 def current_view(carried: _Carried, h: links.Harvest, now: datetime) -> Shown:
@@ -531,13 +539,7 @@ def current_view(carried: _Carried, h: links.Harvest, now: datetime) -> Shown:
         return Shown(_as(carried, current.status), new_status=current.status)
     if current.expires_at is not None and current.expires_at <= now:
         return Shown(_as(carried, "expired"), new_status="expired")
-    view = LinkView(
-        kind=current.kind,
-        label=carried.label,
-        status="active",
-        url=current.url,
-        expires_at=current.expires_at,
-    )
+    view = LinkView(kind=current.kind, status="active", url=current.url, expires_at=current.expires_at)
     return Shown(view)
 
 
@@ -579,7 +581,7 @@ async def refresh_posts(
         shown = [current_view(c, h, now) for c in carried]
         if any(x.unsure for x in shown):
             continue  # a link is missing for a moment only: wait before showing it as paused
-        views = [x.view for x in shown]
+        views = with_marks([x.view for x in shown], [(c.kind, c.key) for c in carried])
         changes = [(c, x.new_status) for c, x in zip(carried, shown, strict=True) if x.new_status]
         paused = [c.label for c, x in zip(carried, shown, strict=True) if x.view.status == "paused"]
         try:

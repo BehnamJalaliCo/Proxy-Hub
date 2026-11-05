@@ -86,10 +86,11 @@ def test_post_has_content_proxy_words_and_channel_tag_last() -> None:
         [("203.0.113.10", 443, SECRET), ("p2.example.com", 8443, "ee" + SECRET + "676f6f676c652e636f6d")],
         "@ipoxxo",
     )
-    assert post.startswith("<b>خبر مهم</b>\nمتن کوتاه\n\n📡 <b>پروکسی‌ها</b>\n")
+    assert post.startswith("<b>خبر مهم</b>\nمتن کوتاه\n\n📡 <b>پروکسی‌ها</b>\n⚡ <a href=")
     assert post.splitlines()[-1] == "🔗 @ipoxxo"
     words = re.findall(r'<a href="([^"]+)">([^<]+)</a>', post)
-    assert [w for _, w in words] == ["پروکسی ۱", "پروکسی ۲"]
+    assert [w for _, w in words] == ["اتصال ۱", "اتصال ۲"]  # connect words, by place
+    assert "پروکسی ۱" not in post
     first = urlsplit(html.unescape(words[0][0]))
     assert (first.scheme, first.netloc, first.path) == ("https", "t.me", "/proxy")
     assert parse_qs(first.query) == {"server": ["203.0.113.10"], "port": ["443"], "secret": [SECRET]}
