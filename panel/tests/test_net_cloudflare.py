@@ -433,16 +433,27 @@ async def test_desired_slot_records_prefer_ready_and_hold_through_unhealthy(engi
     await make_node(engine, state="burned", slot=3, ipv4="203.0.113.3", ready_at=t0)
     await make_node(engine, state="ready", slot=3, ipv4="203.0.113.33", ready_at=t0 - timedelta(hours=9))
     await make_node(engine, state="retiring", slot=4, ipv4="203.0.113.4", ready_at=t0)
-    await make_node(engine, state="ready", slot=None, ipv4="203.0.113.5", ready_at=t0)
+    test_node = await make_node(engine, state="ready", slot=None, ipv4="203.0.113.5", ready_at=t0)
     await make_node(engine, state="ready", slot=6, ipv4=None, ready_at=t0)
     await make_node(engine, state="ready", slot=7, ipv4="2001:db8::7", ready_at=t0)
+    # A slotless node only gets its own name as a test node, once it has been ready, until it leaves.
+    plain = await make_node(engine, state="ready", slot=None, ipv4="203.0.113.6", ready_at=t0)
+    await make_node(engine, state="booting", slot=None, ipv4="203.0.113.7", ready_at=None)
+    await make_node(engine, state="retiring", slot=None, ipv4="203.0.113.8", ready_at=t0)
+    async with engine.begin() as conn:
+        await conn.execute(text("UPDATE nodes SET is_test = false WHERE id = :n"), {"n": plain})
     async with engine.connect() as conn:
         desired = await service.desired_slot_records(conn, ZONE)
-    assert [(d.name, d.content) for d in desired] == [
-        ("slot1.example.com", "203.0.113.11"),  # newest READY node of the slot
-        ("slot2.example.com", "203.0.113.2"),  # unhealthy still holds the name
-        ("slot3.example.com", "203.0.113.33"),  # READY beats a burned node
-    ]
+    assert (
+        [(d.name, d.content) for d in desired]
+        == [
+            ("slot1.example.com", "203.0.113.11"),  # newest READY node of the slot
+            ("slot2.example.com", "203.0.113.2"),  # unhealthy still holds the name
+            ("slot3.example.com", "203.0.113.33"),  # READY beats a burned node
+            (f"t{test_node.hex[:8]}.example.com", "203.0.113.5"),  # the test node's own name
+        ]
+    )
+    assert desired[-1].node_id == test_node and desired[-1].purpose == "slot"
     assert all(d.ttl == 60 and d.proxied is False and d.type == "A" for d in desired)
 
 

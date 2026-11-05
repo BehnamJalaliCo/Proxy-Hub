@@ -7,8 +7,9 @@
   ``reality:key:node:<uuid>``, AES-256-GCM, rule 3); the public key, short id and target are public
   link data. A scope follows the owner's target setting once none of its configs needs the old one
   (proxyhub/reality/policy.py ``retarget_scopes``).
-* ``reality_configs``: short-lived configs (a UUID each), 24 h or 50 GB by default, with the link
-  host fixed when the config is made (contract item 2: slot name, else the node's IPv4).
+* ``reality_configs``: short-lived configs (a UUID each), 48 h or 1 TB by default (D41), with the
+  link host and the transport fixed when the config is made (``reality``: slot name, else the
+  node's IPv4; ``ws_tls``: the node's DNS name, ``slot<N>.<domain>`` or ``t<8 hex>.<domain>``).
 * ``reality_usage``: per config and node, the agent's cumulative byte count (aggregate per
   config, never a person) and the last value reported, so a reset agent is added up correctly.
 * ``reality_node_status``: what each node's agent says about Xray (up, version, and its target
@@ -41,8 +42,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from proxyhub.db.models import Base
 
 CONFIG_STATUSES = ("active", "expired", "full", "burned")
+# How a config's link reaches the node: VLESS + REALITY on TCP, or VLESS + WebSocket + TLS with the
+# panel's own certificate for the node's DNS name (proxyhub/reality/settings.py ``transport``).
+TRANSPORTS = ("reality", "ws_tls")
 PUBLIC_KEY_RE = "^[A-Za-z0-9_-]{43}$"
 SHORT_ID_RE = "^([0-9a-f]{2}){1,8}$"
+WS_PATH_RE = "^/[0-9a-f]{16}$"
 
 
 def _in(values: tuple[str, ...]) -> str:
@@ -60,6 +65,7 @@ class RealityKey(Base):
         CheckConstraint("slot IS NULL OR slot >= 1", name="slot_positive"),
         CheckConstraint(f"public_key ~ '{PUBLIC_KEY_RE}'", name="public_key"),
         CheckConstraint(f"short_id ~ '{SHORT_ID_RE}'", name="short_id"),
+        CheckConstraint(f"ws_path ~ '{WS_PATH_RE}'", name="ws_path"),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     slot: Mapped[int | None] = mapped_column(Integer, unique=True)
@@ -73,6 +79,9 @@ class RealityKey(Base):
     server_name: Mapped[str] = mapped_column(String(253), nullable=False)
     # Vault name of the private key (never the key itself).
     secret_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    # The scope's WebSocket path for the ws_tls transport: "/" + 16 random hex, made with the key, so
+    # a slot's links keep their path when a new server takes the slot over.
+    ws_path: Mapped[str] = mapped_column(String(17), nullable=False)
     created_at: Mapped[datetime] = _now()
 
 
@@ -84,6 +93,7 @@ class RealityConfig(Base):
         CheckConstraint("data_cap_bytes > 0 AND used_bytes >= 0", name="bytes"),
         CheckConstraint("expires_at > created_at", name="window"),
         CheckConstraint("slot IS NULL OR slot >= 1", name="slot_positive"),
+        CheckConstraint(f"transport IN ({_in(TRANSPORTS)})", name="transport"),
         Index("ix_reality_configs_key_status", "key_id", "status"),
         Index("ix_reality_configs_status_ended", "status", "ended_at"),
     )
@@ -103,6 +113,10 @@ class RealityConfig(Base):
     used_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     status: Mapped[str] = mapped_column(String(10), nullable=False, default="active")
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The inbound the config was made for; its link only works while its nodes serve that inbound.
+    transport: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="reality", server_default="reality"
+    )
 
 
 class RealityUsage(Base):

@@ -18,6 +18,7 @@ import pytest
 from pydantic import ValidationError
 
 from proxyhub.agent_api.validation import valid_user_name
+from proxyhub.cloudflare.service import NodeNames
 from proxyhub.mtproto.links import to_link
 from proxyhub.mtproto.service import ProxyView, pick_host, proxy_status
 from proxyhub.mtproto.settings import (
@@ -200,17 +201,27 @@ def test_settings_diff() -> None:
 # --- host and status -------------------------------------------------------------------------------
 
 
-def test_host_is_the_slot_name_only_when_its_record_leads_to_this_node() -> None:
+def test_host_is_the_node_name_only_when_its_record_leads_to_this_node() -> None:
     zone = "ipoxxo.example"
-    rec = {("slot2.ipoxxo.example", "203.0.113.2")}
-    assert pick_host(2, "203.0.113.2", zone, rec) == ("slot2.ipoxxo.example", "domain")
+    node, test_node = uuid.uuid4(), uuid.UUID("0a1b2c3d-0000-4000-8000-000000000000")
+    names = NodeNames(
+        zone=zone,
+        records={
+            "slot2.ipoxxo.example": ("203.0.113.2", node),
+            "t0a1b2c3d.ipoxxo.example": ("203.0.113.5", test_node),
+        },
+    )
+    assert pick_host(2, node, "203.0.113.2", names) == ("slot2.ipoxxo.example", "domain")
+    # A test node's own name (t<8 hex of its id>) leads to it as well.
+    assert pick_host(None, test_node, "203.0.113.5", names) == ("t0a1b2c3d.ipoxxo.example", "domain")
     # no active domain / no slot / record for another IP / other slot / no record: the IPv4
-    assert pick_host(2, "203.0.113.2", None, rec) == ("203.0.113.2", "ip")
-    assert pick_host(None, "203.0.113.2", zone, rec) == ("203.0.113.2", "ip")
-    assert pick_host(2, "203.0.113.9", zone, rec) == ("203.0.113.9", "ip")
-    assert pick_host(3, "203.0.113.2", zone, rec) == ("203.0.113.2", "ip")
-    assert pick_host(2, "203.0.113.2", zone, set()) == ("203.0.113.2", "ip")
-    assert pick_host(2, None, zone, rec) == (None, None)
+    assert pick_host(2, node, "203.0.113.2", NodeNames(zone=None)) == ("203.0.113.2", "ip")
+    assert pick_host(None, node, "203.0.113.2", names) == ("203.0.113.2", "ip")
+    assert pick_host(2, node, "203.0.113.9", names) == ("203.0.113.9", "ip")
+    assert pick_host(3, node, "203.0.113.2", names) == ("203.0.113.2", "ip")
+    assert pick_host(None, test_node, "203.0.113.2", names) == ("203.0.113.2", "ip")
+    assert pick_host(2, node, "203.0.113.2", NodeNames(zone=zone)) == ("203.0.113.2", "ip")
+    assert pick_host(2, node, None, names) == (None, None)
 
 
 def test_status_of_a_proxy() -> None:

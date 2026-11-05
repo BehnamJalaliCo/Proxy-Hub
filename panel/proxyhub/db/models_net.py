@@ -36,7 +36,9 @@ from proxyhub.db.models import Base
 
 POOL_STATES = ("none", "active", "standby", "filtered", "retired", "deleted")
 RECORD_TYPES = ("A", "AAAA", "TXT")
-RECORD_PURPOSES = ("slot", "test")
+# slot: node names (slot<N>.<domain> and a test node's t<8 hex>.<domain>, the DNS loop); acme: the
+# _acme-challenge TXT records of a certificate order (proxyhub/acme); test: real Cloudflare tests.
+RECORD_PURPOSES = ("slot", "test", "acme")
 PROBE_SOURCES = ("globalping", "check-host")
 PROBE_KINDS = ("tcp", "icmp", "dns")
 PROBE_ROLES = ("node", "control")

@@ -55,6 +55,12 @@ class RuntimeConfig(BaseSettings):
     # EC P-256 private key (PEM) of the panel's own CA that signs node agent certificates (mTLS).
     agent_ca_key_file: Path = Path("/run/secrets/agent_ca_key")
 
+    # ACME directory for the nodes' certificates (proxyhub/acme). Production: Let's Encrypt.
+    # Staging (https://acme-staging-v02.api.letsencrypt.org/directory) or a test CA such as Pebble
+    # for tests; ``acme_ca_file`` then names the extra CA bundle that CA's HTTPS endpoint needs.
+    acme_directory_url: str = "https://acme-v02.api.letsencrypt.org/directory"
+    acme_ca_file: Path | None = None
+
     log_level: str = "INFO"
     git_commit: str = os.environ.get("PROXYHUB_GIT_COMMIT", "unknown")
 

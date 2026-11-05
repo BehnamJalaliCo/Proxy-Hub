@@ -4,6 +4,12 @@ dashboard API.
 Key scopes: a node with a slot uses its slot's key (and the slot's configs), a node without one
 (the owner's test node) its own. Every node of a scope serves all of the scope's active configs, so
 a config posted as ``slot<N>.<domain>`` keeps working when slot N moves to a new server.
+
+Transport ``ws_tls`` (the default, proxyhub/reality/settings.py): a node serves VLESS + WebSocket +
+TLS for its scope's DNS name (``slot<N>.<domain>``, or a test node's ``t<8 hex>.<domain>``) with the
+panel's wildcard certificate for the active domain (proxyhub/acme). Without the name, the
+certificate, or an agent that knows the transport (0.3.0 on), the node gets no inbound at all and
+no link is made or published for it (:func:`ws_tls_plan`).
 """
 
 from __future__ import annotations
@@ -14,18 +20,20 @@ import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
+from proxyhub.acme.store import Material, material
+from proxyhub.cloudflare.service import NodeNames, node_names
 from proxyhub.db.models import Node
-from proxyhub.db.models_agent import TelemtNodeConfig
+from proxyhub.db.models_agent import AgentNode, TelemtNodeConfig
 from proxyhub.db.models_reality import RealityConfig, RealityKey, RealityNodeStatus, RealityUsage
 from proxyhub.fleet.lifecycle import NodeState
-from proxyhub.reality.settings import PORT
+from proxyhub.reality.settings import PORT, load_reality_settings
 from proxyhub.vault import Vault, VaultError
 
 Db = AsyncConnection | AsyncSession
@@ -36,6 +44,8 @@ log = logging.getLogger(__name__)
 # clients may still reach it, and the slot's replacement serves the same configs).
 SERVE_STATES: Final = frozenset({S.READY, S.UNHEALTHY, S.REPAIRING, S.BURNED, S.DRAINING})
 XRAY_API_PORT: Final = 10085  # node-image/files/agent-xray.json; Telemt may not use it
+# The first agent that renders the ws_tls inbound; an older one would refuse the whole document.
+WS_TLS_AGENT: Final = (0, 3, 0)
 EMAIL_DOMAIN: Final = "proxyhub"
 _EMAIL = re.compile(r"cfg-([1-9][0-9]{0,17})@proxyhub")
 
@@ -123,6 +133,7 @@ class KeyView:
     target: str
     server_name: str
     secret_name: str
+    ws_path: str
 
     @property
     def scope(self) -> Scope:
@@ -146,6 +157,7 @@ _KEY_COLS = (
     RealityKey.target,
     RealityKey.server_name,
     RealityKey.secret_name,
+    RealityKey.ws_path,
 )
 
 
@@ -225,11 +237,62 @@ def _utc_text(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def agent_supports_ws_tls(version: str | None) -> bool:
+    """True for an agent version from 0.3.0 on (``X.Y.Z``, anything after it ignored)."""
+    m = re.match(r"([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})", version or "")
+    return m is not None and tuple(int(g) for g in m.groups()) >= WS_TLS_AGENT
+
+
+async def agent_version(db: Db, node_id: uuid.UUID) -> str | None:
+    return (
+        await db.execute(select(AgentNode.agent_version).where(AgentNode.node_id == node_id))
+    ).scalar_one_or_none()
+
+
+@dataclass(frozen=True)
+class WsTls:
+    """What a node needs to serve VLESS + WS + TLS: its scope's DNS name and the certificate."""
+
+    name: str
+    # The name's A record points at exactly this node (links are made only there; the old server of
+    # a slot keeps serving the name for clients that still have its address).
+    own: bool
+    cert: Material
+
+    @property
+    def check_pair(self) -> tuple[str, str]:
+        """(target, server name) the agent's own TLS check of the inbound reports."""
+        return f"{self.name}:{PORT}", self.name
+
+
+async def ws_tls_plan(
+    db: Db,
+    node: NodeView,
+    now: datetime,
+    *,
+    names: NodeNames | None = None,
+    vault: Vault | None = None,
+) -> WsTls | None:
+    """The node's ws_tls material, or None: no DNS name for its scope in Cloudflare, no valid
+    certificate for the active domain, or an agent older than 0.3.0."""
+    names = names if names is not None else await node_names(db)
+    name = names.scope_name(node.slot, node.id)
+    if name is None or not agent_supports_ws_tls(await agent_version(db, node.id)):
+        return None
+    cert = await material(db, names.zone, now, vault)
+    if cert is None:
+        return None
+    return WsTls(name=name, own=names.own_name(node.slot, node.id, node.ipv4) is not None, cert=cert)
+
+
 async def xray_section(db: Db, node_id: uuid.UUID, vault: Vault | None = None) -> dict[str, Any] | None:
     """The desired state's ``xray`` section for one node, or None (then the key is left out, and an
     agent that runs Xray stops it). Present only when the node's agent reported that it manages
     Xray (an older agent refuses the key), the node still serves, its Telemt does not clash, and
-    its scope has a key. Carries the scope's private key: only for that node's own agent."""
+    its scope has a key; for ``ws_tls`` also when :func:`ws_tls_plan` has the name and the
+    certificate. Carries the scope's private key (``reality``) or the certificate's key
+    (``ws_tls``): only for that node's own agent. The users are the scope's active configs of the
+    transport the settings ask for."""
     node = await get_node(db, node_id)
     if node is None or S(node.state) not in SERVE_STATES:
         return None
@@ -239,15 +302,42 @@ async def xray_section(db: Db, node_id: uuid.UUID, vault: Vault | None = None) -
     key = await scope_key(db, node)
     if key is None:
         return None
+    settings = await load_reality_settings(db)
     configs = (
         await db.execute(
             select(
                 RealityConfig.id, RealityConfig.uuid, RealityConfig.expires_at, RealityConfig.data_cap_bytes
             )
-            .where(RealityConfig.key_id == key.id, RealityConfig.status == "active")
+            .where(
+                RealityConfig.key_id == key.id,
+                RealityConfig.status == "active",
+                RealityConfig.transport == settings.transport,
+            )
             .order_by(RealityConfig.id)
         )
     ).all()
+    users = [
+        {
+            "id": str(c.uuid),
+            "email": config_email(c.id),
+            "expires_at": _utc_text(c.expires_at),
+            "data_cap_bytes": c.data_cap_bytes,
+        }
+        for c in configs
+    ]
+    if settings.transport == "ws_tls":
+        plan = await ws_tls_plan(db, node, datetime.now(UTC), vault=vault)
+        if plan is None:
+            return None
+        return {
+            "transport": "ws_tls",
+            "port": PORT,
+            "server_name": plan.name,
+            "ws_path": key.ws_path,
+            "tls_cert_chain": plan.cert.chain_pem,
+            "tls_key": plan.cert.key_pem.reveal(),
+            "users": users,
+        }
     try:
         secret = await (vault or Vault.from_config()).get(db, key.secret_name)
     except VaultError as exc:
@@ -260,22 +350,31 @@ async def xray_section(db: Db, node_id: uuid.UUID, vault: Vault | None = None) -
         # scope is handed to posts (proxyhub/reality/links.py needs Xray up on a serving node).
         log.error("reality: the private key of key %s is unusable (%s); xray left out", key.id, problem)
         return None
+    # The REALITY section has exactly the shape agents before 0.3.0 know (no "transport" key).
     return {
         "port": PORT,
         "private_key": secret.reveal(),
         "target": key.target,
         "server_names": [key.server_name],
         "short_ids": [key.short_id],
-        "users": [
-            {
-                "id": str(c.uuid),
-                "email": config_email(c.id),
-                "expires_at": _utc_text(c.expires_at),
-                "data_cap_bytes": c.data_cap_bytes,
-            }
-            for c in configs
-        ],
+        "users": users,
     }
+
+
+async def telemt_tls_domain(db: Db, node_id: uuid.UUID) -> str | None:
+    """The node's own DNS name when its Telemt fake-TLS domain should be that name: the node serves
+    ws_tls (its document's xray section, built by :func:`xray_section` itself) and the name's record
+    points at this node. Then the SNI of its ``ee`` links matches the IP they lead to, and Telemt's
+    TLS front is our own Xray with the real certificate. None: keep the owner's setting."""
+    section = await xray_section(db, node_id)
+    if section is None or section.get("transport") != "ws_tls":
+        return None
+    node = await get_node(db, node_id)
+    if node is None:
+        return None
+    names = await node_names(db)
+    own = names.own_name(node.slot, node.id, node.ipv4)
+    return own if own == section.get("server_name") else None
 
 
 @dataclass(frozen=True)
@@ -398,9 +497,11 @@ async def recent_and_active_configs(db: Db, since: datetime) -> list[Any]:
                     RealityConfig.status,
                     RealityConfig.ended_at,
                     RealityConfig.key_id,
+                    RealityConfig.transport,
                     RealityKey.public_key,
                     RealityKey.short_id,
                     RealityKey.server_name,
+                    RealityKey.ws_path,
                     Node.name.label("node_name"),
                     Node.location,
                 )

@@ -574,25 +574,57 @@ def slot_name(slot: int, zone_name: str) -> str:
     return f"slot{slot}.{zone_name}"
 
 
+def slotless_name(node_id: uuid.UUID, zone_name: str) -> str:
+    """A slotless (test) node's own name: ``t<first 8 hex of its id>.<zone>``."""
+    return f"t{node_id.hex[:8]}.{zone_name}"
+
+
+def node_dns_name(slot: int | None, node_id: uuid.UUID, zone_name: str) -> str:
+    """The DNS name of a node's scope: its slot's name, or a slotless node's own name."""
+    return slot_name(slot, zone_name) if slot is not None else slotless_name(node_id, zone_name)
+
+
 async def desired_slot_records(db: Db, zone_name: str) -> list[Desired]:
-    """slot<N>.<zone> -> the node holding slot N: a READY node first (newest ready_at), else the
-    newest node that still holds its server (HOLDING_STATES)."""
+    """The node names the DNS loop keeps (purpose ``slot``):
+
+    * ``slot<N>.<zone>`` -> the node holding slot N: a READY node first (newest ready_at), else the
+      newest node that still holds its server (HOLDING_STATES);
+    * ``t<8 hex>.<zone>`` -> a slotless test node of its own, from the moment it was first ready
+      while it still holds its server (HOLDING_STATES); the name goes when the node leaves service
+      (retiring, deleted), by the same plan that moves and removes slot names.
+    """
     rows = (
         await db.execute(
-            select(Node.id, Node.slot, Node.state, Node.ipv4, Node.ready_at, Node.created_at).where(
-                Node.slot.is_not(None),
+            select(
+                Node.id, Node.slot, Node.state, Node.ipv4, Node.ready_at, Node.created_at, Node.is_test
+            ).where(
                 Node.ipv4.is_not(None),
                 Node.state.in_([s.value for s in HOLDING_STATES]),
             )
         )
     ).all()
     best: dict[int, tuple[tuple[int, float, float], uuid.UUID, str]] = {}
+    tests: list[Desired] = []
     for r in rows:
         try:
             ip = ipaddress.ip_interface(str(r.ipv4)).ip
         except ValueError:
             continue
-        if ip.version != 4 or r.slot is None or r.slot < 1:
+        if ip.version != 4:
+            continue
+        if r.slot is None:
+            if r.is_test and r.ready_at is not None:
+                tests.append(
+                    Desired(
+                        name=slotless_name(r.id, zone_name),
+                        type="A",
+                        content=str(ip),
+                        node_id=r.id,
+                        purpose="slot",
+                    )
+                )
+            continue
+        if r.slot < 1:
             continue
         rank = (
             1 if r.state == NodeState.READY.value else 0,
@@ -602,10 +634,62 @@ async def desired_slot_records(db: Db, zone_name: str) -> list[Desired]:
         current = best.get(int(r.slot))
         if current is None or rank > current[0]:
             best[int(r.slot)] = (rank, r.id, str(ip))
-    return [
+    slots = [
         Desired(name=slot_name(slot, zone_name), type="A", content=ip, node_id=node_id, purpose="slot")
         for slot, (_, node_id, ip) in sorted(best.items())
     ]
+    return slots + sorted(tests, key=lambda d: d.name)
+
+
+@dataclass(frozen=True)
+class NodeNames:
+    """The active domain and the node names Cloudflare really holds there (our A records)."""
+
+    zone: str | None
+    # name -> (IPv4 the record points at, node id the row was written for)
+    records: dict[str, tuple[str, uuid.UUID | None]] = field(default_factory=dict)
+
+    def scope_name(self, slot: int | None, node_id: uuid.UUID) -> str | None:
+        """The name of a node's scope if Cloudflare holds it (whichever node of the scope it points
+        at: the old server of a slot still serves the slot's name for clients that cached it)."""
+        if self.zone is None:
+            return None
+        name = node_dns_name(slot, node_id, self.zone)
+        return name if name in self.records else None
+
+    def own_name(self, slot: int | None, node_id: uuid.UUID, ipv4: str | None) -> str | None:
+        """The scope's name only if its record points at exactly this node's IPv4."""
+        name = self.scope_name(slot, node_id)
+        if name is None or ipv4 is None or self.records[name][0] != ipv4:
+            return None
+        return name
+
+
+async def node_names(db: Db) -> NodeNames:
+    """Every node name (purpose ``slot``) the panel created in Cloudflare on the active domain."""
+    zone = (
+        await db.execute(
+            select(CfZone.id, CfZone.name).where(
+                CfZone.pool_state == PoolState.ACTIVE.value, CfZone.status != GONE
+            )
+        )
+    ).first()
+    if zone is None:
+        return NodeNames(zone=None)
+    rows = (
+        await db.execute(
+            select(CfRecord.name, CfRecord.content, CfRecord.node_id).where(
+                CfRecord.zone_id == zone.id,
+                CfRecord.type == "A",
+                CfRecord.purpose == "slot",
+                CfRecord.cf_record_id.is_not(None),
+            )
+        )
+    ).all()
+    return NodeNames(
+        zone=str(zone.name).lower(),
+        records={str(r.name).lower(): (str(r.content), r.node_id) for r in rows},
+    )
 
 
 async def active_zone(db: Db) -> ZoneView | None:

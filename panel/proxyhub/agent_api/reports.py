@@ -172,6 +172,9 @@ async def store_report(session: AsyncSession, node_id: uuid.UUID, report: AgentR
         )
     )
     values: dict[str, Any] = {
+        # The running binary's version (a node never changes it today, but the ws_tls gate in
+        # proxyhub/reality/store.py must follow the agent that really runs).
+        "agent_version": report.agent_version,
         "last_report_at": now,
         "last_applied_etag": report.applied_etag,
         "last_apply_ok": report.apply_ok,

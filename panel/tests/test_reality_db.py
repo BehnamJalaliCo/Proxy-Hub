@@ -50,15 +50,22 @@ pytestmark = pytest.mark.db
 T0 = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 # The tests were written for a 24-hour config life; F scales those hours to the current default
 # (D41: 48 hours), and CAP is the default data cap (D41: 1 TB).
-F = RealitySettings().cap_hours / 24
-CAP = RealitySettings().cap_bytes
+
+
+def reality_settings(**kw: Any) -> RealitySettings:
+    """These tests are about the REALITY transport (tests/test_wstls_db.py covers ws_tls)."""
+    return RealitySettings(**{"transport": "reality", **kw})
+
+
+F = reality_settings().cap_hours / 24
+CAP = reality_settings().cap_bytes
 
 
 async def _create(world: World, now: datetime, settings: RealitySettings | None = None) -> list[Any]:
     """One policy round's making step: keys for new scopes, then due configs (as the loop does)."""
     async with world.engine.begin() as conn:
-        await ensure_keys(conn, settings or RealitySettings(), now)
-        return await create_configs(conn, settings or RealitySettings(), now)
+        await ensure_keys(conn, settings or reality_settings(), now)
+        return await create_configs(conn, settings or reality_settings(), now)
 
 
 async def _retarget(world: World, now: datetime, settings: RealitySettings) -> list[Any]:
@@ -75,7 +82,7 @@ async def _keys(world: World) -> list[Any]:
 
 async def _end(world: World, now: datetime) -> dict[int, str]:
     async with world.engine.begin() as conn:
-        return dict(await end_configs(conn, now))
+        return dict(await end_configs(conn, now, "reality"))
 
 
 async def _configs(world: World) -> list[Any]:
@@ -135,7 +142,7 @@ async def test_a_ready_node_gets_a_vaulted_key_and_staggered_configs(world: Worl
 
 async def _renew(world: World, now: datetime, settings: RealitySettings | None = None) -> list[int]:
     async with world.engine.begin() as conn:
-        return await renew_configs(conn, settings or RealitySettings(), now)
+        return await renew_configs(conn, settings or reality_settings(), now)
 
 
 async def test_a_working_config_is_renewed_in_place_before_it_ends(world: World) -> None:
@@ -146,7 +153,7 @@ async def test_a_working_config_is_renewed_in_place_before_it_ends(world: World)
     [_made] = await _create(world, T0)
     [c] = await _configs(world)
     await world.report(node, now=T0 + timedelta(hours=40), users={f"cfg-{c.id}@proxyhub": 300 * GB})
-    life = timedelta(hours=RealitySettings().cap_hours)
+    life = timedelta(hours=reality_settings().cap_hours)
     assert await _renew(world, c.expires_at - timedelta(hours=2)) == []  # not near its end yet
     near = c.expires_at - timedelta(minutes=50)
     await world.report(node, now=near)
@@ -172,7 +179,7 @@ async def test_a_config_that_does_not_work_is_not_renewed(world: World, case: st
     await _create(world, T0)
     [c] = await _configs(world)
     near = c.expires_at - timedelta(minutes=30)
-    settings = RealitySettings()
+    settings = reality_settings()
     await world.report(node, now=near)
     if case == "full":
         await world.report(node, now=near, users={f"cfg-{c.id}@proxyhub": CAP})
@@ -181,11 +188,11 @@ async def test_a_config_that_does_not_work_is_not_renewed(world: World, case: st
     elif case == "node_retiring":
         await world.rows("UPDATE nodes SET state = 'retiring' WHERE id = :n", n=node)
     elif case == "renew_off":
-        settings = RealitySettings(renew=False)
+        settings = reality_settings(renew=False)
     elif case == "new_target_pending":
-        settings = RealitySettings(target_host="www.example.org")
+        settings = reality_settings(target_host="www.example.org")
     else:
-        settings = RealitySettings(enabled=False)
+        settings = reality_settings(enabled=False)
     assert await _renew(world, near, settings) == []
     [after] = await _configs(world)
     assert after.expires_at == c.expires_at
@@ -314,12 +321,12 @@ async def test_nodes_that_must_not_get_configs(world: World) -> None:
     ok = await world.node(slot=17)
     await world.report(ok, now=datetime.now(UTC))
     async with world.engine.begin() as conn:
-        await save_reality_settings(conn, RealitySettings(enabled=False))
+        await save_reality_settings(conn, reality_settings(enabled=False))
     async with world.engine.begin() as conn:
         await RealityReconciler().run_once(conn)
     assert await _configs(world) == []
     async with world.engine.begin() as conn:
-        await save_reality_settings(conn, RealitySettings(enabled=True))
+        await save_reality_settings(conn, reality_settings(enabled=True))
     async with world.engine.begin() as conn:
         await RealityReconciler().run_once(conn)
     [made] = await _configs(world)
@@ -395,7 +402,7 @@ async def test_a_failing_target_is_replaced_by_the_owners_new_target(world: Worl
 
     # The owner sets another target in the dashboard.
     async with world.engine.begin() as conn:
-        await save_reality_settings(conn, RealitySettings(target_host="www.example.org"))
+        await save_reality_settings(conn, reality_settings(target_host="www.example.org"))
     await _loop(world)
     rows = {c.slot: c for c in await _configs(world)}
     assert rows[3].status == "burned" and rows[4].status == "expired"  # old target, no new config yet
@@ -463,7 +470,7 @@ async def test_a_working_target_is_switched_once_its_configs_have_ended(world: W
     await world.report(node, now=T0 + timedelta(hours=12 * F))
     [c2] = await _create(world, T0 + timedelta(hours=12 * F))
     [key] = await _keys(world)
-    new = RealitySettings(target_host="www.example.org")
+    new = reality_settings(target_host="www.example.org")
 
     # The owner changes the target while two configs of the old one are in use (and it works).
     async with world.engine.begin() as conn:
@@ -792,14 +799,14 @@ async def test_links_provider(world: World) -> None:
         f"vless://{c.uuid}@203.0.113.10:443?encryption=none&security=reality&sni=dl.google.com"
     )
     assert link.url.endswith("#%40ipoxxo_main%20%F0%9F%87%AB%F0%9F%87%AE%20" + str(c.id))
-    assert link.label.startswith("ریلیتی ") and link.expires_at == c.expires_at
+    assert link.label.startswith("کانفیگ ") and link.expires_at == c.expires_at
     # An ended config stays listed (so its post can be marked), with its status.
     await world.rows("UPDATE reality_configs SET status = 'full', ended_at = now()")
     async with world.engine.connect() as conn:
         [ended] = await provide_links(conn)
     assert ended.status == "full" and ended.key == link.key
     async with world.engine.begin() as conn:
-        await save_reality_settings(conn, RealitySettings(link_name="My Channel"))
+        await save_reality_settings(conn, reality_settings(link_name="My Channel"))
     async with world.engine.connect() as conn:
         assert "#My%20Channel%20" in (await provide_links(conn))[0].url
 
@@ -841,7 +848,7 @@ async def test_dashboard_api(world: World) -> None:
             [row] = await _configs(world)
             assert str(row.uuid) not in json.dumps((await c.get("/api/reality")).json())
 
-            put = await c.put("/api/reality/settings", json={**RealitySettings().model_dump(), "cap_gb": 80})
+            put = await c.put("/api/reality/settings", json={**reality_settings().model_dump(), "cap_gb": 80})
             assert put.status_code == 200 and put.json()["cap_gb"] == 80
             bad = await c.put("/api/reality/settings", json={"cap_gb": 0})
             assert (

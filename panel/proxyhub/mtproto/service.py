@@ -1,10 +1,12 @@
 """What the panel knows about each node's public MTProto proxy (read side).
 
-Host (cross-team contract item 2): the slot's DNS name ``slot<N>.<active domain>`` when that name
-really points at this node, i.e. the panel's own A record for it exists in Cloudflare
-(``cf_records`` row with a Cloudflare id) with this node's IPv4; otherwise the node's IPv4. So a
-link never names a host that does not lead to the node holding its secret (a slot's name moves to
-the replacement node, whose secret is different).
+Host (cross-team contract item 2): the node's DNS name (``slot<N>.<active domain>``, or a test
+node's ``t<8 hex>.<active domain>``) when that name really points at this node, i.e. the panel's own
+A record for it exists in Cloudflare (``cf_records`` row with a Cloudflare id) with this node's IPv4;
+otherwise the node's IPv4. So a link never names a host that does not lead to the node holding its
+secret (a slot's name moves to the replacement node, whose secret is different). The fake-TLS
+domain of the ``ee`` secret is the node's own ``tls_domain`` (proxyhub/mtproto/policy.py: the node's
+name while its Xray serves that name with our certificate, else the owner's setting).
 
 Status of a proxy:
 
@@ -27,12 +29,10 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from proxyhub.agent_api.sealing import SealError, open_secret
-from proxyhub.cloudflare.pool import PoolState
-from proxyhub.cloudflare.rotation import GONE
+from proxyhub.cloudflare.service import NodeNames, node_names
 from proxyhub.db.models import Node
 from proxyhub.db.models_agent import TelemtNodeConfig, TelemtUser
 from proxyhub.db.models_mtproto import MtprotoProxy
-from proxyhub.db.models_net import CfRecord, CfZone
 from proxyhub.fleet.lifecycle import NodeState
 from proxyhub.mtproto.settings import Mode, link_mode
 from proxyhub.mtproto.urls import label_for, proxy_key, proxy_url
@@ -103,45 +103,16 @@ def _ipv4(value: Any) -> str | None:
     return str(ip) if ip.version == 4 else None
 
 
-async def _slot_records(db: Db) -> tuple[str | None, dict[uuid.UUID, set[tuple[str, str]]]]:
-    """The active domain and, per node, the (name, IPv4) of the A records Cloudflare holds for it."""
-    zone = (
-        await db.execute(
-            select(CfZone.id, CfZone.name).where(
-                CfZone.pool_state == PoolState.ACTIVE.value, CfZone.status != GONE
-            )
-        )
-    ).first()
-    if zone is None:
-        return None, {}
-    rows = (
-        await db.execute(
-            select(CfRecord.node_id, CfRecord.name, CfRecord.content).where(
-                CfRecord.zone_id == zone.id,
-                CfRecord.type == "A",
-                CfRecord.purpose == "slot",
-                CfRecord.cf_record_id.is_not(None),
-                CfRecord.node_id.is_not(None),
-            )
-        )
-    ).all()
-    out: dict[uuid.UUID, set[tuple[str, str]]] = {}
-    for r in rows:
-        out.setdefault(r.node_id, set()).add((str(r.name).lower(), str(r.content)))
-    return str(zone.name).lower(), out
-
-
 def pick_host(
     slot: int | None,
+    node_id: uuid.UUID,
     ipv4: str | None,
-    zone: str | None,
-    records: set[tuple[str, str]],
+    names: NodeNames,
 ) -> tuple[str | None, HostKind | None]:
-    """Contract item 2: the slot's DNS name if it leads to this node, else the node's IPv4."""
-    if slot is not None and zone is not None and ipv4 is not None:
-        name = f"slot{slot}.{zone}"
-        if (name, ipv4) in records:
-            return name, "domain"
+    """Contract item 2: the node's DNS name if it leads to this node, else the node's IPv4."""
+    name = names.own_name(slot, node_id, ipv4)
+    if name is not None:
+        return name, "domain"
     if ipv4 is not None:
         return ipv4, "ip"
     return None, None
@@ -149,7 +120,7 @@ def pick_host(
 
 async def list_proxies(db: Db, seal_key: bytes, now: datetime) -> list[ProxyView]:
     """Every node's public proxy (deleted nodes for :data:`DELETED_KEPT_FOR`), slots first."""
-    zone, records = await _slot_records(db)
+    names = await node_names(db)
     rows = (
         await db.execute(
             select(
@@ -192,7 +163,7 @@ async def list_proxies(db: Db, seal_key: bytes, now: datetime) -> list[ProxyView
             log.warning("mtproto: the sealed secret of node %s does not open; proxy skipped", r.node_id)
             continue
         ipv4 = _ipv4(r.ipv4)
-        host, kind = pick_host(r.slot, ipv4, zone, records.get(r.node_id, set()))
+        host, kind = pick_host(r.slot, r.node_id, ipv4, names)
         views.append(
             ProxyView(
                 key=proxy_key(r.node_id, r.user_name),

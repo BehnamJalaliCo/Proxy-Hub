@@ -118,7 +118,9 @@ def test_end_status() -> None:
     def why(
         c: ActiveConfig, state: str | None = "ready", served: bool = True, domain: str | None = "example.com"
     ) -> Any:
-        return end_status(c, now=NOW, own_node_state=state, scope_served=served, active_domain=domain)
+        return end_status(
+            c, now=NOW, own_node_state=state, scope_served=served, active_domain=domain, transport="reality"
+        )
 
     assert why(_config()) is None
     assert why(_config(used_bytes=50 * GB)) == "full"
@@ -136,6 +138,18 @@ def test_end_status() -> None:
     assert why(ip) is None and why(ip, state="unhealthy") is None
     for state in ("burned", "draining", "retiring", "deleted", None):
         assert why(ip, state=state) == "burned", state
+    # The owner switched the transport: a node serves one inbound, so the other one's links end.
+    assert (
+        end_status(
+            _config(),
+            now=NOW,
+            own_node_state="ready",
+            scope_served=True,
+            active_domain="example.com",
+            transport="ws_tls",
+        )
+        == "burned"
+    )
 
 
 def test_creation_is_staggered() -> None:

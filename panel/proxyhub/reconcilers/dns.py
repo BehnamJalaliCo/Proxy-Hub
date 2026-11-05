@@ -1,4 +1,6 @@
-"""DNS loop (docs/10 section 3.10, decision D13): slot<N>.<active domain> -> the node's IPv4.
+"""DNS loop (docs/10 section 3.10, decision D13): slot<N>.<active domain> -> the node's IPv4, and a
+slotless test node's own name t<8 hex>.<active domain> -> its IPv4 (from its first ready on, until it
+leaves service), so every serving node has a name of its own (VLESS + WS + TLS, Telemt's TLS front).
 
 It does nothing at all until the owner has stored a verified Cloudflare token AND chosen an active
 domain in the pool. Then, every minute: desired records come from the database (the node holding
