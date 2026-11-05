@@ -320,10 +320,15 @@ def plan_with(classes: dict[str, str], **settings_kw: Any) -> list[Any]:
     return creates(plan_for(open_settings(**settings_kw), location_classes=classes))
 
 
-def test_planner_prefers_open_locations_and_skips_closed_ones() -> None:
+def test_planner_spreads_over_open_locations_and_skips_closed_ones() -> None:
     cs = plan_with({"fsn1": "bad", "nbg1": "mixed", "hel1": "good"}, target_slots=3)
     assert [c.context["location"] for c in cs] == ["hel1", "hel1", "hel1"] and all(c.allowed for c in cs)
-    assert all(c.context["location_class"] == "good" for c in cs)
+    assert all(c.context["location_class"] == "good" for c in cs)  # half-closed comes after
+    # P16, the owner: "other locations too, not only hel1": a location without data is used as well.
+    cs = plan_with({"fsn1": "bad", "nbg1": "unknown", "hel1": "good"}, target_slots=3)
+    assert [c.context["location"] for c in cs] == ["nbg1", "hel1", "hel1"] and all(c.allowed for c in cs)
+    cs = plan_with({"fsn1": "bad"}, target_slots=4)  # evenly over the open ones
+    assert [c.context["location"] for c in cs] == ["nbg1", "hel1", "hel1", "nbg1"]
     cs = plan_with({"fsn1": "good", "nbg1": "good", "hel1": "bad"}, target_slots=3)
     assert [c.context["location"] for c in cs] == ["fsn1", "nbg1", "fsn1"]
     # Nothing known yet: the slots spread over the owner's locations exactly as before.
