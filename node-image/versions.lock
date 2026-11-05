@@ -28,6 +28,6 @@ XCORE_GEOIP_SHA256=ce90dc02a81528109c99d769e1f8fe3071ded6b02a574f31e62d8f4eee312
 
 # proxyhub-agent, built from agent/ in this repository by node-image/build-agent.sh
 # (go1.24.7, CGO off, -trimpath, empty build id: reproducible). A test rebuilds it and compares.
-AGENT_VERSION=0.3.0
+AGENT_VERSION=0.4.0
 AGENT_GO_VERSION=1.24.7
-AGENT_SHA256=333b23b1e80caaea1bdbd47fbe917479d3eb63a5e5148ac9cf1575e23638e382
+AGENT_SHA256=31ce7724bae743c889a5eb24fdbacfefc84bfb884357a9a09443e70881c77485
