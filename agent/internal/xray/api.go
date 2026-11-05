@@ -145,14 +145,16 @@ func (c *API) Uptime(ctx context.Context) (uint32, error) {
 	return decodeSysUptime(resp)
 }
 
-// AddUser adds one user to the Reality inbound of the running Xray (no restart).
-func (c *API) AddUser(ctx context.Context, u User) error {
-	_, err := c.call(ctx, methodAlterInbound, encodeAddUser(InboundTag, u))
+// AddUser adds one user to the inbound named tag in the running Xray (no restart), with the inbound's
+// client flow (XTLS Vision for REALITY, none for WebSocket).
+func (c *API) AddUser(ctx context.Context, tag, flow string, u User) error {
+	_, err := c.call(ctx, methodAlterInbound, encodeAddUser(tag, flow, u))
 	return err
 }
 
-// RemoveUser removes one user (by label) from the running Xray: new connections with its id fail.
-func (c *API) RemoveUser(ctx context.Context, email string) error {
-	_, err := c.call(ctx, methodAlterInbound, encodeRemoveUser(InboundTag, email))
+// RemoveUser removes one user (by label) from the inbound named tag in the running Xray: new
+// connections with its id fail.
+func (c *API) RemoveUser(ctx context.Context, tag, email string) error {
+	_, err := c.call(ctx, methodAlterInbound, encodeRemoveUser(tag, email))
 	return err
 }

@@ -14,7 +14,8 @@ import (
 )
 
 // TestPanelDocument checks a desired-state document the real panel built (panel/tests/
-// test_reality_db.py writes it and runs this test): the agent accepts it, renders it, and, with
+// test_reality_db.py and test_wstls_db.py write it and run this test): the agent accepts it, renders
+// it (REALITY, or VLESS + WS + TLS with the document's certificate written to files), and, with
 // PROXYHUB_TEST_XRAY set, the pinned Xray binary accepts the rendered config. Nothing from the
 // document (it holds a private key and user ids) is printed.
 func TestPanelDocument(t *testing.T) {
@@ -37,11 +38,26 @@ func TestPanelDocument(t *testing.T) {
 	if want := os.Getenv("PROXYHUB_TEST_EXPECT_USERS"); want != "" && strconv.Itoa(len(users)) != want {
 		t.Fatalf("%d users served, want %s", len(users), want)
 	}
-	data, err := Render(doc.Xray, users, "127.0.0.1:10085")
+	if want := os.Getenv("PROXYHUB_TEST_EXPECT_TRANSPORT"); want != "" && (want == "ws_tls") != doc.Xray.WSTLS() {
+		t.Fatalf("the document's transport is not %s", want)
+	}
+	dir := t.TempDir()
+	var files TLSFiles
+	if doc.Xray.WSTLS() {
+		// The agent writes these from the document (0640); Xray's config only names them.
+		files = TLSFiles{Cert: filepath.Join(dir, "panel.crt"), Key: filepath.Join(dir, "panel.key")}
+		if err := os.WriteFile(files.Cert, []byte(doc.Xray.TLSCertChain), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(files.Key, []byte(doc.Xray.TLSKey), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := Render(doc.Xray, users, "127.0.0.1:10085", files)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	out := filepath.Join(t.TempDir(), "config.json")
+	out := filepath.Join(dir, "config.json")
 	if err := WriteConfig(out, data, fsutil.KeepOwner); err != nil {
 		t.Fatal(err)
 	}

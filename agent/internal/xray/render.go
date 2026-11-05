@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/desired"
@@ -15,15 +17,22 @@ import (
 
 // Fixed parts of every rendered config.
 const (
-	InboundTag = "reality-in"
-	// Flow is XTLS Vision, the flow every link the panel publishes asks for.
-	Flow       = "xtls-rprx-vision"
-	userLevel  = 0
-	blockTag   = "block"
-	directTag  = "direct"
-	apiTag     = "api"
-	maskFull   = "full"
-	accessNone = "none"
+	// InboundTag is the REALITY inbound, WSInboundTag the VLESS + WebSocket + TLS one (one of the two
+	// is rendered, on the same port).
+	InboundTag   = "reality-in"
+	WSInboundTag = "vless-ws-in"
+	// Flow is XTLS Vision, the flow every REALITY link the panel publishes asks for. A WebSocket
+	// link has no flow (Vision needs the raw TLS stream).
+	Flow = "xtls-rprx-vision"
+	// ALPN and TLSMinVersion of the ws_tls inbound: HTTP/1.1 (WebSocket upgrades), TLS 1.2 or 1.3.
+	ALPN          = "http/1.1"
+	TLSMinVersion = "1.2"
+	userLevel     = 0
+	blockTag      = "block"
+	directTag     = "direct"
+	apiTag        = "api"
+	maskFull      = "full"
+	accessNone    = "none"
 	// LogLevel: warnings only, and with maskAddress "full" no address appears even in those.
 	// Xray's output is discarded by xray.service as well (rule 7).
 	LogLevel = "warning"
@@ -142,9 +151,33 @@ type client struct {
 }
 
 type inboundStream struct {
-	Network  string          `json:"network"`
-	Security string          `json:"security"`
-	Reality  realitySettings `json:"realitySettings"`
+	Network  string           `json:"network"`
+	Security string           `json:"security"`
+	Reality  *realitySettings `json:"realitySettings,omitempty"`
+	TLS      *tlsSettings     `json:"tlsSettings,omitempty"`
+	WS       *wsSettings      `json:"wsSettings,omitempty"`
+}
+
+// tlsSettings: only certificate FILES, never inline key material in the config.
+type tlsSettings struct {
+	ALPN         []string      `json:"alpn"`
+	MinVersion   string        `json:"minVersion"`
+	Certificates []certificate `json:"certificates"`
+}
+
+type certificate struct {
+	CertificateFile string `json:"certificateFile"`
+	KeyFile         string `json:"keyFile"`
+}
+
+type wsSettings struct {
+	Path string `json:"path"`
+}
+
+// TLSFiles are the certificate chain and key files the ws_tls inbound reads (written by the agent).
+type TLSFiles struct {
+	Cert string
+	Key  string
 }
 
 type realitySettings struct {
@@ -201,15 +234,59 @@ type rule struct {
 	OutboundTag string   `json:"outboundTag"`
 }
 
-// Render builds the Xray config for the desired section and the effective users. The result passes
-// CheckInvariants (it is checked here before it is returned).
-func Render(x *desired.Xray, users []User, apiListen string) ([]byte, error) {
+// InboundOf is the inbound tag and client flow the section renders.
+func InboundOf(x *desired.Xray) (tag, flow string) {
+	if x.WSTLS() {
+		return WSInboundTag, ""
+	}
+	return InboundTag, Flow
+}
+
+func renderStream(x *desired.Xray, files TLSFiles) (inboundStream, error) {
+	if !x.WSTLS() {
+		return inboundStream{
+			Network:  "tcp",
+			Security: "reality",
+			Reality: &realitySettings{
+				Show:        false,
+				Target:      x.Target,
+				Xver:        0,
+				ServerNames: x.ServerNames,
+				PrivateKey:  x.PrivateKey,
+				ShortIDs:    x.ShortIDs,
+			},
+		}, nil
+	}
+	if !filepath.IsAbs(files.Cert) || !filepath.IsAbs(files.Key) {
+		return inboundStream{}, errors.New("xray: the ws_tls inbound needs absolute certificate and key files")
+	}
+	return inboundStream{
+		Network:  "ws",
+		Security: "tls",
+		TLS: &tlsSettings{
+			ALPN:         []string{ALPN},
+			MinVersion:   TLSMinVersion,
+			Certificates: []certificate{{CertificateFile: files.Cert, KeyFile: files.Key}},
+		},
+		WS: &wsSettings{Path: x.WSPath},
+	}, nil
+}
+
+// Render builds the Xray config for the desired section and the effective users: a REALITY inbound,
+// or (ws_tls) a VLESS + WebSocket + TLS inbound that reads files (written by the agent). The result
+// passes CheckInvariants (it is checked here before it is returned).
+func Render(x *desired.Xray, users []User, apiListen string, files TLSFiles) ([]byte, error) {
 	if x == nil {
 		return nil, errors.New("xray: nothing to render")
 	}
+	tag, flow := InboundOf(x)
+	stream, err := renderStream(x, files)
+	if err != nil {
+		return nil, err
+	}
 	clients := make([]client, 0, len(users))
 	for _, u := range users {
-		clients = append(clients, client{ID: u.ID, Email: u.Email, Flow: Flow, Level: userLevel})
+		clients = append(clients, client{ID: u.ID, Email: u.Email, Flow: flow, Level: userLevel})
 	}
 	cfg := config{
 		Log: logConfig{Access: accessNone, Error: "", Level: LogLevel, DNSLog: false, MaskAddress: maskFull},
@@ -218,23 +295,12 @@ func Render(x *desired.Xray, users []User, apiListen string) ([]byte, error) {
 			Levels: map[string]levelPolicy{"0": {StatsUserUplink: true, StatsUserDownlink: true, StatsUserOnline: false}},
 		},
 		Inbounds: []inbound{{
-			Tag:      InboundTag,
-			Listen:   inboundListen,
-			Port:     x.Port,
-			Protocol: "vless",
-			Settings: inboundSettings{Clients: clients, Decryption: "none"},
-			StreamSettings: inboundStream{
-				Network:  "tcp",
-				Security: "reality",
-				Reality: realitySettings{
-					Show:        false,
-					Target:      x.Target,
-					Xver:        0,
-					ServerNames: x.ServerNames,
-					PrivateKey:  x.PrivateKey,
-					ShortIDs:    x.ShortIDs,
-				},
-			},
+			Tag:            tag,
+			Listen:         inboundListen,
+			Port:           x.Port,
+			Protocol:       "vless",
+			Settings:       inboundSettings{Clients: clients, Decryption: "none"},
+			StreamSettings: stream,
 			// Sniffing only to route (bittorrent block); destinations are never rewritten.
 			Sniffing: sniffing{Enabled: true, DestOverride: []string{"http", "tls", "quic"}, RouteOnly: true},
 		}},
@@ -318,13 +384,15 @@ func CheckInvariants(data []byte) error {
 		return refuse("exactly one inbound")
 	}
 	in := c.Inbounds[0]
-	if in.Tag != InboundTag || in.Listen != inboundListen || in.Protocol != "vless" || in.StreamSettings.Security != "reality" ||
-		in.StreamSettings.Network != "tcp" || in.Settings.Decryption != "none" || in.StreamSettings.Reality.Show ||
-		in.StreamSettings.Reality.Xver != 0 || !in.Sniffing.RouteOnly {
-		return refuse("the inbound must be VLESS REALITY on TCP")
+	if in.Listen != inboundListen || in.Protocol != "vless" || in.Settings.Decryption != "none" || !in.Sniffing.RouteOnly {
+		return refuse("the inbound must be VLESS on every address, without decryption")
+	}
+	flow, err := checkStream(in.Tag, in.StreamSettings)
+	if err != nil {
+		return err
 	}
 	for _, cl := range in.Settings.Clients {
-		if !desired.ValidXrayEmail(cl.Email) || cl.Flow != Flow || cl.Level != userLevel {
+		if !desired.ValidXrayEmail(cl.Email) || cl.Flow != flow || cl.Level != userLevel {
 			return refuse("bad client entry")
 		}
 	}
@@ -344,6 +412,29 @@ func CheckInvariants(data []byte) error {
 		return refuse("routing must block bittorrent, private ranges and mail ports first")
 	}
 	return nil
+}
+
+// checkStream accepts exactly the two inbounds Render makes and returns their client flow.
+func checkStream(tag string, st inboundStream) (string, error) {
+	switch tag {
+	case InboundTag:
+		r := st.Reality
+		if st.Security != "reality" || st.Network != "tcp" || r == nil || st.TLS != nil || st.WS != nil || r.Show || r.Xver != 0 {
+			return "", refuse("the REALITY inbound must be VLESS REALITY on TCP")
+		}
+		return Flow, nil
+	case WSInboundTag:
+		t := st.TLS
+		if st.Security != "tls" || st.Network != "ws" || t == nil || st.WS == nil || st.Reality != nil ||
+			!sameStrings(t.ALPN, []string{ALPN}) || t.MinVersion != TLSMinVersion || len(t.Certificates) != 1 ||
+			!filepath.IsAbs(t.Certificates[0].CertificateFile) || !filepath.IsAbs(t.Certificates[0].KeyFile) ||
+			!strings.HasPrefix(st.WS.Path, "/") {
+			return "", refuse("the ws_tls inbound must be VLESS + WebSocket + TLS 1.2+ with certificate files")
+		}
+		return "", nil
+	default:
+		return "", refuse("unknown inbound")
+	}
 }
 
 func mailBlock(r finalRule) bool {

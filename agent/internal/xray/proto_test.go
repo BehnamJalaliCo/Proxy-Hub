@@ -69,7 +69,7 @@ func TestUserStatNames(t *testing.T) {
 }
 
 func TestAddUserEncoding(t *testing.T) {
-	msg := encodeAddUser(InboundTag, User{ID: "6a1f3a2e-1111-4c3b-9a55-0123456789ab", Email: "cfg-1@proxyhub"})
+	msg := encodeAddUser(InboundTag, Flow, User{ID: "6a1f3a2e-1111-4c3b-9a55-0123456789ab", Email: "cfg-1@proxyhub"})
 	top, err := parseFields(msg)
 	if err != nil || len(top) != 2 || string(top[0].bytes) != InboundTag {
 		t.Fatalf("alter inbound %v %v", top, err)
@@ -102,7 +102,7 @@ func TestAPIUnreachable(t *testing.T) {
 	if _, err := api.Uptime(context.Background()); err == nil {
 		t.Fatal("expected an error")
 	}
-	err := api.AddUser(context.Background(), User{ID: "6a1f3a2e-1111-4c3b-9a55-0123456789ab", Email: "cfg-1@proxyhub"})
+	err := api.AddUser(context.Background(), InboundTag, Flow, User{ID: "6a1f3a2e-1111-4c3b-9a55-0123456789ab", Email: "cfg-1@proxyhub"})
 	if err == nil || err.Error() != "xray api: unreachable" {
 		t.Fatalf("error %v", err)
 	}

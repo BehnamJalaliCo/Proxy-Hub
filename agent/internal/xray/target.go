@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"net"
+	"strconv"
 	"time"
 )
 
@@ -36,6 +37,33 @@ func CheckTarget(ctx context.Context, target, serverName string, roots *x509.Cer
 	}
 	if state.NegotiatedProtocol != "h2" {
 		return errors.New("target: no HTTP/2")
+	}
+	return nil
+}
+
+// CheckOwnTLS verifies the node's own ws_tls inbound (docs: the panel only makes a config on a node
+// that passed it): a TLS 1.2+ handshake to port on loopback with SNI serverName and ALPN
+// http/1.1, whose certificate chain is valid for serverName under roots (nil: the system roots,
+// where Let's Encrypt's roots are). Nothing is sent after the handshake.
+func CheckOwnTLS(ctx context.Context, port int, serverName string, roots *x509.CertPool) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	dialer := &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: 5 * time.Second},
+		Config: &tls.Config{
+			ServerName: serverName,
+			RootCAs:    roots,
+			MinVersion: tls.VersionTLS12,
+			NextProtos: []string{ALPN},
+		},
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		return errors.New("own tls: no handshake with a certificate valid for the node's name")
+	}
+	defer conn.Close()
+	if conn.(*tls.Conn).ConnectionState().NegotiatedProtocol != ALPN {
+		return errors.New("own tls: http/1.1 not negotiated")
 	}
 	return nil
 }

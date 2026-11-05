@@ -28,7 +28,10 @@ func (k Kind) String() string { return [...]string{"none", "live", "restart"}[k]
 
 // Plan says how to get from the current config to the next one.
 type Plan struct {
-	Kind   Kind
+	Kind Kind
+	// KindLive: the inbound the users change in, and the flow its clients have.
+	Tag    string
+	Flow   string
 	Add    []User   // KindLive: users to add
 	Remove []string // KindLive: labels to remove (a changed id is a remove plus an add)
 }
@@ -63,6 +66,10 @@ func Decide(current, next []byte) (Plan, error) {
 	}
 	var plan Plan
 	plan.Kind = KindLive
+	plan.Tag = nextCfg.Inbounds[0].Tag
+	if plan.Tag == InboundTag {
+		plan.Flow = Flow
+	}
 	for _, c := range curClients {
 		if id, ok := want[c.Email]; !ok || id != c.ID {
 			plan.Remove = append(plan.Remove, c.Email)

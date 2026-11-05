@@ -195,10 +195,12 @@ func decodeSysUptime(b []byte) (uint32, error) {
 	return 0, nil
 }
 
-func encodeAddUser(tag string, u User) []byte {
+func encodeAddUser(tag, flow string, u User) []byte {
 	var account []byte
 	account = appendString(account, 1, u.ID)
-	account = appendString(account, 2, Flow)
+	if flow != "" {
+		account = appendString(account, 2, flow)
+	}
 	// encryption (3) stays empty, exactly as for a client from the config file: the inbound's
 	// "decryption": "none" applies.
 	var user []byte

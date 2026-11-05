@@ -3,7 +3,9 @@ package xray
 // Tests against the real, pinned Xray binary (decision D10: no imitation of Xray). They run when
 // PROXYHUB_TEST_XRAY names the binary that node-image/fetch-xray.sh downloaded (geoip.dat next to
 // it); both files must match the sha256 values in node-image/versions.lock. Everything happens on
-// loopback: a REALITY server rendered by Render, a REALITY client, a local TLS 1.3 + h2 target.
+// loopback: a REALITY server rendered by Render, a REALITY client, a local TLS 1.3 + h2 target; and
+// a VLESS + WebSocket + TLS server rendered by Render with a throwaway CA's certificate, and a real
+// client that verifies that certificate (the ws_tls link's exact shape).
 
 import (
 	"bufio"
@@ -34,6 +36,7 @@ import (
 
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/desired"
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/fsutil"
+	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/testcert"
 )
 
 func lockValue(t *testing.T, key string) string {
@@ -161,7 +164,7 @@ func TestRealXrayAcceptsTheRenderedConfig(t *testing.T) {
 		t.Fatalf("the pinned Xray refuses the rendered config: %v", err)
 	}
 	// No user left (every config ended): Xray still starts, with nobody admitted.
-	empty, err := Render(x, nil, "127.0.0.1:10085")
+	empty, err := Render(x, nil, "127.0.0.1:10085", TLSFiles{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +273,7 @@ func newRealityLab(t *testing.T) *realityLab {
 
 func (lab *realityLab) render(t *testing.T) []byte {
 	t.Helper()
-	cfg, err := Render(lab.x, []User{lab.user}, fmt.Sprintf("127.0.0.1:%d", lab.apiPort))
+	cfg, err := Render(lab.x, []User{lab.user}, fmt.Sprintf("127.0.0.1:%d", lab.apiPort), TLSFiles{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +401,7 @@ func TestRealXrayRealityUsersCountersAndBlocking(t *testing.T) {
 	counted := userTraffic(t, api, email)
 
 	// Live removal: the same client is no longer admitted and its counter stays put.
-	if err := api.RemoveUser(ctx, email); err != nil {
+	if err := api.RemoveUser(ctx, InboundTag, email); err != nil {
 		t.Fatalf("RemoveUser: %v", err)
 	}
 	_ = request(t, lanPort)
@@ -408,15 +411,249 @@ func TestRealXrayRealityUsersCountersAndBlocking(t *testing.T) {
 	}
 	// Removing twice is an error the agent sees (and answers with a restart).
 	var status *StatusError
-	if err := api.RemoveUser(ctx, email); !errors.As(err, &status) {
+	if err := api.RemoveUser(ctx, InboundTag, email); !errors.As(err, &status) {
 		t.Fatalf("second RemoveUser: %v", err)
 	}
 	// Live add: admitted again.
-	if err := api.AddUser(ctx, lab.user); err != nil {
+	if err := api.AddUser(ctx, InboundTag, Flow, lab.user); err != nil {
 		t.Fatalf("AddUser: %v", err)
 	}
-	if err := api.AddUser(ctx, lab.user); !errors.As(err, &status) {
+	if err := api.AddUser(ctx, InboundTag, Flow, lab.user); !errors.As(err, &status) {
 		t.Fatalf("duplicate AddUser: %v", err)
+	}
+	_ = request(t, lanPort)
+	waitFor(t, "traffic after the user came back", func() bool { return userTraffic(t, api, email) > counted })
+
+	if lab.hits.Load() != 0 {
+		t.Fatalf("the private service was reached %d times through the proxy", lab.hits.Load())
+	}
+	if out := serverLog.String(); ipv4Like.MatchString(out) {
+		t.Fatalf("the server's output shows an address:\n%s", out)
+	}
+}
+
+// --- VLESS + WebSocket + TLS (transport ws_tls) ---------------------------------------------------
+
+// wsLab is the ws_tls setup on loopback: the rendered server with a throwaway CA's certificate for
+// the node's name in files (as the agent writes them), a real Xray client that verifies that
+// certificate with the CA (fingerprint chrome, ALPN http/1.1, the link's exact shape), and the
+// counting private service of the REALITY lab.
+type wsLab struct {
+	bin, assets string
+	m           *testcert.Material
+	caFile      string
+	hits        atomic.Int64
+	lan         string
+	privatePort int
+	user        User
+	x           *desired.Xray
+	files       TLSFiles
+	apiPort     int
+}
+
+func newWSLab(t *testing.T) *wsLab {
+	t.Helper()
+	bin, assets := pinnedXray(t)
+	lab := &wsLab{bin: bin, assets: assets, lan: localPrivateIPv4()}
+	if lab.lan == "" {
+		t.Skip("this machine has no private IPv4 address to test the private-range block with")
+	}
+	listener, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	private := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		lab.hits.Add(1)
+		_, _ = io.WriteString(w, "private")
+	}))
+	private.Listener = listener
+	private.Start()
+	t.Cleanup(private.Close)
+	lab.privatePort = listener.Addr().(*net.TCPAddr).Port
+
+	lab.m, err = testcert.New("*.ipoxxo-test.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	lab.caFile = filepath.Join(dir, "ca.pem")
+	lab.files = TLSFiles{Cert: filepath.Join(dir, "node.crt"), Key: filepath.Join(dir, "node.key")}
+	for path, content := range map[string][]byte{
+		lab.caFile: lab.m.CAPEM, lab.files.Cert: []byte(lab.m.ChainPEM), lab.files.Key: []byte(lab.m.KeyPEM),
+	} {
+		if err := os.WriteFile(path, content, 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lab.apiPort = freePort(t)
+	lab.user = User{ID: "6a1f3a2e-1111-4c3b-9a55-0123456789ab", Email: "cfg-1@proxyhub"}
+	lab.x = &desired.Xray{
+		Transport:    desired.TransportWSTLS,
+		Port:         freePort(t),
+		ServerName:   wsTestName,
+		WSPath:       "/0123456789abcdef",
+		TLSCertChain: lab.m.ChainPEM,
+		TLSKey:       lab.m.KeyPEM,
+	}
+	if err := lab.x.Validate(nil); err != nil {
+		t.Fatal(err)
+	}
+	return lab
+}
+
+func (lab *wsLab) render(t *testing.T) []byte {
+	t.Helper()
+	cfg, err := Render(lab.x, []User{lab.user}, fmt.Sprintf("127.0.0.1:%d", lab.apiPort), lab.files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// client starts a real Xray client whose two local ports lead, through VLESS + WS + TLS on path, to
+// the private service on loopback and on the LAN address. trustCA false: the client knows only the
+// system roots (so it must refuse the test certificate).
+func (lab *wsLab) client(t *testing.T, path string, trustCA bool) (loopPort, lanPort int) {
+	t.Helper()
+	loopPort, lanPort = freePort(t), freePort(t)
+	forward := func(port int, address string) map[string]any {
+		return map[string]any{
+			"listen": "127.0.0.1", "port": port, "protocol": "dokodemo-door",
+			"settings": map[string]any{"address": address, "port": lab.privatePort, "network": "tcp"},
+		}
+	}
+	clientCfg := map[string]any{
+		"log":      map[string]any{"loglevel": "warning", "access": "none"},
+		"inbounds": []any{forward(loopPort, "127.0.0.1"), forward(lanPort, lab.lan)},
+		"outbounds": []any{map[string]any{
+			"protocol": "vless",
+			"settings": map[string]any{"vnext": []any{map[string]any{
+				"address": "127.0.0.1", "port": lab.x.Port,
+				"users": []any{map[string]any{"id": lab.user.ID, "encryption": "none"}},
+			}}},
+			// The published link: security=tls&sni=<name>&alpn=http/1.1&fp=chrome&type=ws&host=<name>&path=...
+			"streamSettings": map[string]any{
+				"network": "ws", "security": "tls",
+				"tlsSettings": map[string]any{
+					"serverName": wsTestName, "alpn": []any{ALPN}, "fingerprint": "chrome",
+					// Trust only the test CA (no allowInsecure): the certificate is really verified.
+					"certificates": []any{map[string]any{"usage": "verify", "certificateFile": lab.caFile}},
+				},
+				"wsSettings": map[string]any{"path": path, "host": wsTestName},
+			},
+		}},
+	}
+	if !trustCA {
+		tlsCfg := clientCfg["outbounds"].([]any)[0].(map[string]any)["streamSettings"].(map[string]any)["tlsSettings"]
+		delete(tlsCfg.(map[string]any), "certificates")
+	}
+	clientJSON, _ := json.Marshal(clientCfg)
+	startXray(t, lab.bin, lab.assets, clientJSON)
+	waitFor(t, "the client's listener", func() bool {
+		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", lanPort), time.Second)
+		if err == nil {
+			_ = c.Close()
+		}
+		return err == nil
+	})
+	return loopPort, lanPort
+}
+
+func (lab *wsLab) server(t *testing.T, cfg []byte) (*API, *lockedBuffer) {
+	t.Helper()
+	out := startXray(t, lab.bin, lab.assets, cfg)
+	api := NewAPI(fmt.Sprintf("127.0.0.1:%d", lab.apiPort))
+	waitFor(t, "the server's API", func() bool { _, err := api.Uptime(context.Background()); return err == nil })
+	return api, out
+}
+
+// Positive control and the node's own check: with the private-range blocks taken out and only the
+// LAN address allowed, a request travels through a real VLESS + WebSocket + TLS connection (the
+// client verifies the certificate for the node's name with the CA) and is counted for the user. A
+// client on another WebSocket path is not served, nor one that does not trust the certificate (the
+// verification is real, not "allowInsecure"). The agent's own TLS check of the inbound passes
+// with the CA as root, and fails without it (system roots) or for another name.
+func TestRealXrayWSTLSCarriesTrafficWhenAllowed(t *testing.T) {
+	lab := newWSLab(t)
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	if err := WriteConfig(cfgPath, lab.render(t), fsutil.KeepOwner); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Service{Binary: lab.bin, AssetsDir: lab.assets}).Test(context.Background(), cfgPath); err != nil {
+		t.Fatalf("the pinned Xray refuses the rendered ws_tls config: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(lab.render(t), &m); err != nil {
+		t.Fatal(err)
+	}
+	m["routing"].(map[string]any)["rules"] = []any{}
+	m["outbounds"].([]any)[0].(map[string]any)["settings"] = map[string]any{
+		"finalRules": []any{map[string]any{"action": "allow", "ip": []any{lab.lan + "/32"}}},
+	}
+	open, _ := json.Marshal(m)
+	api, _ := lab.server(t, open)
+	_, lanPort := lab.client(t, lab.x.WSPath, true)
+	if got := request(t, lanPort); !strings.HasPrefix(got, "HTTP/1.1 200") {
+		t.Fatalf("no answer through VLESS + WS + TLS: %q", got)
+	}
+	if lab.hits.Load() != 1 {
+		t.Fatalf("hits %d", lab.hits.Load())
+	}
+	waitFor(t, "request and response bytes", func() bool { return userTraffic(t, api, lab.user.Email) > 150 })
+
+	_, wrongPort := lab.client(t, "/not-the-path", true)
+	if got := request(t, wrongPort); got != "" {
+		t.Fatalf("a client on another path was served: %q", got)
+	}
+	_, untrusting := lab.client(t, lab.x.WSPath, false)
+	if got := request(t, untrusting); got != "" {
+		t.Fatalf("a client without the CA was served: %q", got)
+	}
+	if lab.hits.Load() != 1 {
+		t.Fatalf("the wrong path or an untrusted handshake reached the service: %d hits", lab.hits.Load())
+	}
+
+	ctx := context.Background()
+	if err := CheckOwnTLS(ctx, lab.x.Port, wsTestName, lab.m.Pool); err != nil {
+		t.Fatalf("own TLS check with the right root: %v", err)
+	}
+	if err := CheckOwnTLS(ctx, lab.x.Port, wsTestName, nil); err == nil {
+		t.Fatal("own TLS check passed a certificate the system roots do not know")
+	}
+	if err := CheckOwnTLS(ctx, lab.x.Port, "slot3.elsewhere.example", lab.m.Pool); err == nil {
+		t.Fatal("own TLS check passed for a name the certificate does not cover")
+	}
+}
+
+// The rendered ws_tls config as it is, with the pinned binary on both ends: the user is counted,
+// private destinations (loopback, LAN) are blocked, a live RemoveUser in the WebSocket inbound
+// stops the user and a live AddUser (no flow) brings it back. Xray's own output shows no address.
+func TestRealXrayWSTLSUsersCountersAndBlocking(t *testing.T) {
+	lab := newWSLab(t)
+	api, serverLog := lab.server(t, lab.render(t))
+	loopPort, lanPort := lab.client(t, lab.x.WSPath, true)
+	ctx := context.Background()
+	email := lab.user.Email
+
+	if got := request(t, loopPort); got != "" {
+		t.Fatalf("a loopback destination answered through the proxy: %q", got)
+	}
+	if got := request(t, lanPort); got != "" {
+		t.Fatalf("a private destination answered through the proxy: %q", got)
+	}
+	waitFor(t, "the user's traffic counter", func() bool { return userTraffic(t, api, email) > 0 })
+	counted := userTraffic(t, api, email)
+
+	if err := api.RemoveUser(ctx, WSInboundTag, email); err != nil {
+		t.Fatalf("RemoveUser: %v", err)
+	}
+	_ = request(t, lanPort)
+	time.Sleep(500 * time.Millisecond)
+	if after := userTraffic(t, api, email); after != counted {
+		t.Fatalf("a removed user was still served: %d -> %d bytes", counted, after)
+	}
+	if err := api.AddUser(ctx, WSInboundTag, "", lab.user); err != nil {
+		t.Fatalf("AddUser: %v", err)
 	}
 	_ = request(t, lanPort)
 	waitFor(t, "traffic after the user came back", func() bool { return userTraffic(t, api, email) > counted })
