@@ -18,7 +18,11 @@ from proxyhub.reconcilers.fleet import FleetReconciler
 from proxyhub.reconcilers.mtproto import MtprotoReconciler
 from proxyhub.reconcilers.mtproxy_account import MtproxyAccountReconciler
 from proxyhub.reconcilers.nodes import NodesReconciler
-from proxyhub.reconcilers.operator_poster import OperatorChecksReconciler, OperatorOutboxReconciler
+from proxyhub.reconcilers.operator_poster import (
+    OperatorChecksReconciler,
+    OperatorOutboxReconciler,
+    OwnEmojiPackReconciler,
+)
 from proxyhub.reconcilers.pricing import PricingReconciler
 from proxyhub.reconcilers.probes import ProbesReconciler
 from proxyhub.reconcilers.publisher import PublisherReconciler
@@ -60,6 +64,7 @@ def reconcilers() -> list[Reconciler]:
         PublisherReconciler(),  # posts: new posts on the day plan + status edits (test channel by default)
         OperatorOutboxReconciler(),  # D38: posts/edits as the operator account (Premium emoji)
         OperatorChecksReconciler(),  # D38: daily emoji pack + the account's rights in our channels
+        OwnEmojiPackReconciler(),  # D38: the channel's own animated emoji pack, made by the bot
         RealityReconciler(),  # D18: fresh VLESS Reality configs per ready node, ended when used up
     ]
 

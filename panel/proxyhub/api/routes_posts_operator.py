@@ -1,10 +1,12 @@
 """The operator poster on the Content page (decision D38): posts with animated Premium emoji.
 
 GET  /api/posts/operator         who posts, the emoji pack and its emoji, the account's rights in each
-                                 channel (with warnings), why the operator cannot post right now, and
-                                 the recent posts that went with the bot instead (Persian)
+                                 channel (with warnings), why the operator cannot post right now, the
+                                 recent posts that went with the bot instead (Persian), and the
+                                 channel's own pack (``own_pack``, proxyhub/posts/own_pack.py)
 PUT  /api/posts/operator         ``{"poster": "bot" | "operator", "pack_link": "https://t.me/addemoji/..."}``
-                                 (either key; an empty or null pack link removes the pack)
+                                 (either key; an empty or null pack link removes the pack, and the
+                                 channel's own pack takes its place within a minute)
 POST /api/posts/operator/check   read the pack and the account's rights NOW (under the account's lock)
 
 Owner only (``require_admin``; CSRF on writes). Errors are ``{"error", "message_fa"}``:
@@ -37,7 +39,7 @@ from proxyhub.api.routes_mtproxy_account import get_client_options, get_lock_wai
 from proxyhub.db.session import get_engine
 from proxyhub.fleet.actions import log_action
 from proxyhub.mtproxy.userclient import ClientOptions
-from proxyhub.posts import operator, operator_checks
+from proxyhub.posts import operator, operator_checks, own_pack
 from proxyhub.posts.messages import ERRORS_FA
 from proxyhub.telegram import store as tg_store
 from proxyhub.vault import Vault
@@ -78,7 +80,10 @@ def _err(code: str, **extra: Any) -> ApiError:
 
 async def _view() -> dict[str, Any]:
     async with get_engine().connect() as conn:
-        return await operator.view(conn, tg_store.now_utc())
+        return {
+            **await operator.view(conn, tg_store.now_utc()),
+            "own_pack": await own_pack.status(conn),
+        }
 
 
 @router.get("")

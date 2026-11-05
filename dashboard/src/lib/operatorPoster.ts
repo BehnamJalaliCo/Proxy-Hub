@@ -5,6 +5,7 @@
 // server's (panel/proxyhub/posts/operator.py). The server is always the authority.
 
 import { request } from "./api";
+import { toFaDigits } from "./format";
 import type { Tone } from "./labels";
 import type { PostRole } from "./posts";
 
@@ -52,6 +53,19 @@ export interface Fallback {
   text_fa: string;
 }
 
+/** The channel's own animated emoji pack, made by the bot (panel/proxyhub/posts/own_pack.py). */
+export interface OwnPack {
+  state: "waiting" | "pending" | "ready" | "error";
+  /** Why the bot cannot make it now (kill_switch, no_bot, no_owner, no_public_channel, bad_name). */
+  reason: string | null;
+  name: string | null;
+  link: string | null;
+  emoji: number;
+  total: number;
+  error: string | null;
+  checked_at?: string | null;
+}
+
 export interface OperatorView {
   poster: PosterName;
   emoji_pack: string | null;
@@ -62,6 +76,7 @@ export interface OperatorView {
   rights_checked_at: string | null;
   pack: OperatorPack | null;
   fallbacks: Fallback[];
+  own_pack?: OwnPack;
   outcome?: string;
 }
 
@@ -175,6 +190,32 @@ export function packErrorText(code: string | null, rpc: string | null = null): s
       return "نشست حساب دوم بسته شده است؛ حساب را دوباره وصل کنید.";
     default:
       return `خواندن بسته ناموفق بود (${code}).`;
+  }
+}
+
+/** One line about the channel's own pack: what the owner reads, and its tone. */
+export function ownPackText(p: OwnPack): { tone: Tone; text: string } {
+  if (p.state === "ready") {
+    const all = p.emoji >= p.total;
+    return {
+      tone: all ? "success" : "info",
+      text: all ? `ساخته شد؛ ${toFaDigits(p.emoji)} ایموجی متحرک.` : `ساخته شد؛ ${toFaDigits(p.emoji)} از ${toFaDigits(p.total)} ایموجی، بقیه خودکار اضافه میشود.`,
+    };
+  }
+  if (p.state === "error") return { tone: "warning", text: "ساخت بسته ناموفق بود؛ یک ساعت بعد خودکار دوباره امتحان میشود." };
+  switch (p.reason) {
+    case "kill_switch":
+      return { tone: "neutral", text: "کلید توقف روشن است؛ پس از خاموش شدنش بسته خودکار ساخته میشود." };
+    case "no_bot":
+      return { tone: "neutral", text: "اول ربات کانال را در صفحه‌ی تلگرام وصل کنید." };
+    case "no_owner":
+      return { tone: "neutral", text: "اول در صفحه‌ی تلگرام، ربات را با حساب خودتان جفت کنید؛ بسته به نام شما ساخته میشود." };
+    case "no_public_channel":
+      return { tone: "neutral", text: "کانال اصلی نام کاربری عمومی (@) ندارد؛ عنوان بسته همان نام کانال است." };
+    case "bad_name":
+      return { tone: "warning", text: "نام کانال یا ربات برای نام بسته مناسب نیست." };
+    default:
+      return { tone: "info", text: "تا یک دقیقه‌ی دیگر خودکار ساخته میشود." };
   }
 }
 

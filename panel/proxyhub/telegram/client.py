@@ -1,9 +1,11 @@
 """A small typed async client for the Telegram Bot API (https://core.telegram.org/bots/api).
 
 Only the methods Proxy-Hub needs: getMe, getUpdates, sendMessage, editMessageText, getChat,
-getChatMember, getChatMemberCount (channel size for the «آمار» page) and createChatInviteLink (a
-named tracking link per campaign; links are never revoked or edited). Nothing else can be sent: the
-one request path (:meth:`BotClient._call`) refuses any
+getChatMember, getChatMemberCount (channel size for the «آمار» page), createChatInviteLink (a
+named tracking link per campaign; links are never revoked or edited), and getStickerSet,
+createNewStickerSet and addStickerToSet for the channel's own animated emoji pack
+(proxyhub/posts/own_pack.py; nothing in a pack is ever removed or replaced). Nothing else can be
+sent: the one request path (:meth:`BotClient._call`) refuses any
 method name outside :data:`ALLOWED_METHODS` before a request is built, so no message can be removed
 and nobody banned through this client, not even with a computed method name (CLAUDE.md rule 6).
 
@@ -54,10 +56,20 @@ ALLOWED_METHODS: Final = frozenset(
         "getChatMember",
         "getChatMemberCount",
         "createChatInviteLink",
+        "getStickerSet",
+        "createNewStickerSet",
+        "addStickerToSet",
     }
 )
 # Telegram's limit for an invite link's name (Bot API, createChatInviteLink).
 INVITE_LINK_NAME_MAX: Final = 32
+# Sticker sets (Bot API createNewStickerSet): a name of 1-64 letters, digits and single underscores,
+# starting with a letter and ending in "_by_<bot username>"; a title of 1-64 characters; at most 50
+# stickers in the first request; an animated (.tgs) file of at most 64 KB.
+STICKER_SET_NAME_RE: Final = re.compile(r"^[A-Za-z](?:[A-Za-z0-9]|_(?!_)){0,63}$")
+STICKER_SET_TITLE_MAX: Final = 64
+NEW_SET_MAX_STICKERS: Final = 50
+TGS_MAX_BYTES: Final = 64 * 1024
 
 DEFAULT_TIMEOUT: Final = httpx.Timeout(15.0, connect=10.0)
 MAX_LONG_POLL_SECONDS: Final = 25
@@ -167,6 +179,11 @@ class BadRequest(ApiError):
     @property
     def chat_not_found(self) -> bool:
         return "chat not found" in self.description.lower()
+
+    @property
+    def sticker_set_missing(self) -> bool:
+        """getStickerSet of a name nobody created: ``Bad Request: STICKERSET_INVALID``."""
+        return "stickerset_invalid" in self.description.lower()
 
 
 class Unauthorized(ApiError):
@@ -365,6 +382,43 @@ class InviteLink:
 
 
 @dataclass(frozen=True)
+class StickerSetInfo:
+    """A sticker set as getStickerSet returns it: name, title, kind and each item's alt emoji."""
+
+    name: str
+    title: str
+    is_custom_emoji: bool
+    alts: tuple[str, ...]
+
+    @classmethod
+    def from_result(cls, result: Any, method: str = "getStickerSet") -> StickerSetInfo:
+        obj = _obj(result, method, "sticker set")
+        name = _str(obj, "name")
+        stickers = obj.get("stickers")
+        if not name or not isinstance(stickers, list):
+            raise InvalidResponse(method, "sticker set without a name or stickers")
+        alts = tuple(
+            str(item["emoji"])
+            for item in stickers
+            if isinstance(item, dict) and isinstance(item.get("emoji"), str)
+        )
+        return cls(
+            name=name,
+            title=_str(obj, "title") or "",
+            is_custom_emoji=obj.get("sticker_type") == "custom_emoji",
+            alts=alts,
+        )
+
+
+@dataclass(frozen=True)
+class AnimatedEmoji:
+    """One animated custom emoji to upload: the .tgs file and the plain emoji it stands for."""
+
+    tgs: bytes = field(repr=False)
+    alt: str
+
+
+@dataclass(frozen=True)
 class Update:
     """One update. Only the fields Proxy-Hub reads are parsed; ``raw`` is never stored."""
 
@@ -441,8 +495,17 @@ class BotClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def _call(self, method: str, params: dict[str, Any], *, read_timeout: float | None = None) -> Any:
-        """POST one Bot API method with JSON parameters; returns ``result`` or raises.
+    async def _call(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        read_timeout: float | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
+    ) -> Any:
+        """POST one Bot API method; returns ``result`` or raises. Parameters go as JSON, or, with
+        ``files`` (field -> (file name, bytes, content type)), as multipart form fields (a non-string
+        value JSON-encoded, as the Bot API reads it) next to the files.
 
         Private on purpose: callers use the typed methods below. A method outside
         :data:`ALLOWED_METHODS` raises ``ValueError`` before any request is built or sent.
@@ -453,9 +516,15 @@ class BotClient:
         if read_timeout is not None:  # long poll: the server holds the answer up to its own timeout
             timeout = httpx.Timeout(self._timeout.connect or 10.0, read=read_timeout)
         try:
-            response = await self._http.post(
-                f"/bot{self._token.reveal()}/{method}", json=params, timeout=timeout
-            )
+            path = f"/bot{self._token.reveal()}/{method}"
+            if files:
+                form = {
+                    k: v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+                    for k, v in params.items()
+                }
+                response = await self._http.post(path, data=form, files=files, timeout=timeout)
+            else:
+                response = await self._http.post(path, json=params, timeout=timeout)
         except httpx.HTTPError as exc:
             raise NetworkError(
                 method, type(exc).__name__, maybe_sent=not isinstance(exc, _NOT_SENT)
@@ -533,3 +602,67 @@ class BotClient:
             "createChatInviteLink", {"chat_id": chat_id, "name": name, "creates_join_request": False}
         )
         return InviteLink.from_result(result)
+
+    async def get_sticker_set(self, name: str) -> StickerSetInfo:
+        """A sticker set by name; :class:`BadRequest` with ``sticker_set_missing`` if there is none."""
+        _check_set_name(name)
+        return StickerSetInfo.from_result(await self._call("getStickerSet", {"name": name}))
+
+    async def create_custom_emoji_set(
+        self, *, user_id: int, name: str, title: str, emoji: Sequence[AnimatedEmoji]
+    ) -> None:
+        """A new custom emoji set owned by ``user_id`` (who must have started this bot), with
+        ``emoji`` (1 to 50 animated emoji) uploaded in the same request."""
+        _check_set_name(name)
+        if not 1 <= len(title) <= STICKER_SET_TITLE_MAX:
+            raise ValueError("sticker set title must be 1 to 64 characters")
+        if not 1 <= len(emoji) <= NEW_SET_MAX_STICKERS:
+            raise ValueError("a new sticker set takes 1 to 50 stickers")
+        stickers, files = _attach(emoji)
+        result = await self._call(
+            "createNewStickerSet",
+            {
+                "user_id": user_id,
+                "name": name,
+                "title": title,
+                "sticker_type": "custom_emoji",
+                "stickers": stickers,
+            },
+            files=files,
+            read_timeout=60.0,
+        )
+        if result is not True:
+            raise InvalidResponse("createNewStickerSet", "result is not true")
+
+    async def add_custom_emoji(self, *, user_id: int, name: str, item: AnimatedEmoji) -> None:
+        """One more animated emoji at the end of the set ``name`` (owned by ``user_id``)."""
+        _check_set_name(name)
+        stickers, files = _attach([item])
+        result = await self._call(
+            "addStickerToSet",
+            {"user_id": user_id, "name": name, "sticker": stickers[0]},
+            files=files,
+            read_timeout=60.0,
+        )
+        if result is not True:
+            raise InvalidResponse("addStickerToSet", "result is not true")
+
+
+def _check_set_name(name: str) -> None:
+    if not STICKER_SET_NAME_RE.fullmatch(name):
+        raise ValueError("not a sticker set name")
+
+
+def _attach(emoji: Sequence[AnimatedEmoji]) -> tuple[list[dict[str, Any]], dict[str, tuple[str, bytes, str]]]:
+    """InputSticker objects that point at multipart files (``attach://e<N>``), and those files."""
+    stickers: list[dict[str, Any]] = []
+    files: dict[str, tuple[str, bytes, str]] = {}
+    for n, item in enumerate(emoji):
+        if not 0 < len(item.tgs) <= TGS_MAX_BYTES:
+            raise ValueError("an animated emoji file must be 1 byte to 64 KB")
+        if not 0 < len(item.alt) <= 16:
+            raise ValueError("an emoji alt must be 1 to 16 characters")
+        field_name = f"e{n}"
+        files[field_name] = (f"{field_name}.tgs", item.tgs, "application/x-tgsticker")
+        stickers.append({"sticker": f"attach://{field_name}", "format": "animated", "emoji_list": [item.alt]})
+    return stickers, files

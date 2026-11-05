@@ -485,6 +485,10 @@ def test_token_shape_is_checked_before_any_request() -> None:
         "revokeChatInviteLink",  # a tracking link is never revoked: its joins stay countable
         "editChatInviteLink",
         "exportChatInviteLink",  # would revoke the channel's primary link
+        "deleteStickerSet",  # the channel's emoji pack is never removed or changed in place
+        "deleteStickerFromSet",
+        "replaceStickerInSet",
+        "setStickerSetTitle",
         "sendmessage",  # the allowlist is exact, not case-insensitive
         "sendMessage/../deleteMessage",
         "",
@@ -509,6 +513,9 @@ def test_the_allowlist_is_exactly_the_typed_methods() -> None:
                 "getChatMember",
                 "getChatMemberCount",
                 "createChatInviteLink",
+                "getStickerSet",
+                "createNewStickerSet",
+                "addStickerToSet",
             }
         )
         == ALLOWED_METHODS
@@ -525,6 +532,9 @@ def test_the_allowlist_is_exactly_the_typed_methods() -> None:
         "get_chat_member",
         "get_chat_member_count",
         "create_chat_invite_link",
+        "get_sticker_set",
+        "create_custom_emoji_set",
+        "add_custom_emoji",
     }
 
 
