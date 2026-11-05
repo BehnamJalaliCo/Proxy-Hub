@@ -460,3 +460,28 @@ async def test_every_foreign_key_into_a_purged_table_is_handled(engine: AsyncEng
 
 def ended_source() -> str:
     return Path(ended.__file__).read_text(encoding="utf-8")
+
+
+async def test_a_dead_proxy_still_listed_in_mtproxybot_keeps_its_registration(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """The @MTProxybot cleanup knows a listed proxy is a dead one of ours through its retired
+    registration: purging that registration first would make the entry "unknown" forever."""
+    w = World(engine, now=datetime.now(UTC))
+    old = w.now - timedelta(days=3)
+    listed = await w.registration(user="u_listed", state="retired", updated_at=old)
+    unlisted = await w.registration(user="u_unlisted", state="retired", updated_at=old)
+    host = await w.one("SELECT host FROM mtproxy_registrations WHERE id = :r", r=listed)
+    await w.run(
+        "INSERT INTO mtproxybot_entries (id, host, port, label_shape, label_fp, ordinal, page, position, "
+        "pressable, first_seen_at, seen_at) VALUES (:i, :h, 8443, '<host> <hex8>', 'ab12cd34ab12cd34', 1, "
+        "1, 1, true, :t, :t)",
+        i=uuid.uuid4(),
+        h=host,
+        t=w.now,
+    )
+    preview = await run_purge(w, dry_run=True)
+    assert preview.kept["registrations"].get("still_in_mtproxybot") == 1
+    await run_purge(w, dry_run=False)
+    regs = {r.id for r in await w.rows("SELECT id FROM mtproxy_registrations")}
+    assert listed in regs and unlisted not in regs

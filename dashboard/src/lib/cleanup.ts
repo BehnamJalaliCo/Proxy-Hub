@@ -102,6 +102,7 @@ const KEPT_FA: Record<string, Record<string, string>> = {
   registrations: {
     too_recent: "تازه بازنشسته شده‌اند",
     proxy_exists: "پروکسی‌شان هنوز روی nodeی هست",
+    still_in_mtproxybot: "هنوز در فهرست ‎@MTProxybot‎ است؛ اول از آنجا پاک میشود",
   },
 };
 

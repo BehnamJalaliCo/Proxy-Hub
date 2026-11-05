@@ -146,6 +146,7 @@ REFERENCES: Final[dict[str, str]] = {
     "telemt_users.registration_id -> mtproxy_registrations": GUARD,
     "mtproxy_stats.registration_id -> mtproxy_registrations": DELETED_FIRST,
     "sponsor_flows.registration_id -> mtproxy_registrations": DELETED_FIRST,
+    "mtproxybot_entries.tag_registration_id -> mtproxy_registrations": GUARD,
     "post_links.post_id -> posts": DELETED_FIRST,
     "posts.outbox_id -> outbox": GUARD,
     "posts.last_edit_outbox_id -> outbox": GUARD,
@@ -234,16 +235,27 @@ _REG_PROXY_EXISTS = (
     "(EXISTS (SELECT 1 FROM telemt_users u WHERE u.registration_id = r.id OR u.name = r.secret_name) "
     "OR EXISTS (SELECT 1 FROM mtproto_proxies m WHERE m.user_name = r.secret_name))"
 )
+# A retired registration whose proxy @MTProxybot's latest list still names stays: it is how the
+# @MTProxybot cleanup (proxyhub/sponsor/inventory.py) knows that entry is a dead proxy of ours;
+# without it the entry would read "unknown" and never be removed.
+_REG_STILL_LISTED = (
+    "EXISTS (SELECT 1 FROM mtproxybot_entries e WHERE e.tag_registration_id = r.id "
+    "OR (lower(e.host) = lower(r.host) AND (e.port IS NULL OR e.port = r.port)))"
+)
 _RETIRED_REGS = _sql(
     "SELECT r.id FROM mtproxy_registrations r WHERE r.state = 'retired' AND r.updated_at < :cutoff",
     "AND NOT",
     _REG_PROXY_EXISTS,
+    "AND NOT",
+    _REG_STILL_LISTED,
     "ORDER BY r.id FOR UPDATE OF r",
 )
 _REGS_KEPT = _sql(
     "SELECT CASE WHEN r.updated_at >= :cutoff THEN 'too_recent' WHEN",
     _REG_PROXY_EXISTS,
-    "THEN 'proxy_exists' ELSE 'other' END AS reason, count(*) AS n",
+    "THEN 'proxy_exists' WHEN",
+    _REG_STILL_LISTED,
+    "THEN 'still_in_mtproxybot' ELSE 'other' END AS reason, count(*) AS n",
     "FROM mtproxy_registrations r WHERE r.state = 'retired' GROUP BY 1",
 )
 _TEST_POSTS = (
