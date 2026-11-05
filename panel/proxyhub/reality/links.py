@@ -74,13 +74,13 @@ def vless_url(
 
 
 async def link_prefix(db: Db) -> str:
-    """The channel name config names start with (owner setting, else the main channel)."""
+    """What config names start with: the owner's text, else the main channel's @username."""
     settings = await load_reality_settings(db)
     if settings.link_name:
         return settings.link_name
     main = (await channels(db)).get("main") or {}
     username = str(main.get("username") or "").lstrip("@")
-    return username or DEFAULT_CHANNEL
+    return "@" + (username or DEFAULT_CHANNEL)  # D41: the ad in every config name, a findable @handle
 
 
 def _confirmed(row: Any, scope_nodes: list[NodeView], statuses: dict[uuid.UUID, StatusView]) -> bool:

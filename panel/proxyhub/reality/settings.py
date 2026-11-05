@@ -1,8 +1,10 @@
 """Reality settings, stored under key ``reality`` in the ``settings`` table (owner-editable).
 
-Defaults (cross-team contract item 5, docs/10 O4): every config lasts 24 hours or 50 GB, whichever
-comes first; two fresh configs per serving slot (or slotless node), started half a lifetime apart
-so a new one appears about every 12 hours; port 443 (contract item 1, fixed).
+Defaults (owner decision D41, 2026-11-05): every config runs 48 hours or 1 TB, whichever comes
+first, and a config that still works is RENEWED in place an hour before its end (same link, 48 more
+hours, 1 TB more), so people who already use it never get stuck; two configs per serving slot (or
+slotless node); port 443 (contract item 1, fixed). Every config name starts with the channel's
+@username (the ad users see in their app).
 
 The REALITY target (docs/10 X5: foreign, TLS 1.3 + HTTP/2, not a redirect, not behind a third-party
 CDN, near the nodes) defaults to ``dl.google.com``: Google's own edge (no third-party CDN), TLS 1.3
@@ -45,8 +47,10 @@ class RealitySettings(BaseModel):
 
     enabled: bool = True
     configs_per_node: int = Field(default=2, ge=1, le=20)
-    cap_hours: int = Field(default=24, ge=1, le=24 * 30)
-    cap_gb: int = Field(default=50, ge=1, le=10_000)
+    cap_hours: int = Field(default=48, ge=1, le=24 * 30)
+    cap_gb: int = Field(default=1000, ge=1, le=10_000)
+    # D41: a working config gets another cap_hours and cap_gb before it ends (same link).
+    renew: bool = True
     target_host: str = "dl.google.com"
     target_port: int = Field(default=443, ge=1, le=65535)
     # The name every config gets in the user's app starts with this (decision N15). None: the main

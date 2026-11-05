@@ -37,6 +37,7 @@ from proxyhub.reality.policy import (
     end_configs,
     ensure_keys,
     forget_gone_node_keys,
+    renew_configs,
     retarget_scopes,
 )
 from proxyhub.reality.settings import GB, RealitySettings, save_reality_settings
@@ -47,6 +48,10 @@ from proxyhub.telegram.store import save_channel
 pytestmark = pytest.mark.db
 
 T0 = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+# The tests were written for a 24-hour config life; F scales those hours to the current default
+# (D41: 48 hours), and CAP is the default data cap (D41: 1 TB).
+F = RealitySettings().cap_hours / 24
+CAP = RealitySettings().cap_bytes
 
 
 async def _create(world: World, now: datetime, settings: RealitySettings | None = None) -> list[Any]:
@@ -112,20 +117,78 @@ async def test_a_ready_node_gets_a_vaulted_key_and_staggered_configs(world: Worl
     await assert_absent_from_database(world.engine, private)
 
     [c] = await _configs(world)
-    assert (c.status, c.slot, c.node_id, c.data_cap_bytes) == ("active", 3, node, 50 * GB)
-    assert c.expires_at - c.created_at == timedelta(hours=24)
+    assert (c.status, c.slot, c.node_id, c.data_cap_bytes) == ("active", 3, node, CAP)
+    assert c.expires_at - c.created_at == timedelta(hours=24 * F)
     # Two per scope, half a lifetime apart (each round needs a fresh report from the node).
-    await world.report(node, now=T0 + timedelta(hours=11))
-    assert await _create(world, T0 + timedelta(hours=11)) == []
-    await world.report(node, now=T0 + timedelta(hours=12))
-    [second] = await _create(world, T0 + timedelta(hours=12))
+    await world.report(node, now=T0 + timedelta(hours=11 * F))
+    assert await _create(world, T0 + timedelta(hours=11 * F)) == []
+    await world.report(node, now=T0 + timedelta(hours=12 * F))
+    [second] = await _create(world, T0 + timedelta(hours=12 * F))
     assert second.slot == 3 and len(await _keys(world)) == 1  # the same scope key
-    await world.report(node, now=T0 + timedelta(hours=23))
-    assert await _create(world, T0 + timedelta(hours=23)) == []  # two active already
-    await world.report(node, now=T0 + timedelta(hours=24))
+    await world.report(node, now=T0 + timedelta(hours=23 * F))
+    assert await _create(world, T0 + timedelta(hours=23 * F)) == []  # two active already
+    await world.report(node, now=T0 + timedelta(hours=24 * F))
     # The first one expires; a fresh one follows once the newest is half a lifetime old.
-    assert await _end(world, T0 + timedelta(hours=24)) == {c.id: "expired"}
-    assert await _create(world, T0 + timedelta(hours=24)) != []
+    assert await _end(world, T0 + timedelta(hours=24 * F)) == {c.id: "expired"}
+    assert await _create(world, T0 + timedelta(hours=24 * F)) != []
+
+
+async def _renew(world: World, now: datetime, settings: RealitySettings | None = None) -> list[int]:
+    async with world.engine.begin() as conn:
+        return await renew_configs(conn, settings or RealitySettings(), now)
+
+
+async def test_a_working_config_is_renewed_in_place_before_it_ends(world: World) -> None:
+    """D41: a config that still works gets another period an hour before its end: same row, same
+    uuid (so the same link), 48 hours more and 1 TB more on top of what it used."""
+    node = await world.node(slot=3)
+    await world.report(node, now=T0)
+    [_made] = await _create(world, T0)
+    [c] = await _configs(world)
+    await world.report(node, now=T0 + timedelta(hours=40), users={f"cfg-{c.id}@proxyhub": 300 * GB})
+    life = timedelta(hours=RealitySettings().cap_hours)
+    assert await _renew(world, c.expires_at - timedelta(hours=2)) == []  # not near its end yet
+    near = c.expires_at - timedelta(minutes=50)
+    await world.report(node, now=near)
+    assert await _renew(world, near) == [c.id]
+    [after] = await _configs(world)
+    assert (after.id, after.uuid, after.host, after.status) == (c.id, c.uuid, c.host, "active")
+    assert after.expires_at == c.expires_at + life
+    assert after.data_cap_bytes == 300 * GB + CAP
+    assert await _end(world, c.expires_at + timedelta(minutes=1)) == {}  # nothing ends at the old time
+    assert await _renew(world, near) == []  # once per period
+    section = await _section(world, node)
+    assert section is not None and [u["expires_at"] for u in section["users"]] == [
+        after.expires_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    ]
+
+
+@pytest.mark.parametrize(
+    "case", ["full", "target_failing", "node_retiring", "renew_off", "new_target_pending", "disabled"]
+)
+async def test_a_config_that_does_not_work_is_not_renewed(world: World, case: str) -> None:
+    node = await world.node(slot=3)
+    await world.report(node, now=T0)
+    await _create(world, T0)
+    [c] = await _configs(world)
+    near = c.expires_at - timedelta(minutes=30)
+    settings = RealitySettings()
+    await world.report(node, now=near)
+    if case == "full":
+        await world.report(node, now=near, users={f"cfg-{c.id}@proxyhub": CAP})
+    elif case == "target_failing":
+        await world.report(node, now=near, target_ok=False)
+    elif case == "node_retiring":
+        await world.rows("UPDATE nodes SET state = 'retiring' WHERE id = :n", n=node)
+    elif case == "renew_off":
+        settings = RealitySettings(renew=False)
+    elif case == "new_target_pending":
+        settings = RealitySettings(target_host="www.example.org")
+    else:
+        settings = RealitySettings(enabled=False)
+    assert await _renew(world, near, settings) == []
+    [after] = await _configs(world)
+    assert after.expires_at == c.expires_at
 
 
 async def test_slot_configs_follow_the_slot_and_burn_with_their_domain(world: World) -> None:
@@ -143,14 +206,14 @@ async def test_slot_configs_follow_the_slot_and_burn_with_their_domain(world: Wo
     await world.rows("UPDATE nodes SET state = 'burned' WHERE id = :n", n=old)
     assert await _end(world, T0 + timedelta(hours=1)) == {}  # the slot name still works
     # Fresh configs go to the newest ready node of the slot.
-    await world.report(new, now=T0 + timedelta(hours=12))
-    [fresh] = await _create(world, T0 + timedelta(hours=12))
+    await world.report(new, now=T0 + timedelta(hours=12 * F))
+    [fresh] = await _create(world, T0 + timedelta(hours=12 * F))
     assert fresh.node_id == new and fresh.host == f"slot2.{zone}"
 
     # The domain is filtered and another one becomes active: the old names no longer work.
     await world.rows("UPDATE cf_zones SET pool_state = 'filtered' WHERE name = :z", z=zone)
     await world.zone("b")
-    ended = await _end(world, T0 + timedelta(hours=13))
+    ended = await _end(world, T0 + timedelta(hours=13 * F))
     assert sorted(ended.values()) == ["burned", "burned"]
 
 
@@ -223,7 +286,7 @@ async def test_usage_from_reports_fills_configs(world: World) -> None:
     assert rows[c1.id].used_bytes == 3_400 + 500
     assert rows[c4.id].used_bytes == 0, "a node may only report its own scope's configs"
     # Over the cap: full at the next policy round.
-    await world.report(b, users={email: 50 * GB})
+    await world.report(b, users={email: CAP})
     assert await _end(world, T0 + timedelta(minutes=1)) == {c1.id: "full"}
 
 
@@ -397,8 +460,8 @@ async def test_a_working_target_is_switched_once_its_configs_have_ended(world: W
     node = await world.node(slot=5)
     await world.report(node, now=T0)
     [c1] = await _create(world, T0)
-    await world.report(node, now=T0 + timedelta(hours=12))
-    [c2] = await _create(world, T0 + timedelta(hours=12))
+    await world.report(node, now=T0 + timedelta(hours=12 * F))
+    [c2] = await _create(world, T0 + timedelta(hours=12 * F))
     [key] = await _keys(world)
     new = RealitySettings(target_host="www.example.org")
 
@@ -415,18 +478,18 @@ async def test_a_working_target_is_switched_once_its_configs_have_ended(world: W
     async with world.engine.connect() as conn:
         from proxyhub.reality.service import summary
 
-        view = await summary(conn, T0 + timedelta(hours=23))
+        view = await summary(conn, T0 + timedelta(hours=23 * F))
     [item] = [n for n in view["nodes"] if n["node_id"] == str(node)]
     assert item["target"] == "dl.google.com:443" and item["target_next"] == "www.example.org:443"
     assert item["xray"]["target_ok"] is True
 
     # The older one ends: still one in use.
-    now = T0 + timedelta(hours=24)
+    now = T0 + timedelta(hours=24 * F)
     await world.report(node, now=now)
     assert await _end(world, now) == {c1.config_id: "expired"}
     assert await _retarget(world, now, new) == [] and await _create(world, now, new) == []
     # The last one ends: the scope switches (nothing burned), the node checks, configs resume.
-    now = T0 + timedelta(hours=36)
+    now = T0 + timedelta(hours=36 * F)
     await world.report(node, now=now)
     assert await _end(world, now) == {c2.config_id: "expired"}
     [switched] = await _retarget(world, now, new)
@@ -481,22 +544,22 @@ async def test_desired_state_has_xray_only_for_agents_that_manage_it(world: Worl
             "id": str(c.uuid),
             "email": f"cfg-{c.id}@proxyhub",
             "expires_at": c.expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "data_cap_bytes": 50 * GB,
+            "data_cap_bytes": CAP,
         }
     ]
     assert first["telemt"] is None  # the Telemt part is untouched
     # A new config changes the ETag; an ended one leaves the users.
-    await world.report(node, now=T0 + timedelta(hours=12))
-    await _create(world, T0 + timedelta(hours=12))
+    await world.report(node, now=T0 + timedelta(hours=12 * F))
+    await _create(world, T0 + timedelta(hours=12 * F))
     second = await doc()
     assert len(second["xray"]["users"]) == 2
     assert etag_for(canonical_json(first)) != etag_for(canonical_json(second))
-    await _end(world, T0 + timedelta(hours=24))
+    await _end(world, T0 + timedelta(hours=24 * F))
     assert len((await doc())["xray"]["users"]) == 1
     # An agent that says it does not manage Xray (no Xray on its image) never gets the key.
-    await world.report(node, now=T0 + timedelta(hours=24), enabled=False)
+    await world.report(node, now=T0 + timedelta(hours=24 * F), enabled=False)
     assert "xray" not in await doc()
-    await world.report(node, now=T0 + timedelta(hours=24))
+    await world.report(node, now=T0 + timedelta(hours=24 * F))
     await world.rows("UPDATE nodes SET state = 'retiring' WHERE id = :n", n=node)
     assert "xray" not in await doc()  # a leaving server stops Xray
 
@@ -728,7 +791,7 @@ async def test_links_provider(world: World) -> None:
     assert link.url.startswith(
         f"vless://{c.uuid}@203.0.113.10:443?encryption=none&security=reality&sni=dl.google.com"
     )
-    assert link.url.endswith("#ipoxxo_main%20%F0%9F%87%AB%F0%9F%87%AE%20" + str(c.id))
+    assert link.url.endswith("#%40ipoxxo_main%20%F0%9F%87%AB%F0%9F%87%AE%20" + str(c.id))
     assert link.label.startswith("ریلیتی ") and link.expires_at == c.expires_at
     # An ended config stays listed (so its post can be marked), with its status.
     await world.rows("UPDATE reality_configs SET status = 'full', ended_at = now()")
@@ -757,15 +820,15 @@ async def test_dashboard_api(world: World) -> None:
             transport=ASGITransport(app=app), base_url="http://panel.test", headers=CSRF
         ) as c:
             body = (await c.get("/api/reality")).json()
-            assert body["settings"]["cap_hours"] == 24 and body["settings"]["port"] == 443
+            assert body["settings"]["cap_hours"] == 48 and body["settings"]["port"] == 443
             assert body["totals"]["active"] == 1 and body["totals"]["nodes_enabled"] == 1
             [cfg] = body["configs"]
             assert (
                 cfg["status"] == "active"
                 and cfg["url"].startswith("vless://")
-                and cfg["remaining_bytes"] == 50 * GB
+                and cfg["remaining_bytes"] == CAP
             )
-            assert 0 < cfg["remaining_s"] <= 24 * 3600
+            assert 0 < cfg["remaining_s"] <= 24 * 3600 * F
             [item] = [n for n in body["nodes"] if n["node_id"] == str(node)]
             assert item["xray"]["enabled"] and item["xray"]["target_ok"] is True
             assert item["target"] == "dl.google.com:443" and item["target_next"] is None
@@ -792,7 +855,7 @@ async def test_dashboard_api(world: World) -> None:
     [log] = await world.rows(
         "SELECT action, reasons->'context' AS context FROM actions_log WHERE target = 'reality'"
     )
-    assert log.action == "settings_update" and log.context["changed"]["cap_gb"] == [50, 80]
+    assert log.action == "settings_update" and log.context["changed"]["cap_gb"] == [1000, 80]
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://panel.test", headers=CSRF) as c:
         assert (await c.get("/api/reality")).status_code == 401
 
@@ -888,6 +951,6 @@ async def test_the_go_agent_accepts_and_renders_the_panels_document(world: World
     # Then two configs.
     await world.report(node, now=T0)
     await _create(world, T0)
-    await world.report(node, now=T0 + timedelta(hours=12))
-    await _create(world, T0 + timedelta(hours=12))
+    await world.report(node, now=T0 + timedelta(hours=12 * F))
+    await _create(world, T0 + timedelta(hours=12 * F))
     _go_panel_document(node, await body(), tmp_path / "desired.json", 2)

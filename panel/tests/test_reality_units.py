@@ -48,8 +48,8 @@ NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 
 def test_settings_defaults_follow_the_contract() -> None:
     s = RealitySettings()
-    assert (s.enabled, s.configs_per_node, s.cap_hours, s.cap_gb) == (True, 2, 24, 50)
-    assert s.cap_bytes == 50 * GB == 50_000_000_000
+    assert (s.enabled, s.configs_per_node, s.cap_hours, s.cap_gb, s.renew) == (True, 2, 48, 1000, True)
+    assert s.cap_bytes == 1000 * GB == 1_000_000_000_000  # D41: 1 TB
     assert s.target == "dl.google.com:443" and s.link_name is None
     assert (
         RealitySettings(target_host="  WWW.Example.COM ", link_name="@ipoxxo").target_host
@@ -139,12 +139,12 @@ def test_end_status() -> None:
 
 
 def test_creation_is_staggered() -> None:
-    s = RealitySettings()  # 2 per scope, 24 h: one every 12 h
+    s = RealitySettings(cap_hours=24)  # 2 per scope, 24 h: one every 12 h
     assert creation_due([], now=NOW, settings=s)
     assert not creation_due([NOW - timedelta(hours=11, minutes=59)], now=NOW, settings=s)
     assert creation_due([NOW - timedelta(hours=12)], now=NOW, settings=s)
     assert not creation_due([NOW - timedelta(hours=20), NOW - timedelta(hours=8)], now=NOW, settings=s)
-    four = RealitySettings(configs_per_node=4)
+    four = RealitySettings(configs_per_node=4, cap_hours=24)
     assert creation_due([NOW], now=NOW, settings=four)  # two or more missing: no waiting
     assert not creation_due([NOW, NOW - timedelta(hours=1), NOW], now=NOW, settings=four)
     assert creation_due(
