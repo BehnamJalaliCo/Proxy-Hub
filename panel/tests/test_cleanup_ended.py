@@ -27,6 +27,7 @@ from test_fleet_support import make_vault
 from proxyhub.cleanup import ended
 from proxyhub.mtproto.urls import user_name_for
 from proxyhub.posts import settings as posting
+from proxyhub.safety.budget import month_bounds
 from proxyhub.telegram.schedule import TEHRAN
 
 pytestmark = pytest.mark.db
@@ -55,16 +56,28 @@ async def seed(engine: AsyncEngine, tmp_path: Path) -> Seeded:
     await w.telegram(make_vault(tmp_path))
 
     # --- nodes -------------------------------------------------------------------------------------
-    gone = ids["gone"] = await w.node(state="deleted", deleted_at=w.old)
+    gone = ids["gone"] = await w.node(state="deleted", deleted_at=w.last_month)
     await w.node_rows(gone)
     gone_key = await w.reality_key(node_id=gone)
     ids["gone_config"] = cfg = await w.reality_config(gone, gone_key, status="expired", ended_at=w.old)
     await w.reality_usage(cfg, gone)
 
     ids["young"] = await w.node(state="deleted", deleted_at=w.recent)  # too_recent
-    ids["reach"] = reach = await w.node(state="deleted", deleted_at=w.old)  # location_reach
+    # Deleted this month with a Hetzner server: on this month's bill, so the budget cap still counts
+    # it (too_recent instead in the first hour of a month).
+    billed_at = max(month_bounds(w.now)[0], w.old)
+    ids["billed"] = await w.node(state="deleted", deleted_at=billed_at)
+    ids["billed_reason"] = "too_recent" if billed_at >= w.now - timedelta(hours=1) else "billed_this_month"
+    # Deleted two hours ago before Hetzner ever made its server: never billed, so it may go.
+    ids["free"] = await w.node(
+        state="deleted",
+        deleted_at=w.now - timedelta(hours=2),
+        billed=False,
+        created_at=w.now - timedelta(hours=3),
+    )
+    ids["reach"] = reach = await w.node(state="deleted", deleted_at=w.last_month)  # location_reach
     await w.node_rows(reach, reach_at=w.now - timedelta(days=1))
-    ids["ledger"] = ledger = await w.node(state="deleted", deleted_at=w.old)  # cost_ledger
+    ids["ledger"] = ledger = await w.node(state="deleted", deleted_at=w.last_month)  # cost_ledger
     await w.run(
         "INSERT INTO cost_ledger (day, account_id, node_id, euros, source) VALUES (:d, :a, :n, 1.25, "
         "'hetzner')",
@@ -72,7 +85,7 @@ async def seed(engine: AsyncEngine, tmp_path: Path) -> Seeded:
         a=w.account,
         n=ledger,
     )
-    ids["dns"] = dns = await w.node(state="deleted", deleted_at=w.old)  # dns_record
+    ids["dns"] = dns = await w.node(state="deleted", deleted_at=w.last_month)  # dns_record
     await w.run(
         "INSERT INTO cf_zones (id, name, status, pool_state, seen_at) "
         "VALUES (:z, 'cleanup-test.example', 'active', 'active', now())",
@@ -87,10 +100,12 @@ async def seed(engine: AsyncEngine, tmp_path: Path) -> Seeded:
         c=uuid.uuid4().hex,
         n=dns,
     )
-    ids["slot_node"] = slot_node = await w.node(state="deleted", deleted_at=w.old, slot=3)  # reality_in_use
+    ids["slot_node"] = slot_node = await w.node(
+        state="deleted", deleted_at=w.last_month, slot=3
+    )  # reality_in_use
     slot_key = await w.reality_key(slot=3)
     ids["slot_active_config"] = await w.reality_config(slot_node, slot_key)
-    ids["in_post"] = in_post = await w.node(state="deleted", deleted_at=w.old)  # in_recent_post
+    ids["in_post"] = in_post = await w.node(state="deleted", deleted_at=w.last_month)  # in_recent_post
     ids["live"] = live = await w.node(state="ready", slot=1)
     await w.node_rows(live, reach_at=w.now - timedelta(days=1))
 
@@ -225,7 +240,7 @@ EXPECTED_REMOVED = {
     "reality_node_status": 1,
     "reality_keys": 1,
     "node_events": 2,
-    "nodes": 1,
+    "nodes": 2,
     "mtproxy_stats": 2,
     "sponsor_flows": 1,
     "mtproxy_registrations": 1,
@@ -234,18 +249,18 @@ EXPECTED_REMOVED = {
     "channel_posts": 2,
     "outbox": 5,
 }
-EXPECTED_KEPT = {
-    "nodes": {
-        "too_recent": 1,
-        "location_reach": 1,
-        "cost_ledger": 1,
-        "dns_record": 1,
-        "reality_in_use": 1,
-        "in_recent_post": 1,
-    },
-    "reality_configs": {"too_recent": 1, "in_recent_post": 1},
-    "registrations": {"too_recent": 1, "proxy_exists": 1},
-}
+
+
+def expected_kept(s: Seeded) -> dict[str, dict[str, int]]:
+    nodes = {"too_recent": 1, "location_reach": 1, "cost_ledger": 1, "dns_record": 1, "reality_in_use": 1}
+    nodes["in_recent_post"] = 1
+    reason = s.ids["billed_reason"]
+    nodes[reason] = nodes.get(reason, 0) + 1
+    return {
+        "nodes": nodes,
+        "reality_configs": {"too_recent": 1, "in_recent_post": 1},
+        "registrations": {"too_recent": 1, "proxy_exists": 1},
+    }
 
 
 async def run_purge(w: World, *, dry_run: bool, min_age_hours: int = 1) -> ended.PurgeResult:
@@ -262,7 +277,7 @@ async def test_preview_counts_exactly_and_changes_nothing(engine: AsyncEngine, t
     result = await run_purge(s.w, dry_run=True)
     assert result.removed == EXPECTED_REMOVED
     assert result.total == sum(EXPECTED_REMOVED.values())
-    assert result.kept == EXPECTED_KEPT
+    assert result.kept == expected_kept(s)
     assert result.ip_history_unlinked == 1
     assert result.as_json()["dry_run"] is True
     assert await s.w.counts(EVERY_TABLE) == before  # nothing changed
@@ -282,7 +297,7 @@ async def test_purge_removes_ended_rows_and_keeps_everything_else(
     preview = await run_purge(w, dry_run=True)
     result = await run_purge(w, dry_run=False)
     assert result.removed == preview.removed == EXPECTED_REMOVED
-    assert result.kept == EXPECTED_KEPT
+    assert result.kept == expected_kept(s)
     after = await w.counts(EVERY_TABLE)
     for table in ended.ALLOWED_TABLES:
         assert after[table] == before[table] - EXPECTED_REMOVED[table], table
@@ -300,7 +315,8 @@ async def test_purge_removes_ended_rows_and_keeps_everything_else(
         assert not await w.rows(f"SELECT 1 FROM {table} WHERE node_id = :n", n=gone), table  # noqa: S608
     assert await w.one("SELECT count(*) FROM ip_history WHERE node_id IS NULL") == 1
     # Every deleted node in use is still there, and the live node with all of its rows.
-    for name in ("young", "reach", "ledger", "dns", "slot_node", "in_post", "live"):
+    assert not await w.rows("SELECT 1 FROM nodes WHERE id = :n", n=ids["free"])  # never billed
+    for name in ("young", "billed", "reach", "ledger", "dns", "slot_node", "in_post", "live"):
         assert await w.rows("SELECT 1 FROM nodes WHERE id = :n", n=ids[name]), name
     live = ids["live"]
     for table in ("node_events", "agent_nodes", "telemt_users", "mtproto_proxies", "probe_location_reach"):
@@ -376,9 +392,13 @@ async def test_min_age_decides_what_is_old_enough(engine: AsyncEngine, tmp_path:
     s = await seed(engine, tmp_path)
     week = await run_purge(s.w, dry_run=True, min_age_hours=24 * 7)
     assert week.total == 0  # everything ended 3 to 5 days ago
-    assert week.kept["nodes"] == {"too_recent": 7}
+    assert sum(week.kept["nodes"].values()) == 9  # every deleted node stays
     day = await run_purge(s.w, dry_run=True, min_age_hours=24)
-    assert day.removed == EXPECTED_REMOVED
+    for table in ("outbox", "reality_configs", "posts", "channel_posts"):  # 3 to 5 days old: they go
+        assert day.removed[table] == EXPECTED_REMOVED[table], table
+    # The never-billed node was deleted two hours ago: too recent for a day. The other one, deleted
+    # an hour before this month began, goes once that is more than a day ago.
+    assert day.removed["nodes"] == (1 if s.w.now - s.w.last_month > timedelta(hours=24) else 0)
     for bad in (0, -1, 721, True):
         with pytest.raises(ValueError, match="min_age_hours"):
             async with s.w.engine.begin() as conn:

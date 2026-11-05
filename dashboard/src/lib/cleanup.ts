@@ -88,6 +88,7 @@ export function purgeLines(removed: Record<string, number>): PurgeLine[] {
 const KEPT_FA: Record<string, Record<string, string>> = {
   nodes: {
     too_recent: "تازه حذف شده‌اند (کمتر از کمینه‌ی عمر)",
+    billed_this_month: "هزینه‌ی این ماهشان هنوز در سقف بودجه شمرده میشود؛ از آغاز ماه بعد پاک میشوند",
     location_reach: "سنجش‌های هفته‌ی اخیرشان از ایران هنوز برای انتخاب location لازم است",
     dns_record: "رکورد DNS آن‌ها هنوز در Cloudflare است و چرخه‌ی DNS باید اول پاکش کند",
     reality_in_use: "کانفیگ Reality زنده‌ای هنوز به آن‌ها وابسته است",

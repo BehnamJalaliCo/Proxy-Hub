@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from proxyhub.mtproto.urls import proxy_key, user_name_for
+from proxyhub.safety.budget import month_bounds
 from proxyhub.telegram import store
 from proxyhub.telegram.schedule import TEHRAN
 from proxyhub.vault import SecretValue, Vault
@@ -114,20 +115,35 @@ class World:
             )
         return self.account
 
+    @property
+    def last_month(self) -> datetime:
+        """An hour before this month began (UTC): a node deleted then is no longer on this month's
+        bill, and it is always more than an hour ago."""
+        return month_bounds(self.now)[0] - timedelta(hours=1)
+
     async def node(
-        self, *, state: str = "ready", deleted_at: datetime | None = None, slot: int | None = None
+        self,
+        *,
+        state: str = "ready",
+        deleted_at: datetime | None = None,
+        slot: int | None = None,
+        billed: bool = True,
+        created_at: datetime | None = None,
     ) -> uuid.UUID:
+        """A node; ``billed``: Hetzner had a server for it (a ``hetzner_id``)."""
         node_id = uuid.uuid4()
         await self.run(
-            "INSERT INTO nodes (id, account_id, name, slot, location, server_type, state, ipv4, "
-            "deleted_at, updated_at, is_test) VALUES (:id, :acc, :name, :slot, 'hel1', 'cpx02', :state, "
-            "CAST(:ip AS inet), :deleted_at, :updated, false)",
+            "INSERT INTO nodes (id, account_id, hetzner_id, name, slot, location, server_type, state, ipv4, "
+            "created_at, deleted_at, updated_at, is_test) VALUES (:id, :acc, :hz, :name, :slot, 'hel1', "
+            "'cpx02', :state, CAST(:ip AS inet), :created, :deleted_at, :updated, false)",
             id=node_id,
             acc=await self.ensure_account(),
+            hz=100_000_000 + secrets.randbelow(10**8) if billed else None,
             name=f"{PREFIX}{node_id.hex[:8]}",
             slot=slot,
             state=state,
             ip=f"203.0.113.{secrets.randbelow(250) + 1}",
+            created=created_at or (deleted_at or self.now) - timedelta(days=1),
             deleted_at=deleted_at,
             updated=deleted_at or self.now,
         )

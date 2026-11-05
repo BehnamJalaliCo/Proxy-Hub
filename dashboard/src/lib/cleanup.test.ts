@@ -52,13 +52,14 @@ describe("«پاک کردن پایان‌یافته‌ها»: the counts as Pers
 
   it("explains why ended things stay", () => {
     const lines = keptLines({
-      nodes: { location_reach: 2, cost_ledger: 1, new_reason: 1 },
+      nodes: { location_reach: 2, cost_ledger: 1, billed_this_month: 4, new_reason: 1 },
       reality_configs: { in_recent_post: 0 },
       registrations: { proxy_exists: 3 },
     });
     expect(lines).toEqual([
       "۲ node میماند: سنجش‌های هفته‌ی اخیرشان از ایران هنوز برای انتخاب location لازم است.",
       "۱ node میماند: در دفتر هزینه ثبت شده‌اند (دفتر هزینه هرگز پاک نمیشود).",
+      "۴ node میماند: هزینه‌ی این ماهشان هنوز در سقف بودجه شمرده میشود؛ از آغاز ماه بعد پاک میشوند.",
       "۱ node میماند: هنوز در استفاده‌اند.",
       "۳ ثبت اسپانسر میماند: پروکسی‌شان هنوز روی nodeی هست.",
     ]);

@@ -12,6 +12,10 @@ statements, so its counts are exactly what the purge would remove at that moment
    events, agent records, Telemt config and users, the MTProto proxy, probe samples, operations,
    Xray status and the node's own Reality key. A deleted node stays while any of this holds:
 
+   * it counts toward this month's bill (rule 8): Hetzner had a server for it and it was deleted
+     this month (or has no deletion time), or it was created within the fleet's creation window.
+     The budget cap and the hourly creation cap read exactly these nodes
+     (``proxyhub.fleet.snapshot.load_nodes``); removing one would let the fleet spend past the cap;
    * a ``cost_ledger`` row points at it (the ledger is never touched);
    * a ``cf_records`` row points at it: a DNS record the Cloudflare loop has not removed yet (that
      row is how the panel knows the record is its own, so it is never removed here);
@@ -51,7 +55,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from proxyhub.fleet.actions import iso
 from proxyhub.fleet.locations import WINDOW as LOCATION_WINDOW
+from proxyhub.fleet.planner import CREATION_WINDOW
 from proxyhub.posts import settings as posting
+from proxyhub.safety.budget import month_bounds
 from proxyhub.telegram import store as tg_store
 from proxyhub.telegram.schedule import MAX_POST_INTERVAL_MIN, TEHRAN
 
@@ -177,9 +183,17 @@ _NODE_REALITY = (
     "OR EXISTS (SELECT 1 FROM reality_usage u WHERE u.node_id = n.id))"
 )
 _NODE_REACH = "EXISTS (SELECT 1 FROM probe_location_reach l WHERE l.node_id = n.id AND l.at >= :reach_since)"
+# The nodes the budget and the creation caps count (proxyhub/fleet/snapshot.py load_nodes and
+# proxyhub/fleet/costs.py node_cost_items): billed this month, or created within the window.
+_NODE_BILLED = (
+    "((n.hetzner_id IS NOT NULL AND (n.deleted_at IS NULL OR n.deleted_at >= :month_start)) "
+    "OR n.created_at >= :creation_since)"
+)
 _DELETED_NODES = _sql(
     "SELECT n.id FROM nodes n WHERE n.state = 'deleted' AND",
     _NODE_ENDED,
+    "AND NOT",
+    _NODE_BILLED,
     "AND NOT",
     _NODE_IN_LEDGER,
     "AND NOT",
@@ -196,6 +210,8 @@ _NODES_KEPT = _sql(
     "SELECT CASE WHEN NOT (",
     _NODE_ENDED,
     ") THEN 'too_recent' WHEN",
+    _NODE_BILLED,
+    "THEN 'billed_this_month' WHEN",
     _NODE_IN_LEDGER,
     "THEN 'cost_ledger' WHEN",
     _NODE_HAS_DNS,
@@ -371,6 +387,8 @@ async def purge_ended(db: Db, *, now: datetime, min_age_hours: int, dry_run: boo
         "cutoff": cutoff,
         "window_start": now - edit_window,
         "reach_since": now - LOCATION_WINDOW,
+        "month_start": month_bounds(now)[0],
+        "creation_since": now - CREATION_WINDOW,
         "post_cutoff": min(cutoff, now - edit_window, now - timedelta(minutes=MAX_POST_INTERVAL_MIN)),
         "keep_from_day": now.astimezone(TEHRAN).date() - timedelta(days=1),
         "main_chat": await _main_chat_id(db),

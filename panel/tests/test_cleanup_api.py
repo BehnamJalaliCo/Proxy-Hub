@@ -15,7 +15,7 @@ import pytest
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from test_cleanup_ended import EXPECTED_KEPT, EXPECTED_REMOVED, seed
+from test_cleanup_ended import EXPECTED_REMOVED, expected_kept, seed
 from test_cleanup_support import World, wipe
 from test_fleet_support import ADMIN, CSRF, make_vault
 from test_telegram_support import closed_port_bot, real_bot, telegram_reachable
@@ -95,7 +95,9 @@ async def test_preview_then_purge_over_http(client: AsyncClient, engine: AsyncEn
     r = await client.post("/api/cleanup/ended/preview", json={"min_age_hours": 1})
     assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
     body = r.json()
-    assert body["dry_run"] is True and body["removed"] == EXPECTED_REMOVED and body["kept"] == EXPECTED_KEPT
+    assert (
+        body["dry_run"] is True and body["removed"] == EXPECTED_REMOVED and body["kept"] == expected_kept(s)
+    )
     assert await s.w.counts(ended.ALLOWED_TABLES) == before
     assert await s.w.one("SELECT count(*) FROM actions_log WHERE action LIKE 'cleanup.%'") == 0
 
