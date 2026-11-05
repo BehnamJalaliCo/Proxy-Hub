@@ -87,6 +87,93 @@ export interface SponsorOverview {
   active_campaign_id: string | null;
   registrations: SponsorRegistration[];
   campaigns: SponsorCampaign[];
+  /** @MTProxybot's own list (absent on an older panel). */
+  mtproxybot?: BotListSection;
+}
+
+// --- @MTProxybot's own list (panel/proxyhub/sponsor/inventory.py) ------------------------------------------
+
+export type BotEntryStatus = "live" | "gone" | "retired" | "unknown";
+export type BotPromotion = "ok" | "other" | "not_shown" | "several" | "stuck" | "unread";
+export type BotRemovalState = "observed" | "removed" | "unconfirmed" | "stuck" | "interrupted";
+export type BotJobState = "queued" | "running" | "done" | "stuck" | "stopped" | "failed";
+
+export interface BotListEntry {
+  id: string;
+  /** What the list button names: "host" or "host:port". */
+  address: string;
+  host: string;
+  port: number | null;
+  /** The button's label with every hex value replaced ("<host> <hex>"). */
+  label_shape: string;
+  page: number;
+  /** How many buttons of the list name the same address. */
+  listed: number;
+  status: BotEntryStatus;
+  /** The label names one of our registrations' tags. */
+  exact: boolean;
+  removable: boolean;
+  registration: { address: string; state: string; state_reason: string | null; node_state: string | null } | null;
+  /** The public channel the proxy's own screen names (live proxies only). */
+  sponsor_channel: string | null;
+  menu_read_at: string | null;
+  promotion: BotPromotion | null;
+  removal_state: BotRemovalState | null;
+  removal_reason: string | null;
+  removal_reason_fa: string | null;
+  removal_at: string | null;
+  first_seen_at: string | null;
+}
+
+export interface BotListJob {
+  kind: "inventory" | "cleanup";
+  mode: "look" | "observe" | "remove";
+  state: BotJobState;
+  requested_by: string;
+  requested_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  list_read_at: string | null;
+  relisted: boolean;
+  observed: string | null;
+  removed: number;
+  failures: number;
+  reason: string | null;
+  step: string | null;
+  last_error: string | null;
+  reason_fa: string | null;
+  last_error_fa: string | null;
+}
+
+/** One screen of the bot as placeholders (no secret): what the server operator reports. */
+export interface BotScreen {
+  stage: string;
+  text: string;
+  buttons: string[][];
+  answer: string | null;
+  about: string;
+  at: string | null;
+}
+
+export interface BotListSection {
+  removal_enabled: boolean;
+  cleanup_mode: "observe" | "remove";
+  wanted_channel: string;
+  job: BotListJob | null;
+  list: { read_at: string; pages: number; complete: boolean; note: string | null; total: number } | null;
+  observation: { at: string; address: string; remove_buttons: number; names_proxy: boolean; result: string } | null;
+  counts: {
+    live: number;
+    gone: number;
+    retired: number;
+    unknown: number;
+    removable: number;
+    promotion_ok: number;
+    promotion_problem: number;
+    promotion_unread: number;
+  };
+  entries: BotListEntry[];
+  screens: BotScreen[];
 }
 
 export interface CampaignBody {
@@ -117,6 +204,9 @@ export const cancelCampaign = (campaignId: string) =>
   request<SponsorOverview>("POST", `${BASE}/campaigns/${id(campaignId)}/cancel`);
 export const deleteCampaign = (campaignId: string) =>
   request<SponsorOverview>("DELETE", `${BASE}/campaigns/${id(campaignId)}`);
+export const startBotListInventory = () => request<SponsorOverview>("POST", `${BASE}/mtproxybot/inventory`);
+export const startBotListCleanup = () => request<SponsorOverview>("POST", `${BASE}/mtproxybot/cleanup`);
+export const stopBotListJob = () => request<SponsorOverview>("POST", `${BASE}/mtproxybot/stop`);
 
 export const sponsorKey = ["sponsor"] as const;
 
@@ -437,4 +527,150 @@ export function leadText(minutes: number): string {
   if (minutes === 0) return "درست در زمان شروع";
   if (minutes % 60 === 0) return `${formatNumber(minutes / 60)} ساعت زودتر`;
   return `${formatNumber(minutes)} دقیقه زودتر`;
+}
+
+// --- @MTProxybot's own list ----------------------------------------------------------------------------
+
+export const BOT_ENTRY_STATUS: Record<BotEntryStatus, { label: string; tone: Tone; hint: string }> = {
+  live: { label: "فعال", tone: "success", hint: "یک پروکسی زنده‌ی ما همین نشانی را دارد." },
+  gone: {
+    label: "سرور حذف‌شده",
+    tone: "danger",
+    hint: "سرورش حذف شده و این ثبت در ‎@MTProxybot‎ دیگر به کاری نمیآید.",
+  },
+  retired: {
+    label: "بازنشسته؛ سرور هنوز هست",
+    tone: "neutral",
+    hint: "نشانی سرورش عوض شده است. پاک نمیشود، چون سرورش هنوز وجود دارد.",
+  },
+  unknown: {
+    label: "ناشناس",
+    tone: "warning",
+    hint: "در داده‌های پنل نیست. پنل هرگز آن را پاک نمیکند.",
+  },
+};
+
+export function botEntryStatusInfo(status: string): { label: string; tone: Tone; hint: string } {
+  return (
+    (BOT_ENTRY_STATUS as Record<string, { label: string; tone: Tone; hint: string } | undefined>)[status] ?? {
+      label: status,
+      tone: "neutral",
+      hint: "",
+    }
+  );
+}
+
+/** Live first, then the dead ones, the retired ones and the unknown ones; the bot's order within. */
+export function sortBotEntries(entries: BotListEntry[]): BotListEntry[] {
+  const rank: Record<string, number | undefined> = { live: 0, gone: 1, retired: 2, unknown: 3 };
+  return entries
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => (rank[a.e.status] ?? 9) - (rank[b.e.status] ?? 9) || a.i - b.i)
+    .map(({ e }) => e);
+}
+
+/** What a live proxy's own screen in @MTProxybot says about its sponsor (null for one that is not live). */
+export function botPromotionInfo(e: BotListEntry, wanted: string): { tone: Tone; text: string } | null {
+  switch (e.promotion) {
+    case null:
+      return null;
+    case "ok":
+      return { tone: "success", text: `اسپانسر: ${channelText(e.sponsor_channel)}` };
+    case "other":
+      return { tone: "danger", text: `اسپانسر ${channelText(e.sponsor_channel)} است، نه ${channelText(wanted)}` };
+    case "not_shown":
+      return { tone: "warning", text: "صفحه‌ی ربات هیچ کانالی نشان نداد" };
+    case "several":
+      return { tone: "warning", text: "صفحه‌ی ربات چند کانال نشان داد" };
+    case "stuck":
+      return { tone: "warning", text: "صفحه‌ی این پروکسی خوانده نشد" };
+    default:
+      return { tone: "info", text: "هنوز خوانده نشده" };
+  }
+}
+
+/** The cleanup's word on one entry, if any. ``listReadAt``: when the shown list was read. */
+export function botRemovalInfo(e: BotListEntry, listReadAt: string | null): { tone: Tone; text: string } | null {
+  switch (e.removal_state) {
+    case null:
+      return null;
+    case "observed":
+      return { tone: "info", text: "صفحه‌اش فقط دیده شد؛ چیزی زده نشد." };
+    case "removed":
+    case "unconfirmed": {
+      const listedAfter = listReadAt !== null && e.removal_at !== null && listReadAt > e.removal_at;
+      if (listedAfter) return { tone: "danger", text: "حذف شد ولی هنوز در فهرست ربات هست." };
+      return e.removal_state === "removed"
+        ? { tone: "success", text: "از ‎@MTProxybot‎ حذف شد؛ خواندن بعدی فهرست آن را تأیید میکند." }
+        : { tone: "warning", text: "ربات حذف را تأیید نکرد؛ خواندن بعدی فهرست نشان میدهد." };
+    }
+    default:
+      return { tone: "danger", text: e.removal_reason_fa ?? "پاک کردن این پروکسی متوقف شد." };
+  }
+}
+
+export const botJobOpen = (s: BotListSection) => s.job !== null && (s.job.state === "queued" || s.job.state === "running");
+
+/** One line about the latest job on the list (null when there never was one). */
+export function botJobInfo(s: BotListSection): { tone: Tone; title: string; text: string } | null {
+  const j = s.job;
+  if (j === null) return null;
+  const what =
+    j.kind === "inventory"
+      ? "خواندن فهرست"
+      : j.mode === "remove"
+        ? "پاک کردن پروکسی‌های مرده"
+        : "پاک کردن پروکسی‌های مرده (فقط مشاهده)";
+  switch (j.state) {
+    case "queued":
+      return {
+        tone: "info",
+        title: `${what}: در صف`,
+        text: "در گذر بعدی پنل شروع میشود، وقتی کار پروکسی‌های زنده نباشد و سهم پیام این ساعت برسد.",
+      };
+    case "running": {
+      const progress = j.mode === "remove" ? ` ${formatNumber(j.removed)} پروکسی تا اینجا حذف شد.` : "";
+      const retry = j.last_error_fa ? ` آخرین تلاش: ${j.last_error_fa}` : "";
+      return {
+        tone: "brand",
+        title: `${what}: در جریان`,
+        text: `هر گام یک پیام آرام به ‎@MTProxybot‎ است (دست‌کم ۵ ثانیه فاصله، حداکثر ۳۰ پیام در ساعت).${progress}${retry}`,
+      };
+    }
+    case "done":
+      if (j.reason === "nothing_to_remove") {
+        return { tone: "success", title: `${what}: تمام شد`, text: "پروکسی مرده‌ای از ما در فهرست ربات نبود." };
+      }
+      return {
+        tone: "success",
+        title: `${what}: تمام شد`,
+        text: j.mode === "remove" ? `${formatNumber(j.removed)} پروکسی از ‎@MTProxybot‎ حذف شد.` : "فهرست و صفحه‌ها خوانده شد.",
+      };
+    case "stuck":
+      return {
+        tone: "danger",
+        title: `${what}: متوقف شد`,
+        text: `${j.reason_fa ?? j.reason ?? ""} پنل چیز دیگری نزد؛ شکل صفحه‌ها پایین همین کارت ثبت شده است.`.trim(),
+      };
+    case "stopped":
+      return { tone: "neutral", title: `${what}: متوقف شد`, text: j.reason_fa ?? "" };
+    default:
+      return { tone: "danger", title: `${what}: انجام نشد`, text: j.reason_fa ?? j.last_error_fa ?? "" };
+  }
+}
+
+/** A recorded screen's stage in Persian. */
+export function botScreenStage(stage: string): string {
+  const page = /^list_page_(\d+)$/.exec(stage);
+  if (page) return `فهرست، صفحه‌ی ${toFaDigits(page[1] ?? "")}`;
+  switch (stage) {
+    case "proxy_screen":
+      return "صفحه‌ی یک پروکسی";
+    case "after_remove":
+      return "پس از دکمه‌ی حذف";
+    case "after_confirm":
+      return "پس از تأیید حذف";
+    default:
+      return stage;
+  }
 }
