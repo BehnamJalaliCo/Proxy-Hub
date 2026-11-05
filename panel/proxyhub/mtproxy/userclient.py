@@ -39,9 +39,10 @@ Locks (docs/11 section 2.1):
   :meth:`OperatorSession.open_mtproxybot_chat` resolved on this connection AND whose id equals the id the
   panel stored at login. Nothing here can list chats or contacts, read any other chat's messages, or write to
   anyone else.
-* No updates: ``receive_updates=False``, and the library's post-login catch-up
-  (``updates.getState`` + ``updates.getDifference``) is replaced by one that only records the
-  account's own id, so the message box stays empty and no difference is ever requested.
+* No updates: ``receive_updates=False``; the library's post-login catch-up (``updates.getState`` +
+  ``updates.getDifference``) is replaced by one that only records the account's own id, and its
+  update loop by one that discards what arrives, so no difference is ever requested (not even after
+  a pts gap, which every second message to the bot makes).
 * Logs: the ``telethon`` loggers stay at WARNING and do not propagate; every record they make goes
   through :class:`_RedactingForwarder`, which removes the secrets in use (api_hash, phone, code,
   password, session string, phone_code_hash) and anything shaped like a phone number, a hex key, a
@@ -457,11 +458,22 @@ class _OperatorClient(TelegramClient):  # type: ignore[misc]  # Telethon ships n
 
     async def _on_login(self, user: Any) -> Any:
         # The library would call updates.getState and updates.getDifference here (catching up on
-        # every chat). We only remember who we are; the message box stays empty, so the update loop
-        # never asks for a difference.
+        # every chat). We only remember who we are.
         self._mb_entity_cache.set_self_user(user.id, user.bot, user.access_hash)
         self._authorized = True
         return user
+
+    async def _update_loop(self) -> None:
+        # No updates at all (D37). The library's loop tracks the pts of what we send; a client without
+        # updates never sees the bot's replies, so the pts of our next message jumps, the loop takes it
+        # for a gap and asks updates.getDifference (every chat's news). The allowlist refuses that,
+        # the loop dies and the library disconnects in the middle of the conversation (P11 on the
+        # real server). This loop only throws away what the library queues; nothing is ever asked.
+        try:
+            while self.is_connected():
+                await self._updates_queue.get()
+        except asyncio.CancelledError:
+            pass
 
 
 @dataclass(frozen=True)
