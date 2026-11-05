@@ -34,6 +34,7 @@ from proxyhub.telegram import store as tg_store
 
 SPONSOR_SQL = (
     "DELETE FROM mtproxy_stats",
+    "DELETE FROM mtproxybot_entries",
     "UPDATE telemt_users SET registration_id = NULL WHERE registration_id IS NOT NULL",
     "DELETE FROM sponsor_flows",
     "DELETE FROM mtproxy_registrations",

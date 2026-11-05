@@ -20,16 +20,31 @@ patterns before the module is relied on. A /myproxies button is pressed only whe
 the proxy's host (or ``host:port``) with nothing beside it but hex. Anything not recognised is
 "unknown": the flow stops there (proxyhub/sponsor/conversation.py). Every text that leaves the
 flow goes through :func:`mask`.
+
+Reading the whole /myproxies list and removing a dead proxy from it (proxyhub/sponsor/botlist.py)
+use the second half of this module: :func:`list_address` (which proxy a list button names),
+:func:`is_next_page` (a strict pagination button), :func:`shown_channels` (the sponsor channel a
+proxy's screen names), :func:`removal_done`, and :func:`shape` (a screen as placeholders, safe to
+store and report). The removal and confirmation buttons are recognised ONLY in the strict shapes of
+:data:`proxyhub.mtproxy.userclient.REMOVE_BUTTON` and ``CONFIRM_BUTTON``, which the operator
+client's allowlist enforces too.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 from collections.abc import Iterable
 from typing import Final
 
-from proxyhub.mtproxy.userclient import BotButton, BotMessage
+from proxyhub.mtproxy.userclient import (
+    CONFIRM_BUTTON,
+    REMOVE_BUTTON,
+    BotButton,
+    BotMessage,
+    text_names,
+)
 
 MAX_STORED_TEXT: Final = 1500
 
@@ -219,3 +234,190 @@ def mask(text: str, *, secrets: Iterable[str] = (), tags: Iterable[str] = ()) ->
     if len(text) > MAX_STORED_TEXT:
         text = text[: MAX_STORED_TEXT - 1] + "…"
     return text
+
+
+# --- the whole /myproxies list, a proxy's screen, removal (proxyhub/sponsor/botlist.py) -----------------
+
+# A proxy address: an IPv4 address or a DNS name whose last label is letters (so "e.g" or "3.5" in
+# prose is not one), optionally with ``:port``.
+_IPV4: Final = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
+_DNS_NAME: Final = re.compile(
+    r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9\-]{0,61}[a-z0-9]"
+)
+NEXT_PAGE: Final = re.compile(
+    r"(?:(?:next|more)(?:\s+page)?\s*(?:»|›|>>|>|→|➡️?|▶️?|⏩)?"
+    r"|(?:»|›|>>|>|→|➡️?|▶️?|⏩)\s*(?:next|more)?)",
+    re.IGNORECASE,
+)
+REMOVAL_DONE: Final = re.compile(r"\b(?:deleted|removed)\b", re.IGNORECASE)
+_NOT_DONE: Final = re.compile(r"\?|\b(?:sure|really|confirm|undo|want to)\b", re.IGNORECASE)
+_CHANNEL_REF: Final = re.compile(
+    r"(?:(?<![\w@])@|(?<![\w/])(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/)"
+    r"([A-Za-z][A-Za-z0-9_]{3,31})(?![\w/])",
+    re.IGNORECASE,
+)
+_NOT_CHANNELS: Final = frozenset(
+    {"mtproxybot", "proxy", "socks", "share", "addstickers", "addemoji", "joinchat", "setlanguage"}
+)
+_TME_LINK: Final = re.compile(
+    r"(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/[A-Za-z][A-Za-z0-9_]{3,31}/?", re.IGNORECASE
+)
+_ANY_URL: Final = re.compile(r"(?:https?|tg)://\S*", re.IGNORECASE)
+_SHAPE_HEX: Final = re.compile(r"[0-9a-fA-F]{4,}")
+_TOKEN: Final = re.compile(r"(?=[A-Za-z0-9_\-+/=]*\d)[A-Za-z0-9_\-+/=]{16,}")
+_EDGE: Final = ".,;:!?()[]{}«»\"'`"
+_TEXT_WORDS: Final = re.compile(r"[\s,;()\[\]{}<>«»\"'`|]+")
+MAX_SHAPE: Final = 400
+TAG_HINT_MIN: Final = 6
+
+
+def address_of(word: str) -> tuple[str, int | None] | None:
+    """``(host, port)`` when ``word`` (lower case) is ``host`` or ``host:port``, else None."""
+    host, sep, port_text = word.rpartition(":") if ":" in word else (word, "", "")
+    if not (_IPV4.fullmatch(host) or _DNS_NAME.fullmatch(host)):
+        return None
+    if not sep:
+        return host, None
+    if not port_text.isascii() or not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
+        return None
+    return host, int(port_text)
+
+
+def _list_words(label: str) -> tuple[tuple[str, int | None], list[str]] | None:
+    words = normalize_label(label).split(" ")
+    found = [a for w in words if (a := address_of(w)) is not None]
+    rest = [w for w in words if address_of(w) is None]
+    if len(found) != 1 or len(rest) > 2 or not all(_HEX_WORD.fullmatch(w) for w in rest):
+        return None
+    return found[0], rest
+
+
+def list_address(label: str) -> tuple[str, int | None] | None:
+    """The proxy a /myproxies button names: one word is ``host`` or ``host:port`` and every other
+    word (at most two) is plain hex (the real shape is "<host> <hex>", P13). None for anything
+    else, so "Delete 1.2.3.4", a page button or a header never counts as a proxy."""
+    parsed = _list_words(label)
+    return None if parsed is None else parsed[0]
+
+
+def list_hex_words(label: str) -> tuple[str, ...]:
+    """The plain-hex words beside the address of a /myproxies button (held in memory only)."""
+    parsed = _list_words(label)
+    return () if parsed is None else tuple(parsed[1])
+
+
+def label_fingerprint(label: str) -> str:
+    """A short one-way fingerprint of a list button's label, to find the SAME button again in a
+    later read without keeping its hex."""
+    return hashlib.sha256(normalize_label(label).encode()).hexdigest()[:16]
+
+
+def tag_hint(hex_words: Iterable[str], tags: Iterable[str]) -> str | None:
+    """The one tag that a hex word of the label starts or ends (at least :data:`TAG_HINT_MIN`
+    characters), or None when no tag or more than one does."""
+    words = [w.lower() for w in hex_words if len(w) >= TAG_HINT_MIN]
+    found = {t for t in tags if any(t.lower().startswith(w) or t.lower().endswith(w) for w in words)}
+    return found.pop() if len(found) == 1 else None
+
+
+def is_next_page(label: str) -> bool:
+    """A pagination button in one of the strict shapes ("Next", "»", "Next »", "➡️", ...)."""
+    return bool(NEXT_PAGE.fullmatch(label.strip()))
+
+
+def is_remove_button(label: str) -> bool:
+    return bool(REMOVE_BUTTON.fullmatch(label.strip()))
+
+
+def is_confirm_button(label: str) -> bool:
+    return bool(CONFIRM_BUTTON.fullmatch(label.strip()))
+
+
+def address_words(host: str, ports: Iterable[int]) -> frozenset[str]:
+    """What a screen about this proxy may call it: ``host`` and ``host:port`` for its known ports."""
+    host = host.lower()
+    return frozenset({host, *(f"{host}:{p}" for p in ports)})
+
+
+def names_proxy(text: str, words: frozenset[str]) -> bool:
+    """One word of the text is the proxy's ``host`` or ``host:port`` (the allowlist's own test)."""
+    return text_names(text, words)
+
+
+def text_addresses(text: str) -> set[str]:
+    """Every address-shaped word of ``text`` (lower case, ``host`` or ``host:port``)."""
+    found: set[str] = set()
+    for raw in _TEXT_WORDS.split(text.lower()):
+        word = raw.strip(".!?:")
+        if word and address_of(word) is not None:
+            found.add(word)
+    return found
+
+
+def names_other_proxy(text: str, words: frozenset[str]) -> bool:
+    """The text names an address that is not one of ``words`` (a screen of another proxy)."""
+    return bool(text_addresses(text) - words)
+
+
+def shown_channels(text: str) -> list[str]:
+    """The public channels a screen names (``@name`` or ``t.me/name``), lower case, in order."""
+    found: list[str] = []
+    for match in _CHANNEL_REF.finditer(text):
+        name = match.group(1).lower()
+        if name not in _NOT_CHANNELS and not name.endswith("_") and name not in found:
+            found.append(name)
+    return found
+
+
+def removal_done(text: str) -> bool:
+    """The bot says the proxy is gone: "deleted"/"removed", and no question, refusal or doubt."""
+    return bool(REMOVAL_DONE.search(text)) and not REFUSAL.search(text) and not _NOT_DONE.search(text)
+
+
+def _link_shape(match: re.Match[str]) -> str:
+    """A link to a public channel stays (lower case); any other link (a proxy link with its
+    parameters, ...) becomes ``<link>``, up to the next space."""
+    url = match.group(0)
+    core = url.rstrip(".,;:!?)]}»\"'")
+    return core.lower() + url[len(core) :] if _TME_LINK.fullmatch(core) else "<link>"
+
+
+def _shape_word(word: str) -> str:
+    core = word.strip(_EDGE)
+    if not core:
+        return word
+    start = word.find(core)
+    lead, trail = word[:start], word[start + len(core) :]
+    if _TME_LINK.fullmatch(core):
+        shaped = core.lower()
+    elif _ANY_URL.match(core):
+        shaped = "<link>"
+    elif (address := address_of(core.lower())) is not None:
+        shaped = "<host>" if address[1] is None else "<host:port>"
+    elif (
+        _SHAPE_HEX.fullmatch(core)
+        and not core.isdigit()  # a plain number (a count) stays
+        and (len(core) >= 8 or any(c.isdigit() for c in core))
+    ):
+        shaped = "<hex>"
+    elif _TOKEN.fullmatch(core):
+        shaped = "<token>"
+    else:
+        shaped = core
+    return f"{lead}{shaped}{trail}"
+
+
+def shape(text: str, *, limit: int = MAX_SHAPE) -> str:
+    """What a screen or button of the bot LOOKS like: every secret, proxy address, hex value, link
+    and long token replaced by a placeholder (``<host>``, ``<host:port>``, ``<hex>``, ``<link>``,
+    ``<token>``). Words, emoji and public channel names (``@name``, ``t.me/name``) stay. Safe to
+    store, show and report."""
+    masked = _ANY_URL.sub(_link_shape, mask(text))
+    lines = [re.sub(r"\S+", lambda m: _shape_word(m.group(0)), line) for line in masked.splitlines()]
+    out = "\n".join(line.rstrip() for line in lines).strip()
+    return out if len(out) <= limit else out[: limit - 1] + "…"
+
+
+def scrub(text: str) -> str:
+    """For actions_log: :func:`mask`, and every long token (a secret in another encoding) removed."""
+    return _TOKEN.sub("[token]", mask(text))

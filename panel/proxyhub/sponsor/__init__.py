@@ -9,4 +9,8 @@
 * ``store``: settings, registrations with their flow rows, campaigns.
 * ``driver``: one conversation over ``proxyhub.mtproxy.userclient.BotChat``.
 * ``service``: the reconciler's pass and the API's reads and writes.
+* ``botlist``: @MTProxybot's own /myproxies list, a proxy's screen and the removal of a dead proxy
+  as state machines, and which of our rows each listed proxy is (pure).
+* ``inventory``: the owner's jobs on that list (inventory, promotion check, cleanup), its table
+  and view; ``python -m proxyhub.sponsor`` for the operator runbook.
 """

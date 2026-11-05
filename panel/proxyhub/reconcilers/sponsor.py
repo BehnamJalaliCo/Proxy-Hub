@@ -8,6 +8,10 @@ It runs under its own advisory lock ``sponsor`` (two workers never both act) wit
 open while Telegram answers. The live proxies come from team mtproto's provider
 (:data:`proxyhub.sponsor.provider.MTPROTO_PROVIDER`); with no provider (tests only), the loop only
 keeps the campaign states up to date.
+
+A pass with nothing to do for a live proxy (``idle``, or ``paused``) runs one step of the owner's
+job on @MTProxybot's own list instead (:func:`proxyhub.sponsor.inventory.step`): the inventory, the
+promotion check, or the cleanup of proxies whose node was deleted.
 """
 
 from __future__ import annotations
@@ -20,8 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from proxyhub.mtproxy.userclient import ClientOptions
 from proxyhub.reconcilers.base import Reconciler
 from proxyhub.reconcilers.telegram import run_locked
+from proxyhub.sponsor import inventory, service
 from proxyhub.sponsor import provider as provider_module
-from proxyhub.sponsor import service
 from proxyhub.sponsor.provider import SponsorProvider
 from proxyhub.vault import Vault, VaultError
 
@@ -62,4 +66,10 @@ class SponsorReconciler(Reconciler):
                 log.warning("sponsor: vault unavailable (%s)", type(exc).__name__)
                 return "vault_unavailable"
         deps = service.Deps(engine=engine, vault=self._vault, provider=self._provider(), options=self.options)
-        return await service.run_once(deps)
+        outcome = await service.run_once(deps)
+        if outcome not in ("idle", "paused"):
+            return outcome
+        # Nothing for a live proxy this pass: one step of the owner's job on @MTProxybot's own list
+        # (inventory, promotion check, cleanup), if any. A removal waits while conversations pause.
+        listed = await inventory.step(deps, paused=outcome == "paused")
+        return outcome if listed == "idle" else listed
