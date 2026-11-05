@@ -24,6 +24,7 @@ import {
 import { motion } from "motion/react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
+import { LocationReachTable } from "../components/LocationReachTable";
 import { ProbeGrid } from "../components/ProbeGrid";
 import { Button, IconButton } from "../components/ui/Button";
 import { Badge, Card, CardHeader, StatusDot } from "../components/ui/Card";
@@ -780,7 +781,7 @@ export default function NodesPage() {
             subtitle={
               probes.data?.last_run_at
                 ? `آخرین سنجش ${formatRelative(probes.data.last_run_at)} · ${formatJalali(probes.data.last_run_at, "short")}`
-                : "هر node از شبکه‌ی اپراتورهای ایران (Globalping و check-host) سنجیده میشود."
+                : "هر node از شبکه‌ی اپراتورهای ایران با دست‌دادن واقعی TLS (Globalping) سنجیده میشود."
             }
             action={
               probes.data ? (
@@ -808,6 +809,19 @@ export default function NodesPage() {
             )}
           </div>
         </Card>
+
+        {probes.data?.locations ? (
+          <Card>
+            <CardHeader
+              icon={<MapPin className="size-5" />}
+              title="locationها از ایران"
+              subtitle={`هر location هتزنر از هر اپراتور، از روی دست‌دادن TLS با nodeهای ما در ${formatNumber(probes.data.locations.window_days)} روز اخیر.`}
+            />
+            <div className="p-3 sm:p-5">
+              <LocationReachTable summary={probes.data.locations} />
+            </div>
+          </Card>
+        ) : null}
       </div>
 
       <CreateTestNodeDialog open={creating} onOpenChange={setCreating} />

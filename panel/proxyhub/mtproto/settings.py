@@ -15,6 +15,11 @@ Defaults (no row yet):
   www.youtube.com, was hijacked on 2 of 4).
 * modes: fake-TLS on; ``dd`` (secure) and classic off. The link uses the first mode that is on, in
   the order tls, secure, classic (one link per proxy).
+* ``target_mode`` (P15, 2026-11-05) ``auto`` (default): the panel replaces ``tls_domain`` by the
+  best candidate site (proxyhub/targets) when the current one is blocked from Iran (TLS handshakes
+  from MCI or Rightel failing in two rounds; ``www.microsoft.com`` was closed on MCI). It applies
+  only to nodes without their own DNS name: a node that has one keeps it (decision D42). Every
+  switch is logged and told to the owner. ``manual``: the owner's ``tls_domain`` stays.
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ DEFAULT_TLS_DOMAIN = "www.microsoft.com"
 FORBIDDEN_PORTS = frozenset({22, 443, 2083, 9090, 9091})
 
 Mode = Literal["tls", "secure", "classic"]
+TargetMode = Literal["auto", "manual"]
 Db = AsyncConnection | AsyncSession
 
 
@@ -50,6 +56,7 @@ class MtprotoSettings(BaseModel):
 
     port: int = Field(default=DEFAULT_PORT, ge=1, le=65535)
     tls_domain: str = DEFAULT_TLS_DOMAIN
+    target_mode: TargetMode = "auto"  # auto: proxyhub/targets replaces a tls_domain blocked from Iran
     mode_tls: bool = True
     mode_secure: bool = False
     mode_classic: bool = False

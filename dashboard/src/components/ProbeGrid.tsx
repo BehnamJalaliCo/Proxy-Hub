@@ -6,6 +6,7 @@ import { errorMessage } from "../lib/api";
 import { cn } from "../lib/browser";
 import * as api from "../lib/endpoints";
 import { formatJalali, formatNumber, formatRelative } from "../lib/format";
+import { portsText } from "../lib/iranReach";
 import { PROBE_SOURCE, verdictInfo, type Tone } from "../lib/labels";
 import { buildHeatmap, sourceStatus, verdictCounts, type HeatCell, type HeatColumn } from "../lib/probes";
 import { keys } from "../lib/queries";
@@ -25,9 +26,9 @@ const CELL_ICON: Record<Tone, typeof Check> = {
 };
 
 const LEGEND: { tone: Tone; label: string }[] = [
-  { tone: "success", label: "همه‌ی تلاش‌ها وصل شد" },
-  { tone: "warning", label: "بعضی وصل نشد" },
-  { tone: "danger", label: "هیچ‌کدام وصل نشد" },
+  { tone: "success", label: "همه‌ی دست‌دادن‌های TLS موفق" },
+  { tone: "warning", label: "بعضی ناموفق" },
+  { tone: "danger", label: "هیچ‌کدام موفق نشد" },
 ];
 
 function cellTitle(col: HeatColumn, cell: HeatCell): string {
@@ -88,14 +89,14 @@ export function ProbeGrid({ summary }: { summary: ProbeSummary }) {
         <EmptyState
           icon={<Radar className="size-7" />}
           title="هنوز سنجشی نیست"
-          description="وقتی node آماده‌ای باشد، پنل آن را از شبکه‌های ایران میسنجد و نتیجه اینجا به تفکیک اپراتور دیده میشود."
+          description="وقتی node آماده‌ای باشد، پنل با دست‌دادن واقعی TLS آن را از شبکه‌های ایران میسنجد و نتیجه اینجا به تفکیک اپراتور دیده میشود."
         />
       ) : (
         <>
           {/* The grid scrolls inside its own box on a phone; the page itself never scrolls sideways. */}
           <div className="overflow-x-auto rounded-2xl border border-line">
             <table className="w-full border-separate border-spacing-0 text-sm">
-              <caption className="sr-only">باز بودن هر node از هر شبکه‌ی ایران: تعداد اتصال موفق از کل تلاش‌ها</caption>
+              <caption className="sr-only">باز بودن هر node از هر شبکه‌ی ایران: تعداد دست‌دادن TLS موفق از کل (پورت ۴۴۳ و پورت MTProto)</caption>
               <thead>
                 <tr>
                   <th scope="col" className="sticky start-0 z-10 bg-surface-2 px-3 py-2.5 text-start text-xs font-semibold text-fg-muted">
@@ -122,6 +123,11 @@ export function ProbeGrid({ summary }: { summary: ProbeSummary }) {
                             <div className="ltr max-w-[9rem] truncate text-right font-mono text-[0.8rem] font-bold text-fg" title={target.name}>
                               {target.name}
                             </div>
+                            {target.tls_target ? (
+                              <div className="max-w-[9rem] truncate text-[0.66rem] text-fg-faint" title={`دست‌دادن TLS با ${target.tls_target} روی پورت ${portsText(target.networks)}`}>
+                                <span className="ltr inline-block font-mono">{target.tls_target}</span>
+                              </div>
+                            ) : null}
                             <Badge tone={v.tone} className="mt-1 px-2 py-0.5 text-[0.68rem]">
                               {v.label}
                             </Badge>
@@ -181,7 +187,7 @@ export function ProbeGrid({ summary }: { summary: ProbeSummary }) {
                 </span>
               );
             })}
-            <span>عدد هر خانه: اتصال موفق از کل تلاش‌ها</span>
+            <span>عدد هر خانه: دست‌دادن TLS موفق از کل (پورت ۴۴۳ و پورت MTProto). ping و TCP دیگر ملاک نیست: همراه اول و رایتل به TCP جواب جعلی میدهند.</span>
             {summary.last_run_at ? <span className="ms-auto">{formatJalali(summary.last_run_at, "datetime")}</span> : null}
           </div>
         </>

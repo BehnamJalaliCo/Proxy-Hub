@@ -2,9 +2,10 @@
 
 The fleet loop never talks to Hetzner. In live mode it only changes rows, in its own transaction:
 
-* :func:`mark_burned_nodes`: a slot node whose fresh probe verdict says *blocked* (both sources,
-  at least two rounds; proxyhub/probes/verdict.py) becomes ``burned``; its IP and /24 go into
-  ``ip_history`` (proxyhub/fleet/ip_history.py).
+* :func:`mark_burned_nodes`: a slot node whose fresh probe verdict says *blocked* (TLS handshakes
+  from Iran failed from MCI and Rightel on every port, in at least two rounds, while the control
+  worked; proxyhub/probes/verdict.py) becomes ``burned``; its IP and /24 go into ``ip_history``
+  (proxyhub/fleet/ip_history.py).
 * :func:`apply_plan`: every ALLOWED action of the plan (proxyhub/fleet/planner.py, which evaluated
   it through ``proxyhub.safety.gates``):
   - ``create`` -> a ``requested`` slot node. The node executor (proxyhub/nodes/executor.py) creates
@@ -61,11 +62,13 @@ class Applied:
 
 
 async def probed_service_up(s: AsyncSession, node_id: uuid.UUID, now: datetime) -> bool:
-    """True when the node's own agent says the service the probes test is listening: the probes
-    test Telemt's port (proxyhub/probes/service.py; every serving node has a Telemt config), so the
-    newest report, at most :data:`VERDICT_MAX_AGE` old, must show Telemt up. A refused port fails
-    from every Iranian network exactly like a block, so without this a down service would burn a
-    healthy node and its whole /24."""
+    """True when the node's own agent says the service the probes test is listening. The probes
+    make TLS handshakes from Iran to 443 and to Telemt's port (proxyhub/probes/service.py; every
+    serving node has a Telemt config), and ``blocked`` needs every one of them to fail from MCI and
+    Rightel; so the newest report, at most :data:`VERDICT_MAX_AGE` old, must show Telemt up: then
+    its port failing too means the address is blocked, not that the service is down. A refused or
+    silent port fails from every Iranian network exactly like a block, so without this a down
+    service would burn a healthy node and its whole /24."""
     has_config = (
         await s.execute(select(TelemtNodeConfig.node_id).where(TelemtNodeConfig.node_id == node_id))
     ).first()
@@ -134,7 +137,7 @@ async def mark_burned_nodes(s: AsyncSession, snap: FleetSnapshot, now: datetime)
                 "verdict_at": iso(verdict.verdict_at),
             },
             result=(
-                "blocked from Iran by both probe sources: a replacement is built in another location first"
+                "TLS from Iran blocked on MCI and Rightel: a replacement is built in another location first"
             ),
         )
         burned.append(row.name)

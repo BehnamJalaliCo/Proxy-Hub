@@ -14,6 +14,10 @@ Model (docs/10_IMPLEMENTATION_PLAN.md section 3.11):
   follows the ready node by itself). The fleet never plans more than ``target_slots + 1`` live nodes.
 * A slot whose last request was refused by the executor waits a little before asking again; a
   server that got a burned IP (proxyhub/fleet/ip_history.py) is retried in another location.
+* Locations (P15): only the owner's allowed ones (fleet settings), preferring those whose recent TLS
+  record from Iran is open on MCI and Rightel and skipping those closed on both
+  (proxyhub/fleet/locations.py). When every allowed location is closed, nothing is built
+  (``all_locations_closed``) and the owner is told once a day.
 * Accounts: youngest active account first, the next one when it is full (section 3.8).
 * Intended creations are evaluated cumulatively, in slot order: an allowed creation counts
   against the node cap, the hourly creation cap, the account and the month budget of the next one.
@@ -33,6 +37,7 @@ from typing import Any, Literal
 from proxyhub.accounts.hetzner_io import LiveOffer
 from proxyhub.fleet.costs import NodeCostInput, PriceKey, money, node_cost_items
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
+from proxyhub.fleet.locations import CLASS_RANK
 from proxyhub.safety.budget import Price, projected_month_total, rest_of_month_cost
 from proxyhub.safety.gates import (
     DELETABLE_ROLES,
@@ -137,6 +142,9 @@ class FleetSnapshot:
     # Reasons found outside the database that block every creation (e.g. agent_domain_not_set: a
     # node's user data would have nowhere to register, so the executor would refuse each request).
     blockers: tuple[str, ...] = ()
+    # Location -> good / mixed / unknown / bad from the TLS probes of the last 7 days
+    # (proxyhub/fleet/locations.py). A location missing here is "unknown".
+    location_classes: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -323,17 +331,36 @@ class _Planner:
             return _Placement(a, loc, offer, reasons)
         return _Placement(active[0], first_loc, None, ("no_live_price",))
 
+    def _rank(self, location: str) -> int:
+        """0: open on MCI and Rightel lately; 1: mixed or no data; 2: closed on both (never used)."""
+        return CLASS_RANK.get(self.snap.location_classes.get(location, "unknown"), 1)
+
+    def _usable(self, locations: list[str]) -> list[str]:
+        return [loc for loc in locations if self._rank(loc) < CLASS_RANK["bad"]]
+
+    def _all_closed(self) -> bool:
+        return bool(self.s.locations) and not self._usable(list(self.s.locations))
+
     def _slot_locations(self, slot: int) -> list[str]:
         locs = list(self.s.locations)
         if not locs:
             return []
         start = (slot - 1) % len(locs)
+        rotated = [locs[(start + k) % len(locs)] for k in range(len(locs))]
+        # Stable: the slot's own rotation decides among locations of the same rank.
+        return sorted(self._usable(rotated), key=self._rank)
+
+    def _slot_locations_all(self, slot: int) -> list[str]:
+        locs = list(self.s.locations)
+        start = (slot - 1) % len(locs) if locs else 0
         return [locs[(start + k) % len(locs)] for k in range(len(locs))]
 
     def _replacement_locations(self, avoid: set[str]) -> list[str]:
         locs = list(self.s.locations)
-        others = [loc for loc in locs if loc not in avoid]
-        return sorted(others, key=lambda loc: (self.run.per_location.get(loc, 0), locs.index(loc)))
+        others = self._usable([loc for loc in locs if loc not in avoid])
+        return sorted(
+            others, key=lambda loc: (self._rank(loc), self.run.per_location.get(loc, 0), locs.index(loc))
+        )
 
     def _repair_over(self, n: NodeSnapshot) -> bool:
         since = n.state_since or n.created_at
@@ -358,9 +385,14 @@ class _Planner:
             if not preferred and self.s.locations:
                 if hard:
                     planner_reasons.append("no_other_location")
-                    preferred = list(self.s.locations)
+                    preferred = self._usable(list(self.s.locations))
                 else:
                     preferred = self._slot_locations(slot)
+        if self._all_closed():
+            # Every allowed location is closed from Iran (MCI and Rightel): a server there would be
+            # money for nothing. The plan shows where it would have gone; nothing is built.
+            planner_reasons.append("all_locations_closed")
+            preferred = self._slot_locations_all(slot)
         placement = self._place(preferred)
         planner_reasons.extend(r for r in placement.reasons if r not in planner_reasons)
 
@@ -396,6 +428,9 @@ class _Planner:
             "creations_last_hour": self.run.creations,
             "servers_in_account": view.servers_in_account,
             "avoid": sorted((avoid or set()) | soft),
+            "location_class": (
+                self.snap.location_classes.get(placement.location, "unknown") if placement.location else None
+            ),
         }
         if allowed and placement.account is not None and placement.location is not None:
             self.run.live_total += 1

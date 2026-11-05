@@ -2,23 +2,24 @@
 
 Measurement types used, and why:
 
-* **Reachability of the MTProto port: ``ping`` with ``protocol: TCP`` and ``port`` = the node's
-  Telemt port.** Each "packet" is a real TCP connection attempt (SYN, SYN/ACK) to exactly the port
-  Telegram clients open, from eyeball networks inside Iran. Iran blocks a proxy IP by dropping its
-  packets, which is exactly a failed handshake here; RTT and loss come per attempt. It costs one
-  test per probe.
-* **``ping`` over ICMP**: recorded for context only (ICMP is filtered independently of TCP, so it
-  never decides anything).
-* **TLS handshake: not used for verdicts.** Globalping's ``http`` measurement has no SNI option
-  (``request.host`` only overrides the Host header; SNI follows the target), so it cannot send the
-  fake-TLS domain our ``ee`` secrets use to an IP target. Whether that is enough is field test F5.
+* **A real TLS handshake: ``http`` with ``protocol: HTTPS``, ``HEAD /``, on the node's own DNS name
+  (``slot<N>.<domain>`` / ``t<hex>.<domain>``, the SNI its links use) or, without one, its IP; on 443
+  and on the MTProto port.** This is what decides (2026-11-05, P15 on the real panel server): MCI
+  (AS197207) and Rightel (AS57218) answer a TCP SYN themselves for blocked addresses (a fake answer in
+  about 33 ms), so a TCP "ping" reported blocked IPs as reachable; the TLS handshake then times out.
+  Any HTTP status means the handshake worked (our own Xray answers 404/400 to a plain HEAD); a probe
+  failure caused by the target (a timeout or a TLS error) means closed. A probe whose name resolved
+  to another address than the node's says nothing about the node (``resolved_elsewhere``).
+* **``ping`` with ``protocol: TCP``** on the MTProto port, and **``ping`` over ICMP**: recorded for
+  context only. Neither decides anything any more (see above).
 * **``dns`` A queries** for our slot names through each probe's own (ISP) resolver: an answer in
   10.10.34.0/24 is the Iranian filter's hijack signature (docs/10 section 3.10).
 
 The control measurement is created first; the node measurements reuse ITS probes (Globalping's
 ``locations: <measurement id>``), so every node result is paired with the control result of the
 very same probe. Rate-limit headers (``X-RateLimit-*``) are returned with every creation so the
-caller can stay inside the free hourly limit (250 tests per hour per IP without a token).
+caller can stay inside the free hourly limit (250 tests per hour per IP without a token; every
+probe that runs a measurement is one test).
 """
 
 from __future__ import annotations
@@ -186,6 +187,100 @@ def _in_hijack_net(value: str) -> bool:
         return False
 
 
+# The text Globalping's probes put into ``rawOutput`` for the failures seen from Iran (recorded
+# 2026-11-05). Only a short label for the dashboard comes from it; the decision uses ``status`` and
+# ``failureSource`` alone (the API says rawOutput is not meant to be parsed).
+_HTTP_FAILURES: tuple[tuple[str, str], ...] = (
+    ("during the TLS handshake", "tls_timeout"),
+    ("while establishing the TCP connection", "tcp_timeout"),
+    ("ECONNRESET", "reset"),
+)
+
+
+def _http_failure(raw_output: object) -> str:
+    text = raw_output if isinstance(raw_output, str) else ""
+    for needle, label in _HTTP_FAILURES:
+        if needle in text:
+            return label
+    return "other"
+
+
+def _ms(timings: object, key: str) -> float | None:
+    if not isinstance(timings, Mapping):
+        return None
+    value = timings.get(key)
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def parse_http(
+    raw: Mapping[str, Any], requested_asns: Sequence[int] = (), expected_ip: str | None = None
+) -> list[NetworkObs]:
+    """An ``http`` (HTTPS, HEAD) measurement -> one entry per network. ``ok``: the probe got an HTTP
+    status (so TCP and the TLS handshake worked); ``fail``: the test failed because of the target
+    (a timeout, a reset, a TLS error); everything else (the probe's own failure, an unusable DNS
+    answer, a name that resolved to another address than ``expected_ip``) gives no data."""
+    acc: dict[str, NetworkObs] = {}
+    for item in raw.get("results") or []:
+        if not isinstance(item, Mapping):
+            continue
+        probe, result = item.get("probe") or {}, item.get("result") or {}
+        key, asn, name = _probe_key(probe)
+        status = result.get("status")
+        resolved = result.get("resolvedAddress")
+        timings = result.get("timings")
+        code = result.get("statusCode")
+        if expected_ip is not None and isinstance(resolved, str) and resolved != expected_ip:
+            obs = NetworkObs(key, name, asn, nodata=1, detail={"failure": "resolved_elsewhere"})
+        elif status == "finished" and isinstance(code, int) and not isinstance(code, bool):
+            tls = result.get("tls")
+            obs = NetworkObs(
+                key,
+                name,
+                asn,
+                ok=1,
+                rtt_ms=_ms(timings, "total"),
+                detail={
+                    "code": code,
+                    "tls_ms": _ms(timings, "tls"),
+                    "total_ms": _ms(timings, "total"),
+                    "tls": str(tls.get("protocol"))[:16] if isinstance(tls, Mapping) else None,
+                },
+            )
+        elif status == "failed" and result.get("failureSource") == "target" and isinstance(resolved, str):
+            obs = NetworkObs(
+                key,
+                name,
+                asn,
+                fail=1,
+                detail={"failure": _http_failure(result.get("rawOutput")), "tcp_ms": _ms(timings, "tcp")},
+            )
+        else:
+            failure = result.get("failureSource") if status == "failed" else status
+            obs = NetworkObs(key, name, asn, nodata=1, detail={"failure": str(failure or "unknown")[:20]})
+        _merge(acc, obs)
+    return [*acc.values(), *_no_probe_networks(requested_asns, acc)]
+
+
+def https_body(target: str, port: int, locations: str | Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """HEAD https://<target>:<port>/ (the SNI is the target name). ``locations``: location objects
+    (each with its own ``limit``) or the id of an earlier measurement whose probes are reused."""
+    return {
+        "type": "http",
+        "target": target,
+        "locations": locations if isinstance(locations, str) else [dict(loc) for loc in locations],
+        "measurementOptions": {
+            "protocol": "HTTPS",
+            "port": port,
+            "request": {"method": "HEAD", "path": "/"},
+        },
+    }
+
+
+def location_asns(locations: Sequence[Mapping[str, Any]]) -> list[int]:
+    """The ASNs named in location objects (networks that should report even without a probe)."""
+    return [int(loc["asn"]) for loc in locations if isinstance(loc.get("asn"), int)]
+
+
 def tcp_body(target: str, port: int, locations: str | Sequence[int]) -> dict[str, Any]:
     return {
         "type": "ping",
@@ -331,7 +426,12 @@ class GlobalpingClient:
             ), created.id
         # With reused probes the same ASNs are missing as in the control: list them too.
         asns = requested_asns
-        networks = parse_dns(raw, expected_ip, asns) if kind == "dns" else parse_ping(raw, asns)
+        if kind == "dns":
+            networks = parse_dns(raw, expected_ip, asns)
+        elif kind == "https":
+            networks = parse_http(raw, asns, expected_ip)
+        else:
+            networks = parse_ping(raw, asns)
         # A partial result after a timeout still counts for the probes that finished.
         final: MeasurementStatus = "ok" if status in ("ok", "timeout") else status
         return (

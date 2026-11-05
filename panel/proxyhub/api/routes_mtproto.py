@@ -1,7 +1,8 @@
 """MTProto proxies on the nodes (owner only).
 
 GET /api/mtproto            {settings, defaults, active_domain, proxies: [...]}
-PUT /api/mtproto/settings   {port, tls_domain, mode_tls, mode_secure, mode_classic} -> {settings}
+PUT /api/mtproto/settings   {port, tls_domain, target_mode, mode_tls, mode_secure, mode_classic}
+                            -> {settings}
 
 Each proxy: key, node (id, name, state, test flag), slot, Persian label, host (slot DNS name or the
 node's IPv4) and port, link mode, the public link (the owner publishes it on purpose: the only place
@@ -44,7 +45,7 @@ MESSAGES_FA = {
     "invalid_settings": "تنظیمات پذیرفته نشد. پورت، دامنه‌ی TLS و دست‌کم یک حالت را بررسی کنید.",
     "mtproto_key_unavailable": "کلید اصلی پنل در دسترس نیست؛ لینک پروکسی‌ها ساخته نمیشود.",
 }
-FIELDS = frozenset({"port", "tls_domain", "mode_tls", "mode_secure", "mode_classic"})
+FIELDS = frozenset({"port", "tls_domain", "target_mode", "mode_tls", "mode_secure", "mode_classic"})
 
 
 def _error(code: str, status: int, extra: dict[str, Any] | None = None) -> ApiError:

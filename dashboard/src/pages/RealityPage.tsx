@@ -25,6 +25,7 @@ import {
   sameSettings,
   savedMessage,
   sortConfigs,
+  TARGET_AUTO_HINT,
   TARGET_HINT,
   TRANSPORT,
   usage,
@@ -39,6 +40,7 @@ import {
   type RealitySettings,
   type RealitySettingsView,
   type RealitySummary,
+  type TargetMode,
   type Transport,
 } from "../lib/reality";
 import { putRealitySettings, realityKey, useReality } from "../lib/realityApi";
@@ -334,7 +336,7 @@ function NodesCard({ nodes, settings, cert }: { nodes: RealityNode[]; settings: 
 
 // --- settings ------------------------------------------------------------------------------------
 
-const DRAFT_KEYS = new Set<string>(["enabled", "transport", "xhttp_enabled", "renew", "configs_per_node", "cap_hours", "cap_gb", "target_host", "target_port", "link_name"]);
+const DRAFT_KEYS = new Set<string>(["enabled", "transport", "xhttp_enabled", "renew", "target_mode", "configs_per_node", "cap_hours", "cap_gb", "target_host", "target_port", "link_name"]);
 
 /** 422 {"fields": ["cap_gb", ...]} -> which form fields the server refused. */
 function serverErrors(err: unknown): RealityDraftErrors {
@@ -445,16 +447,48 @@ function SettingsCard({ initial, defaults }: { initial: RealitySettingsView; def
           </Field>
           {draft.transport === "reality" ? (
             <>
+              <div className="flex flex-col gap-2 sm:col-span-2 lg:col-span-3">
+                <span className="text-sm font-semibold text-fg">انتخاب سایت هدف</span>
+                <Segmented<TargetMode>
+                  label="انتخاب سایت هدف"
+                  value={draft.target_mode}
+                  onChange={(v) => set("target_mode", v)}
+                  options={[
+                    { value: "auto", label: "خودکار (از سنجش ایران)" },
+                    { value: "manual", label: "دستی" },
+                  ]}
+                  className="w-full max-w-md"
+                />
+              </div>
               <Field
                 label="سایت هدف (target)"
                 htmlFor="r-target"
-                hint={TARGET_HINT}
+                hint={draft.target_mode === "auto" ? TARGET_AUTO_HINT : TARGET_HINT}
                 error={shown("target_host")}
               >
-                <TextInput id="r-target" latin autoComplete="off" value={draft.target_host} onChange={(e) => set("target_host", e.target.value)} invalid={Boolean(shown("target_host"))} placeholder={defaults.target_host} />
+                <TextInput
+                  id="r-target"
+                  latin
+                  autoComplete="off"
+                  value={draft.target_host}
+                  onChange={(e) => set("target_host", e.target.value)}
+                  invalid={Boolean(shown("target_host"))}
+                  placeholder={defaults.target_host}
+                  readOnly={draft.target_mode === "auto"}
+                  aria-readonly={draft.target_mode === "auto"}
+                />
               </Field>
               <Field label="پورت سایت هدف" htmlFor="r-tport" hint="معمولاً ۴۴۳." error={shown("target_port")}>
-                <TextInput id="r-tport" inputMode="numeric" latin value={draft.target_port} onChange={(e) => set("target_port", e.target.value)} invalid={Boolean(shown("target_port"))} />
+                <TextInput
+                  id="r-tport"
+                  inputMode="numeric"
+                  latin
+                  value={draft.target_port}
+                  onChange={(e) => set("target_port", e.target.value)}
+                  invalid={Boolean(shown("target_port"))}
+                  readOnly={draft.target_mode === "auto"}
+                  aria-readonly={draft.target_mode === "auto"}
+                />
               </Field>
             </>
           ) : null}

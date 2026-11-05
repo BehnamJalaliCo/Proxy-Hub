@@ -9,6 +9,7 @@ import {
   REALITY_STATUS,
   sameSettings,
   savedMessage,
+  TARGET_AUTO_HINT,
   TARGET_HINT,
   sortConfigs,
   usage,
@@ -30,6 +31,7 @@ const DEFAULTS: RealitySettings = {
   configs_per_node: 2,
   cap_hours: 48,
   cap_gb: 1000,
+  target_mode: "auto",
   target_host: "dl.google.com",
   target_port: 443,
   link_name: null,
@@ -97,6 +99,19 @@ describe("reality settings form", () => {
     expect(savedMessage(DEFAULTS, { ...DEFAULTS, cap_gb: 80 })).toBe("کانفیگ‌های تازه با این عددها ساخته میشوند.");
     expect(TARGET_HINT).toContain("پس از پایان کانفیگ‌های فعلی");
     expect(TARGET_HINT).not.toContain("فقط برای کلیدهای تازه");
+  });
+
+  it("keeps the target mode through the form and says what switching it does", () => {
+    const manual = parseDraft({ ...draftFrom(DEFAULTS), target_mode: "manual" }).settings;
+    expect(manual?.target_mode).toBe("manual");
+    expect(manual && sameSettings(manual, DEFAULTS)).toBe(false);
+    expect(savedMessage(DEFAULTS, { ...DEFAULTS, target_mode: "manual" })).toContain("دیگر خودکار عوض نمیشود");
+    expect(savedMessage({ ...DEFAULTS, target_mode: "manual" }, DEFAULTS)).toContain("همراه اول و رایتل");
+    // A panel older than the automatic choice has no target_mode: the owner's target (manual).
+    const older: RealitySettings = { ...DEFAULTS };
+    delete older.target_mode;
+    expect(draftFrom(older).target_mode).toBe("manual");
+    expect(TARGET_AUTO_HINT).toContain("خودکار");
   });
 
   it("keeps the renew switch through the form", () => {

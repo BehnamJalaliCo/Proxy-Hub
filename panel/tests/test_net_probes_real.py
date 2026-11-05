@@ -1,9 +1,11 @@
 """Real Globalping and check-host measurements from Iran (opt-in: ``PROXYHUB_GLOBALPING_TESTS=1``).
 
 A well-known public host (1.1.1.1, port 443) stands in for a node: the full reconciler runs two
-real rounds against it, 75 seconds apart, and stores real results and a real verdict. Each run costs about 10
-Globalping tests of the free 250 per hour. The probes in Iran come and go (an eyeball probe may be
-offline), so the assertions accept "unknown" only together with the reason the logic gave.
+real rounds against it, 75 seconds apart, and stores real results and a real verdict: TLS handshakes
+from MCI, Rightel and other Iranian networks (what decides), TCP information. Each run costs about
+40 Globalping tests of the free 250 per hour; the candidate-site round below about 20 more. The
+probes in Iran come and go (an eyeball probe may be offline), so the assertions accept "unknown"
+only together with the reason the logic gave.
 """
 
 from __future__ import annotations
@@ -21,8 +23,9 @@ from test_net_support import clean_net_tables, make_node
 
 from proxyhub.probes import service
 from proxyhub.probes.globalping import GlobalpingClient, dns_body
-from proxyhub.probes.settings import DEFAULT_ASNS
+from proxyhub.probes.settings import DEFAULT_ASNS, MCI_ASN, RIGHTEL_ASN, ProbeSettings
 from proxyhub.reconcilers.probes import ProbesReconciler
+from proxyhub.targets.service import measure_round, net_results, target_locations
 
 pytestmark = [pytest.mark.globalping]
 
@@ -74,11 +77,12 @@ async def test_real_rounds_from_iran_against_a_public_host(engine: AsyncEngine) 
     if target["verdict"] == "unknown":
         assert target["verdict_reasons"], "unknown must always say why"
     else:
-        # Both sources' controls worked in both rounds, so the probes themselves were proven.
+        # The TLS control worked in both rounds, so the probes themselves were proven.
         for r in rounds:
-            assert all(o["state"] != "invalid" for o in r.observations.values())
-    gp_networks = {n["asn"]: n for n in target["networks"] if n["source"] == "globalping"}
-    assert set(DEFAULT_ASNS) <= set(gp_networks), "every requested Iranian network is recorded"
+            assert r.observations["https"]["state"] != "invalid"
+    tls = {n["asn"] for n in target["networks"] if n["kind"] == "https"}
+    assert {MCI_ASN, RIGHTEL_ASN} <= tls, "both key networks are recorded (with or without a probe)"
+    assert {n["port"] for n in target["networks"]} == {443}  # no Telemt config: 443 only
     # Rule 7 sanity: the addresses of check-host's own nodes are never stored.
     async with httpx.AsyncClient(timeout=20) as client:
         nodes = (
@@ -102,3 +106,23 @@ async def test_real_dns_hijack_signature_from_iran() -> None:
     if m.status != "ok" or not answered:
         pytest.skip(f"no Iranian probe answered (status {m.status})")
     assert any(n.detail.get("hijacked") for n in answered)
+
+
+async def test_real_round_of_candidate_sites_from_iran() -> None:
+    """A real candidate round (proxyhub/targets): github.com as the control from MCI and Rightel,
+    two sites on its probes. P15 measured www.apple.com healthy on MCI and Rightel."""
+    probes = ProbeSettings()
+    async with GlobalpingClient() as gp:
+        rnd = await measure_round(
+            gp, ["github.com", "www.apple.com"], probes.tls_control_host, target_locations(probes)
+        )
+    print("\nREAL TARGET ROUND:", rnd.control.status, {h: (m.status, m.ref) for h, m in rnd.results.items()})
+    if rnd.control.status != "ok":
+        pytest.skip(f"Globalping gave no usable control (status {rnd.control.status})")
+    assert rnd.results["github.com"].ref == rnd.control.ref  # the control's own result is reused
+    apple = net_results(rnd.results["www.apple.com"], rnd.control)
+    print("REAL www.apple.com:", {k: (r.state, r.ms) for k, r in apple.items()})
+    valid = [r for r in apple.values() if r.state != "nodata"]
+    if not valid:
+        pytest.skip("no Iranian key network had a probe whose control worked")
+    assert all(r.network for r in valid)

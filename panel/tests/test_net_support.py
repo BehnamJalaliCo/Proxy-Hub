@@ -438,6 +438,223 @@ CF_DELETE_ZONE_INVALID_TOKEN = {
     "result": None,
 }
 
+# --- Globalping HTTPS from Iran: real TLS handshakes (recorded 2026-11-05 16:15-16:37 UTC) --------
+# Requested as proxyhub/probes uses them: {"type": "http", "measurementOptions": {"protocol":
+# "HTTPS", "port": <p>, "request": {"method": "HEAD", "path": "/"}}} with locations [{"asn": 197207,
+# "limit": 3}, {"asn": 57218, "limit": 2}, {"country": "IR", "limit": 3}]. Field names and values as
+# api.globalping.io returned them (FinishedHttpTestResult / FailedTestResult in its spec.yaml);
+# trimmed: rawOutput and rawHeaders to their first line, headers to content-type, tls to the fields
+# the dashboard could show. Until 17:19 UTC no MCI probe was online, so measurements "from MCI" in
+# the tests may put the real MCI probe object next to these real result objects; GP_HTTPS_PANEL_BLOCKED
+# and GP_HTTPS_GITHUB_MCI are real answers of the MCI probe (Tabriz) itself.
+# panel.beyra-ai.com is the owner's panel in fsn1 (P15: fsn1 is closed on MCI and Rightel).
+
+_IR_RIGHTEL = _ir_probe(
+    57218, "Rightel Communication Service Company PJS", ["eyeball-network", "u-sudo-user-un:rightel"]
+)
+_IR_PASARGAD = _ir_probe(206065, "Tose'h Fanavari Ertebabat Pasargad Arian", ["eyeball-network"])
+_TLS_GITHUB = {
+    "authorized": True,
+    "protocol": "TLSv1.3",
+    "cipherName": "TLS_AES_128_GCM_SHA256",
+    "subject": {"CN": "github.com", "alt": "DNS:github.com, DNS:www.github.com"},
+    "issuer": {"C": "GB", "O": "Sectigo Limited", "CN": "Sectigo Public Server Authentication CA DV E36"},
+}
+_TLS_PANEL = {
+    "authorized": True,
+    "protocol": "TLSv1.3",
+    "cipherName": "TLS_AES_128_GCM_SHA256",
+    "subject": {"CN": "panel.beyra-ai.com", "alt": "DNS:panel.beyra-ai.com"},
+    "issuer": {"C": "US", "O": "Let's Encrypt", "CN": "YE1"},
+}
+_TLS_APPLE = {
+    "authorized": True,
+    "protocol": "TLSv1.3",
+    "cipherName": "TLS_AES_256_GCM_SHA384",
+    "subject": {
+        "CN": "www.apple.com",
+        "alt": "DNS:www.apple.com.cn, DNS:images.apple.com, DNS:www.apple.com",
+    },
+    "issuer": {"C": "US", "O": "Apple Inc.", "CN": "Apple Public EV Server RSA CA 1 - G1"},
+}
+
+
+def http_ok(
+    address: str, timings: tuple[int, int, int, int, int, int], tls: dict[str, Any], first_header: str
+) -> dict[str, Any]:
+    """A finished HTTPS test as recorded; ``timings``: total, dns, tcp, tls, firstByte, download."""
+    total, dns, tcp, tls_ms, first, download = timings
+    return {
+        "status": "finished",
+        "resolvedAddress": address,
+        "headers": {"content-type": "text/html; charset=utf-8"},
+        "rawHeaders": f"{first_header}\n...",
+        "rawBody": None,
+        "rawOutput": "HTTP/1.1 200\n...",
+        "truncated": False,
+        "statusCode": 200,
+        "statusCodeName": "OK",
+        "timings": {
+            "total": total,
+            "dns": dns,
+            "tcp": tcp,
+            "tls": tls_ms,
+            "firstByte": first,
+            "download": download,
+        },
+        "tls": dict(tls),
+    }
+
+
+def http_failed(
+    address: str, raw_output: str, total: int, dns: int | None, tcp: int | None
+) -> dict[str, Any]:
+    """A failed HTTPS test as recorded (``failureSource: target``)."""
+    return {
+        "status": "failed",
+        "failureSource": "target",
+        "resolvedAddress": address,
+        "headers": {},
+        "rawHeaders": None,
+        "rawBody": None,
+        "rawOutput": raw_output,
+        "truncated": False,
+        "statusCode": None,
+        "statusCodeName": None,
+        "timings": {"total": total, "dns": dns, "tcp": tcp, "tls": None, "firstByte": None, "download": None},
+        "tls": None,
+    }
+
+
+TLS_TIMEOUT = "Request timed out during the TLS handshake."
+TCP_TIMEOUT = "Request timed out while establishing the TCP connection."
+PANEL_IP = "91.107.164.134"
+
+HTTP_OK_GITHUB_RIGHTEL = http_ok(
+    "140.82.121.4", (548, 137, 126, 130, 155, 0), _TLS_GITHUB, "Date: Thu, 05 Nov 2026 16:15:33 GMT"
+)
+HTTP_OK_GITHUB_ARVAN = http_ok(
+    "140.82.121.4", (226, 12, 69, 75, 70, 0), _TLS_GITHUB, "Date: Thu, 05 Nov 2026 16:15:36 GMT"
+)
+HTTP_OK_GITHUB_HOSTIRAN = http_ok(
+    "140.82.121.4", (316, 3, 101, 109, 103, 0), _TLS_GITHUB, "Date: Thu, 05 Nov 2026 16:15:29 GMT"
+)
+HTTP_OK_PANEL_ARVAN = http_ok(PANEL_IP, (396, 164, 74, 81, 76, 1), _TLS_PANEL, "Cache-Control: no-cache")
+HTTP_OK_PANEL_PISHGAMAN = http_ok(PANEL_IP, (457, 201, 75, 104, 77, 0), _TLS_PANEL, "Cache-Control: no-cache")
+HTTP_OK_PANEL_PASARGAD = http_ok(
+    PANEL_IP, (527, 138, 117, 136, 136, 0), _TLS_PANEL, "Cache-Control: no-cache"
+)
+HTTP_OK_APPLE_RIGHTEL = http_ok("23.36.157.47", (540, 141, 103, 143, 153, 0), _TLS_APPLE, "Server: Apple")
+# Rightel connected over TCP in 34 ms (its own fake answer), then the handshake timed out.
+HTTP_TLS_TIMEOUT_RIGHTEL_443 = http_failed(PANEL_IP, TLS_TIMEOUT, 15000, 132, 34)
+HTTP_TLS_TIMEOUT_RIGHTEL_8443 = http_failed(PANEL_IP, TLS_TIMEOUT, 15002, 133, 59)
+# AbrArvan (no fake answer): the dropped port 8443 times out already at the TCP connection.
+HTTP_TCP_TIMEOUT_ARVAN_8443 = http_failed(PANEL_IP, TCP_TIMEOUT, 15001, 207, None)
+# An IP target (no SNI) that the server refuses: the TLS handshake is reset.
+HTTP_RESET_ARVAN = http_failed(PANEL_IP, "read ECONNRESET", 92, None, 83)
+
+TLS_LOCATIONS = [{"asn": 197207, "limit": 3}, {"asn": 57218, "limit": 2}, {"country": "IR", "limit": 3}]
+
+
+def gp_https(
+    mid: str,
+    target: str,
+    port: int,
+    results: list[tuple[dict[str, Any], dict[str, Any]]],
+    *,
+    at: str,
+    locations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """A finished ``http`` measurement in the recorded shape around recorded probe/result objects."""
+    return {
+        "id": mid,
+        "type": "http",
+        "status": "finished",
+        "createdAt": at,
+        "updatedAt": at,
+        "target": target,
+        "probesCount": len(results),
+        "locations": copy.deepcopy(locations if locations is not None else TLS_LOCATIONS),
+        "measurementOptions": {"port": port},
+        "results": [{"probe": dict(p), "result": copy.deepcopy(r)} for p, r in results],
+    }
+
+
+# github.com:443 (the TLS control): Rightel and two datacenter networks, all 200 (as recorded).
+GP_HTTPS_GITHUB = gp_https(
+    "2ezQw50QA0u8rglRt00021Rtv",
+    "github.com",
+    443,
+    [
+        (_IR_RIGHTEL, HTTP_OK_GITHUB_RIGHTEL),
+        (_IR_ARVAN, HTTP_OK_GITHUB_ARVAN),
+        (_IR_HOSTIRAN, HTTP_OK_GITHUB_HOSTIRAN),
+    ],
+    at="2026-11-05T16:15:37.146Z",
+)
+# panel.beyra-ai.com:443 (fsn1): Rightel timed out in the TLS handshake; three other networks got 200.
+GP_HTTPS_PANEL_443 = gp_https(
+    "2hlXQWvTwWkidFxHE00021Rtv",
+    "panel.beyra-ai.com",
+    443,
+    [
+        (_IR_RIGHTEL, HTTP_TLS_TIMEOUT_RIGHTEL_443),
+        (_IR_ARVAN, HTTP_OK_PANEL_ARVAN),
+        (_IR_PISHGAMAN, HTTP_OK_PANEL_PISHGAMAN),
+        (_IR_PASARGAD, HTTP_OK_PANEL_PASARGAD),
+    ],
+    at="2026-11-05T16:16:08.167Z",
+)
+# panel.beyra-ai.com:8443 (nothing listens, the port is dropped), as recorded.
+GP_HTTPS_PANEL_8443 = gp_https(
+    "2BxvEpnwulLDMY5XJ00021Rtw",
+    "panel.beyra-ai.com",
+    8443,
+    [(_IR_RIGHTEL, HTTP_TLS_TIMEOUT_RIGHTEL_8443), (_IR_ARVAN, HTTP_TCP_TIMEOUT_ARVAN_8443)],
+    at="2026-11-05T16:16:39.086Z",
+    locations=[{"asn": 197207, "limit": 3}, {"asn": 57218, "limit": 2}, {"asn": 202468}],
+)
+# panel.beyra-ai.com:443 from MCI and Rightel (17:19 UTC): both "connected" over TCP in about 60 ms
+# (their own answer) and timed out in the TLS handshake. This is a blocked address (P15, fsn1).
+HTTP_TLS_TIMEOUT_MCI_443 = http_failed(PANEL_IP, TLS_TIMEOUT, 14850, 167, 64)
+HTTP_TLS_TIMEOUT_RIGHTEL_443_B = http_failed(PANEL_IP, TLS_TIMEOUT, 15001, 154, 52)
+GP_HTTPS_PANEL_BLOCKED = gp_https(
+    "25GOwzSgeEUHeKEGk00021Rux",
+    "panel.beyra-ai.com",
+    443,
+    [(_MCI_PROBE, HTTP_TLS_TIMEOUT_MCI_443), (_IR_RIGHTEL, HTTP_TLS_TIMEOUT_RIGHTEL_443_B)],
+    at="2026-11-05T17:20:09.821Z",
+    locations=[{"asn": 197207, "limit": 3}, {"asn": 57218, "limit": 2}],
+)
+# github.com:443 from MCI a moment later: 200 after a TLS 1.3 handshake.
+HTTP_OK_GITHUB_MCI = http_ok(
+    "140.82.121.3", (421, 11, 131, 140, 138, 1), _TLS_GITHUB, "Date: Thu, 05 Nov 2026 17:20:04 GMT"
+)
+GP_HTTPS_GITHUB_MCI = gp_https(
+    "277nJKG6DPsAZCXKU00021Ruy",
+    "github.com",
+    443,
+    [(_MCI_PROBE, HTTP_OK_GITHUB_MCI)],
+    at="2026-11-05T17:20:11.713Z",
+    locations=[{"asn": 197207, "limit": 3}],
+)
+# www.apple.com reusing the probes of a github.com control from MCI + Rightel (only Rightel had one).
+GP_HTTPS_APPLE_REUSED = gp_https(
+    "2gxMU9pkGcKbaoOSd00021RuG",
+    "www.apple.com",
+    443,
+    [(_IR_RIGHTEL, HTTP_OK_APPLE_RIGHTEL)],
+    at="2026-11-05T16:36:45.810Z",
+    locations=[{"asn": 197207, "limit": 3}, {"asn": 57218, "limit": 2}],
+)
+
+
+# Probe objects as recorded, for measurements assembled in the tests.
+MCI_PROBE = _MCI_PROBE
+RIGHTEL_PROBE = _IR_RIGHTEL
+ARVAN_PROBE = _IR_ARVAN
+PISHGAMAN_PROBE = _IR_PISHGAMAN
+
 GP_NO_PROBES_422 = {
     "error": {"type": "no_probes_found", "message": "No matching IPv4 probes available."},
     "links": {"documentation": "https://globalping.io/docs/api.globalping.io#post-/v1/measurements"},
@@ -516,7 +733,9 @@ async def clean_net_tables(engine: AsyncEngine) -> None:
         await conn.execute(text("DELETE FROM cf_zones"))
         await conn.execute(text("DELETE FROM cf_state"))
         await conn.execute(text("DELETE FROM secrets WHERE name = 'cloudflare:token'"))
-        await conn.execute(text("DELETE FROM settings WHERE key = 'probes'"))
+        await conn.execute(text("DELETE FROM settings WHERE key IN ('probes', 'targets', 'targets.state')"))
+        await conn.execute(text("DELETE FROM target_states"))
+        await conn.execute(text("DELETE FROM probe_location_reach"))
         await conn.execute(text("DELETE FROM actions_log"))
         await conn.execute(
             text(

@@ -58,6 +58,7 @@ from proxyhub.probes.globalping import GlobalpingClient, RateLimit
 from proxyhub.probes.service import (
     GpFactory,
     globalping_rate,
+    last_tls_probes,
     node_probe_reserve,
     ready_node_count,
     record_globalping_rate,
@@ -143,7 +144,7 @@ class DomainsReconciler(Reconciler):
             if not due:
                 return 0
             settings = await load_probe_settings(db)
-            reserve = node_probe_reserve(settings, await ready_node_count(db))
+            reserve = node_probe_reserve(settings, await ready_node_count(db), await last_tls_probes(db))
             rate = tighter_rate(await globalping_rate(db), self._rate, now)
         done = 0
         async with self._gp_factory() as gp:

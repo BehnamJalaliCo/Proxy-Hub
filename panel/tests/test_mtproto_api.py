@@ -48,6 +48,7 @@ PATHS = {("GET", BASE), ("PUT", f"{BASE}/settings")}
 DEFAULTS = {
     "port": 8443,
     "tls_domain": "www.microsoft.com",
+    "target_mode": "auto",
     "mode_tls": True,
     "mode_secure": False,
     "mode_classic": False,
@@ -203,7 +204,7 @@ async def test_put_settings_saves_logs_and_the_loop_applies_them(
     }
     r = await client.put(f"{BASE}/settings", json=new)
     assert r.status_code == 200, r.text
-    want = {**new, "tls_domain": "www.apple.com", "link_mode": "secure"}
+    want = {**new, "tls_domain": "www.apple.com", "target_mode": "auto", "link_mode": "secure"}
     assert r.json() == {"settings": want}
     assert (await client.get(BASE)).json()["settings"] == want
     logged = [a for a in await actions(engine) if a["action"] == "settings_update"]
@@ -227,6 +228,7 @@ async def test_put_settings_saves_logs_and_the_loop_applies_them(
         ({"tls_domain": "no spaces.com"}, ["tls_domain"]),
         ({"mode_tls": False}, ["modes"]),
         ({"mode_tls": 1}, ["mode_tls"]),
+        ({"target_mode": "sometimes"}, ["target_mode"]),
         ({"secret": "0" * 32}, ["unknown"]),
     ],
 )
