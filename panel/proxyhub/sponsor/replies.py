@@ -16,9 +16,10 @@ people have published (kept word for word as test data in tests/test_sponsor_rep
 The channel prompt and the confirmation after the channel link are not published anywhere: they
 are matched by meaning (channel + link; success words without refusal or removal words), and the
 first real run records them in actions_log (docs/11 F11): the runbook checks them against these
-patterns before the module is relied on. A /myproxies button is pressed only when its whole label
-is the proxy's ``host:port``. Anything not recognised is "unknown": the flow stops there
-(proxyhub/sponsor/conversation.py). Every text that leaves the flow goes through :func:`mask`.
+patterns before the module is relied on. A /myproxies button is pressed only when its label names
+the proxy's host (or ``host:port``) with nothing beside it but hex. Anything not recognised is
+"unknown": the flow stops there (proxyhub/sponsor/conversation.py). Every text that leaves the
+flow goes through :func:`mask`.
 """
 
 from __future__ import annotations
@@ -108,15 +109,28 @@ def is_proxy_list(text: str) -> bool:
     return bool(PROXY_LIST.search(text))
 
 
+_HEX_WORD: Final = re.compile(r"[0-9a-f]{1,64}")
+
+
+def is_address_label(label: str, host: str, port: int) -> bool:
+    """The button names this proxy: one word is its ``host`` or ``host:port`` and every other word
+    (at most two) is plain hex. The real /myproxies list labels a button "<host> <hex>" (P13 on the
+    panel server). Any other word ("Delete 1.2.3.4:443") or another host never matches."""
+    words = normalize_label(label).split(" ")
+    ours = {host.lower(), f"{host}:{port}".lower()}
+    named = [w for w in words if w in ours]
+    rest = [w for w in words if w not in ours]
+    return len(named) == 1 and len(rest) <= 2 and all(_HEX_WORD.fullmatch(w) for w in rest)
+
+
 def address_buttons(messages: Iterable[BotMessage], host: str, port: int) -> list[tuple[int, BotButton]]:
-    """Pressable buttons whose label is exactly this proxy's ``host:port`` (spaces and emoji aside):
-    a label with any other word ("Delete 1.2.3.4:443") is never pressed."""
-    want = f"{host}:{port}".lower()
+    """Pressable buttons that name this proxy (:func:`is_address_label`); the caller presses one only
+    when exactly one matches."""
     found: list[tuple[int, BotButton]] = []
     for message in messages:
         for row in message.buttons:
             for button in row:
-                if button.data is not None and normalize_label(button.text) == want:
+                if button.data is not None and is_address_label(button.text, host, port):
                     found.append((message.id, button))
     return found
 
