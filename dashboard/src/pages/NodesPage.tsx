@@ -29,6 +29,7 @@ import { ProbeGrid } from "../components/ProbeGrid";
 import { Button, IconButton } from "../components/ui/Button";
 import { Badge, Card, CardHeader, StatusDot } from "../components/ui/Card";
 import { ConfirmDialog, Drawer } from "../components/ui/Dialogs";
+import { PurgeEndedButton } from "../components/PurgeEnded";
 import { EndedSection } from "../components/ui/EndedSection";
 import { CopyButton, EmptyState, LoadError, Skeleton, SkeletonLines } from "../components/ui/Feedback";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -752,7 +753,11 @@ export default function NodesPage() {
                     ))}
                   </ul>
                 )}
-                <EndedSection count={split.ended.length} hint="سوخته، در حال کنار رفتن یا حذف‌شده (حذف‌شده‌ها تا یک هفته).">
+                <EndedSection
+                  count={split.ended.length}
+                  hint="سوخته، در حال کنار رفتن یا حذف‌شده (حذف‌شده‌ها تا یک هفته)."
+                  action={<PurgeEndedButton />}
+                >
                   <ul className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                     {split.ended.map((n, i) => (
                       <NodeCard

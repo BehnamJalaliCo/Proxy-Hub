@@ -5,6 +5,7 @@ import { useState, type ReactNode, type SubmitEvent } from "react";
 
 import { Button } from "../components/ui/Button";
 import { Badge, Card, CardHeader } from "../components/ui/Card";
+import { PurgeEndedButton } from "../components/PurgeEnded";
 import { EndedSection } from "../components/ui/EndedSection";
 import { CopyButton, EmptyState, LoadError, Skeleton } from "../components/ui/Feedback";
 import { Field, Segmented, TextInput, Toggle } from "../components/ui/Form";
@@ -345,7 +346,11 @@ export default function MtprotoPage() {
               </ul>
             ) : null}
             {split ? (
-              <EndedSection count={split.ended.length} hint="nodeهای کنارگذاشته یا فیلترشده؛ لینکشان دیگر منتشر نمیشود.">
+              <EndedSection
+                count={split.ended.length}
+                hint="nodeهای کنارگذاشته یا فیلترشده؛ لینکشان دیگر منتشر نمیشود."
+                action={<PurgeEndedButton />}
+              >
                 <ul className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                   {split.ended.map((p, i) => (
                     <ProxyCard key={p.key} p={p} index={i} />

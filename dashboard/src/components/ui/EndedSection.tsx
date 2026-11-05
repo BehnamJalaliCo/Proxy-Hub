@@ -7,9 +7,22 @@ import { formatNumber } from "../../lib/format";
 /**
  * «پایان‌یافته‌ها»: a collapsed section under a list, closed by default, with how many items it
  * holds. Nothing is shown when there are none. A native <details>, so it opens with the keyboard
- * and a screen reader announces it as expandable.
+ * and a screen reader announces it as expandable. `action` (the «پاک کردن پایان‌یافته‌ها» button)
+ * sits at the top of the open section.
  */
-export function EndedSection({ count, hint, children, className }: { count: number; hint?: string; children: ReactNode; className?: string }) {
+export function EndedSection({
+  count,
+  hint,
+  action,
+  children,
+  className,
+}: {
+  count: number;
+  hint?: string;
+  action?: ReactNode;
+  children: ReactNode;
+  className?: string;
+}) {
   if (count <= 0) return null;
   return (
     <details className={cn("group rounded-3xl border border-line bg-surface-2/40", className)}>
@@ -22,7 +35,10 @@ export function EndedSection({ count, hint, children, className }: { count: numb
         {hint ? <span className="hidden truncate text-xs font-normal text-fg-faint sm:inline">{hint}</span> : null}
         <ChevronDown className="ms-auto size-4 shrink-0 transition-transform group-open:rotate-180" aria-hidden />
       </summary>
-      <div className="px-3 pb-3 sm:px-4 sm:pb-4">{children}</div>
+      <div className="px-3 pb-3 sm:px-4 sm:pb-4">
+        {action ? <div className="mb-3 flex flex-wrap items-center justify-end gap-2">{action}</div> : null}
+        {children}
+      </div>
     </details>
   );
 }

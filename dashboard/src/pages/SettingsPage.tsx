@@ -1,9 +1,10 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { FlaskConical, Gauge, MapPin, Save, Server, SlidersHorizontal, Undo2 } from "lucide-react";
+import { Archive, FlaskConical, Gauge, MapPin, Save, Server, SlidersHorizontal, Undo2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useState, type SubmitEvent, type ReactNode } from "react";
 
 import { KillSwitchControl } from "../components/KillSwitchControl";
+import { PurgeEndedButton } from "../components/PurgeEnded";
 import { TargetCandidates } from "../components/TargetCandidates";
 import { Button } from "../components/ui/Button";
 import { Card, CardHeader } from "../components/ui/Card";
@@ -280,6 +281,17 @@ export default function SettingsPage() {
           <KillSwitchControl on={data.kill_switch} budgetSet={data.budget_cap_eur !== null} nodeCapSet={data.node_cap_total !== null} />
           <SettingsForm key={version} initial={data} onSaved={() => setVersion((v) => v + 1)} />
           <TargetCandidates />
+          <Card>
+            <CardHeader
+              icon={<Archive className="size-5" />}
+              title="پایان‌یافته‌ها"
+              subtitle="nodeهای حذف‌شده، کانفیگ‌ها و ثبت‌های اسپانسر تمام‌شده و کارهای تمام‌شده‌ی صف، از دیتابیس پنل. آنچه هنوز به کار میآید (هزینه‌ی این ماه در سقف بودجه، سنجش‌های اخیر از ایران، پست‌های تازه) میماند."
+            />
+            <div className="flex flex-wrap items-center gap-3 p-5">
+              <PurgeEndedButton size="md" />
+              <span className="text-xs leading-6 text-fg-faint">پیش از پاک کردن، شمار هر بخش نشان داده میشود.</span>
+            </div>
+          </Card>
         </div>
       ) : null}
     </>
