@@ -202,7 +202,7 @@ function SettingsForm({ current, defaults, corrupt }: { current: MtprotoSettings
           </div>
         ) : null}
         <div className="grid gap-5 sm:grid-cols-2">
-          <Field label="پورت" htmlFor="mtp-port" hint="پیش‌فرض ۸۴۴۳. پورت ۴۴۳ مال VLESS (WebSocket + TLS یا Reality) است. پورت دیگر فقط وقتی کار میکند که فایروال nodeها هم بازش کند." error={shown("port")}>
+          <Field label="پورت" htmlFor="mtp-port" hint="پیش‌فرض ۸۴۴۳. پورت ۴۴۳ مال VLESS (WebSocket + TLS یا Reality) و ۲۰۸۳ مال XHTTP است. پورت دیگر فقط وقتی کار میکند که فایروال nodeها هم بازش کند." error={shown("port")}>
             <TextInput id="mtp-port" inputMode="numeric" latin value={draft.port} onChange={(e) => set("port", e.target.value)} invalid={Boolean(shown("port"))} />
           </Field>
           <Field

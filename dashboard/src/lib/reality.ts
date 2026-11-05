@@ -192,10 +192,11 @@ export function xrayState(x: RealityXray | null, transport: Transport = "reality
 
 /** The XHTTP inbound of a node in one Persian phrase and a tone (null: nothing to say, e.g. ws_tls). */
 export function xhttpState(n: Pick<RealityNode, "agent_xhttp" | "xray">, s: Pick<RealitySettings, "transport" | "xhttp_enabled">): { label: string; tone: Tone } | null {
-  if (s.transport !== "reality") return null;
+  // No Xray report at all: the node's Xray line already says why.
+  if (s.transport !== "reality" || n.xray === null) return null;
   if (!s.xhttp_enabled) return { label: "XHTTP خاموش است", tone: "neutral" };
   if (!n.agent_xhttp) return { label: "عامل این node قدیمی است (XHTTP از نسخه‌ی ۰٫۴٫۰)", tone: "neutral" };
-  if (n.xray?.up && n.xray.xhttp_port !== null) return { label: `XHTTP روی پورت ${toFaDigits(String(n.xray.xhttp_port))} فعال است`, tone: "success" };
+  if (n.xray.up && n.xray.xhttp_port !== null) return { label: `XHTTP روی پورت ${toFaDigits(String(n.xray.xhttp_port))} فعال است`, tone: "success" };
   return { label: "XHTTP هنوز روی node بالا نیامده", tone: "info" };
 }
 

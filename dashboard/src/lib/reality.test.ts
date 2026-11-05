@@ -231,7 +231,7 @@ describe("XHTTP (VLESS + XHTTP + REALITY next to every REALITY inbound)", () => 
     expect(xhttpState(node, reality)).toEqual({ label: "XHTTP روی پورت ۲۰۸۳ فعال است", tone: "success" });
     expect(xhttpState({ ...node, xray: { ...xray, xhttp_port: null } }, reality)?.tone).toBe("info");
     expect(xhttpState({ ...node, xray: { ...xray, up: false } }, reality)?.tone).toBe("info");
-    expect(xhttpState({ ...node, xray: null }, reality)?.tone).toBe("info");
+    expect(xhttpState({ ...node, xray: null }, reality)).toBeNull(); // the Xray line explains
     expect(xhttpState({ ...node, agent_xhttp: false }, reality)?.label).toContain("۰٫۴٫۰");
     expect(xhttpState(node, { ...reality, xhttp_enabled: false })?.tone).toBe("neutral");
     expect(xhttpState(node, { transport: "ws_tls", xhttp_enabled: true })).toBeNull();

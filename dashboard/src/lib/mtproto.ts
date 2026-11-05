@@ -112,6 +112,7 @@ export const MODE_LABEL: Record<MtprotoMode, { label: string; short: string; hin
 export const FORBIDDEN_PORTS: ReadonlyMap<number, string> = new Map([
   [22, "پورت ۲۲ برای SSH است و فایروال node آن را میبندد."],
   [443, "پورت ۴۴۳ مال VLESS Reality روی همه‌ی nodeهاست."],
+  [2083, "پورت ۲۰۸۳ مال VLESS + XHTTP روی همه‌ی nodeهاست."],
   [9090, "پورت ۹۰۹۰ مال آمار داخلی Telemt است."],
   [9091, "پورت ۹۰۹۱ مال API داخلی Telemt است."],
 ]);

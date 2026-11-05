@@ -60,7 +60,7 @@ describe("port", () => {
     expect(parsePort("1")).toEqual({ ok: true, value: 1 });
     expect(parsePort("65535")).toEqual({ ok: true, value: 65535 });
   });
-  it.each(["", "0", "65536", "84a3", "-1", "8443.0", "443", "22", "9090", "9091"])("refuses %j with a Persian hint", (raw) => {
+  it.each(["", "0", "65536", "84a3", "-1", "8443.0", "443", "2083", "22", "9090", "9091"])("refuses %j with a Persian hint", (raw) => {
     const r = parsePort(raw);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toMatch(PERSIAN);

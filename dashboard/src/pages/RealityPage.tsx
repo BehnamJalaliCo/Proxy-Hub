@@ -141,14 +141,14 @@ function ConfigItem({ c, now }: { c: RealityConfig; now: Date }) {
   return (
     <li className={cn("rounded-2xl border border-line p-3 sm:p-4", active ? "bg-surface-2/50" : "bg-surface-2/20 opacity-80")}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="ltr truncate font-bold text-fg">{c.name}</span>
           <Badge tone={st.tone} dot>
             {st.label}
           </Badge>
           <Badge tone="neutral">{TRANSPORT[c.transport].short}</Badge>
           {xhttp ? <Badge tone="brand">+ XHTTP</Badge> : null}
-          {active && !c.listed ? <Badge tone="info">منتظر تأیید node</Badge> : null}
+          {active && !c.listed && !xhttp ? <Badge tone="info">منتظر تأیید node</Badge> : null}
         </div>
         {c.url && !xhttp ? <CopyButton text={c.url} label="کپی لینک" /> : null}
       </div>
