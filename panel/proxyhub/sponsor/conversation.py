@@ -36,6 +36,10 @@ class Step(StrEnum):
     PRESSED_PROXY = "pressed_proxy"
     PRESSED_PROMOTION = "pressed_promotion"
     SENT_CHANNEL = "sent_channel"
+    # Reading the whole /myproxies list and removing a dead proxy (proxyhub/sponsor/botlist.py).
+    PRESSED_NEXT_PAGE = "pressed_next_page"
+    PRESSED_REMOVE = "pressed_remove"
+    PRESSED_CONFIRM = "pressed_confirm"
 
 
 @dataclass(frozen=True)

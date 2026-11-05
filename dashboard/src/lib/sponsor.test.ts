@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { actionLabel } from "./labels";
 import {
+  botEntryStatusInfo,
+  botJobInfo,
+  botJobOpen,
+  botPromotionInfo,
+  botRemovalInfo,
+  botScreenStage,
   campaignBody,
   campaignStateInfo,
   canDelete,
@@ -17,10 +23,14 @@ import {
   priceText,
   regCounts,
   regStateInfo,
+  sortBotEntries,
   sortRegistrations,
   sponsorLine,
   tagNote,
   toLocalInput,
+  type BotListEntry,
+  type BotListJob,
+  type BotListSection,
   type CampaignDraft,
   type SponsorCampaign,
   type SponsorOverview,
@@ -226,5 +236,130 @@ describe("campaigns", () => {
   it("gives the sponsor actions Persian names in the events page", () => {
     expect(actionLabel("sponsor.flow_stuck")).toMatch(/متوقف/);
     expect(actionLabel("sponsor.something_new")).toBe("sponsor.something_new");
+    expect(actionLabel("sponsor.mtproxybot_removed")).toMatch(/حذف پروکسی مرده/);
+    expect(actionLabel("sponsor.mtproxybot_observed")).toMatch(/بی زدن دکمه/);
+  });
+});
+
+describe("@MTProxybot's own list", () => {
+  const entry = (over: Partial<BotListEntry> = {}): BotListEntry => ({
+    id: "e1",
+    address: "t7aae9f0c.ipoxxo.online",
+    host: "t7aae9f0c.ipoxxo.online",
+    port: null,
+    label_shape: "<host> <hex>",
+    page: 1,
+    listed: 1,
+    status: "live",
+    exact: true,
+    removable: false,
+    registration: { address: "t7aae9f0c.ipoxxo.online:8443", state: "registered", state_reason: null, node_state: "ready" },
+    sponsor_channel: "ipoxxo",
+    menu_read_at: "2026-11-04T11:00:00Z",
+    promotion: "ok",
+    removal_state: null,
+    removal_reason: null,
+    removal_reason_fa: null,
+    removal_at: null,
+    first_seen_at: "2026-11-04T10:00:00Z",
+    ...over,
+  });
+
+  const job = (over: Partial<BotListJob> = {}): BotListJob => ({
+    kind: "cleanup",
+    mode: "observe",
+    state: "running",
+    requested_by: "admin:owner",
+    requested_at: "2026-11-04T11:00:00Z",
+    started_at: "2026-11-04T11:01:00Z",
+    finished_at: null,
+    list_read_at: null,
+    relisted: false,
+    observed: null,
+    removed: 0,
+    failures: 0,
+    reason: null,
+    step: null,
+    last_error: null,
+    reason_fa: null,
+    last_error_fa: null,
+    ...over,
+  });
+
+  const section = (over: Partial<BotListSection> = {}): BotListSection => ({
+    removal_enabled: false,
+    cleanup_mode: "observe",
+    wanted_channel: "ipoxxo",
+    job: null,
+    list: { read_at: "2026-11-04T11:30:00Z", pages: 1, complete: true, note: null, total: 1 },
+    observation: null,
+    counts: { live: 1, gone: 0, retired: 0, unknown: 0, removable: 0, promotion_ok: 1, promotion_problem: 0, promotion_unread: 0 },
+    entries: [entry()],
+    screens: [],
+    ...over,
+  });
+
+  it("names each status in Persian as the owner asked", () => {
+    expect(botEntryStatusInfo("live").label).toBe("فعال");
+    expect(botEntryStatusInfo("gone").label).toBe("سرور حذف‌شده");
+    expect(botEntryStatusInfo("unknown").label).toBe("ناشناس");
+    expect(botEntryStatusInfo("unknown").hint).toMatch(/هرگز/);
+    expect(botEntryStatusInfo("weird").label).toBe("weird");
+  });
+
+  it("lists the live proxies first, then the dead, retired and unknown ones, in the bot's order", () => {
+    const list = [
+      entry({ id: "u", status: "unknown" }),
+      entry({ id: "g1", status: "gone" }),
+      entry({ id: "l", status: "live" }),
+      entry({ id: "r", status: "retired" }),
+      entry({ id: "g2", status: "gone" }),
+    ];
+    expect(sortBotEntries(list).map((e) => e.id)).toEqual(["l", "g1", "g2", "r", "u"]);
+  });
+
+  it("flags a live proxy that does not show the wanted sponsor", () => {
+    expect(botPromotionInfo(entry(), "ipoxxo")).toEqual({ tone: "success", text: "اسپانسر: ‎@ipoxxo‎" });
+    const other = botPromotionInfo(entry({ promotion: "other", sponsor_channel: "someone" }), "ipoxxo");
+    expect(other?.tone).toBe("danger");
+    expect(other?.text).toMatch(/@someone.*@ipoxxo/);
+    expect(botPromotionInfo(entry({ promotion: "not_shown", sponsor_channel: null }), "ipoxxo")?.tone).toBe("warning");
+    expect(botPromotionInfo(entry({ promotion: "unread" }), "ipoxxo")?.tone).toBe("info");
+    expect(botPromotionInfo(entry({ status: "gone", promotion: null }), "ipoxxo")).toBeNull();
+  });
+
+  it("says what the cleanup did to an entry", () => {
+    expect(botRemovalInfo(entry(), null)).toBeNull();
+    expect(botRemovalInfo(entry({ removal_state: "observed" }), null)?.text).toMatch(/چیزی زده نشد/);
+    const removed = entry({ status: "gone", removal_state: "removed", removal_at: "2026-11-04T11:40:00Z" });
+    expect(botRemovalInfo(removed, "2026-11-04T11:30:00Z")?.tone).toBe("success");
+    // The list was read again after the removal and the proxy is still in it.
+    expect(botRemovalInfo(removed, "2026-11-04T11:50:00Z")?.text).toMatch(/هنوز در فهرست/);
+    const stuck = entry({ removal_state: "stuck", removal_reason_fa: "در صفحه‌ی تأیید دکمه‌ای نبود." });
+    expect(botRemovalInfo(stuck, null)).toEqual({ tone: "danger", text: "در صفحه‌ی تأیید دکمه‌ای نبود." });
+  });
+
+  it("describes the job in one line", () => {
+    expect(botJobInfo(section())).toBeNull();
+    expect(botJobOpen(section())).toBe(false);
+    const queued = section({ job: job({ state: "queued", kind: "inventory", mode: "look" }) });
+    expect(botJobOpen(queued)).toBe(true);
+    expect(botJobInfo(queued)?.title).toMatch(/خواندن فهرست.*در صف/);
+    const running = section({ job: job({ mode: "remove", removed: 3, last_error_fa: "به تلگرام نرسید." }) });
+    expect(botJobInfo(running)?.text).toMatch(/۳ پروکسی/);
+    expect(botJobInfo(running)?.text).toMatch(/به تلگرام نرسید/);
+    expect(botJobInfo(section({ job: job({ state: "done", reason: "nothing_to_remove" }) }))?.text).toMatch(/مرده‌ای/);
+    const stuck = botJobInfo(section({ job: job({ state: "stuck", reason: "no_confirm_button", reason_fa: "دکمه‌ی تأیید نبود." }) }));
+    expect(stuck?.tone).toBe("danger");
+    expect(stuck?.text).toMatch(/دکمه‌ی تأیید نبود/);
+    expect(botJobOpen(section({ job: job({ state: "stuck" }) }))).toBe(false);
+    expect(botJobInfo(section({ job: job({ state: "failed", reason_fa: "ربات جواب نداد." }) }))?.text).toBe("ربات جواب نداد.");
+  });
+
+  it("names the recorded screens", () => {
+    expect(botScreenStage("list_page_2")).toBe("فهرست، صفحه‌ی ۲");
+    expect(botScreenStage("proxy_screen")).toMatch(/پروکسی/);
+    expect(botScreenStage("after_confirm")).toMatch(/تأیید/);
+    expect(botScreenStage("other")).toBe("other");
   });
 });

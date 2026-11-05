@@ -28,10 +28,12 @@ from proxyhub.mtproxy.userclient import (
     ApiCredentials,
     BotButton,
     BotChat,
+    BotMessage,
     ClientOptions,
     Endpoint,
     MtpError,
     OperatorSession,
+    ReadButtons,
     RequestNotAllowed,
     check_request,
     operator_session,
@@ -59,13 +61,24 @@ def _press(peer: object = BOT, data: bytes | None = b"\x01promo", **kw: object) 
 # --- the allowlist on request objects -------------------------------------------------------------------
 
 
+def _read(*labels: tuple[str, bytes], msg_id: int = 42, text: str = "Here is the list") -> ReadButtons:
+    """The bot's buttons as a connection read them (what BotChat.recent remembers)."""
+    read = ReadButtons()
+    buttons = (tuple(BotButton(label, data) for label, data in labels),)
+    read.remember(BotMessage(id=msg_id, outgoing=False, text=text, edit_date=None, buttons=buttons))
+    return read
+
+
+READ = _read(("Set promotion", b"\x01promo"))
+
+
 @pytest.mark.parametrize("request_", [_send(), _history(), _press(), _send(no_webpage=True)])
 def test_the_three_chat_requests_pass_only_in_the_bots_open_chat(request_: object) -> None:
-    check_request(request_, bot_id=BOT_ID)
+    check_request(request_, bot_id=BOT_ID, buttons=READ)
     with pytest.raises(RequestNotAllowed, match="only in the chat with @MTProxybot"):
-        check_request(request_)  # the chat was not opened on this connection
+        check_request(request_, buttons=READ)  # the chat was not opened on this connection
     with pytest.raises(RequestNotAllowed, match="only with @MTProxybot"):
-        check_request(request_, bot_id=BOT_ID + 1)  # the stored bot id is another user
+        check_request(request_, bot_id=BOT_ID + 1, buttons=READ)  # the stored bot id is another user
 
 
 OTHER_PEERS = [

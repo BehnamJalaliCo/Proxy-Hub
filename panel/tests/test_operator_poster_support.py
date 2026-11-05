@@ -176,7 +176,13 @@ def telegram_answers(monkeypatch: pytest.MonkeyPatch, answer: Answer) -> Iterato
         for item in request if isinstance(request, list) else [request]:
             # The client's own allowlist let it through already; checked again so that no test can
             # pass with a request the allowlist would refuse.
-            check_request(item, self.scope, bot_id=self._mtproxybot_id)
+            check_request(
+                item,
+                self.scope,
+                bot_id=self._mtproxybot_id,
+                buttons=self._read_buttons,
+                removal=self._removal,
+            )
             requests.append(item)
         result = answer(request)
         if isinstance(result, BaseException):

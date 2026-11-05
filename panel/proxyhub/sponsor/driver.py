@@ -10,6 +10,9 @@ the state machine what is next.
 It stops at the first result (tag, promotion set, or a reply it does not understand) or at the
 first failure, and never raises for Telegram's or the pace's reasons: the caller gets a
 :class:`FlowResult`. No database transaction is open while Telegram is called.
+
+:func:`walk` does the same for the list walks of proxyhub/sponsor/botlist.py (reading every page of
+/myproxies, a proxy's screen, removing a dead proxy), whose state machines keep their own memory.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Final, Protocol
 
-from proxyhub.mtproxy.userclient import BotMessage, MtpError
+from proxyhub.mtproxy.userclient import BotMessage, MtpError, RequestNotAllowed
 from proxyhub.sponsor import replies
 from proxyhub.sponsor.conversation import (
     Job,
@@ -37,6 +40,7 @@ from proxyhub.sponsor.conversation import (
 from proxyhub.sponsor.pacing import PaceStop
 
 MAX_ACTIONS: Final = 6
+REFUSED: Final = "request_not_allowed"
 
 
 class Chat(Protocol):
@@ -180,3 +184,91 @@ async def run(
         )
     except PaceStop as exc:
         return FlowResult(error=exc.reason, last_step=step, messages_sent=sent)
+
+
+# --- the list walks (proxyhub/sponsor/botlist.py) ---------------------------------------------------------
+
+
+class Machine(Protocol):
+    """A walk as a pure state machine with its own memory: the first message, then, for each reply,
+    the next action or a result (anything that is not a :class:`Send` or :class:`Press`)."""
+
+    def first(self) -> Send: ...
+    def next(self, step: Step, seen: Observation) -> object: ...
+
+
+@dataclass(frozen=True)
+class WalkResult:
+    """``result`` when the machine reached one, else ``error``. ``attempted_step``: the step of the
+    last message that was TRIED (it may have reached the bot even when the call failed), so a walk
+    that stopped after a removal button can never be taken for one that did not press it."""
+
+    result: object | None = None
+    error: str | None = None
+    rpc: str | None = None
+    retry_after_s: int | None = None
+    last_step: Step | None = None
+    attempted_step: Step | None = None
+    messages_sent: int = 0
+
+
+async def walk(
+    chat: Chat,
+    machine: Machine,
+    *,
+    take_slot: Callable[[], Awaitable[object]],
+    record: Recorder,
+    timing: Timing,
+    max_actions: int,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> WalkResult:
+    """:func:`run` for a :class:`Machine`: the same slot, log line, request and wait for each
+    action, every reply logged with :func:`proxyhub.sponsor.replies.scrub`. Never raises for
+    Telegram's or the pace's reasons."""
+    step: Step | None = None
+    tried: dict[str, Step] = {}
+    current: dict[str, Send | Press] = {}
+    sent = 0
+
+    async def slot() -> object:
+        taken = await take_slot()
+        tried["step"] = current["action"].then  # from here on, the message may reach the bot
+        return taken
+
+    try:
+        before = await chat.recent()
+        current["action"] = machine.first()
+        for _ in range(max_actions):
+            answer = await perform(chat, current["action"], take_slot=slot, record=record)
+            sent += 1
+            step = current["action"].then
+            found, before = await _await_reply(chat, before, timing, sleep)
+            if not found and not answer:
+                return WalkResult(error="no_reply", last_step=step, attempted_step=step, messages_sent=sent)
+            seen = Observation(messages=tuple(found), answer=answer)
+            await record.reply(
+                step, replies.scrub(seen.text), [replies.scrub(b) for b in button_labels(found)]
+            )
+            nxt = machine.next(step, seen)
+            if isinstance(nxt, Send | Press):
+                current["action"] = nxt
+                continue
+            return WalkResult(result=nxt, last_step=step, attempted_step=step, messages_sent=sent)
+        return WalkResult(error="too_many_steps", last_step=step, attempted_step=step, messages_sent=sent)
+    except RequestNotAllowed:
+        # The operator client refused a request before it left (its allowlist and the machine
+        # disagree): a stop, never a retry. Nothing of that request reached Telegram.
+        return WalkResult(error=REFUSED, last_step=step, attempted_step=step, messages_sent=sent)
+    except MtpError as exc:
+        return WalkResult(
+            error=exc.code,
+            rpc=exc.rpc,
+            retry_after_s=exc.seconds,
+            last_step=step,
+            attempted_step=tried.get("step"),
+            messages_sent=sent,
+        )
+    except PaceStop as exc:
+        return WalkResult(
+            error=exc.reason, last_step=step, attempted_step=tried.get("step"), messages_sent=sent
+        )

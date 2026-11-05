@@ -33,6 +33,16 @@ ERRORS_FA: Final[dict[str, str]] = {
     "customer_format": "نام مشتری حداکثر ۲۰۰ نویسه است.",
     "lead_format": "زمان زودتر شروع شدن تغییر باید بین ۰ تا ۳۶۰ دقیقه باشد.",
     "registration_retired": "این ثبت بازنشسته است (پروکسی‌اش دیگر وجود ندارد) و ثبت دوباره ندارد.",
+    "mtproxybot_job_running": (
+        "یک کار دیگر با فهرست ‎@MTProxybot‎ در جریان است. صبر کنید تمام شود، یا اول «توقف» را بزنید."
+    ),
+    "mtproxybot_no_job": "کاری با فهرست ‎@MTProxybot‎ در جریان نیست.",
+    "mtproxybot_kill_switch": "کلید توقف روشن است؛ تا خاموش نشود پنل با ‎@MTProxybot‎ گفتگو نمیکند.",
+    "mtproxybot_no_account": "حساب عملیاتی (حساب دوم تلگرام) وصل نیست. اول آن را در صفحه‌ی تلگرام وصل کنید.",
+    "mtproxybot_not_observed": (
+        "حذف واقعی فقط پس از یک اجرای «مشاهده» روشن میشود که صفحه‌ی یک پروکسی مرده را دیده باشد و دقیقاً "
+        "یک دکمه‌ی حذف با شکل شناخته‌شده در آن بوده باشد."
+    ),
 }
 
 STATUS: Final[dict[str, int]] = {
@@ -42,6 +52,11 @@ STATUS: Final[dict[str, int]] = {
     "campaign_closed": 409,
     "campaign_started": 409,
     "registration_retired": 409,
+    "mtproxybot_job_running": 409,
+    "mtproxybot_no_job": 409,
+    "mtproxybot_kill_switch": 409,
+    "mtproxybot_no_account": 409,
+    "mtproxybot_not_observed": 409,
 }
 
 
@@ -57,6 +72,9 @@ STEP_FA: Final[dict[str, str]] = {
     "pressed_proxy": "پس از انتخاب پروکسی در فهرست",
     "pressed_promotion": "پس از زدن دکمه‌ی «Set promotion»",
     "sent_channel": "پس از فرستادن لینک کانال",
+    "pressed_next_page": "پس از رفتن به صفحه‌ی بعد فهرست",
+    "pressed_remove": "پس از زدن دکمه‌ی حذف",
+    "pressed_confirm": "پس از تأیید حذف",
 }
 
 REASON_FA: Final[dict[str, str]] = {
@@ -113,4 +131,58 @@ def stuck_alert(
             "گفتگو نمیکند."
         )
     lines.append("پس از بررسی، در صفحه‌ی «اسپانسر» داشبورد دکمه‌ی «ثبت دوباره» را بزنید.")
+    return "\n".join(lines)
+
+
+# --- @MTProxybot's own list: inventory and cleanup (proxyhub/sponsor/inventory.py) ------------------------
+
+LIST_REASON_FA: Final[dict[str, str]] = {
+    "unexpected_reply": "پاسخ ‎/myproxies‎ فهرست همیشگی ربات نبود.",
+    "wrong_step": "ربات در جای نادرستی از گفتگو جواب داد.",
+    "proxy_not_in_list": "این پروکسی در فهرست ربات پیدا نشد.",
+    "proxy_listed_twice": "دو دکمه‌ی یکسان برای این پروکسی بود و معلوم نبود کدام است.",
+    "menu_of_another_proxy": "ربات صفحه‌ی پروکسی دیگری را نشان داد.",
+    "menu_does_not_name_proxy": "صفحه‌ی پروکسی نشانی خودش را نشان نداد؛ برای ایمنی چیزی زده نشد.",
+    "no_remove_button": "در صفحه‌ی پروکسی دکمه‌ای با شکل شناخته‌شده‌ی حذف نبود.",
+    "several_remove_buttons": "در صفحه‌ی پروکسی چند دکمه‌ی حذف بود؛ برای ایمنی چیزی زده نشد.",
+    "confirm_of_another_proxy": "صفحه‌ی تأیید نام پروکسی دیگری را داشت؛ تأیید زده نشد.",
+    "confirm_does_not_name_proxy": "صفحه‌ی تأیید نشانی همین پروکسی را نشان نداد؛ تأیید زده نشد.",
+    "no_confirm_button": "در صفحه‌ی تأیید دکمه‌ای با شکل شناخته‌شده‌ی تأیید نبود؛ تأیید زده نشد.",
+    "several_confirm_buttons": "در صفحه‌ی تأیید چند دکمه‌ی تأیید بود؛ برای ایمنی چیزی زده نشد.",
+    "removal_not_confirmed": "پس از تأیید، ربات نگفت که پروکسی حذف شد. فهرست بعدی نشان میدهد حذف شده یا نه.",
+    "interrupted": "گفتگو پس از زدن دکمه‌ی حذف قطع شد؛ پنل آن را خودکار ادامه نمیدهد.",
+    "list_incomplete": "همه‌ی صفحه‌های فهرست خوانده نشد؛ بدون فهرست کامل هیچ چیزی حذف نمیشود.",
+    "next_page_did_not_change": "دکمه‌ی صفحه‌ی بعد، فهرست را عوض نکرد.",
+    "several_next_buttons": "چند دکمه‌ی صفحه‌ی بعد بود؛ فقط صفحه‌ی اول خوانده شد.",
+    "too_many_pages": "فهرست بیش از ۸ صفحه بود؛ بقیه خوانده نشد.",
+    "nothing_to_remove": "پروکسی مرده‌ای از ما در فهرست ربات نبود.",
+    "owner": "به درخواست شما متوقف شد.",
+    "removal_disabled": "حذف واقعی هنوز روشن نشده است.",
+    "no_reply": "‎@MTProxybot‎ چند بار جواب نداد.",
+    "too_many_steps": "گفتگو بیش از اندازه طول کشید.",
+    "telegram_unavailable": "به تلگرام نرسید.",
+    "flood_wait": "تلگرام خواست صبر کنیم.",
+    "mtproxybot_changed": "نام ‎@MTProxybot‎ به حساب دیگری میرسد؛ برای ایمنی پیامی فرستاده نشد.",
+    "telegram_refused": "تلگرام درخواست را نپذیرفت.",
+    "request_not_allowed": "فهرست مجاز حساب دوم این دکمه را نپذیرفت؛ چیزی فرستاده نشد.",
+}
+
+
+def list_reason(code: str | None) -> str | None:
+    if code is None:
+        return None
+    return LIST_REASON_FA.get(code.split(":", 1)[0], code)
+
+
+def cleanup_stuck_alert(*, address: str, step: str | None, reason: str) -> str:
+    """The owner alert (HTML) when removing a dead proxy from @MTProxybot stopped on a screen the
+    panel does not know. Nothing more is pressed until the owner starts the cleanup again."""
+    lines = [
+        "⚠️ <b>پاک کردن پروکسی‌های مرده از ‎@MTProxybot‎ متوقف شد</b>",
+        f"پروکسی: <code>{html.escape(address)}</code>",
+    ]
+    if step:
+        lines.append(f"کجا: {html.escape(STEP_FA.get(step, step))}")
+    lines.append(f"چرا: {html.escape(list_reason(reason) or reason)}")
+    lines.append("پنل چیز دیگری نمیزند. شکل صفحه‌ها (بی secret) در صفحه‌ی «اسپانسر» داشبورد ثبت شده است.")
     return "\n".join(lines)

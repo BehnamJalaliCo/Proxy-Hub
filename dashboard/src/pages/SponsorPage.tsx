@@ -19,6 +19,7 @@ import {
 import { motion } from "motion/react";
 import { useState, type ReactNode, type SubmitEvent } from "react";
 
+import { BotListCard } from "../components/BotListCard";
 import { Button, LinkButton } from "../components/ui/Button";
 import { Badge, Card, CardHeader, StatusDot } from "../components/ui/Card";
 import { ConfirmDialog, Modal } from "../components/ui/Dialogs";
@@ -631,6 +632,7 @@ export default function SponsorPage() {
           <StatusCard o={o} now={now} />
           <RegistrationsCard o={o} now={now} />
           <CampaignsCard o={o} now={now} onNew={() => setForm({ editing: null, key: Date.now() })} onEdit={(c) => setForm({ editing: c, key: Date.now() })} />
+          {o.mtproxybot ? <BotListCard s={o.mtproxybot} onApply={apply} /> : null}
           <SettingsCard key={`${o.settings.default_channel}-${toFaDigits(o.settings.lead_minutes)}`} o={o} />
         </div>
       ) : null}
