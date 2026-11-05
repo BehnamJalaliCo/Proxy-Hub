@@ -5,9 +5,15 @@ getChatMember, getChatMemberCount (channel size for the «آمار» page), crea
 named tracking link per campaign; links are never revoked or edited), and getStickerSet,
 createNewStickerSet and addStickerToSet for the channel's own animated emoji pack
 (proxyhub/posts/own_pack.py; nothing in a pack is ever removed or replaced). Nothing else can be
-sent: the one request path (:meth:`BotClient._call`) refuses any
-method name outside :data:`ALLOWED_METHODS` before a request is built, so no message can be removed
-and nobody banned through this client, not even with a computed method name (CLAUDE.md rule 6).
+sent: the generic request path (:meth:`BotClient._call`) refuses any method name outside
+:data:`ALLOWED_METHODS` before a request is built, so nobody can be banned and no message removed
+through it, not even with a computed method name (CLAUDE.md rule 6).
+
+The one exception is decision D44, the owner's «پاک کردن کانال آزمایشی»: the TEST channel may be
+emptied. Its Bot API method (:data:`TEST_CHANNEL_CLEANUP_METHOD`) is NOT in :data:`ALLOWED_METHODS`;
+only :meth:`BotClient.delete_test_channel_messages` sends it, and only after checking that the chat
+is the test channel id the caller passed and is not the main channel. Nothing can reach it through
+``_call``.
 
 Token safety (CLAUDE.md rule 3). The Bot API puts the token in the URL path
 (``https://api.telegram.org/bot<token>/<method>``), so:
@@ -61,6 +67,14 @@ ALLOWED_METHODS: Final = frozenset(
         "addStickerToSet",
     }
 )
+# Decision D44: the one method that removes messages, for the TEST channel only. Deliberately not in
+# ALLOWED_METHODS: the generic path refuses it, and BotClient.delete_test_channel_messages (its only
+# sender) checks the chat first. One request takes 1 to 100 message ids (Bot API).
+TEST_CHANNEL_CLEANUP_METHOD: Final = "deleteMessages"
+TEST_CHANNEL_CLEANUP_MAX_IDS: Final = 100
+# A channel's (or supergroup's) Bot API chat id is -100 followed by its own id, i.e. at most this;
+# a user's id is positive and a basic group's is above it.
+_CHANNEL_CHAT_ID_MAX: Final = -1_000_000_000_001
 # Telegram's limit for an invite link's name (Bot API, createChatInviteLink).
 INVITE_LINK_NAME_MAX: Final = 32
 # Sticker sets (Bot API createNewStickerSet): a name of 1-64 letters, digits and single underscores,
@@ -74,8 +88,9 @@ TGS_MAX_BYTES: Final = 64 * 1024
 DEFAULT_TIMEOUT: Final = httpx.Timeout(15.0, connect=10.0)
 MAX_LONG_POLL_SECONDS: Final = 25
 DEFAULT_RETRY_AFTER: Final = 5
-# Telegram's admin flag for removing posts in a channel. It is only READ, to show the owner that
-# the bot should not have it (docs/04: the bot may post and edit, never remove).
+# Telegram's admin flag for removing posts in a channel. It is only READ: to show the owner that
+# the bot should not have it (docs/04: the bot may post and edit, never remove), and, decision D44,
+# to check that the owner granted it in the TEST channel for the time of a cleaning.
 CAN_REMOVE_POSTS_FLAG: Final = "can_delete_messages"
 
 _LOGGERS = (
@@ -326,7 +341,7 @@ class MemberRights:
     status: str  # "creator" | "administrator" | "member" | "restricted" | "left" | "kicked"
     can_post: bool
     can_edit: bool
-    can_remove: bool  # the owner should NOT grant this (docs/04)
+    can_remove: bool  # not granted (docs/04), except in the test channel while it is cleaned (D44)
 
     @classmethod
     def from_result(cls, result: Any) -> MemberRights:
@@ -512,6 +527,21 @@ class BotClient:
         """
         if method not in ALLOWED_METHODS:
             raise ValueError("Bot API method not allowed in Proxy-Hub")
+        return await self._post(method, params, read_timeout=read_timeout, files=files)
+
+    async def _post(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        read_timeout: float | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
+    ) -> Any:
+        """The HTTP request itself. Called only by :meth:`_call` (the allowlist) and by
+        :meth:`delete_test_channel_messages` (decision D44, after its own checks); a test pins both
+        callers. Refuses anything else again, as a second lock."""
+        if method not in ALLOWED_METHODS and method != TEST_CHANNEL_CLEANUP_METHOD:
+            raise ValueError("Bot API method not allowed in Proxy-Hub")
         timeout = self._timeout
         if read_timeout is not None:  # long poll: the server holds the answer up to its own timeout
             timeout = httpx.Timeout(self._timeout.connect or 10.0, read=read_timeout)
@@ -646,6 +676,38 @@ class BotClient:
         )
         if result is not True:
             raise InvalidResponse("addStickerToSet", "result is not true")
+
+    async def delete_test_channel_messages(
+        self,
+        chat_id: int,
+        message_ids: Sequence[int],
+        *,
+        test_chat_id: int,
+        main_chat_id: int | None,
+    ) -> None:
+        """Remove ``message_ids`` (1 to 100) from the TEST channel (decision D44; Telegram skips ids
+        that do not exist). ``test_chat_id`` is the stored test channel's id and ``main_chat_id``
+        the stored main channel's (None when there is none). Raises ``ValueError`` before any
+        request unless ``chat_id`` is exactly the test channel, is a channel id, and is not the main
+        channel; the ids must be distinct positive integers. There is no other way to send this
+        method (:meth:`_call` refuses it)."""
+        for value in (chat_id, test_chat_id, main_chat_id):
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
+                raise ValueError("chat ids must be integers")
+        if chat_id != test_chat_id:
+            raise ValueError("only the test channel's messages may be removed")
+        if main_chat_id is not None and chat_id == main_chat_id:
+            raise ValueError("the main channel's messages are never removed")
+        if chat_id > _CHANNEL_CHAT_ID_MAX:
+            raise ValueError("not a channel")
+        ids = list(message_ids)
+        if not 1 <= len(ids) <= TEST_CHANNEL_CLEANUP_MAX_IDS or len(set(ids)) != len(ids):
+            raise ValueError("1 to 100 distinct message ids")
+        if any(not isinstance(i, int) or isinstance(i, bool) or i < 1 for i in ids):
+            raise ValueError("message ids are positive integers")
+        result = await self._post(TEST_CHANNEL_CLEANUP_METHOD, {"chat_id": chat_id, "message_ids": ids})
+        if result is not True:
+            raise InvalidResponse(TEST_CHANNEL_CLEANUP_METHOD, "result is not true")
 
 
 def _check_set_name(name: str) -> None:
