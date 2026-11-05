@@ -60,6 +60,8 @@ export interface PostPreview {
   blocked: string | null;
   text: string;
   chars: number;
+  /** Which emoji the second account's post would show animated (D38); older panels omit it. */
+  emoji?: { emoji: string; animated: boolean }[];
   content_item: { id: number; title: string; recycled: boolean } | null;
   links: { mtproto: number; reality: number };
 }
@@ -84,6 +86,8 @@ export interface RecentPost {
   edits_stopped: boolean;
   watching: boolean;
   message_url: string | null;
+  /** Who posted it (and edits it): the bot or the second account (D38); older panels omit it. */
+  poster?: "bot" | "operator";
 }
 
 export interface ContentItem {

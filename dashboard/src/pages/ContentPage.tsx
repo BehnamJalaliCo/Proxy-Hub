@@ -31,6 +31,7 @@ import {
 import { AnimatePresence, motion } from "motion/react";
 import { Fragment, useMemo, useRef, useState, type ReactNode, type SubmitEvent } from "react";
 
+import { OperatorPosterCard } from "../components/OperatorPosterCard";
 import { Button, IconButton } from "../components/ui/Button";
 import { Badge, Card, CardHeader } from "../components/ui/Card";
 import { ConfirmDialog, Drawer } from "../components/ui/Dialogs";
@@ -605,6 +606,12 @@ function RecentCard() {
                       {state.label}
                     </Badge>
                     <Badge tone={post.role === "main" ? "success" : "neutral"}>{ROLE_LABEL[post.role]}</Badge>
+                    {post.poster === "operator" ? (
+                      <Badge tone="brand">
+                        <Sparkles className="size-3" aria-hidden />
+                        حساب دوم
+                      </Badge>
+                    ) : null}
                     <span className="text-xs text-fg-muted" title={formatJalali(post.created_at)}>
                       {formatRelative(post.created_at, now)}
                     </span>
@@ -920,6 +927,13 @@ function LibraryCard() {
   );
 }
 
+// --- the second account with Premium emoji (D38) ---------------------------------------------------------------
+
+function OperatorSection() {
+  const preview = usePostPreview(); // the same query as the preview card: fetched once
+  return <OperatorPosterCard preview={preview.data} />;
+}
+
 // --- page -------------------------------------------------------------------------------------------------------
 
 export default function ContentPage() {
@@ -952,6 +966,7 @@ export default function ContentPage() {
             <SettingsCard s={s} />
             <PreviewCard s={s} />
           </div>
+          <OperatorSection />
           <RecentCard />
           <LibraryCard />
         </div>

@@ -302,6 +302,11 @@ const ACTION: Record<string, string> = {
   "mtproxy.account_disconnected": "بسته شدن نشست حساب عملیاتی در تلگرام",
   "mtproxy.account_check_failed": "بررسی نشست حساب عملیاتی ناموفق",
   "mtproxy.account_check_ok": "نشست حساب عملیاتی دوباره سالم",
+  // posts through the second account with Premium emoji (D38)
+  "posts.poster_fallback": "پست تازه به جای حساب دوم با ربات رفت",
+  "posts.operator_set": "تغییر فرستنده‌ی پست یا بسته‌ی ایموجی",
+  "posts.operator_not_sent": "پست حساب دوم برای کانال اصلی نرفت (انتشار اصلی خاموش شد)",
+  "posts.operator_send_unknown": "معلوم نیست پست حساب دوم رفت یا نه (دوباره فرستاده نمیشود)",
 };
 
 export function actionLabel(code: string): string {
@@ -336,6 +341,7 @@ const ACTOR: Record<string, string> = {
   domains: "چرخه‌ی دامنه‌ها",
   cli: "فرمان روی سرور پنل",
   mtproxy: "چرخه‌ی حساب عملیاتی ‎@MTProxybot‎",
+  operator_poster: "پست‌های حساب دوم (Premium)",
 };
 
 /** "admin:owner" -> "مالک (owner)"; control loops get a Persian name. */

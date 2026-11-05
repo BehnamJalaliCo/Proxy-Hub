@@ -154,11 +154,16 @@ class TgUpdate(Base):
 
 
 class Outbox(Base):
-    """Durable queue of Telegram jobs (post, edit, invite link, alert). Never a delete job (rule 6)."""
+    """Durable queue of Telegram jobs (post, edit, invite link, alert; the ``operator_*`` posts and
+    edits go through the operator account, decision D38). Never a delete job (rule 6)."""
 
     __tablename__ = "outbox"
     __table_args__ = (
-        CheckConstraint("kind IN ('send_post', 'edit_post', 'create_invite_link', 'alert')", name="kind"),
+        CheckConstraint(
+            "kind IN ('send_post', 'edit_post', 'create_invite_link', 'alert', "
+            "'operator_send_post', 'operator_edit_post')",
+            name="kind",
+        ),
         Index("ix_outbox_pending", "not_before", postgresql_where="done_at IS NULL"),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
