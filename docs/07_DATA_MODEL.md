@@ -51,6 +51,7 @@
 |---|---|---|
 | `mtproto_proxies` | node_id, user_name, live_at, disabled_at | یک secret بلندمدت برای هر node (`mt_<16 hex>`)؛ secret فقط رمزشده در `telemt_users`. |
 | `sponsor_flows` / `mtproxy_registrations` | host, port, user_name, ad_tag, state | ثبت در ‎@MTProxybot‎؛ ردیف ثبت فقط وقتی ساخته میشود که ربات tag داده باشد. |
+| `mtproxybot_entries` (migration `0022`) | host, port, label_shape, label_fp, menu_channel, removal_state | فهرست خود ‎@MTProxybot‎ در آخرین خواندن (`11_MTPROTO_SPONSOR.md` بخش ۲.۲)؛ فقط نشانی، شکل برچسب و اثرانگشت یک‌طرفه، هرگز hex برچسب، secret یا tag. کار و تنظیم حذف در ردیف `sponsor.mtproxybot` جدول `settings`. |
 | `sponsor_campaigns` | customer, channel, starts_at, ends_at, paid | کمپین اسپانسر پولی؛ تغییر ۲ ساعت پیش از شروع. |
 | `fleet_plans`، `fleet_alerts`، `ip_history`، `domain_delegation_checks` / `_state` | slot، IP سوخته و /24، NS هر دامنه | ناوگان زنده‌ی ۹ جایگاه؛ IP سوخته دوباره گرفته نمیشود. |
 | `posts`، `post_links`، `content_items` | role، plan_day، plan_slot، لینک‌های هر پست | پست خودکار؛ فقط ویرایش، هرگز حذف. لینک node آزمایشی هرگز در کانال اصلی نمیآید. |

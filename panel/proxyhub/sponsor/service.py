@@ -54,7 +54,7 @@ from proxyhub.db.models import SponsorCampaign
 from proxyhub.fleet.actions import iso, log_action
 from proxyhub.mtproxy import state as account_state
 from proxyhub.mtproxy import store as account_store
-from proxyhub.mtproxy.userclient import ClientOptions, MtpError, operator_session
+from proxyhub.mtproxy.userclient import BotChat, ClientOptions, MtpError, operator_session
 from proxyhub.sponsor import campaigns as camp
 from proxyhub.sponsor import driver, pacing, store
 from proxyhub.sponsor.channels import ChannelError, channel_link, parse_public_channel
@@ -521,7 +521,16 @@ class _Recorder:
         await self._line("sponsor.bot_reply", step, {"text": text, "buttons": buttons})
 
 
-async def _converse(deps: Deps, work: Work) -> driver.FlowResult | str:
+type Talk[T] = Callable[[BotChat, Callable[[], Awaitable[object]], driver.Recorder], Awaitable[T]]
+
+
+async def with_bot_chat[T](deps: Deps, target: str, talk: Talk[T]) -> T | str:
+    """Under the operator account's lock, with the kill switch OFF and the account connected: one
+    connection, the chat with @MTProxybot (only if it still resolves to the user id stored at
+    login), and ``talk(chat, take_slot, recorder)``; every message takes a pacing slot and every
+    line goes to actions_log under ``target``. A reason code when nothing could start (``busy``,
+    ``kill_switch``, ``no_account``, ``vault_unavailable``); raises :class:`MtpError` when
+    connecting or opening the chat fails."""
     try:
         async with account_store.account_lock(deps.engine, wait_s=deps.lock_wait_s):
             async with deps.engine.connect() as db:
@@ -538,24 +547,27 @@ async def _converse(deps: Deps, work: Work) -> driver.FlowResult | str:
             async def take_slot() -> datetime:
                 return await pacing.take_slot(deps.engine, clock=deps.clock, sleep=deps.sleep)
 
-            recorder = _Recorder(deps.engine, work.job.address)
-            try:
-                async with operator_session(creds, session, options=deps.options) as op:
-                    chat = await op.open_mtproxybot_chat(row.mtproxybot_id)
-                    return await driver.run(
-                        chat,
-                        work.job,
-                        take_slot=take_slot,
-                        record=recorder,
-                        timing=deps.timing,
-                        sleep=deps.sleep,
-                    )
-            except MtpError as exc:
-                return driver.FlowResult(error=exc.code, rpc=exc.rpc, retry_after_s=exc.seconds)
+            async with operator_session(creds, session, options=deps.options) as op:
+                chat = await op.open_mtproxybot_chat(row.mtproxybot_id)
+                return await talk(chat, take_slot, _Recorder(deps.engine, target))
     except account_store.LockBusy:
         return "busy"
     except VaultError:
         return "vault_unavailable"
+
+
+async def _converse(deps: Deps, work: Work) -> driver.FlowResult | str:
+    async def talk(
+        chat: BotChat, take_slot: Callable[[], Awaitable[object]], recorder: driver.Recorder
+    ) -> driver.FlowResult:
+        return await driver.run(
+            chat, work.job, take_slot=take_slot, record=recorder, timing=deps.timing, sleep=deps.sleep
+        )
+
+    try:
+        return await with_bot_chat(deps, work.job.address, talk)
+    except MtpError as exc:
+        return driver.FlowResult(error=exc.code, rpc=exc.rpc, retry_after_s=exc.seconds)
 
 
 # --- step 4: record -----------------------------------------------------------------------------------

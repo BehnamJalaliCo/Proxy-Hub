@@ -14,6 +14,8 @@
   the users over the slots instead of sending everyone to the lowest ones (a Reality config ends at
   its traffic cap). A companion link (``companion_of``: the XHTTP link of a REALITY config) does not
   count on its own: it comes right after the link it belongs to, when that one is chosen.
+* A post shows no label; a REALITY config that comes with its XHTTP link gets a tiny transport
+  marker on each of its two code blocks (:func:`transport_marks`).
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from proxyhub.links import registry
-from proxyhub.links.contract import Provider, ProxyLink
+from proxyhub.links.contract import XHTTP_KEY_SUFFIX, Provider, ProxyLink
 from proxyhub.telegram.templates import clean_label, mtproto_url, vless_url
 
 log = logging.getLogger(__name__)
@@ -37,6 +39,9 @@ STATUSES: Final = ("active", "expired", "full", "burned")
 MAX_KEY_CHARS: Final = 200
 # A config that ends sooner than this is not put into a NEW post.
 MIN_REMAINING: Final = timedelta(hours=1)
+# The transport markers a post shows on a REALITY config's two code blocks.
+TCP_MARK: Final = "TCP"
+XHTTP_MARK: Final = "XHTTP"
 
 
 @dataclass(frozen=True)
@@ -191,3 +196,26 @@ def for_new_post(
     configs = spread([x for x in usable if x.companion_of is None], max_reality, rotate)
     reality = [y for x in configs for y in (x, *sorted(companions.get(x.key, []), key=lambda c: c.key))]
     return [*mtproto, *reality]
+
+
+def transport_marks(keys: Sequence[tuple[str, str]]) -> list[tuple[str | None, bool]]:
+    """(variant, companion) for each (kind, key) of a post, in the post's order (see
+    :class:`proxyhub.telegram.templates.PostLink`): "XHTTP" on a REALITY config's XHTTP link, which is
+    a companion when its config's own link is right before it; "TCP" on a config's own link when its
+    XHTTP link is in the same post; nothing otherwise. Only the keys decide (links contract: an XHTTP
+    link's key is its config's key + :data:`XHTTP_KEY_SUFFIX`), and a post keeps the keys it carries,
+    so a status edit shows exactly the markers the post was sent with."""
+    present = {key for kind, key in keys if kind == "reality"}
+    out: list[tuple[str | None, bool]] = []
+    before: str | None = None
+    for kind, key in keys:
+        if kind != "reality":
+            out.append((None, False))
+        elif key.endswith(XHTTP_KEY_SUFFIX):
+            out.append((XHTTP_MARK, before == key[: -len(XHTTP_KEY_SUFFIX)]))
+        elif key + XHTTP_KEY_SUFFIX in present:
+            out.append((TCP_MARK, False))
+        else:
+            out.append((None, False))
+        before = key
+    return out

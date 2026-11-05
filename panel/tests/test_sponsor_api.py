@@ -48,6 +48,9 @@ PATHS = {
     ("PUT", f"{BASE}/campaigns/{{campaign_id}}"),
     ("POST", f"{BASE}/campaigns/{{campaign_id}}/cancel"),
     ("DELETE", f"{BASE}/campaigns/{{campaign_id}}"),
+    ("POST", f"{BASE}/mtproxybot/inventory"),
+    ("POST", f"{BASE}/mtproxybot/cleanup"),
+    ("POST", f"{BASE}/mtproxybot/stop"),
 }
 TAG = "ecfe4482355b04af36e816044653e999"
 

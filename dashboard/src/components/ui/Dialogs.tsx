@@ -176,7 +176,8 @@ export function Modal({
   );
 }
 
-/** Confirmation for consequential actions. `acknowledge` adds a checkbox that must be ticked. */
+/** Confirmation for consequential actions. `acknowledge` adds a checkbox that must be ticked;
+ * `confirmDisabled` keeps the confirm button off (e.g. while a preview loads or is empty). */
 export function ConfirmDialog({
   open,
   onOpenChange,
@@ -187,6 +188,7 @@ export function ConfirmDialog({
   icon,
   acknowledge,
   busy = false,
+  confirmDisabled = false,
   onConfirm,
   children,
 }: {
@@ -199,6 +201,7 @@ export function ConfirmDialog({
   icon?: ReactNode;
   acknowledge?: string;
   busy?: boolean;
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   children?: ReactNode;
 }) {
@@ -250,7 +253,7 @@ export function ConfirmDialog({
                     <Button
                       variant={tone}
                       loading={busy}
-                      disabled={acknowledge !== undefined && !ack}
+                      disabled={confirmDisabled || (acknowledge !== undefined && !ack)}
                       onClick={onConfirm}
                     >
                       {confirmLabel}

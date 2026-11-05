@@ -143,6 +143,7 @@ describe("the channel's own emoji pack", () => {
     expect(ownPackText({ ...base, state: "waiting", reason: "no_owner", link: null, emoji: 0 }).text).toContain("جفت کنید");
     expect(ownPackText({ ...base, state: "waiting", reason: "kill_switch", link: null, emoji: 0 }).text).toContain("کلید توقف");
     expect(ownPackText({ ...base, state: "error", error: "x" }).tone).toBe("warning");
+    expect(ownPackText({ ...base, state: "error", error: "429", retry_at: "2026-11-05T22:05:00Z" }).text).toContain("صبر");
     expect(ownPackText({ ...base, state: "pending", reason: null, emoji: 0 }).text).toContain("خودکار");
   });
 });

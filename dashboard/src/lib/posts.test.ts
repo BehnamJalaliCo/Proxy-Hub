@@ -102,6 +102,18 @@ describe("Telegram HTML reader", () => {
     expect(link.href).toBe("https://t.me/proxy?server=a.com&port=1");
   });
 
+  it("reads a config's code block and its language as Telegram does", () => {
+    const nodes = parseTgHtml('⏳ تا ۱۸:۳۰\n<pre><code class="language-XHTTP">vless://a@b:1?x=1&amp;y=2</code></pre>\n<pre>vless://c@d:1</pre>');
+    const marked = nodes[1] as Extract<TgNode, { type: "el" }>;
+    expect(marked).toEqual({ type: "el", tag: "pre", lang: "XHTTP", children: [{ type: "text", text: "vless://a@b:1?x=1&y=2" }] });
+    const plain = nodes[3] as Extract<TgNode, { type: "el" }>;
+    expect(plain.tag).toBe("pre");
+    expect(plain.lang).toBeUndefined();
+    // A code outside a pre stays inline code; a bad language is no language.
+    expect((parseTgHtml("<code>x</code>")[0] as Extract<TgNode, { type: "el" }>).tag).toBe("code");
+    expect((parseTgHtml('<pre><code class="language-a b">x</code></pre>')[0] as Extract<TgNode, { type: "el" }>).lang).toBeUndefined();
+  });
+
   it("drops unsafe links and unknown tags but keeps their text", () => {
     const nodes = parseTgHtml('<a href="javascript:alert(1)">بد</a><script>x</script><span>y</span><span class="tg-spoiler">z</span>');
     const link = nodes[0] as Extract<TgNode, { type: "el" }>;

@@ -13,7 +13,9 @@ takes the text and its entities separately, with offsets and lengths counted in 
 * :func:`with_custom_emoji` marks every plain emoji of that text which the owner's emoji pack has an
   animated twin for (same ``alt`` emoji, variation selectors ignored) with a custom-emoji entity over
   exactly that emoji's UTF-16 range. An emoji inside ``code``/``pre`` stays plain (Telegram draws
-  nothing inside code), and so does every emoji after :data:`MAX_CUSTOM_EMOJI`.
+  nothing inside code), as does one inside a link (Telegram's nesting rules let no entity but bold,
+  italic, underline, strike and spoiler sit inside a link), and every emoji after
+  :data:`MAX_CUSTOM_EMOJI`.
 
 The bot path never uses this module: it keeps sending the HTML with plain emoji. Nothing here imports
 Telethon or touches the database; proxyhub/mtproxy/userclient.py builds the TL objects from
@@ -61,7 +63,9 @@ _TAG_KIND: Final[dict[str, EntityKind]] = {
     "blockquote": "blockquote",
     "tg-emoji": "custom_emoji",
 }
-_NO_EMOJI_INSIDE: Final = frozenset({"code", "pre"})
+# core.telegram.org/bots/api#formatting-options: pre and code contain no other entity, and a link
+# none but bold, italic, underline, strike and spoiler. So a custom emoji goes in none of them.
+_NO_EMOJI_INSIDE: Final = frozenset({"code", "pre", "text_url"})
 
 
 @dataclass(frozen=True)
@@ -355,7 +359,7 @@ def operator_message(html_text: str, pack: Mapping[str, int]) -> MessageText:
 
 def emoji_report(html_text: str, pack: Mapping[str, int], limit: int = 40) -> list[tuple[str, bool]]:
     """The different emoji of a post (in order) and whether the operator's message shows each one
-    animated (at least once; an emoji inside code stays plain)."""
+    animated (at least once; an emoji inside code or a link stays plain)."""
     message = operator_message(html_text, pack)
     covered = {e.offset for e in message.entities if e.kind == "custom_emoji"}
     seen: dict[str, tuple[str, bool]] = {}

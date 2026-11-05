@@ -175,9 +175,34 @@ def test_negative_controls_match() -> None:
     assert not USER_ACCOUNT_WRITES.search("await chat.press(message_id, data)")
 
 
+TG_CLIENT = PANEL / "telegram" / "client.py"
+TEST_CHANNEL_CLEANUP = PANEL / "cleanup" / "test_channel.py"
+TEST_CHANNEL_CLEANUP_CALL = re.compile(r"\.delete_test_channel_messages\(")
+
+
 def test_no_telegram_delete_anywhere() -> None:
-    hits = [p for p in _sources() if TG_DELETE.search(_strip_comments(p.read_text(encoding="utf-8")))]
-    assert not hits, f"rule 6 violated in {hits}"
+    """Rule 6, with decision D44's one exception: the bot client names the TEST channel's cleanup
+    method exactly once (the constant only its guarded method sends), and nothing else anywhere."""
+    hits = {
+        p: TG_DELETE.findall(_strip_comments(p.read_text(encoding="utf-8")))
+        for p in _sources()
+        if TG_DELETE.search(_strip_comments(p.read_text(encoding="utf-8")))
+    }
+    assert set(hits) <= {TG_CLIENT}, f"rule 6 violated in {sorted(set(hits) - {TG_CLIENT})}"
+    assert hits.get(TG_CLIENT) == ["deleteMessages"], hits.get(TG_CLIENT)
+    definition = [
+        line for line in TG_CLIENT.read_text(encoding="utf-8").splitlines() if TG_DELETE.search(line)
+    ]
+    assert definition == ['TEST_CHANNEL_CLEANUP_METHOD: Final = "deleteMessages"'], definition
+
+
+def test_only_the_test_channel_cleanup_calls_the_guarded_method() -> None:
+    """D44: the bot's one removing method is called from exactly one place, the owner's «پاک کردن
+    کانال آزمایشی», which passes the stored test channel and the stored main channel to it."""
+    assert TEST_CHANNEL_CLEANUP_CALL.search("await bot.delete_test_channel_messages(chat, ids)")
+    assert _count(TEST_CHANNEL_CLEANUP_CALL) == {TEST_CHANNEL_CLEANUP: 1}
+    source = TEST_CHANNEL_CLEANUP.read_text(encoding="utf-8")
+    assert "test_chat_id=t.test_chat_id" in source and "main_chat_id=t.main_chat_id" in source
 
 
 ACME_IMPORT = re.compile(r"^\s*(?:from|import)\s+(?:acme|josepy)\b", re.MULTILINE)

@@ -64,6 +64,8 @@ export interface OwnPack {
   total: number;
   error: string | null;
   checked_at?: string | null;
+  /** Telegram asked to wait until then (429); the panel goes on by itself. */
+  retry_at?: string | null;
 }
 
 export interface OperatorView {
@@ -202,6 +204,7 @@ export function ownPackText(p: OwnPack): { tone: Tone; text: string } {
       text: all ? `ساخته شد؛ ${toFaDigits(p.emoji)} ایموجی متحرک.` : `ساخته شد؛ ${toFaDigits(p.emoji)} از ${toFaDigits(p.total)} ایموجی، بقیه خودکار اضافه میشود.`,
     };
   }
+  if (p.state === "error" && p.retry_at) return { tone: "info", text: "تلگرام خواست کمی صبر کنیم؛ پنل خودش ادامه میدهد. کاری لازم نیست." };
   if (p.state === "error") return { tone: "warning", text: "ساخت بسته ناموفق بود؛ یک ساعت بعد خودکار دوباره امتحان میشود." };
   switch (p.reason) {
     case "kill_switch":

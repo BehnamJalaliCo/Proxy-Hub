@@ -5,6 +5,7 @@ import { useState, type ReactNode, type SubmitEvent } from "react";
 
 import { Button } from "../components/ui/Button";
 import { Badge, Card, CardHeader, StatusDot } from "../components/ui/Card";
+import { PurgeEndedButton } from "../components/PurgeEnded";
 import { EndedSection } from "../components/ui/EndedSection";
 import { AnimatedNumber, CopyButton, EmptyState, LoadError, Skeleton } from "../components/ui/Feedback";
 import { Field, Segmented, TextInput, Toggle } from "../components/ui/Form";
@@ -206,7 +207,7 @@ function ConfigsCard({ configs }: { configs: RealityConfig[] }) {
             ))}
           </ul>
         )}
-        <EndedSection count={ended.length} hint="زمان یا حجمشان تمام شد یا سرورشان کنار رفت.">
+        <EndedSection count={ended.length} hint="زمان یا حجمشان تمام شد یا سرورشان کنار رفت." action={<PurgeEndedButton />}>
           <ul className="flex flex-col gap-2.5">
             {ended.map((c) => (
               <ConfigItem key={c.id} c={c} now={now} />
@@ -322,7 +323,7 @@ function NodesCard({ nodes, settings, cert }: { nodes: RealityNode[]; settings: 
             ))}
           </ul>
         )}
-        <EndedSection count={ended.length} hint="سوخته یا در حال کنار رفتن." className="mt-3">
+        <EndedSection count={ended.length} hint="سوخته یا در حال کنار رفتن." className="mt-3" action={<PurgeEndedButton />}>
           <ul className="flex flex-col gap-2">
             {ended.map((n) => (
               <NodeItem key={n.node_id} n={n} settings={settings} cert={cert} />

@@ -15,11 +15,13 @@ Two shapes, by the transport the config was made for (the links contract kind st
   &sid=<id>&type=xhttp&path=<urlencoded path>&mode=auto#<name> XHTTP`` (VLESS + XHTTP + REALITY,
   same uuid, so the same time and data cap). It is listed while the config is, and only once a
   serving node of the scope reports its XHTTP inbound up; the two links are then labelled
-  «کانفیگ N (TCP)» and «کانفیگ N (XHTTP)». An ended config lists its XHTTP link too (with the
-  config's status), so posts that carry it are marked.
+  «کانفیگ N (TCP)» and «کانفیگ N (XHTTP)» for the owner. An ended config lists its XHTTP link too
+  (with the config's status), so posts that carry it are marked.
 
 The host was fixed when the config was made. The name every user's app shows starts with the
-channel's @name (D41), e.g. ``@ipoxxo 🇩🇪 12``; the post label is «کانفیگ N».
+channel's @name (D41), e.g. ``@ipoxxo 🇩🇪 12``. The label «کانفیگ N» is the owner's (dashboard,
+logs): a channel post never shows it, only the config in a code block, with "TCP" / "XHTTP" as the
+block's marker when both links come (proxyhub/posts/links.py :func:`transport_marks`).
 
 Listed: every active config that a serving node of its scope has confirmed (its agent reported
 Xray up, without an error, after the config was made; for ``ws_tls`` also its own TLS check for
@@ -38,7 +40,7 @@ from urllib.parse import quote, urlencode
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from proxyhub.fleet.lifecycle import NodeState
-from proxyhub.links.contract import ProxyLink
+from proxyhub.links.contract import XHTTP_KEY_SUFFIX, ProxyLink
 from proxyhub.reality.settings import PORT, XHTTP_PORT, load_reality_settings
 from proxyhub.reality.store import (
     SERVE_STATES,
@@ -166,14 +168,14 @@ def xhttp_url(row: Any, name: str) -> str:
 
 
 def config_label(config_id: int, variant: str | None = None) -> str:
-    """The Persian label a post shows for the config: «کانفیگ N», or with both links
-    «کانفیگ N (TCP)» and «کانفیگ N (XHTTP)»."""
+    """The owner's Persian label for the config (dashboard, logs; never in a channel post):
+    «کانفیگ N», or with both links «کانفیگ N (TCP)» and «کانفیگ N (XHTTP)»."""
     label = f"کانفیگ {fa_digits(config_id)}"
     return f"{label} ({variant})" if variant else label
 
 
 def xhttp_key(config_key: str) -> str:
-    return f"{config_key}:xhttp"
+    return f"{config_key}{XHTTP_KEY_SUFFIX}"
 
 
 async def link_prefix(db: Db) -> str:

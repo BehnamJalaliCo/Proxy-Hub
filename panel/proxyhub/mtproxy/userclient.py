@@ -12,7 +12,8 @@ short-lived connection (:func:`operator_session`) it offers exactly these operat
 * :meth:`OperatorSession.log_out`: ``auth.logOut``, which ends the session on Telegram's side,
 * :meth:`OperatorSession.open_mtproxybot_chat`: the chat with @MTProxybot and nobody else
   (:class:`BotChat`: send a text, read the last few messages of that chat, press an inline button
-  of a message in that chat), used by proxyhub/sponsor to register proxies.
+  of a bot message this connection read), used by proxyhub/sponsor to register proxies, read the
+  bot's proxy list and remove from it the proxies whose node was deleted.
 
 and, for OUR channels' statistics only (decision D38; proxyhub/mtproxy/channel_stats.py), on a
 connection opened with a :class:`ChannelScope` that names the configured main and test channels:
@@ -53,8 +54,12 @@ Locks (docs/11 section 2.1):
   The three chat requests (``messages.sendMessage``, ``messages.getHistory`` with a small limit,
   ``messages.getBotCallbackAnswer``) pass only when their peer is the @MTProxybot user that
   :meth:`OperatorSession.open_mtproxybot_chat` resolved on this connection AND whose id equals the id the
-  panel stored at login. Nothing here can list chats or contacts, read any other chat's messages, or write to
-  anyone else.
+  panel stored at login. A button press names a button of a message FROM the bot that this connection
+  read; the bot's removal and confirmation buttons (strict shapes, :data:`REMOVE_BUTTON` and
+  :data:`CONFIRM_BUTTON`) pass only with the connection's removal permit and under a message naming
+  a permitted proxy address, and any other button that takes something away never passes
+  (:func:`_check_press`). Nothing here can list chats or contacts, read any other chat's messages, or
+  write to anyone else.
 * No updates: ``receive_updates=False``; the library's post-login catch-up (``updates.getState`` +
   ``updates.getDifference``) is replaced by one that only records the account's own id, and its
   update loop by one that discards what arrives, so no difference is ever requested (not even after
@@ -451,6 +456,95 @@ def _check_bot_chat_request(request: Any, bot_id: int | None) -> None:
             raise RequestNotAllowed("messages.getBotCallbackAnswer: an inline button's data only")
 
 
+# Which inline button of the bot chat may be pressed (proxyhub/sponsor). A press names a message and
+# a button's callback data; it passes only for a button of a message FROM @MTProxybot that this
+# connection read (:meth:`BotChat.recent`), as that message stood at the last read. Two buttons take
+# something away in @MTProxybot: removing a proxy and confirming that. They are recognised only in
+# these strict shapes (the bot has no documentation, docs/11 S4) and pass only on a connection the
+# cleanup opened with a removal permit (:meth:`BotChat.permit_removal`), under a message whose text
+# names one of the permitted proxy addresses. Any other button whose words take something away
+# (delete, revoke, reset, cancel, ...) never passes, on any connection.
+REMOVE_BUTTON: Final = re.compile(r"(?:🗑\ufe0f?\s*)?(?:delete|remove)(?:\s+proxy)?", re.IGNORECASE)
+CONFIRM_BUTTON: Final = re.compile(
+    r"(?:✅\s*)?(?:yes|yes,?\s+(?:delete|remove)(?:\s+it)?|confirm)[.!]?", re.IGNORECASE
+)
+_TAKES_AWAY: Final = re.compile(
+    r"\b(?:delet|remov|revok|disabl|reset|clear|eras|destroy|unregist|wipe|cancel|stop|transfer|ban|block"
+    r"|yes|confirm|sure)\w*|\b(?:off|ok)\b",
+    re.IGNORECASE,
+)
+_AMBIGUOUS: Final = "\x00ambiguous"
+MAX_READ_MESSAGES: Final = 50
+_TEXT_SPLIT: Final = re.compile(r"[\s,;()\[\]{}<>«»\"'`|]+")
+
+
+def removal_button(label: str) -> bool:
+    """The bot's "remove this proxy" or "yes, remove it" button, in the strict shapes above."""
+    text = label.strip()
+    return bool(REMOVE_BUTTON.fullmatch(text) or CONFIRM_BUTTON.fullmatch(text))
+
+
+def takes_away(label: str) -> bool:
+    """The label's words (an address-shaped word aside) take something away."""
+    words = " ".join(w for w in label.split() if "." not in w and ":" not in w)
+    return removal_button(label) or bool(_TAKES_AWAY.search(words))
+
+
+def text_names(text: str, words: frozenset[str]) -> bool:
+    """One word of ``text`` (lower case, trailing punctuation dropped) is one of ``words``."""
+    return any(raw.strip(".!?:") in words for raw in _TEXT_SPLIT.split(text.lower()) if raw)
+
+
+@dataclass
+class ReadButtons:
+    """The bot's messages with pressable buttons as THIS connection last read them: message id ->
+    (its text, {callback data: label}). Data that two different labels of one message share is
+    ambiguous and never pressable."""
+
+    messages: dict[int, tuple[str, dict[bytes, str]]] = field(default_factory=dict)
+
+    def remember(self, message: BotMessage) -> None:
+        if message.outgoing:
+            return
+        pressable: dict[bytes, str] = {}
+        for row in message.buttons:
+            for button in row:
+                if button.data is None:
+                    continue
+                seen = pressable.get(button.data)
+                pressable[button.data] = button.text if seen in (None, button.text) else _AMBIGUOUS
+        self.messages.pop(message.id, None)
+        if pressable:
+            self.messages[message.id] = (message.text, pressable)
+        while len(self.messages) > MAX_READ_MESSAGES:
+            del self.messages[min(self.messages)]
+
+    def find(self, message_id: Any, data: Any) -> tuple[str, str] | None:
+        """(the message's text, the button's label), or None if no such button was read."""
+        found = self.messages.get(message_id) if isinstance(message_id, int) else None
+        label = found[1].get(data) if found is not None and isinstance(data, bytes) else None
+        if found is None or label is None or label == _AMBIGUOUS:
+            return None
+        return found[0], label
+
+
+def _check_press(request: Any, buttons: ReadButtons | None, removal: frozenset[str]) -> None:
+    found = buttons.find(request.msg_id, request.data) if buttons is not None else None
+    if found is None:
+        raise RequestNotAllowed(
+            "messages.getBotCallbackAnswer: only a button of a bot message read on this connection"
+        )
+    text, label = found
+    if removal_button(label):
+        if not removal or not text_names(text, removal):
+            raise RequestNotAllowed(
+                "messages.getBotCallbackAnswer: a removal button only with this connection's removal "
+                "permit, under a message that names that proxy"
+            )
+    elif takes_away(label):
+        raise RequestNotAllowed("messages.getBotCallbackAnswer: a button that takes something away")
+
+
 # Posting in OUR channels (decision D38, proxyhub/posts/operator.py): a new post and the edit of a
 # post. Allowed ONLY with a channel peer in the scope's ``post_ids``; see :func:`_check_channel_post`.
 # messages.sendMessage with any other peer is the @MTProxybot chat request above (or refused).
@@ -556,11 +650,20 @@ def _check_poster_read(request: Any, scope: ChannelScope) -> None:
         raise RequestNotAllowed("messages.getStickerSet: only the emoji pack the owner configured")
 
 
-def check_request(request: Any, scope: ChannelScope | None = None, *, bot_id: int | None = None) -> None:
+def check_request(
+    request: Any,
+    scope: ChannelScope | None = None,
+    *,
+    bot_id: int | None = None,
+    buttons: ReadButtons | None = None,
+    removal: frozenset[str] = frozenset(),
+) -> None:
     """Raise :class:`RequestNotAllowed` unless ``request`` is allowed with these arguments.
     ``scope``: our configured channels (statistics requests are allowed only for them; posts and
     edits only for its ``post_ids``; the sticker set read only for its ``emoji_set``).
-    ``bot_id``: @MTProxybot's user id once its chat is open on this connection, else None."""
+    ``bot_id``: @MTProxybot's user id once its chat is open on this connection, else None.
+    ``buttons``: the bot's buttons this connection read (a press needs one of them, see
+    :func:`_check_press`); ``removal``: the address words of the connection's removal permit."""
     kind = type(request)
     scope = scope or ChannelScope()
     if kind in CHANNEL_POST_REQUESTS and _post_channel(request, scope):
@@ -568,6 +671,8 @@ def check_request(request: Any, scope: ChannelScope | None = None, *, bot_id: in
         return
     if kind in BOT_CHAT_REQUESTS:
         _check_bot_chat_request(request, bot_id)
+        if kind is functions.messages.GetBotCallbackAnswerRequest:
+            _check_press(request, buttons, removal)
         return
     if kind not in ALLOWED_REQUESTS:
         raise RequestNotAllowed(f"request not allowed: {kind.__name__}")
@@ -601,12 +706,22 @@ class _OperatorClient(TelegramClient):  # type: ignore[misc]  # Telethon ships n
     # Set only by OperatorSession.open_mtproxybot_chat, after Telegram resolved @MTProxybot to the
     # very user id the panel stored at login.
     _mtproxybot_id: int | None = None
+    # The bot's buttons this connection read (set per client by _new_client; None: no press passes)
+    # and the removal permit (BotChat.permit_removal; empty: no removal button passes).
+    _read_buttons: ReadButtons | None = None
+    _removal: frozenset[str] = frozenset()
 
     async def _call(
         self, sender: Any, request: Any, ordered: bool = False, flood_sleep_threshold: Any = None
     ) -> Any:
         for item in request if isinstance(request, list | tuple) else (request,):
-            check_request(item, self.scope, bot_id=self._mtproxybot_id)
+            check_request(
+                item,
+                self.scope,
+                bot_id=self._mtproxybot_id,
+                buttons=self._read_buttons,
+                removal=self._removal,
+            )
         return await super()._call(
             sender, request, ordered=ordered, flood_sleep_threshold=flood_sleep_threshold
         )
@@ -1144,6 +1259,13 @@ class BotChat:
     def bot_id(self) -> int:
         return int(self._peer.user_id)
 
+    def permit_removal(self, address_words: frozenset[str]) -> None:
+        """For the rest of this connection, the bot's removal and confirmation buttons (the strict
+        shapes of :data:`REMOVE_BUTTON` and :data:`CONFIRM_BUTTON`) may be pressed, but only under
+        a bot message whose text names one of ``address_words`` (``host`` or ``host:port``, lower
+        case). Called only by the cleanup of proxies whose node was deleted (proxyhub/sponsor)."""
+        self._session._client._removal = frozenset(w.lower() for w in address_words if w)
+
     async def send(self, text: str, *, sensitive: bool = False) -> int | None:
         """Send ``text`` to the bot; the new message's id if Telegram says it. ``sensitive``: the
         text is a proxy secret, kept out of every log line until the connection is closed."""
@@ -1188,10 +1310,16 @@ class BotChat:
                     buttons=_buttons(message.reply_markup),
                 )
             )
+        client = self._session._client
+        if client._read_buttons is None:
+            client._read_buttons = ReadButtons()
+        for read in found:
+            client._read_buttons.remember(read)
         return sorted(found, key=lambda m: m.id)
 
     async def press(self, message_id: int, data: bytes) -> str | None:
-        """Press the inline button with callback ``data`` under the bot's message ``message_id``.
+        """Press the inline button with callback ``data`` under the bot's message ``message_id``
+        (a button of a bot message this connection read: :func:`_check_press`).
         The bot's short answer (a toast), if any. A bot that does not answer the press in time
         (BOT_RESPONSE_TIMEOUT) may still have changed the message, so that is not an error here."""
         try:
@@ -1238,6 +1366,7 @@ def _new_client(
         entity_cache_limit=100,
     )
     client.scope = scope or ChannelScope()
+    client._read_buttons = ReadButtons()
     if options.endpoint is not None:
         client.session.set_dc(options.endpoint.dc_id, options.endpoint.host, options.endpoint.port)
     return client

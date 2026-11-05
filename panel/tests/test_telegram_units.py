@@ -4,11 +4,13 @@ test points the client at a refused local port, which it must never reach) and n
 
 from __future__ import annotations
 
+import ast
 import html
 import json
 import re
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -19,6 +21,7 @@ from proxyhub.telegram import pairing
 from proxyhub.telegram.client import (
     ALLOWED_METHODS,
     CAN_REMOVE_POSTS_FLAG,
+    TEST_CHANNEL_CLEANUP_METHOD,
     TOKEN_RE,
     BadRequest,
     BotClient,
@@ -29,6 +32,7 @@ from proxyhub.telegram.client import (
     InvalidResponse,
     InvalidToken,
     MemberRights,
+    NetworkError,
     NotFound,
     RetryAfter,
     SentMessage,
@@ -86,10 +90,11 @@ def test_post_has_content_proxy_words_and_channel_tag_last() -> None:
         [("203.0.113.10", 443, SECRET), ("p2.example.com", 8443, "ee" + SECRET + "676f6f676c652e636f6d")],
         "@ipoxxo",
     )
-    assert post.startswith("<b>خبر مهم</b>\nمتن کوتاه\n\n📡 <b>پروکسی‌ها</b>\n")
+    assert post.startswith("<b>خبر مهم</b>\nمتن کوتاه\n\n📡 <b>پروکسی‌ها</b>\n⚡ <a href=")
     assert post.splitlines()[-1] == "🔗 @ipoxxo"
     words = re.findall(r'<a href="([^"]+)">([^<]+)</a>', post)
-    assert [w for _, w in words] == ["پروکسی ۱", "پروکسی ۲"]
+    assert [w for _, w in words] == ["اتصال ۱", "اتصال ۲"]  # connect words, by place
+    assert "پروکسی ۱" not in post
     first = urlsplit(html.unescape(words[0][0]))
     assert (first.scheme, first.netloc, first.path) == ("https", "t.me", "/proxy")
     assert parse_qs(first.query) == {"server": ["203.0.113.10"], "port": ["443"], "secret": [SECRET]}
@@ -469,6 +474,7 @@ def test_token_shape_is_checked_before_any_request() -> None:
 
 
 # --- rule 6: the client cannot remove a post or ban anyone ---------------------------------------
+# (decision D44: the TEST channel alone may be emptied, only through the guarded method below)
 
 
 @pytest.mark.parametrize(
@@ -499,6 +505,9 @@ async def test_only_allowed_methods_can_be_called(method: str) -> None:
     async with closed_port_bot()(SecretValue(random_token())) as bot:
         with pytest.raises(ValueError, match="not allowed"):
             await bot._call(method, {"chat_id": -1001234567890, "message_id": 1})
+        if method != TEST_CHANNEL_CLEANUP_METHOD:  # the transport's own second lock
+            with pytest.raises(ValueError, match="not allowed"):
+                await bot._post(method, {"chat_id": -1001234567890, "message_id": 1})
 
 
 def test_the_allowlist_is_exactly_the_typed_methods() -> None:
@@ -535,7 +544,88 @@ def test_the_allowlist_is_exactly_the_typed_methods() -> None:
         "get_sticker_set",
         "create_custom_emoji_set",
         "add_custom_emoji",
+        "delete_test_channel_messages",  # D44: the TEST channel only, checked before any request
     }
+    # The one method that removes messages is NOT in the generic allowlist (only the guarded
+    # method sends it), and nothing that deletes, bans or leaves is.
+    assert TEST_CHANNEL_CLEANUP_METHOD == "deleteMessages"
+    assert TEST_CHANNEL_CLEANUP_METHOD not in ALLOWED_METHODS
+    assert not {m for m in ALLOWED_METHODS if m.lower().startswith(("delete", "ban", "leave", "revoke"))}
+
+
+TEST_CHAT = -1009876543210
+MAIN_CHAT = -1001234567890
+
+
+@pytest.mark.parametrize(
+    ("chat_id", "ids", "test_chat", "main_chat"),
+    [
+        (MAIN_CHAT, [5], TEST_CHAT, MAIN_CHAT),  # the main channel: never
+        (MAIN_CHAT, [5], MAIN_CHAT, MAIN_CHAT),  # not even when passed as the test channel too
+        (TEST_CHAT + 1, [5], TEST_CHAT, MAIN_CHAT),  # another channel
+        (TEST_CHAT, [5], TEST_CHAT + 1, None),  # not the stored test channel
+        (111222333, [5], 111222333, None),  # a private chat (a user) is not a channel
+        (-4012345678, [5], -4012345678, None),  # a basic group is not a channel
+        (TEST_CHAT, [], TEST_CHAT, MAIN_CHAT),  # nothing to remove
+        (TEST_CHAT, list(range(1, 102)), TEST_CHAT, MAIN_CHAT),  # more than 100 ids
+        (TEST_CHAT, [5, 5], TEST_CHAT, MAIN_CHAT),  # duplicates
+        (TEST_CHAT, [0], TEST_CHAT, MAIN_CHAT),  # not a message id
+        (TEST_CHAT, [-3], TEST_CHAT, MAIN_CHAT),
+        (TEST_CHAT, [True], TEST_CHAT, MAIN_CHAT),
+        (TEST_CHAT, ["5"], TEST_CHAT, MAIN_CHAT),
+        ("@ipoxxo", [5], "@ipoxxo", None),  # a @name is never accepted, only the stored numeric id
+        (True, [5], True, None),
+        (TEST_CHAT, [5], TEST_CHAT, "x"),
+    ],
+)
+async def test_the_test_channel_cleanup_refuses_anything_but_the_test_channel(
+    chat_id: Any, ids: list[Any], test_chat: Any, main_chat: Any
+) -> None:
+    # A refused port: had a request been sent, this would be a NetworkError, not a ValueError.
+    async with closed_port_bot()(SecretValue(random_token())) as bot:
+        with pytest.raises(ValueError):
+            await bot.delete_test_channel_messages(
+                chat_id, ids, test_chat_id=test_chat, main_chat_id=main_chat
+            )
+
+
+async def test_the_test_channel_cleanup_sends_only_for_the_test_channel() -> None:
+    """The control: the stored test channel (never the main one) does go to the network."""
+    async with closed_port_bot()(SecretValue(random_token())) as bot:
+        with pytest.raises(NetworkError) as caught:
+            await bot.delete_test_channel_messages(
+                TEST_CHAT, list(range(2, 102)), test_chat_id=TEST_CHAT, main_chat_id=MAIN_CHAT
+            )
+        assert caught.value.method == TEST_CHANNEL_CLEANUP_METHOD
+        with pytest.raises(NetworkError):
+            await bot.delete_test_channel_messages(TEST_CHAT, [7], test_chat_id=TEST_CHAT, main_chat_id=None)
+
+
+def test_the_cleanup_method_has_exactly_one_sender() -> None:
+    """``_post`` (the HTTP request) is called only by ``_call`` (the allowlist) and by the guarded
+    method; the cleanup method's name is used only in the transport's second lock and the guarded
+    method. No other path, in the client or anywhere in the panel, can send it."""
+    client = REPO / "panel" / "proxyhub" / "telegram" / "client.py"
+    source = client.read_text(encoding="utf-8")
+    users: dict[str, set[str]] = {"_post": set(), "TEST_CHANNEL_CLEANUP_METHOD": set()}
+    for fn in ast.walk(ast.parse(source)):
+        if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Attribute) and node.attr == "_post":
+                users["_post"].add(fn.name)
+            if isinstance(node, ast.Name) and node.id == "TEST_CHANNEL_CLEANUP_METHOD":
+                users["TEST_CHANNEL_CLEANUP_METHOD"].add(fn.name)
+    assert users["_post"] == {"_call", "delete_test_channel_messages"}
+    assert users["TEST_CHANNEL_CLEANUP_METHOD"] == {"_post", "delete_test_channel_messages"}
+    assert source.count('"deleteMessages"') == 1
+    assert '"deleteMessage"' not in source
+    for path in (REPO / "panel" / "proxyhub").rglob("*.py"):
+        if path == client:
+            continue
+        text_ = path.read_text(encoding="utf-8")
+        assert "TEST_CHANNEL_CLEANUP_METHOD" not in text_, path
+        assert ".delete_test_channel_messages(" not in text_ or path.name == "test_channel.py", path
 
 
 def test_redact_hides_tokens_in_urls_and_bare() -> None:

@@ -8,18 +8,21 @@ its emoji. So the bot makes our own pack from the drawings in proxyhub/posts/emo
   make or change a set with that name), title ``@<channel>`` (the main channel's public username),
   owner: the owner's own Telegram account (the private chat the owner paired with the bot, which
   is the owner's user id). The pack is the owner's: @Stickers shows it in the owner's sets.
-* Bot API ``getStickerSet``; if there is no such set, ``createNewStickerSet`` with every drawing in
-  one request; if there is, ``addStickerToSet`` for each drawing whose alt emoji it lacks (a drawing
-  added to this repository later). Nothing in a pack is ever removed or replaced.
-* When the owner has not chosen a pack (``posts.operator.emoji_pack`` empty), this pack becomes the
-  one the operator poster uses (proxyhub/posts/operator.py, :func:`~proxyhub.posts.operator.emoji_map`).
-  A pack the owner pasted is never replaced.
+* Bot API ``getStickerSet``; if there is no such set, ``createNewStickerSet`` with the FIRST drawing
+  only; then, a minute apart, ``addStickerToSet`` for at most :data:`ADD_PER_RUN` drawings the pack
+  lacks, until it has them all (P17: creating it with all 28 at once got ``429 retry after 301``
+  twice). Nothing in a pack is ever removed or replaced.
+* When Telegram answers 429, the next try waits exactly its ``retry_after`` (plus a few seconds), not
+  a fixed hour; any other failure is tried again an hour later.
+* Once the pack has every drawing and the owner has not chosen a pack (``posts.operator.emoji_pack``
+  empty), it becomes the one the operator poster uses (proxyhub/posts/operator.py,
+  :func:`~proxyhub.posts.operator.emoji_map`). A pack the owner pasted is never replaced.
 
 It runs while the fleet's kill switch is OFF and the bot, the owner's chat and a main channel with a
-public @username exist; once a day it checks the pack is still there (an hour after a failure).
+public @username exist; once complete, it checks once a day that the pack is still there.
 
 ``settings`` row ``posts.own_pack``: ``{"name", "title", "owner_id", "alts", "created_at",
-"checked_at", "attempted_at", "error"}`` (no secret).
+"checked_at", "attempted_at", "retry_at", "error"}`` (no secret).
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ from proxyhub.telegram.client import (
     AnimatedEmoji,
     BadRequest,
     BotClient,
+    RetryAfter,
     StickerSetInfo,
     TelegramError,
 )
@@ -52,6 +56,8 @@ log = logging.getLogger(__name__)
 KEY: Final = "posts.own_pack"
 RECHECK: Final = timedelta(days=1)
 AFTER_FAILURE: Final = timedelta(hours=1)
+RETRY_MARGIN: Final = timedelta(seconds=5)
+ADD_PER_RUN: Final = 3
 CREATED_ACTION: Final = "posts.own_pack_created"
 EXTENDED_ACTION: Final = "posts.own_pack_extended"
 CHOSEN_ACTION: Final = "posts.own_pack_chosen"
@@ -96,6 +102,7 @@ class PackState:
     checked_at: datetime | None = None  # the last check that worked
     attempted_at: datetime | None = None  # the last try, worked or not
     error: str | None = None
+    retry_at: datetime | None = None  # Telegram asked us to wait until then (429)
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -106,15 +113,21 @@ class PackState:
             "created_at": iso(self.created_at),
             "checked_at": iso(self.checked_at),
             "attempted_at": iso(self.attempted_at),
+            "retry_at": iso(self.retry_at),
             "error": self.error,
         }
 
 
 def due(state: PackState | None, name: str, now: datetime) -> bool:
-    """Is a check due now? Always for a new name or a drawing the pack lacks; else daily (hourly
-    after a failure)."""
+    """Is a step due now? Never before Telegram's ``retry_after`` has passed; always for a new name or
+    a drawing the pack lacks; else daily (an hour after a failure without ``retry_after``)."""
     if state is None or state.name != name:
         return True
+    if state.retry_at is not None:
+        if now < state.retry_at:
+            return False
+        if state.error is not None:
+            return True
     if state.error is not None:
         return state.attempted_at is None or now - state.attempted_at >= AFTER_FAILURE
     if missing(state.alts):
@@ -144,6 +157,7 @@ async def load_state(db: tg_store.Db) -> PackState | None:
         created_at=operator.parse_time(value.get("created_at")),
         checked_at=operator.parse_time(value.get("checked_at")),
         attempted_at=operator.parse_time(value.get("attempted_at")),
+        retry_at=operator.parse_time(value.get("retry_at")),
         error=value.get("error") if isinstance(value.get("error"), str) else None,
     )
 
@@ -201,6 +215,38 @@ async def choose_if_unset(db: tg_store.Db, name: str, now: datetime) -> bool:
 # --- the one Telegram step ---------------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class Talk:
+    """What one step with Telegram gave: the outcome, the set as it is now, and on failure the error
+    and Telegram's ``retry_after`` (seconds) when it asked us to wait."""
+
+    outcome: str
+    info: StickerSetInfo | None = None
+    error: str | None = None
+    retry_after_s: int | None = None
+
+
+def failed_state(prev: PackState | None, found: Target, talk: Talk, now: datetime) -> PackState:
+    """The state after a failed step: what was known stays; the next try waits Telegram's
+    ``retry_after`` when it gave one (P17), else :data:`AFTER_FAILURE` (see :func:`due`)."""
+    retry_at = now + timedelta(seconds=talk.retry_after_s) + RETRY_MARGIN if talk.retry_after_s else None
+    return PackState(
+        name=found.name,
+        title=prev.title if prev else found.title,
+        owner_id=found.owner_id,
+        alts=prev.alts if prev else (),
+        created_at=prev.created_at if prev else None,
+        checked_at=prev.checked_at if prev else None,
+        attempted_at=now,
+        error=talk.error,
+        retry_at=retry_at,
+    )
+
+
+def complete(state: PackState | None) -> bool:
+    return state is not None and state.error is None and bool(state.alts) and not missing(state.alts)
+
+
 async def ensure(
     engine: AsyncEngine,
     vault: Vault,
@@ -209,15 +255,15 @@ async def ensure(
     bot_factory: BotFactory = BotClient,
     force: bool = False,
 ) -> str:
-    """Make or complete the pack when due. Returns the reason it cannot (see :func:`target`),
-    ``vault_unavailable``, ``not_due``, ``created``, ``extended``, ``ok``, ``not_emoji_set`` or
-    ``failed``. A pack that is ready becomes the poster's pack if the owner chose none."""
+    """One step towards the complete pack, when due. Returns the reason it cannot (see :func:`target`),
+    ``vault_unavailable``, ``not_due``, ``created``, ``extended``, ``ok``, ``not_emoji_set``,
+    ``rate_limited`` or ``failed``. A COMPLETE pack becomes the poster's pack if the owner chose none."""
     async with engine.begin() as conn:
         found = await target(conn)
         if isinstance(found, str):
             return found
         state = await load_state(conn)
-        if state is not None and state.name == found.name and state.error is None and state.alts:
+        if state is not None and state.name == found.name and complete(state):
             await choose_if_unset(conn, found.name, now)
         if not force and not due(state, found.name, now):
             return "not_due"
@@ -227,58 +273,45 @@ async def ensure(
             return "vault_unavailable"
     if creds is None:
         return "no_bot"
-    outcome, info, error = await _talk(bot_factory, creds.token, found)
+    talk = await _talk(bot_factory, creds.token, found)
     async with engine.begin() as conn:
         old = await load_state(conn)
         prev = old if old is not None and old.name == found.name else None
-        if error is not None:
-            await save_state(
-                conn,
-                PackState(
-                    name=found.name,
-                    title=prev.title if prev else found.title,
-                    owner_id=found.owner_id,
-                    alts=prev.alts if prev else (),
-                    created_at=prev.created_at if prev else None,
-                    checked_at=prev.checked_at if prev else None,
-                    attempted_at=now,
-                    error=error,
-                ),
-            )
-            log.warning("own emoji pack: %s (%s)", outcome, error)
-            return outcome
+        if talk.error is not None:
+            await save_state(conn, failed_state(prev, found, talk, now))
+            log.warning("own emoji pack: %s (%s)", talk.outcome, talk.error)
+            return talk.outcome
+        info = talk.info
         assert info is not None
-        await save_state(
-            conn,
-            PackState(
-                name=found.name,
-                title=info.title,
-                owner_id=found.owner_id,
-                alts=info.alts,
-                created_at=now if outcome == "created" else (prev.created_at if prev else None),
-                checked_at=now,
-                attempted_at=now,
-            ),
+        new = PackState(
+            name=found.name,
+            title=info.title,
+            owner_id=found.owner_id,
+            alts=info.alts,
+            created_at=now if talk.outcome == "created" else (prev.created_at if prev else None),
+            checked_at=now,
+            attempted_at=now,
         )
-        if outcome in ("created", "extended"):
+        await save_state(conn, new)
+        done = complete(new)
+        if talk.outcome == "created" or (talk.outcome == "extended" and done):
             await log_action(
                 conn,
                 actor="worker",
-                action=CREATED_ACTION if outcome == "created" else EXTENDED_ACTION,
+                action=CREATED_ACTION if talk.outcome == "created" else EXTENDED_ACTION,
                 target=found.name,
                 dry_run=False,
                 allowed=True,
-                context={"emoji": len(info.alts)},
+                context={"emoji": len(info.alts), "of": len(emoji_art.ART)},
                 result="ok",
             )
-        await choose_if_unset(conn, found.name, now)
-    return outcome
+        if done:
+            await choose_if_unset(conn, found.name, now)
+    return talk.outcome
 
 
-async def _talk(
-    bot_factory: BotFactory, token: SecretValue, found: Target
-) -> tuple[str, StickerSetInfo | None, str | None]:
-    """(outcome, the set as it is now, error). No transaction is open while Telegram answers."""
+async def _talk(bot_factory: BotFactory, token: SecretValue, found: Target) -> Talk:
+    """One step. No transaction is open while Telegram answers."""
     try:
         async with bot_factory(token) as bot:
             try:
@@ -288,21 +321,25 @@ async def _talk(
                     raise
                 info = None
             if info is None:
-                art = [upload(a) for a in emoji_art.ART]
                 await bot.create_custom_emoji_set(
-                    user_id=found.owner_id, name=found.name, title=found.title, emoji=art
+                    user_id=found.owner_id,
+                    name=found.name,
+                    title=found.title,
+                    emoji=[upload(emoji_art.ART[0])],
                 )
-                return "created", await bot.get_sticker_set(found.name), None
+                return Talk("created", await bot.get_sticker_set(found.name))
             if not info.is_custom_emoji:
-                return "not_emoji_set", None, "not_emoji_set"
-            lacking = missing(info.alts)
+                return Talk("not_emoji_set", error="not_emoji_set")
+            lacking = missing(info.alts)[:ADD_PER_RUN]
             for a in lacking:
                 await bot.add_custom_emoji(user_id=found.owner_id, name=found.name, item=upload(a))
             if lacking:
-                return "extended", await bot.get_sticker_set(found.name), None
-            return "ok", info, None
+                return Talk("extended", await bot.get_sticker_set(found.name))
+            return Talk("ok", info)
+    except RetryAfter as exc:
+        return Talk("rate_limited", error=error_code(exc), retry_after_s=max(1, exc.seconds))
     except TelegramError as exc:
-        return "failed", None, error_code(exc)
+        return Talk("failed", error=error_code(exc))
 
 
 async def status(db: tg_store.Db) -> dict[str, Any]:
@@ -328,4 +365,5 @@ async def status(db: tg_store.Db) -> dict[str, Any]:
         "total": len(emoji_art.ART),
         "error": state.error,
         "checked_at": iso(state.checked_at),
+        "retry_at": iso(state.retry_at),
     }

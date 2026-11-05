@@ -10,10 +10,17 @@ POST   /api/sponsor/campaigns                     {customer?, channel, starts_at
 PUT    /api/sponsor/campaigns/{id}                the same fields (an active campaign keeps its start)
 POST   /api/sponsor/campaigns/{id}/cancel         back to the default sponsor on the next pass
 DELETE /api/sponsor/campaigns/{id}                only a campaign that never started
+POST   /api/sponsor/mtproxybot/inventory          read @MTProxybot's own list and each live proxy's
+                                                  sponsor (a job the sponsor loop runs)
+POST   /api/sponsor/mtproxybot/cleanup            «پاک کردن پروکسی‌های مرده از ‎@MTProxybot‎»: only
+                                                  proxies whose node was deleted; "observe" (nothing
+                                                  pressed) until removal is turned on from the CLI
+POST   /api/sponsor/mtproxybot/stop               end the open job
 
 Owner only (``require_admin``: session cookie and CSRF on every write). Errors are
-``{"error", "message_fa"}``. No response holds a proxy secret: tags are shortened, and the bot's
-last reply was masked before it was stored. Nothing here talks to Telegram; the reconciler does.
+``{"error", "message_fa"}``. No response holds a proxy secret: tags are shortened, the bot's last
+reply was masked before it was stored, and @MTProxybot's list holds addresses, label shapes and
+screen shapes only. Nothing here talks to Telegram; the reconciler does.
 """
 
 from __future__ import annotations
@@ -38,8 +45,9 @@ from pydantic import (
 
 from proxyhub.api.deps import AdminIdentity, ApiError, ApiRoute, require_admin
 from proxyhub.db.session import get_engine
+from proxyhub.sponsor import inventory, service
 from proxyhub.sponsor import provider as provider_module
-from proxyhub.sponsor import service
+from proxyhub.sponsor.inventory import InventoryError
 from proxyhub.sponsor.messages import STATUS, error_message
 from proxyhub.sponsor.service import CampaignInput, SponsorError
 
@@ -71,9 +79,12 @@ def _uuid(value: str) -> uuid.UUID:
 
 
 async def _overview() -> dict[str, Any]:
-    return await service.overview(
-        get_engine(), now=_now(), provider_ready=provider_module.MTPROTO_PROVIDER is not None
+    engine = get_engine()
+    view = await service.overview(
+        engine, now=_now(), provider_ready=provider_module.MTPROTO_PROVIDER is not None
     )
+    view["mtproxybot"] = await inventory.overview(engine, wanted=str(view["wanted_channel"]))
+    return view
 
 
 @router.get("")
@@ -194,5 +205,32 @@ async def delete_campaign(admin: Admin, campaign_id: str) -> dict[str, Any]:
     try:
         await service.delete_campaign(get_engine(), _uuid(campaign_id), actor=_actor(admin), now=_now())
     except SponsorError as exc:
+        raise _error(exc.code) from None
+    return await _overview()
+
+
+@router.post("/mtproxybot/inventory")
+async def mtproxybot_inventory(admin: Admin) -> dict[str, Any]:
+    try:
+        await inventory.request_job(get_engine(), inventory.INVENTORY, actor=_actor(admin), now=_now())
+    except InventoryError as exc:
+        raise _error(exc.code) from None
+    return await _overview()
+
+
+@router.post("/mtproxybot/cleanup")
+async def mtproxybot_cleanup(admin: Admin) -> dict[str, Any]:
+    try:
+        await inventory.request_job(get_engine(), inventory.CLEANUP, actor=_actor(admin), now=_now())
+    except InventoryError as exc:
+        raise _error(exc.code) from None
+    return await _overview()
+
+
+@router.post("/mtproxybot/stop")
+async def mtproxybot_stop(admin: Admin) -> dict[str, Any]:
+    try:
+        await inventory.stop_job(get_engine(), actor=_actor(admin), now=_now())
+    except InventoryError as exc:
         raise _error(exc.code) from None
     return await _overview()

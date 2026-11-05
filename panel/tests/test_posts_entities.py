@@ -45,6 +45,7 @@ PACK = pack_map(
         (5_009, "♻️"),
         (5_010, "📡"),  # a second animation of the same emoji: the first one wins
         (5_011, "🔑"),
+        (5_012, "⚡"),
     ]
 )
 
@@ -137,23 +138,42 @@ def test_unclosed_stray_and_empty_tags() -> None:
 
 def _post_html() -> str:
     content = compose_content("💡 ترفند امروز 🇮🇷", "سلام <b>دوستان</b> 👨‍👩‍👧 <code>vless 🔑</code> ♻️")
+    until = datetime(2026, 11, 6, 6, 0, tzinfo=UTC)
     links = [
         PostLink(
             kind="mtproto",
-            label="پروکسی ۱",
             status="active",
             url="https://t.me/proxy?server=203.0.113.10&port=443&secret=" + "a1" * 16,
         ),
-        PostLink(kind="mtproto", label="پروکسی ۲", status="expired"),
-        PostLink(kind="mtproto", label="پروکسی ۳", status="paused"),
+        PostLink(kind="mtproto", status="expired"),
+        PostLink(kind="mtproto", status="paused"),
+        PostLink(
+            kind="mtproto",
+            status="active",
+            url="https://t.me/proxy?server=203.0.113.11&port=443&secret=" + "b2" * 16,
+        ),
         PostLink(
             kind="reality",
-            label="ریلیتی ۱",
             status="active",
-            url="vless://11111111-2222-3333-4444-555555555555@203.0.113.10:443?security=reality#x",
-            expires_at=datetime(2026, 11, 6, 6, 0, tzinfo=UTC),
+            url="vless://11111111-2222-3333-4444-555555555555@203.0.113.10:443?security=reality#%40ipoxxo",
+            expires_at=until,
+            variant="TCP",
         ),
-        PostLink(kind="reality", label="ریلیتی ۲", status="full"),
+        PostLink(
+            kind="reality",
+            status="active",
+            url="vless://11111111-2222-3333-4444-555555555555@203.0.113.10:2083?type=xhttp#%40ipoxxo%20XHTTP",
+            expires_at=until,
+            variant="XHTTP",
+            companion=True,
+        ),
+        PostLink(
+            kind="reality",
+            status="active",
+            url="vless://66666666-2222-3333-4444-555555555555@203.0.113.12:443?type=ws#%40ipoxxo",
+            expires_at=until,
+        ),
+        PostLink(kind="reality", status="full"),
     ]
     return render_post(content, links, "@ipoxxo", StatusTexts()).text
 
@@ -164,12 +184,25 @@ def test_the_real_template_matches_telethons_own_html_parser() -> None:
     ours = parse_html(post)
     text, theirs = telethon_html.parse(post)
     assert ours.text == text
-    assert [(e.kind, e.offset, e.length) for e in ours.entities] == [
-        (_KIND[type(t).__name__], t.offset, t.length)
+    assert [(e.kind, e.offset, e.length, e.url, e.language or None) for e in ours.entities] == [
+        (
+            _KIND[type(t).__name__],
+            t.offset,
+            t.length,
+            getattr(t, "url", None),
+            getattr(t, "language", None) or None,  # Telethon writes "" for a pre without a language
+        )
         for t in sorted(theirs, key=lambda t: (t.offset, -t.length))
     ]
     for e in ours.entities:  # every entity covers whole characters
         assert covered(ours, e).encode("utf-16-le").decode("utf-16-le")
+    # Each config is one pre entity over exactly the config; its marker is the block's language.
+    pres = [(covered(ours, e), e.language) for e in ours.entities if e.kind == "pre"]
+    assert [lang for _, lang in pres] == ["TCP", "XHTTP", None]
+    assert all(text.startswith("vless://") and "\n" not in text for text, _ in pres)
+    # The connect words are the links' whole text; the mark before each stays outside the link.
+    words = [covered(ours, e) for e in ours.entities if e.kind == "text_url"]
+    assert words == ["اتصال ۱", "اتصال ۴"]
 
 
 _KIND = {
@@ -177,6 +210,7 @@ _KIND = {
     "MessageEntityItalic": "italic",
     "MessageEntityStrike": "strike",
     "MessageEntityCode": "code",
+    "MessageEntityPre": "pre",
     "MessageEntityTextUrl": "text_url",
     "MessageEntityBlockquote": "blockquote",
 }
@@ -211,6 +245,13 @@ def test_the_owners_emoji_become_custom_emoji_over_exactly_their_units() -> None
     assert ("📡", 5_001) in got and ("⌛️", 5_002) in got and ("🔗", 5_003) in got
     assert all(doc != 5_011 for _, doc in got)  # 🔑 is inside <code>: Telegram draws code plain
     assert ("🔐", 5_007) in got  # the Reality header's 🔐 is outside code
+    assert got.count(("⚡", 5_012)) == 2  # the mark of each live connect word, outside its link
+    # No custom emoji inside a code block, a config's pre block or a link (Telegram's nesting rules).
+    closed = [(e.offset, e.end) for e in m.entities if e.kind in ("code", "pre", "text_url")]
+    assert len(closed) == 6  # the body's code, three configs, two connect words
+    for e in m.entities:
+        if e.kind == "custom_emoji":
+            assert not any(e.offset < end and start < e.end for start, end in closed)
     for e in m.entities:
         if e.kind == "custom_emoji":
             emoji = covered(m, e)
@@ -234,6 +275,18 @@ def test_offsets_after_persian_text_and_surrogate_pairs() -> None:
 def test_explicit_custom_emoji_and_code_are_left_alone() -> None:
     m = operator_message('<tg-emoji emoji-id="9">📡</tg-emoji> <code>📡</code> <pre>⌛</pre> 📡', PACK)
     assert customs(m) == [("📡", 9), ("📡", 5_001)]
+
+
+def test_an_emoji_inside_a_link_or_a_config_block_stays_plain() -> None:
+    """A link holds no entity but bold, italic, underline, strike and spoiler, and pre or code
+    none at all (core.telegram.org/bots/api#formatting-options)."""
+    m = operator_message(
+        '⚡ <a href="https://t.me/proxy?server=a.b&amp;port=1&amp;secret=x">⚡ اتصال <b>📡</b></a> '
+        '<pre><code class="language-XHTTP">vless://a@b:1#⚡</code></pre> ⚡',
+        PACK,
+    )
+    assert customs(m) == [("⚡", 5_012), ("⚡", 5_012)]  # the first and the last one only
+    assert [e.offset for e in m.entities if e.kind == "custom_emoji"] == [0, utf16_len(m.text) - 1]
 
 
 def test_no_pack_or_no_match_leaves_the_message_as_it_is() -> None:
