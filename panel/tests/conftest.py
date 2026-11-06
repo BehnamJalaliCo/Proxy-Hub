@@ -55,10 +55,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 # all, e.g. a ReadTimeout), the test could not exercise Telegram's behaviour either: it is the same
 # "Telegram unreachable" case, so it is reported as skipped with the reason, never as passed. Only
 # for those tests and only for that error; any other failure stays a failure. (CI on 2026-11-06:
-# twice, in two different real-Telegram tests, api.telegram.org timed out from the runner.)
-_TELEGRAM_UNANSWERED = ("network error (ReadTimeout", "network error (ConnectTimeout",
-                        "network error (ConnectError", "network error (RemoteProtocolError",
-                        "network error (ReadError", "network error (PoolTimeout")  # fmt: skip
+# three times, in three different real-Telegram tests, api.telegram.org did not answer the runner:
+# ReadTimeout twice, DeadlineExceeded once.)
+# The client's NetworkError message ("<method>: network error (<kind>…)"): whatever the kind
+# (ReadTimeout, ConnectError, DeadlineExceeded, ...), Telegram gave no HTTP answer at all.
+_TELEGRAM_UNANSWERED = (": network error (",)
 
 
 def _talks_to_real_telegram(item: pytest.Item) -> bool:
