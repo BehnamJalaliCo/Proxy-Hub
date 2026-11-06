@@ -23,6 +23,7 @@ from proxyhub.sponsor import replies
 from proxyhub.sponsor.channels import ChannelError, channel_link, parse_public_channel
 from proxyhub.sponsor.conversation import (
     MESSAGES_NEEDED,
+    Forgotten,
     Observation,
     Press,
     PromoteJob,
@@ -465,3 +466,15 @@ def test_the_screen_of_another_registration_is_never_promoted() -> None:
     assert isinstance(next_action(P18_PROMO, Step.PRESSED_PROXY, plain), Press)
     assert replies.screen_hex_words(REAL_SCREEN.format(tag=P18_TAG)) == [P18_TAG]
     assert replies.screen_hex_words("Proxy t7aae9f0c.ipoxxo.online:8443 with the tag n/a") == []
+
+
+REAL_NO_PROXIES = "You didn't create any proxy yet. Please use /newproxy command."  # P19
+
+
+def test_a_bot_without_any_proxy_of_ours_means_the_registration_is_gone() -> None:
+    assert next_action(P18_PROMO, Step.SENT_MYPROXIES, seen(REAL_NO_PROXIES)) == Forgotten()
+    assert replies.no_proxies(REAL_NO_PROXIES) and replies.no_proxies("You have no proxies.")
+    # Only as the answer to /myproxies, and never next to a real list.
+    assert isinstance(next_action(P18_PROMO, Step.PRESSED_NEXT_PAGE, seen(REAL_NO_PROXIES)), Stuck)
+    assert not replies.no_proxies(REAL_LIST_HEADER + "\nYou didn't create any proxy yet")
+    assert not replies.no_proxies("Proxy deleted. You can create a new proxy with /newproxy.")

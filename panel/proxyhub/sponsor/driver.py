@@ -25,6 +25,7 @@ from typing import Final, Protocol
 from proxyhub.mtproxy.userclient import BotMessage, MtpError, RequestNotAllowed
 from proxyhub.sponsor import replies
 from proxyhub.sponsor.conversation import (
+    Forgotten,
     Job,
     Observation,
     Press,
@@ -72,7 +73,7 @@ class FlowResult:
     """``result`` when the conversation reached one; else ``error`` (a code) and, for a flood
     wait, ``retry_after_s``. ``last_bot_text`` is masked."""
 
-    result: Registered | PromotionSet | Stuck | None = None
+    result: Registered | PromotionSet | Forgotten | Stuck | None = None
     error: str | None = None
     rpc: str | None = None
     retry_after_s: int | None = None

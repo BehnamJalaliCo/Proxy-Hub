@@ -61,6 +61,12 @@ ASK_SECRET: Final = re.compile(
 )
 REGISTERED: Final = re.compile(r"successfully registered|pass this proxy tag", re.IGNORECASE)
 PROXY_LIST: Final = re.compile(r"list of all proxies you created", re.IGNORECASE)
+# /myproxies of an account with no proxy at all (P19, after the owner deleted every proxy by hand):
+# "You didn't create any proxy yet. Please use /newproxy command."
+NO_PROXIES: Final = re.compile(
+    r"\bdid\s*n[o'’]?t\s+create\s+any\s+prox(?:y|ies)\b|\byou\s+have\s+no\s+prox(?:y|ies)\b",
+    re.IGNORECASE,
+)
 ASK_CHANNEL: Final = re.compile(
     r"\bchannel\b[^\n]{0,120}\b(?:link|username|send|enter|specify|provide)\b"
     r"|\b(?:link|username|send|enter|specify|provide)\b[^\n]{0,120}\bchannel\b",
@@ -122,6 +128,11 @@ def registered_tag(text: str, secret_hex: str) -> str | None:
 
 def is_proxy_list(text: str) -> bool:
     return bool(PROXY_LIST.search(text))
+
+
+def no_proxies(text: str) -> bool:
+    """@MTProxybot says the account has no proxy at all (and is not showing a list)."""
+    return bool(NO_PROXIES.search(text)) and not is_proxy_list(text)
 
 
 _HEX_WORD: Final = re.compile(r"[0-9a-f]{1,64}")

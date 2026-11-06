@@ -17,6 +17,8 @@ export const SPONSOR_ACTION: Record<string, string> = {
   "sponsor.flow_stuck": "گفتگو با ‎@MTProxybot‎ متوقف شد",
   "sponsor.registration_retired": "بازنشستگی ثبت پروکسی",
   "sponsor.registration_reused": "استفاده‌ی دوباره از ثبت قبلی",
+  "sponsor.registration_forgotten": "‎@MTProxybot‎ این پروکسی را دیگر ندارد؛ دوباره ثبت میشود",
+  "sponsor.tag_cleared": "برداشتن tag کهنه از node",
   "sponsor.retry_requested": "ثبت دوباره",
   "sponsor.settings_changed": "تغییر تنظیمات اسپانسر",
   "sponsor.campaign_created": "ساخت کمپین اسپانسر",

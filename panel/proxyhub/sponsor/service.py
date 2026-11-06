@@ -60,6 +60,7 @@ from proxyhub.sponsor import driver, pacing, store
 from proxyhub.sponsor.channels import ChannelError, channel_link, parse_public_channel
 from proxyhub.sponsor.conversation import (
     MESSAGES_NEEDED,
+    Forgotten,
     PromoteJob,
     PromotionSet,
     Registered,
@@ -88,6 +89,9 @@ STUCK_ERRORS: Final = frozenset({"mtproxybot_changed", "mtproxybot_not_found", "
 NOT_COUNTED: Final = frozenset({"kill_switch", "hourly_cap", "hold", "pace_timeout"})
 BACKOFF_MIN: Final = (5, 15, 30, 60, 120, 240, 360)
 TAG_RETRY: Final = timedelta(minutes=10)
+# A registration @MTProxybot no longer has (its /myproxies is empty): never reused, the proxy is
+# registered again with /newproxy (P19).
+FORGOTTEN: Final = "removed_in_bot"
 
 
 @dataclass(frozen=True)
@@ -231,11 +235,12 @@ async def _advance_campaigns(db: AsyncConnection, settings: store.SponsorSetting
 
 @dataclass(frozen=True)
 class TagJob:
-    """A registration's tag for the desired Telemt state of the proxy ``key`` (``apply_ad_tag``)."""
+    """A registration's tag for the desired Telemt state of the proxy ``key`` (``apply_ad_tag``);
+    ``tag`` None clears it (the bot forgot the registration, so the proxy is listed for a new one)."""
 
     flow_id: uuid.UUID
     key: str
-    tag: str
+    tag: str | None
     address: str
     announce: bool
 
@@ -260,7 +265,7 @@ async def apply_tags(
                 if job.announce:
                     await _log(
                         db,
-                        "sponsor.tag_applied",
+                        "sponsor.tag_applied" if job.tag is not None else "sponsor.tag_cleared",
                         job.address,
                         reasons=["apply_ad_tag"],
                         context={"key": job.key, "tag": short_tag(job.tag)},
@@ -304,6 +309,8 @@ def _best_by_identity(regs: Sequence[Reg]) -> dict[Identity, Reg]:
     best: dict[Identity, Reg] = {}
     for reg in regs:
         if reg.candidate or reg.ad_tag is None:
+            continue
+        if reg.state == RETIRED and reg.state_reason == FORGOTTEN:  # the bot has no such tag
             continue
         key = identity(reg.host, reg.port, reg.secret_name)
         if key not in best or rank.get(reg.state, 9) < rank.get(best[key].state, 9):
@@ -698,7 +705,31 @@ async def _settle(
         return await _registered(db, work, reg, result.tag, step, now)
     if reg is None:
         return "gone", None
+    if isinstance(result, Forgotten):
+        return await _forgotten(db, reg, step, now)
     return await _settle_reg(db, reg, outcome, step, now), None
+
+
+async def _forgotten(db: AsyncConnection, reg: Reg, step: str, now: datetime) -> tuple[str, TagJob | None]:
+    """@MTProxybot has no proxy of ours at all: retire the registration for good (never reused,
+    :data:`FORGOTTEN`) and clear its tag from the node, so the provider lists the proxy again and
+    the next pass registers it with /newproxy and sets its sponsor (P19)."""
+    await store.update_reg(db, reg.registration_id, now, state=RETIRED, state_reason=FORGOTTEN)
+    await store.update_flow(
+        db, reg.id, now, attempts=0, next_attempt_at=None, last_error=None, last_step=step, **CLEAR_STUCK
+    )
+    await _log(
+        db,
+        "sponsor.registration_forgotten",
+        reg.address,
+        reasons=[FORGOTTEN],
+        context={"key": reg.proxy_key, "tag": short_tag(reg.ad_tag)},
+    )
+    if reg.proxy_key is None or node_of(reg.proxy_key) is None:
+        return "forgotten", None
+    return "forgotten", TagJob(
+        flow_id=reg.id, key=reg.proxy_key, tag=None, address=reg.address, announce=True
+    )
 
 
 async def _settle_reg(
