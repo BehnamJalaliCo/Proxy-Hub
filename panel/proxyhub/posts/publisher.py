@@ -1,7 +1,7 @@
 """The publisher's two steps, each run in the caller's transaction (proxyhub/reconcilers/publisher.py).
 
 **New posts** (:func:`publish_due`): when a slot of today's plan is due (proxyhub/posts/plan.py),
-the post is the next content item + the live links of every provider + the channel tag, queued for
+the post is the next content + the live links of every provider + the channel tag, queued for
 the TEST channel, or for the MAIN channel only when the owner turned ``main_enabled`` on. Checks,
 in order: publisher on, a bot, the target channel set, a due slot not yet posted, the day not full,
 not inside a no-post window (D21), at least ``post_interval_min`` since the last post (both
@@ -15,6 +15,15 @@ The post goes through the owner's poster (proxyhub/posts/poster.py); when that i
 account and it cannot take the post now, the post goes to the bot and the reason is logged
 (``posts.poster_fallback``, shown on the Content page).
 
+**The content** (decision D51): the oldest candidate the owner approved in the review queue
+(proxyhub/content/candidates.py), else the old content bank (proxyhub/posts/content.py). A candidate
+with a downloaded photo or video makes a MEDIA post: the file with the content and the links as its
+caption, within :data:`~proxyhub.telegram.templates.CAPTION_LIMIT` (1024) for both posters
+(:func:`fit_caption`). The links must fit now and in every later state; links that cannot are
+dropped from the end (the Reality configs first, ``posts.caption_links_dropped``); when not one fits,
+or the candidate's file failed, the post goes as text (``posts.media_skipped``). The content is what
+gets shortened, never a link.
+
 **Status edits** (:func:`refresh_posts`): every sent post younger than ``edit_window_hours`` is
 rendered again from what it carries, in the order it was posted (a post shows no label: an MTProto
 link is numbered by its place, a config's TCP/XHTTP marker follows from the keys): a link the
@@ -23,7 +32,8 @@ loses its link; a live link takes its provider's current
 URL, so a new active domain (proxyhub.cloudflare.rotation) or a node's slot name replaces the old
 host. When the text differs from the one the channel shows (the last edit that finished without an
 error, else ``channel_posts.text_sha256``) an ``edit_post`` job is queued, through the poster that
-sent the post. Bounds: one edit job per post at a time, :data:`EDIT_MIN_GAP` between two edits of a
+sent the post (for a photo or video post, an edit of its CAPTION, within the caption limit).
+Bounds: one edit job per post at a time, :data:`EDIT_MIN_GAP` between two edits of a
 post, :data:`MAX_EDITS_PER_RUN` per step and :data:`MAX_PENDING_EDITS` waiting at once; the outbox
 paces every message per channel (3 s, 429). A failed edit is retried with backoff and given up after
 :data:`MAX_EDIT_FAILURES` (owner alerted). A link's status in a post never goes back to active, so
@@ -64,6 +74,7 @@ from typing import Any, Final, cast
 from sqlalchemy import and_, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from proxyhub.content import candidates
 from proxyhub.db.models import Outbox
 from proxyhub.db.models_posts import Post, PostLink
 from proxyhub.db.models_telegram import ChannelPost
@@ -78,11 +89,12 @@ from proxyhub.posts.messages import (
     NO_CONTENT_ALERT_FA,
     NO_LINKS_ALERT_FA,
 )
-from proxyhub.posts.poster import BOT, POSTERS, Poster, for_new_post
+from proxyhub.posts.poster import BOT, POSTERS, MediaPayload, Poster, for_new_post
 from proxyhub.telegram import outbox as tg_outbox
 from proxyhub.telegram import store as tg_store
 from proxyhub.telegram.schedule import quiet_until
 from proxyhub.telegram.templates import (
+    CAPTION_LIMIT,
     LinkKind,
     PostTooLong,
     RenderedPost,
@@ -91,6 +103,7 @@ from proxyhub.telegram.templates import (
     channel_tag,
     compose_content,
     render_post,
+    tail_always_fits,
 )
 from proxyhub.telegram.templates import PostLink as LinkView
 
@@ -162,6 +175,25 @@ def fit(
             if not kept:
                 raise
             kept.pop()
+
+
+def fit_caption(
+    content_html: str,
+    chosen: Sequence[ProxyLink],
+    tag: str,
+    texts: StatusTexts,
+    names: Mapping[str, str] | None = None,
+) -> tuple[RenderedPost, list[ProxyLink]]:
+    """A media post's caption (decision D51): the links must fit the caption limit now AND in every
+    later state (a status edit only ever shortens the content); otherwise links are dropped from the
+    end (the Reality configs first). PostTooLong when not even one link fits."""
+    kept = list(chosen)
+    while kept:
+        views = views_for_new_post(kept, names)
+        if tail_always_fits(views, tag, texts, caption=True):
+            return render_post(content_html, views, tag, texts, caption=True), kept
+        kept.pop()
+    raise PostTooLong("not one link fits a media caption")
 
 
 def content_for(item: content.Item | None) -> str:
@@ -295,13 +327,40 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
         if not await _kill_switch_on(db):
             await _alert_once(db, now, "no_links_alert_at", NO_LINKS_REPEAT, NO_LINKS_ALERT_FA)
         return "no_links"
-    item, recycled = await content.next_item(db, now, cfg.recycle_after_days)
+    # The owner's approved candidate first (decision D51), else the content bank.
+    candidate = await candidates.next_for_post(db, now)
+    item, recycled = (
+        (None, False) if candidate is not None else await content.next_item(db, now, cfg.recycle_after_days)
+    )
+    content_html = candidate.content_html() if candidate is not None else content_for(item)
     names = await operators.operator_labels(db, chosen, now)  # D50: decided once, stored below
-    rendered, chosen = fit(content_for(item), chosen, where.tag, cfg.texts(), names)
+    media_row = await candidates.post_media(db, candidate) if candidate is not None else None
+    offered = list(chosen)
+    media_skipped: str | None = None
+    if media_row is not None:
+        try:
+            rendered, chosen = fit_caption(content_html, chosen, where.tag, cfg.texts(), names)
+        except PostTooLong:  # not one link fits a caption: the post goes as text, with its links
+            media_row, media_skipped = None, "links_do_not_fit_caption"
+    elif candidate is not None and candidate.media_kind is not None:
+        media_skipped = f"media_{candidate.media_state}"  # approved although its file failed
+    if media_row is None:
+        rendered, chosen = fit(content_html, chosen, where.tag, cfg.texts(), names)
     if not chosen:
         return "no_links"
+    media = (
+        MediaPayload(
+            kind="video" if media_row.mime == "video/mp4" else "photo",
+            media_id=media_row.id,
+            width=media_row.width,
+            height=media_row.height,
+            duration=media_row.duration,
+        )
+        if media_row is not None
+        else None
+    )
     poster, fallback = await for_new_post(db, poster, role=where.role, now=now)
-    job = await poster.queue_post(db, role=where.role, text_html=rendered.text)
+    job = await poster.queue_post(db, role=where.role, text_html=rendered.text, media=media)
     post_id = (
         await db.execute(
             insert(Post)
@@ -309,6 +368,8 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
                 role=where.role,
                 outbox_id=job,
                 content_item_id=item.id if item else None,
+                content_candidate_id=candidate.id if candidate is not None else None,
+                media_kind=media.kind if media is not None else None,
                 content_html=rendered.content_html,
                 channel_tag=where.tag,
                 poster=poster.name,
@@ -341,7 +402,35 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
         await operator.log_fallback(
             db, actor=ACTOR, role=where.role, post_id=post_id, reason=fallback, stage="queue", outbox_id=job
         )
-    if item is not None:
+    dropped = offered[len(chosen) :]
+    if media is not None and dropped:
+        await log_action(
+            db,
+            actor=ACTOR,
+            action="posts.caption_links_dropped",
+            target=f"{where.role}:post:{post_id}",
+            dry_run=False,
+            allowed=True,
+            reasons=["caption_limit"],
+            context={
+                "caption_limit": CAPTION_LIMIT,
+                "dropped": [{"label": x.label, "kind": x.kind} for x in dropped],
+            },
+        )
+    if media_skipped is not None:
+        await log_action(
+            db,
+            actor=ACTOR,
+            action="posts.media_skipped",
+            target=f"{where.role}:post:{post_id}",
+            dry_run=False,
+            allowed=True,
+            reasons=[media_skipped],
+            context={"candidate_id": candidate.id if candidate is not None else None},
+        )
+    if candidate is not None:
+        await candidates.mark_used(db, candidate.id, now)
+    elif item is not None:
         await content.mark_used(db, item.id, now)
         if recycled:
             await _alert_once(db, now, "recycled_alert_at", RECYCLED_REPEAT, CONTENT_RECYCLED_ALERT_FA)
@@ -360,6 +449,8 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
             "plan_day": slot.day.isoformat(),
             "plan_slot": slot.index,
             "content_item_id": item.id if item else None,
+            "content_candidate_id": candidate.id if candidate is not None else None,
+            "media": media.kind if media is not None else None,
             "recycled": recycled,
             "mtproto": sum(1 for x in chosen if x.kind == "mtproto"),
             "mtproto_extras": sum(1 for x in chosen if x.extra_of is not None),
@@ -389,6 +480,7 @@ class _Sent:
     live_sha: str
     shown_sha: str | None
     gone: bool = False  # this round found its message gone from the channel
+    media_kind: str | None = None  # a photo or video post: its text is the media's caption (D51)
 
     @property
     def showing(self) -> str:
@@ -417,6 +509,7 @@ async def _sent_posts(db: AsyncConnection, since: datetime) -> list[_Sent]:
                 Post.edit_failures,
                 Post.edit_retry_at,
                 Post.shown_sha256,
+                Post.media_kind,
                 ChannelPost.id.label("cp_id"),
                 ChannelPost.text_sha256,
             )
@@ -440,6 +533,7 @@ async def _sent_posts(db: AsyncConnection, since: datetime) -> list[_Sent]:
             channel_post_id=int(r.cp_id),
             live_sha=r.text_sha256,
             shown_sha=r.shown_sha256,
+            media_kind=r.media_kind,
         )
         for r in rows
     ]
@@ -651,8 +745,9 @@ async def refresh_posts(
         )
         changes = [(c, x.new_status) for c, x in zip(carried, shown, strict=True) if x.new_status]
         paused = [c.label for c, x in zip(carried, shown, strict=True) if x.view.status == "paused"]
+        caption = post.media_kind is not None
         try:
-            text = render_post(post.content_html, views, post.channel_tag, texts).text
+            text = render_post(post.content_html, views, post.channel_tag, texts, caption=caption).text
         except (PostTooLong, ValueError) as exc:
             log.warning("publisher: post %d could not be rendered again (%s)", post.id, type(exc).__name__)
             continue
@@ -664,7 +759,9 @@ async def refresh_posts(
             )
         if tg_store.text_sha256(text) == post.showing:
             continue
-        job = await poster.queue_edit(db, channel_post_id=post.channel_post_id, text_html=text)
+        job = await poster.queue_edit(
+            db, channel_post_id=post.channel_post_id, text_html=text, caption=caption
+        )
         await db.execute(
             update(Post)
             .where(Post.id == post.id)

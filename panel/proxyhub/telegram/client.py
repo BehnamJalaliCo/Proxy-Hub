@@ -2,9 +2,11 @@
 
 Only the methods Proxy-Hub needs: getMe, getUpdates, sendMessage, editMessageText, getChat,
 getChatMember, getChatMemberCount (channel size for the «آمار» page), createChatInviteLink (a
-named tracking link per campaign; links are never revoked or edited), and getStickerSet,
+named tracking link per campaign; links are never revoked or edited), getStickerSet,
 createNewStickerSet and addStickerToSet for the channel's own animated emoji pack
-(proxyhub/posts/own_pack.py; nothing in a pack is ever removed or replaced). Nothing else can be
+(proxyhub/posts/own_pack.py; nothing in a pack is ever removed or replaced), and (decision D51) a
+post as a photo or video with a caption: sendPhoto, sendVideo (an uploaded file only, never a URL
+or another chat's file) and editMessageCaption (a status edit of such a post). Nothing else can be
 sent: the generic request path (:meth:`BotClient._call`) refuses any method name outside
 :data:`ALLOWED_METHODS` before a request is built, so nobody can be banned and no message removed
 through it, not even with a computed method name (CLAUDE.md rule 6).
@@ -65,6 +67,9 @@ ALLOWED_METHODS: Final = frozenset(
         "getStickerSet",
         "createNewStickerSet",
         "addStickerToSet",
+        "sendPhoto",
+        "sendVideo",
+        "editMessageCaption",
     }
 )
 # Decision D44: the one method that removes messages, for the TEST channel only. Deliberately not in
@@ -84,6 +89,13 @@ STICKER_SET_NAME_RE: Final = re.compile(r"^[A-Za-z](?:[A-Za-z0-9]|_(?!_)){0,63}$
 STICKER_SET_TITLE_MAX: Final = 64
 NEW_SET_MAX_STICKERS: Final = 50
 TGS_MAX_BYTES: Final = 64 * 1024
+# Uploads (core.telegram.org/bots/api#sending-files, multipart/form-data): a photo up to 10 MB, any
+# other file up to 50 MB. A caption: 0 to 1024 characters after entities parsing (sendPhoto).
+PHOTO_MAX_BYTES: Final = 10 * 1024 * 1024
+FILE_MAX_BYTES: Final = 50 * 1024 * 1024
+CAPTION_MAX_CHARS: Final = 1024
+_PHOTO_TYPES: Final = {"image/jpeg": "photo.jpg", "image/png": "photo.png"}
+UPLOAD_TIMEOUT_S: Final = 120.0
 
 DEFAULT_TIMEOUT: Final = httpx.Timeout(15.0, connect=10.0)
 MAX_LONG_POLL_SECONDS: Final = 25
@@ -623,6 +635,69 @@ class BotClient:
             },
         )
         return SentMessage.from_result(result, "editMessageText")
+
+    async def send_photo(
+        self, chat_id: int | str, photo: bytes, *, mime: str, caption: str, disable_notification: bool = False
+    ) -> SentMessage:
+        """A photo uploaded with the request (never a URL or a file id), with an HTML caption."""
+        name = _PHOTO_TYPES.get(mime)
+        if name is None or not 0 < len(photo) <= PHOTO_MAX_BYTES:
+            raise ValueError("a photo is a JPEG or PNG file of at most 10 MB")
+        result = await self._call(
+            "sendPhoto",
+            {
+                "chat_id": chat_id,
+                "photo": "attach://photo",
+                "caption": caption,
+                "parse_mode": "HTML",
+                "disable_notification": disable_notification,
+            },
+            files={"photo": (name, photo, mime)},
+            read_timeout=UPLOAD_TIMEOUT_S,
+        )
+        return SentMessage.from_result(result, "sendPhoto")
+
+    async def send_video(
+        self,
+        chat_id: int | str,
+        video: bytes,
+        *,
+        caption: str,
+        width: int | None = None,
+        height: int | None = None,
+        duration: int | None = None,
+        disable_notification: bool = False,
+    ) -> SentMessage:
+        """An MP4 video uploaded with the request (never a URL or a file id), streamable, with an
+        HTML caption."""
+        if not 0 < len(video) <= FILE_MAX_BYTES:
+            raise ValueError("a video is a file of at most 50 MB")
+        params: dict[str, Any] = {
+            "chat_id": chat_id,
+            "video": "attach://video",
+            "caption": caption,
+            "parse_mode": "HTML",
+            "supports_streaming": True,
+            "disable_notification": disable_notification,
+        }
+        for key, value in (("width", width), ("height", height), ("duration", duration)):
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                params[key] = value
+        result = await self._call(
+            "sendVideo",
+            params,
+            files={"video": ("video.mp4", video, "video/mp4")},
+            read_timeout=UPLOAD_TIMEOUT_S,
+        )
+        return SentMessage.from_result(result, "sendVideo")
+
+    async def edit_message_caption(self, chat_id: int | str, message_id: int, caption: str) -> SentMessage:
+        """The new HTML caption of a photo or video post (its media stays)."""
+        result = await self._call(
+            "editMessageCaption",
+            {"chat_id": chat_id, "message_id": message_id, "caption": caption, "parse_mode": "HTML"},
+        )
+        return SentMessage.from_result(result, "editMessageCaption")
 
     async def get_chat(self, chat_id: int | str) -> ChatInfo:
         return ChatInfo.from_result(await self._call("getChat", {"chat_id": chat_id}))

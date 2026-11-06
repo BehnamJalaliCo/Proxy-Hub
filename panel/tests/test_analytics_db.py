@@ -240,6 +240,10 @@ async def test_alerts_off_and_stale_samples(engine: AsyncEngine) -> None:
 
 SECRET_NAME = "Nm" + secrets.token_hex(4)
 SECRET_USERNAME = "u_" + secrets.token_hex(5)
+# Users whose events must never be stored. Long random ids, so the leak check cannot
+# match them by chance inside a UUID or a number another test left behind.
+STRANGER_USER = 7_000_000_000_000 + secrets.randbelow(10**12)
+ADMIN_USER = 8_000_000_000_000 + secrets.randbelow(10**12)
 
 
 async def apply(engine: AsyncEngine, raw: dict[str, Any]) -> None:
@@ -318,13 +322,13 @@ async def test_chat_member_events_store_only_the_d7_fields(engine: AsyncEngine) 
     await apply(
         engine,
         chat_member_update(
-            6, chat_id=STRANGER_CHANNEL, user_id=9005, old="left", new="member", date=t0, **common
+            6, chat_id=STRANGER_CHANNEL, user_id=STRANGER_USER, old="left", new="member", date=t0, **common
         ),
     )
     await apply(
         engine,
         chat_member_update(
-            7, chat_id=CHANNEL_MAIN, user_id=9006, old="member", new="administrator", date=t0, **common
+            7, chat_id=CHANNEL_MAIN, user_id=ADMIN_USER, old="member", new="administrator", date=t0, **common
         ),
     )
     # The same update again (e.g. re-read after a crash) is stored once.
@@ -374,7 +378,7 @@ async def test_chat_member_events_store_only_the_d7_fields(engine: AsyncEngine) 
         ("test", CHANNEL_TEST, "join", 9004, "other", None, False),
         ("main", CHANNEL_MAIN, "leave", 9001, "link", "ad-x", True),  # the leave carries its join's source
     ]
-    for needle in (SECRET_NAME, SECRET_USERNAME, other_link, "9005", "9006", "language"):
+    for needle in (SECRET_NAME, SECRET_USERNAME, other_link, str(STRANGER_USER), str(ADMIN_USER), "language"):
         await assert_absent_from_database(engine, needle)
     assert await rows(engine, "SELECT 1 FROM tg_updates") == []
     async with engine.connect() as conn:

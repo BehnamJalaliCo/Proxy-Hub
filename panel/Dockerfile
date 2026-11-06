@@ -51,6 +51,15 @@ RUN bash /src/node-image/build-agent.sh /out/proxyhub-agent \
 FROM ${PYTHON_IMAGE} AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/app/.venv PATH="/app/.venv/bin:$PATH"
+# ffmpeg and ffprobe: the content supervisor takes frames across a whole video before Claude judges
+# it (D52, proxyhub/content/frames.py; run as argv with a file-only protocol whitelist, the MP4/MOV
+# demuxer forced and strict timeouts). Debian's own package from the base image's bookworm sources,
+# no recommends; nothing else is pinned or fetched. In "base" so the runtime image (the worker) and
+# the test image (its real ffmpeg tests) have the same binaries.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && ffmpeg -hide_banner -version >/dev/null && ffprobe -hide_banner -version >/dev/null
 RUN pip install --no-cache-dir uv==0.11.32 \
     && useradd --uid 10001 --create-home --shell /usr/sbin/nologin app
 WORKDIR /app
@@ -62,8 +71,10 @@ RUN uv sync --frozen --no-dev
 FROM base AS test
 RUN uv sync --frozen
 COPY tests ./tests
-# /app is read-only for uid 10001: keep tool caches in /tmp.
-ENV HYPOTHESIS_STORAGE_DIRECTORY=/tmp/.hypothesis MYPY_CACHE_DIR=/tmp/.mypy_cache RUFF_CACHE_DIR=/tmp/.ruff_cache
+# /app is read-only for uid 10001: keep tool caches in /tmp. The image has ffmpeg (base): its real
+# video frame tests must run here, never skip.
+ENV HYPOTHESIS_STORAGE_DIRECTORY=/tmp/.hypothesis MYPY_CACHE_DIR=/tmp/.mypy_cache RUFF_CACHE_DIR=/tmp/.ruff_cache \
+    PROXYHUB_REQUIRE_FFMPEG=1
 USER 10001
 CMD ["sh", "-c", "ruff check proxyhub tests && ruff format --check proxyhub tests && mypy proxyhub && pytest -q -p no:cacheprovider"]
 

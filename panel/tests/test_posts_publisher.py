@@ -985,7 +985,9 @@ async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep
 
 
 class _EditBreaks(BotPoster):
-    async def queue_edit(self, db: AsyncConnection, *, channel_post_id: int, text_html: str) -> int:
+    async def queue_edit(
+        self, db: AsyncConnection, *, channel_post_id: int, text_html: str, caption: bool = False
+    ) -> int:
         raise RuntimeError(f"edit step breaks; text was {text_html}")  # the text holds proxy links
 
 

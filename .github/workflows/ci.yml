@@ -28,8 +28,18 @@ jobs:
     env:
       PROXYHUB_DATABASE_URL: postgresql+asyncpg://proxyhub:throwaway-ci-db@127.0.0.1:5432/proxyhub
       PROXYHUB_REDIS_URL: redis://127.0.0.1:6379/0
+      # The video frame tests run the real ffmpeg; here they fail instead of skipping without it.
+      PROXYHUB_REQUIRE_FFMPEG: "1"
     steps:
       - uses: actions/checkout@v4
+      # ffmpeg/ffprobe for the content supervisor's video frames (proxyhub/content/frames.py), from
+      # the runner's own Ubuntu archive when the image does not already have it.
+      - run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends ffmpeg
+          fi
+          ffmpeg -hide_banner -version | head -n 1
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24.7"  # = AGENT_GO_VERSION in node-image/versions.lock (reproducible agent)
@@ -87,7 +97,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck deploy/*.sh deploy/backup/*.sh deploy/monitoring/*.sh ops/scripts/*.sh node-image/*.sh
+      - run: shellcheck deploy/*.sh deploy/backup/*.sh deploy/claude-bridge/*.sh deploy/monitoring/*.sh ops/scripts/*.sh node-image/*.sh
       - run: shellcheck -s sh deploy/monitoring/alertmanager/entrypoint.sh
       # promtool config/rules/rule unit tests, amtool for every receiver variant, the runtime
       # bot-token leak check of Alertmanager, loki and alloy, all with the pinned images.

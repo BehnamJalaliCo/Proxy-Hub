@@ -475,7 +475,13 @@ MCI, RIGHTEL, IRANCELL, DC = "asn:197207", "asn:57218", "asn:44244", "asn:205585
         ([tls_round({"8443": {MCI: "down"}}), tls_round({"8443": {MCI: "up"}})], []),  # fresh down wins
         ([tls_round({"8443": {MCI: "invalid"}}), tls_round({"8443": {MCI: "up"}})], ["mci"]),  # older
         ([tls_round({"443": {MCI: "up"}, "8443": {MCI: "down"}})], []),  # the MTProto port decides
-        ([tls_round({"443": {MCI: "up"}})], []),
+        # P21: the probes measure 443 only; the node's 443 result stands in for its MTProto port.
+        ([tls_round({"443": {MCI: "up", RIGHTEL: "up"}})], ["mci", "rightel"]),
+        (
+            [tls_round({"443": {MCI: "invalid", RIGHTEL: "up"}}), tls_round({"443": {MCI: "up"}})],
+            ["mci", "rightel"],
+        ),
+        ([tls_round({"443": {MCI: "down"}}), tls_round({"443": {MCI: "up"}})], []),  # fresh down wins
         ([tls_round({"8443": {DC: "up"}})], []),  # a data-centre probe never names a link
         ([tls_round({"8443": {IRANCELL: "up", MCI: "down"}})], []),  # Irancell is never named (owner)
         ([], []),

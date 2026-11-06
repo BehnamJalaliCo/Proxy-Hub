@@ -1,0 +1,45 @@
+[Unit]
+Description=Proxy-Hub Claude bridge (claude -p with no tools, for the content supervisor; D19, D52)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=proxyhub-claude
+Group=proxyhub-claude
+# The socket's group: the worker container joins it (deploy/docker-compose.yml, group_add).
+SupplementaryGroups=proxyhub-claude-sock
+Environment=HOME=/var/lib/proxyhub-claude
+# Daily cap of reviews (any 24 hours). The panel has its own cap in the dashboard; this one protects
+# the owner's subscription even from a panel that misbehaves.
+Environment=PROXYHUB_BRIDGE_CAP=200
+ExecStart=/usr/bin/python3 -I /usr/local/lib/proxyhub-claude-bridge/bridge.py --daily-cap ${PROXYHUB_BRIDGE_CAP}
+Restart=always
+RestartSec=5
+UMask=0077
+WorkingDirectory=/var/lib/proxyhub-claude
+# Hardening. Claude Code (Node) needs writable+executable memory, so MemoryDenyWriteExecute stays off.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/proxyhub-claude /var/lib/proxy-hub/claude-bridge
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+MemoryMax=2G
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

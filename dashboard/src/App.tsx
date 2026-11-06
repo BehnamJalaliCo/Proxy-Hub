@@ -23,6 +23,8 @@ const StatsPage = lazy(() => import("./pages/StatsPage"));
 const MtprotoPage = lazy(() => import("./pages/MtprotoPage"));
 const SponsorPage = lazy(() => import("./pages/SponsorPage"));
 const ContentPage = lazy(() => import("./pages/ContentPage"));
+const ReviewPage = lazy(() => import("./pages/ReviewPage"));
+const SourcesPage = lazy(() => import("./pages/SourcesPage"));
 const RealityPage = lazy(() => import("./pages/RealityPage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
 const SetupPage = lazy(() => import("./pages/SetupPage"));
@@ -138,6 +140,22 @@ export default function App() {
                     }
                   />
                   <Route path="content" element={<Suspense fallback={<PageFallback />}><ContentPage /></Suspense>} />
+                  <Route
+                    path="review"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <ReviewPage />
+                      </Suspense>
+                    }
+                  />
+                  <Route
+                    path="sources"
+                    element={
+                      <Suspense fallback={<PageFallback />}>
+                        <SourcesPage />
+                      </Suspense>
+                    }
+                  />
                   <Route
                     path="mtproto"
                     element={

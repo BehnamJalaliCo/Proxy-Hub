@@ -525,6 +525,10 @@ def test_the_allowlist_is_exactly_the_typed_methods() -> None:
                 "getStickerSet",
                 "createNewStickerSet",
                 "addStickerToSet",
+                # D51: a post as a photo or video with a caption, and the edit of its caption.
+                "sendPhoto",
+                "sendVideo",
+                "editMessageCaption",
             }
         )
         == ALLOWED_METHODS
@@ -544,6 +548,9 @@ def test_the_allowlist_is_exactly_the_typed_methods() -> None:
         "get_sticker_set",
         "create_custom_emoji_set",
         "add_custom_emoji",
+        "send_photo",  # D51: an uploaded file only (never a URL or a file id)
+        "send_video",
+        "edit_message_caption",
         "delete_test_channel_messages",  # D44: the TEST channel only, checked before any request
     }
     # The one method that removes messages is NOT in the generic allowlist (only the guarded

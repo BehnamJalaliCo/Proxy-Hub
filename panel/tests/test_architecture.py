@@ -63,7 +63,9 @@ CHANNEL_STATS_MESSAGES = {"GetMessagesViewsRequest"}
 # D38, the operator poster (proxyhub/posts/operator_outbox.py): a post (messages.sendMessage, the
 # same request class as the bot chat's, pinned to the scope's post channels) and the EDIT of a post
 # in OUR channels, and the read of the owner's one emoji pack. Nothing else of messages.*.
-CHANNEL_POST_MESSAGES = {"EditMessageRequest", "GetStickerSetRequest"}
+# D51: a photo or video post (messages.sendMedia) in OUR channels, with a file this connection
+# uploaded itself (proxyhub/mtproxy/userclient.py _check_channel_media / _check_upload).
+CHANNEL_POST_MESSAGES = {"EditMessageRequest", "GetStickerSetRequest", "SendMediaRequest"}
 # channels.*: the statistics' full channel, and (D38) the account's own membership (its rights).
 CHANNELS_REQUESTS = {"GetFullChannelRequest", "GetParticipantRequest"}
 # Every request class the operator client can EVER let through (any scope, any bot chat), by TL
@@ -88,6 +90,17 @@ OPERATOR_PASSABLE = {
     "messages.EditMessageRequest",
     "messages.GetHistoryRequest",
     "messages.GetBotCallbackAnswerRequest",
+    # D51: a photo or video post in our channels, and the parts of the file it uploads for it.
+    "messages.SendMediaRequest",
+    "upload.SaveFilePartRequest",
+    "upload.SaveBigFilePartRequest",
+}
+# The three D51 requests above carry "Media", "Save" and the upload namespace on purpose; every other
+# passable request is still checked against these words.
+MEDIA_POST_PASSABLE = {
+    "messages.SendMediaRequest",
+    "upload.SaveFilePartRequest",
+    "upload.SaveBigFilePartRequest",
 }
 FORBIDDEN_REQUEST_WORDS = re.compile(
     r"Delete|Forward|Upload|Media|Join|Leave|Report|Invite|Edit(?:Admin|Banned|Creator|Title|Photo)|"
@@ -348,16 +361,23 @@ def _tl_name(kind: type) -> str:
 
 def test_the_operator_client_can_let_through_exactly_these_requests() -> None:
     """D38 adds exactly: a post and an edit in our channels, the account's own rights and the
-    owner's emoji pack. Nothing that deletes, forwards or changes anything else, in any scope."""
+    owner's emoji pack; D51 a photo or video post there and its upload. Nothing that deletes,
+    forwards or changes anything else, in any scope."""
     from proxyhub.mtproxy.userclient import (
         ALLOWED_REQUESTS,
         BOT_CHAT_REQUESTS,
         CHANNEL_POST_REQUESTS,
+        MEDIA_POST_REQUESTS,
         POSTER_READ_REQUESTS,
+        UPLOAD_REQUESTS,
     )
 
-    passable = {_tl_name(k) for k in ALLOWED_REQUESTS | BOT_CHAT_REQUESTS | CHANNEL_POST_REQUESTS}
+    every = (
+        ALLOWED_REQUESTS | BOT_CHAT_REQUESTS | CHANNEL_POST_REQUESTS | MEDIA_POST_REQUESTS | UPLOAD_REQUESTS
+    )
+    passable = {_tl_name(k) for k in every}
     assert passable == OPERATOR_PASSABLE, sorted(passable ^ OPERATOR_PASSABLE)
+    assert {_tl_name(k) for k in MEDIA_POST_REQUESTS | UPLOAD_REQUESTS} == MEDIA_POST_PASSABLE
     assert {_tl_name(k) for k in CHANNEL_POST_REQUESTS} == {
         "messages.SendMessageRequest",
         "messages.EditMessageRequest",
@@ -366,7 +386,7 @@ def test_the_operator_client_can_let_through_exactly_these_requests() -> None:
         "channels.GetParticipantRequest",
         "messages.GetStickerSetRequest",
     }
-    for name in passable:  # editing a POST is allowed; editing admins, titles or photos is not
+    for name in passable - MEDIA_POST_PASSABLE:  # editing a POST is allowed; admins, titles, photos not
         assert not FORBIDDEN_REQUEST_WORDS.search(name), name
 
 

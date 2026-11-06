@@ -36,10 +36,60 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(
                 pytest.mark.skip(reason="needs a real Cloudflare token (PROXYHUB_CLOUDFLARE_TEST_TOKEN_FILE)")
             )
+        if "claude" in item.keywords and os.environ.get("PROXYHUB_CLAUDE_BRIDGE_TESTS") != "1":
+            item.add_marker(
+                pytest.mark.skip(reason="real Claude Code, logged in (set PROXYHUB_CLAUDE_BRIDGE_TESTS=1)")
+            )
+        if "anthropic_api" in item.keywords and not os.environ.get("PROXYHUB_ANTHROPIC_TEST_KEY_FILE"):
+            item.add_marker(
+                pytest.mark.skip(reason="needs a real Anthropic API key (PROXYHUB_ANTHROPIC_TEST_KEY_FILE)")
+            )
         if "globalping" in item.keywords and os.environ.get("PROXYHUB_GLOBALPING_TESTS") != "1":
             item.add_marker(
                 pytest.mark.skip(reason="real Globalping API calls (set PROXYHUB_GLOBALPING_TESTS=1)")
             )
+
+
+# A test that talks to the real api.telegram.org starts with `if not telegram_reachable(): skip`.
+# When Telegram stops answering DURING such a test (the client's NetworkError: no HTTP answer at
+# all, e.g. a ReadTimeout), the test could not exercise Telegram's behaviour either: it is the same
+# "Telegram unreachable" case, so it is reported as skipped with the reason, never as passed. Only
+# for those tests and only for that error; any other failure stays a failure. (CI on 2026-11-06:
+# three times, in three different real-Telegram tests, api.telegram.org did not answer the runner:
+# ReadTimeout twice, DeadlineExceeded once.)
+# The client's NetworkError message ("<method>: network error (<kind>…)"): whatever the kind
+# (ReadTimeout, ConnectError, DeadlineExceeded, ...), Telegram gave no HTTP answer at all.
+_TELEGRAM_UNANSWERED = (": network error (",)
+
+
+def _talks_to_real_telegram(item: pytest.Item) -> bool:
+    import inspect
+
+    function = getattr(item, "function", None)
+    try:
+        return function is not None and "telegram_reachable()" in inspect.getsource(function)
+    except (OSError, TypeError):
+        return False
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> object:
+    report = yield
+    if (
+        isinstance(report, pytest.TestReport)
+        and report.when == "call"
+        and report.failed
+        and _talks_to_real_telegram(item)
+    ):
+        text = report.longreprtext + "\n" + report.caplog
+        if any(marker in text for marker in _TELEGRAM_UNANSWERED):
+            report.outcome = "skipped"
+            report.longrepr = (
+                str(item.path),
+                item.location[1] or 0,
+                "Skipped: api.telegram.org did not answer during the test (network)",
+            )
+    return report
 
 
 @pytest.fixture(autouse=True)

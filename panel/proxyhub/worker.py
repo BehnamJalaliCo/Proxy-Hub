@@ -12,6 +12,8 @@ from proxyhub.reconcilers.account_guard import AccountGuardReconciler
 from proxyhub.reconcilers.acme import AcmeReconciler
 from proxyhub.reconcilers.analytics import AnalyticsReconciler, ChannelStatsReconciler
 from proxyhub.reconcilers.base import Heartbeat, Reconciler
+from proxyhub.reconcilers.content import ContentReconciler
+from proxyhub.reconcilers.content_qc import ContentQcReconciler
 from proxyhub.reconcilers.dns import DnsReconciler
 from proxyhub.reconcilers.domains import DomainsReconciler
 from proxyhub.reconcilers.fleet import FleetReconciler
@@ -61,6 +63,8 @@ def reconcilers() -> list[Reconciler]:
         MtprotoReconciler(),  # Telemt settings + one long-lived proxy secret per node (proxyhub.mtproto)
         SponsorReconciler(),  # D25/D37: @MTProxybot registration and sponsor channel (kill switch OFF only)
         DelegationReconciler(),  # fleet r3: hourly NS lookups; a lost registration leaves the pool
+        ContentReconciler(),  # D51: the owner's sources (Telegram previews, RSS) into the review queue
+        ContentQcReconciler(),  # D52: the supervisor: Claude QC, auto-approval, source quality, alerts
         PublisherReconciler(),  # posts: new posts on the day plan + status edits (test channel by default)
         OperatorOutboxReconciler(),  # D38: posts/edits as the operator account (Premium emoji)
         OperatorChecksReconciler(),  # D38: daily emoji pack + the account's rights in our channels

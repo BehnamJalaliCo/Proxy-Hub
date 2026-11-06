@@ -38,11 +38,15 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
+from proxyhub.db import models_content  # noqa: F401 - posts.content_candidate_id refers to its table
 from proxyhub.db.models import Base
 
 CONTENT_STATUSES = ("draft", "approved", "used", "retired")
 CONTENT_ORIGINS = ("seed", "owner")
 POST_ROLES = ("main", "test")
+# A post that carries a photo or a video (decision D51): its text is the media's caption, so a status
+# edit changes the caption (proxyhub/posts/publisher.py).
+POST_MEDIA_KINDS = ("photo", "video")
 LINK_KINDS = ("mtproto", "reality")
 LINK_STATUSES = ("active", "expired", "full", "burned")
 # The operators a post may name a link after (decision D50): MCI, Rightel, Irancell.
@@ -88,6 +92,7 @@ class Post(Base):
         CheckConstraint(f"role IN ({_in(POST_ROLES)})", name="role"),
         CheckConstraint("plan_slot >= 0", name="plan_slot"),
         CheckConstraint("edits >= 0 AND edit_failures >= 0", name="edit_counts"),
+        CheckConstraint(f"media_kind IS NULL OR media_kind IN ({_in(POST_MEDIA_KINDS)})", name="media_kind"),
         UniqueConstraint("role", "plan_day", "plan_slot", name="uq_posts_role_plan"),
         UniqueConstraint("outbox_id", name="uq_posts_outbox_id"),
         Index("ix_posts_created", "created_at"),
@@ -119,6 +124,12 @@ class Post(Base):
     # never edited again and the owner is not alerted (the dashboard shows it). Rule 6: the panel itself
     # never deletes a post.
     gone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The content engine's candidate this post carries (decision D51), and whether the post is a
+    # photo or a video with a caption (NULL: a text message). Set when the post is made.
+    content_candidate_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("content_candidates.id", ondelete="SET NULL")
+    )
+    media_kind: Mapped[str | None] = mapped_column(String(8))
 
 
 class PostLink(Base):

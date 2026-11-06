@@ -2,8 +2,12 @@
 
 Payloads are the bot's (proxyhub/telegram/outbox.py)::
 
-    operator_send_post  {"role": "main" | "test", "text": "<html>", "post_kind": "auto"}
-    operator_edit_post  {"post_id": <channel_posts.id>, "text": "<html>"}
+    operator_send_post  {"role": "main" | "test", "text": "<html>", "post_kind": "auto", "media": {...}}
+    operator_edit_post  {"post_id": <channel_posts.id>, "text": "<html>", "caption": true}
+
+(``media`` and ``caption`` only for a photo or video post, decision D51: the file is read from
+``content_media`` with the job, uploaded on the post's own connection and sent with its caption; an
+edit of such a post changes the caption. proxyhub/telegram/outbox.py :func:`load_media`.)
 
 One job per step (:func:`process_one`), and only while a job is due:
 
@@ -20,7 +24,9 @@ One job per step (:func:`process_one`), and only while a job is due:
    before Telegram is called.
 3. **Telegram**, with no transaction open: one connection whose :class:`ChannelScope` allows posts
    and edits in THIS channel only; ``contacts.resolveUsername`` (the channel's id must be the
-   configured one; remembered per session), then ``messages.sendMessage`` / ``messages.editMessage``.
+   configured one; remembered per session), then ``messages.sendMessage`` / ``messages.editMessage``
+   (a photo or video post: its file's parts, then ``messages.sendMedia``; a failure while
+   uploading means nothing was posted, so the post goes to the bot).
 4. **record**: a post lands in ``channel_posts`` with the message id Telegram gave, exactly as the
    bot's (so status edits and the channel statistics work the same); an edit updates it.
 
@@ -68,6 +74,7 @@ from proxyhub.mtproxy.userclient import (
     ClientOptions,
     MtpError,
     RequestNotAllowed,
+    UploadFile,
     operator_session,
 )
 from proxyhub.posts import entities, operator
@@ -97,6 +104,7 @@ _EDIT_FINAL: Final = frozenset(
         "MESSAGE_TOO_LONG",
         "ENTITY_BOUNDS_INVALID",
         "ENTITIES_TOO_LONG",
+        "MEDIA_CAPTION_TOO_LONG",
     }
 )
 # A lookup that a cached channel reference may have caused: forget it.
@@ -140,6 +148,7 @@ class Ready:
     session: SecretValue
     session_id: str
     message: entities.MessageText
+    media: UploadFile | None = None  # a photo or video post (D51)
 
     def __repr__(self) -> str:
         return f"Ready(session_id={self.session_id!r}, ***)"
@@ -299,8 +308,22 @@ async def readiness(
     row = await mtp_store.load_row(conn)
     if creds is None or session is None or row.session_id is None:
         return "not_connected"
+    media: UploadFile | None = None
+    if job.kind == operator.SEND:
+        loaded = await bot_outbox.load_media(conn, job.payload)
+        if isinstance(loaded, str):
+            return loaded
+        if loaded is not None:
+            media = UploadFile(
+                kind="video" if loaded.kind == "video" else "photo",
+                mime=loaded.mime,
+                data=loaded.data,
+                width=loaded.width,
+                height=loaded.height,
+                duration=loaded.duration,
+            )
     message = entities.operator_message(job.text, await operator.emoji_map(conn))
-    return Ready(creds=creds, session=session, session_id=row.session_id, message=message)
+    return Ready(creds=creds, session=session, session_id=row.session_id, message=message, media=media)
 
 
 async def _retry(
@@ -405,18 +428,26 @@ async def talk(ready: Ready, job: Job, target: Target, options: ClientOptions | 
             if ref is None:
                 ref = await op.resolve_channel(target.username, channel_id)
                 refs[key] = ref
-            result.stage = "send"
-            if job.kind == operator.SEND:
-                result.message_id = await op.post_in_channel(ref, ready.message.text, ready.message.entities)
+            text, found = ready.message.text, ready.message.entities
+            if job.kind == operator.SEND and ready.media is not None:
+                result.stage = "upload"  # nothing is in the channel until sendMedia
+                uploaded = await op.upload_media(ready.media)
+                result.stage = "send"
+                result.message_id = await op.post_media_in_channel(ref, uploaded, text, found)
+            elif job.kind == operator.SEND:
+                result.stage = "send"
+                result.message_id = await op.post_in_channel(ref, text, found)
             else:
                 assert target.message_id is not None
-                await op.edit_channel_post(ref, target.message_id, ready.message.text, ready.message.entities)
+                result.stage = "send"
+                caption = job.payload.get("caption") is True
+                await op.edit_channel_post(ref, target.message_id, text, found, caption=caption)
             result.stage = "done"
     except MtpError as exc:
         if exc.rpc in _STALE_REF or exc.code == "channel_not_found":
             refs.pop(key, None)
         result.error = exc
-    except RequestNotAllowed as exc:  # a bug of ours: the allowlist stopped it before anything left
+    except (RequestNotAllowed, ValueError) as exc:  # a bug of ours: stopped before anything left
         log.error("operator poster: request refused by the allowlist (%s)", exc)
         result.refused = True
     return result

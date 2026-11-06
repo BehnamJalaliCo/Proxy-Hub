@@ -77,14 +77,27 @@ def freshest(rounds_newest_first: Sequence[Any], port: int, network_key: str) ->
     return None
 
 
+# Since P17 the probes measure TLS on 443 only (the MTProto port is not probed), so a link's own
+# port usually has no cell. The node's 443 result is the same host on the same network path from
+# that operator, so it stands in when the link's port has no valid result at all (P21: every link
+# stayed «پروکسی» because no 8443 cell ever existed). A valid result on the link's own port, "up"
+# or "down", always wins.
+FALLBACK_PORT: Final = 443
+
+
 def open_from(rounds_newest_first: Sequence[Any], port: int) -> list[str]:
     """The operators whose freshest valid result for a link on ``port`` is "up", from its node's
-    rounds of the window (newest first), in :data:`OPERATOR_ASNS` order."""
-    return [
-        operator
-        for operator, asn in OPERATOR_ASNS.items()
-        if freshest(rounds_newest_first, port, f"asn:{asn}") == "up"
-    ]
+    rounds of the window (newest first), in :data:`OPERATOR_ASNS` order. Without any valid result
+    on ``port``, the node's :data:`FALLBACK_PORT` result counts."""
+    seen: list[str] = []
+    for operator, asn in OPERATOR_ASNS.items():
+        network = f"asn:{asn}"
+        result = freshest(rounds_newest_first, port, network)
+        if result is None and port != FALLBACK_PORT:
+            result = freshest(rounds_newest_first, FALLBACK_PORT, network)
+        if result == "up":
+            seen.append(operator)
+    return seen
 
 
 def assign(open_by_key: Mapping[str, Sequence[str]], order: Sequence[str]) -> dict[str, str]:

@@ -117,6 +117,13 @@ services:
     command: ["python", "-m", "proxyhub", "worker"]
     environment:
       PROXYHUB_AGENT_DOMAIN: ${AGENT_DOMAIN:-}  # written into each test node's user data
+    # The Claude bridge's socket (D52, deploy/claude-bridge): the directory read-only (connecting to
+    # a socket needs no write access to the mount), and the socket's group (GID 10101,
+    # proxyhub-claude-sock). Without the bridge the directory is empty and the content supervisor
+    # uses the API key, or the content bank.
+    volumes:
+      - /var/lib/proxy-hub/claude-bridge:/run/claude-bridge:ro
+    group_add: ["10101"]
     healthcheck: {disable: true}
     stop_grace_period: 30s  # loops finish their current step (an outbox send, a Hetzner call) on stop
     depends_on:
