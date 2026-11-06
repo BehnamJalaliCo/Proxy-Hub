@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { actionLabel } from "./labels";
 import {
+  botEntryNoteText,
   botEntryStatusInfo,
   botJobInfo,
   botJobOpen,
@@ -361,5 +362,14 @@ describe("@MTProxybot's own list", () => {
     expect(botScreenStage("proxy_screen")).toMatch(/پروکسی/);
     expect(botScreenStage("after_confirm")).toMatch(/تأیید/);
     expect(botScreenStage("other")).toBe("other");
+  });
+});
+
+describe("botEntryNoteText", () => {
+  it("explains why an entry with no dead row of ours is still removable (P18)", () => {
+    expect(botEntryNoteText("old_tag")).toContain("ثبت قدیمی");
+    expect(botEntryNoteText("no_record")).toContain("رکوردش پاک شده");
+    expect(botEntryNoteText(null)).toBeNull();
+    expect(botEntryNoteText(undefined)).toBeNull();
   });
 });

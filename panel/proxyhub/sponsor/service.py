@@ -180,7 +180,9 @@ def choose(
                 continue
             campaign = wanted != default or reg.sponsor_channel in campaign_channels
             priority = 0 if campaign else 2
-            job: RegisterJob | PromoteJob = PromoteJob(host=reg.host, port=reg.port, channel=wanted)
+            job: RegisterJob | PromoteJob = PromoteJob(
+                host=reg.host, port=reg.port, channel=wanted, tag=reg.ad_tag
+            )
         elif reg.candidate and reg.state == PENDING and reg.proxy_key in live:
             proxy = live[reg.proxy_key]
             if (proxy.host, proxy.port) != (reg.host, reg.port):

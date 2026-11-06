@@ -22,9 +22,12 @@ from proxyhub.sponsor import botlist, replies
 from proxyhub.sponsor.botlist import (
     GONE,
     LIVE,
+    NO_RECORD,
+    OLD_TAG,
     RETIRED_ALIVE,
     UNKNOWN,
     EntryFacts,
+    Known,
     ListRead,
     ListWalk,
     MenuSeen,
@@ -35,7 +38,7 @@ from proxyhub.sponsor.botlist import (
     classify,
 )
 from proxyhub.sponsor.conversation import Observation, Press, Send, Step
-from proxyhub.sponsor.store import REGISTERED, RETIRED
+from proxyhub.sponsor.store import PENDING, REGISTERED, RETIRED
 
 REAL_LIST_HEADER = "Here is the list of all proxies you created:"
 REAL_LABEL = "t7aae9f0c.ipoxxo.online 4f1c9a0b"  # P13: "<host> <hex>"
@@ -568,3 +571,70 @@ def test_the_walk_target_names_the_proxy_by_its_known_ports() -> None:
     assert botlist.target_of(with_port, classify([with_port], [dead], {})[0]).words == frozenset(
         {"5.6.7.8", "5.6.7.8:443"}
     )
+
+
+# --- P18: registrations whose rows are gone ---------------------------------------------------------------
+
+
+def test_an_older_registration_of_a_live_address_goes_once_ours_has_its_own_button() -> None:
+    """P18: Hetzner gave the deleted node's 65.109.209.24 to the new node; the list holds both
+    registrations. The one whose label names our live tag stays; the other is the old one."""
+    host = "65.109.209.24"
+    live = reg(REGISTERED, host=host, node=NODE_A, ad_tag="9e8d7c6b" + "0" * 24)
+    nodes = {NODE_A: "ready"}
+    ours, old = facts(host, tag_reg=live.registration_id, fp="ours"), facts(host, fp="old")
+    got = classify([ours, old], [live], nodes)
+    assert [(m.status, m.removable, m.note) for m in got] == [(LIVE, False, None), (GONE, True, OLD_TAG)]
+    # Without a button of our own, or with a proxy still waiting for its tag there, nothing goes.
+    assert [(m.status, m.removable) for m in classify([old], [live], nodes)] == [(LIVE, False)]
+    waiting = reg(PENDING, host=host, node=NODE_B)
+    assert [m.removable for m in classify([ours, old], [live, waiting], nodes)] == [False, False]
+    # Our button at ANOTHER port of the same host does not vouch for this one.
+    elsewhere = facts(host, 443, tag_reg=live.registration_id, fp="ours")
+    assert classify([elsewhere, facts(host, 8443, fp="old")], [live], nodes)[1].removable is False
+
+
+def test_an_address_of_ours_with_no_rows_left_goes_only_when_nothing_holds_it() -> None:
+    known = Known(
+        ips=frozenset({"5.161.131.202", "65.109.209.24"}),
+        zones=frozenset({"ipoxxo.online"}),
+        held=frozenset({"65.109.209.24", "t0a1b2c3d.ipoxxo.online"}),
+    )
+    cases = {
+        "5.161.131.202": (GONE, True, NO_RECORD),  # an IPv4 one of our servers had
+        "te145a554.ipoxxo.online": (GONE, True, NO_RECORD),  # a test node's name on our domain
+        "slot3.ipoxxo.online": (GONE, True, NO_RECORD),  # a slot name on our domain
+        "65.109.209.24": (UNKNOWN, False, None),  # a node holds it now
+        "t0a1b2c3d.ipoxxo.online": (UNKNOWN, False, None),
+        "8.8.8.8": (UNKNOWN, False, None),  # never ours
+        "www.ipoxxo.online": (UNKNOWN, False, None),  # our domain, but not a node's name
+        "te145a554.example.com": (UNKNOWN, False, None),  # a node's shape on another domain
+    }
+    got = classify([facts(h, fp=h) for h in cases], [], {}, known)
+    assert [(m.status, m.removable, m.note) for m in got] == list(cases.values())
+    # Without what the panel knows (the default), nothing changes: unknown stays unknown.
+    assert [m.status for m in classify([facts("5.161.131.202")], [], {})] == [UNKNOWN]
+
+
+def test_a_removal_never_presses_delete_on_a_screen_that_shows_a_live_tag() -> None:
+    live_tag = "9e8d7c6b" + "0" * 24
+    guarded = Target(
+        host=HOST,
+        port=PORT,
+        label_fp=replies.label_fingerprint(REAL_LABEL),
+        words=WORDS,
+        live_tags=frozenset({live_tag}),
+    )
+    rows = ((btn(REAL_SET_PROMOTION), btn("Stats")), (btn("Delete proxy"), btn("« Back to list")))
+    for tag, expect in ((live_tag, "stuck"), ("5f5f5f5f" + "e" * 24, "press")):
+        walk = MenuWalk(guarded, remove=True)
+        walk.next(Step.SENT_MYPROXIES, listing(REAL_LABEL))
+        screen = menu(
+            f"Proxy {HOST}:{PORT} with the tag {tag}.\nPromoted channel: n/a.\nHow can I help?", *rows
+        )
+        result = walk.next(Step.PRESSED_PROXY, screen)
+        if expect == "stuck":
+            assert isinstance(result, WalkStuck) and result.reason == "menu_of_live_proxy"
+        else:
+            assert isinstance(result, Press) and result.label == "Delete proxy"
+            assert result.then is Step.PRESSED_REMOVE

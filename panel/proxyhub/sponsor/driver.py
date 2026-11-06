@@ -39,7 +39,7 @@ from proxyhub.sponsor.conversation import (
 )
 from proxyhub.sponsor.pacing import PaceStop
 
-MAX_ACTIONS: Final = 6
+MAX_ACTIONS: Final = 8  # a promotion: 4 messages plus up to 4 list pages
 REFUSED: Final = "request_not_allowed"
 
 

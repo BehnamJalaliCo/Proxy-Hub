@@ -12,6 +12,7 @@ import { formatJalali, formatNumber, formatRelative } from "../lib/format";
 import {
   botEntryStatusInfo,
   botJobInfo,
+  botEntryNoteText,
   botJobOpen,
   botPromotionInfo,
   botRemovalInfo,
@@ -123,6 +124,9 @@ function Table({ s }: { s: BotListSection }) {
                     <span title={st.hint}>{st.label}</span>
                   </Badge>
                   {e.removable ? <div className="mt-1 text-[0.72rem] text-fg-muted">پاک‌شدنی</div> : null}
+                  {botEntryNoteText(e.note) ? (
+                    <div className="mt-1 text-[0.72rem] leading-5 text-fg-muted">{botEntryNoteText(e.note)}</div>
+                  ) : null}
                   {e.status === "gone" && !e.removable ? (
                     <div className="mt-1 text-[0.72rem] text-fg-muted">از دکمه‌های هم‌نام قابل تشخیص نیست؛ پاک نمیشود.</div>
                   ) : null}

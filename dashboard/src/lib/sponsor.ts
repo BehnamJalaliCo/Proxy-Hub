@@ -98,6 +98,15 @@ export type BotPromotion = "ok" | "other" | "not_shown" | "several" | "stuck" | 
 export type BotRemovalState = "observed" | "removed" | "unconfirmed" | "stuck" | "interrupted";
 export type BotJobState = "queued" | "running" | "done" | "stuck" | "stopped" | "failed";
 
+export type BotEntryNote = "old_tag" | "no_record";
+
+/** Persian line under a removable entry that has a note. */
+export function botEntryNoteText(note: BotEntryNote | null | undefined): string | null {
+  if (note === "old_tag") return "ثبت قدیمی همین نشانی؛ سرور قبلی حذف شده و این tag مال پروکسی فعال نیست.";
+  if (note === "no_record") return "نشانی خود ما؛ رکوردش پاک شده و هیچ سروری آن را ندارد.";
+  return null;
+}
+
 export interface BotListEntry {
   id: string;
   /** What the list button names: "host" or "host:port". */
@@ -113,6 +122,10 @@ export interface BotListEntry {
   /** The label names one of our registrations' tags. */
   exact: boolean;
   removable: boolean;
+  /** Why a proxy with no dead registration row of ours behind it is still ours and dead (P18):
+   *  "old_tag": an older registration of a live address (Hetzner gave the IPv4 again);
+   *  "no_record": our address, its rows deleted, and no node holds it now. */
+  note?: BotEntryNote | null;
   registration: { address: string; state: string; state_reason: string | null; node_state: string | null } | null;
   /** The public channel the proxy's own screen names (live proxies only). */
   sponsor_channel: string | null;
