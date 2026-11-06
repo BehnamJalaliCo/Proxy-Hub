@@ -17,7 +17,7 @@ from proxyhub.db.models import Outbox
 from proxyhub.db.models_posts import ContentItem, Post, PostLink
 from proxyhub.db.models_telegram import ChannelPost
 from proxyhub.fleet.actions import iso
-from proxyhub.posts import content, entities, links, operator, plan, publisher, settings
+from proxyhub.posts import content, entities, links, operator, operators, plan, publisher, settings
 from proxyhub.telegram import store as tg_store
 from proxyhub.telegram.schedule import TEHRAN, quiet_until
 from proxyhub.telegram.templates import utf16_len, visible_text
@@ -73,7 +73,8 @@ async def preview(db: AsyncConnection, now: datetime, h: links.Harvest) -> dict[
     tag = publisher.channel_tag_for(channels)
     chosen = await publisher.choose_links(db, h, now, cfg, cfg.target_role)
     item, recycled = await content.next_item(db, now, cfg.recycle_after_days)
-    rendered, chosen = publisher.fit(publisher.content_for(item), chosen, tag, cfg.texts())
+    names = await operators.operator_labels(db, chosen, now)
+    rendered, chosen = publisher.fit(publisher.content_for(item), chosen, tag, cfg.texts(), names)
     where = await publisher.target(db, cfg)
     pack = await operator.emoji_map(db)
     return {

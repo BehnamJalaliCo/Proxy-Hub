@@ -45,6 +45,8 @@ CONTENT_ORIGINS = ("seed", "owner")
 POST_ROLES = ("main", "test")
 LINK_KINDS = ("mtproto", "reality")
 LINK_STATUSES = ("active", "expired", "full", "burned")
+# The operators a post may name a link after (decision D50): MCI, Rightel, Irancell.
+LINK_OPERATORS = ("mci", "rightel", "irancell")
 
 
 def _in(values: tuple[str, ...]) -> str:
@@ -125,6 +127,7 @@ class PostLink(Base):
         CheckConstraint(f"kind IN ({_in(LINK_KINDS)})", name="kind"),
         CheckConstraint(f"status IN ({_in(LINK_STATUSES)})", name="status"),
         CheckConstraint("position >= 0", name="position"),
+        CheckConstraint(f"operator IS NULL OR operator IN ({_in(LINK_OPERATORS)})", name="operator"),
         UniqueConstraint("post_id", "key", name="uq_post_links_post_key"),
         UniqueConstraint("post_id", "position", name="uq_post_links_post_position"),
     )
@@ -141,3 +144,7 @@ class PostLink(Base):
     status: Mapped[str] = mapped_column(String(10), nullable=False)
     status_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     missing_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The operator whose name the post shows for this MTProto link (decision D50), decided once when
+    # the post was made from the panel's own fresh probes from Iran; NULL: the plain word «پروکسی».
+    # Status edits keep it (a post is never relabelled).
+    operator: Mapped[str | None] = mapped_column(String(16))

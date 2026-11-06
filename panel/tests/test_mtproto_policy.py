@@ -40,13 +40,15 @@ from proxyhub.agent_api.desired import (
     create_telemt_user,
     reveal_secret,
     set_telemt_node_config,
+    set_user_sponsor_tag,
 )
 from proxyhub.agent_api.sealing import load_seal_key
 from proxyhub.mtproto.keys import SealKeyUnavailable
 from proxyhub.mtproto.links import provide_links
 from proxyhub.mtproto.settings import MtprotoSettings, save_settings
 from proxyhub.mtproto.sponsor_api import UnknownProxy, apply_ad_tag, proxies_to_register
-from proxyhub.mtproto.urls import link_secret, proxy_key, user_name_for
+from proxyhub.mtproto.urls import extra_user_name, link_secret, proxy_key, user_name_for
+from proxyhub.posts import settings as posting
 from proxyhub.reconcilers.mtproto import MtprotoReconciler
 
 pytestmark = pytest.mark.db
@@ -89,6 +91,7 @@ async def env(migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     use_secret_files(monkeypatch, files)
     engine = create_async_engine(migrated_db)
     await clean(engine)
+    await links_per_post(engine, 1)  # the primary user alone; the D49 tests below ask for more
     try:
         yield Env(engine=engine, seal_key=load_seal_key(files.master_key), master_key=files.master_key)
     finally:
@@ -584,3 +587,163 @@ async def test_apply_ad_tag_refuses_unknown_proxies(env: Env) -> None:
         "customer_x": None,
         user_name_for(node): None,
     }
+
+
+# --- extra links on a node (decision D49) ------------------------------------------------------------
+
+
+async def links_per_post(engine: AsyncEngine, n: int) -> None:
+    """The posting setting ``max_mtproto`` the loop sizes the extras by."""
+    async with engine.begin() as conn:
+        await posting.save(conn, posting.parse({**posting.DEFAULTS.as_json(), "max_mtproto": n}))
+
+
+async def proxies(engine: AsyncEngine, node_id: uuid.UUID) -> list[tuple[str, int]]:
+    found = await rows(
+        engine,
+        "SELECT user_name, ordinal FROM mtproto_proxies WHERE node_id = :n ORDER BY ordinal",
+        n=node_id,
+    )
+    return [(r.user_name, r.ordinal) for r in found]
+
+
+def all_links(node: uuid.UUID, n: int) -> list[tuple[str, int]]:
+    return [(user_name_for(node), 0)] + [(extra_user_name(node, k), k) for k in range(1, n)]
+
+
+async def test_extras_fill_a_post_while_few_nodes_run_and_stop_at_the_cap(env: Env) -> None:
+    await links_per_post(env.engine, 6)
+    a = await make_node(env.engine, slot=1)
+    await env.run()
+    assert await proxies(env.engine, a) == all_links(a, 6)  # one node: its primary + 5 extras
+    found = await users(env.engine, a)
+    assert len(found) == 6 and all(u.sealed == 45 and u.enabled for u in found)
+    async with session_maker(env.engine)() as s:
+        secrets = {await reveal_secret(s, env.seal_key, a, u.name) for u in found}
+    assert len(secrets) == 6  # each extra has its own secret
+    async with session_maker(env.engine)() as s:
+        doc = await build_desired_state(s, env.seal_key, a)
+    assert [u["name"] for u in doc["telemt"]["users"]] == sorted(name for name, _ in all_links(a, 6))
+    # A second slot node: the two share a post (3 links each); the first keeps all of its links.
+    b = await make_node(env.engine, slot=2, ipv4="203.0.113.11")
+    await env.run()
+    assert await proxies(env.engine, b) == all_links(b, 3) and await proxies(env.engine, a) == all_links(a, 6)
+    assert not (await env.run()).last_outcome.changed  # nothing more to do
+    # Never more than six links on a node, whatever the setting.
+    await links_per_post(env.engine, 20)
+    await env.run()
+    assert await proxies(env.engine, a) == all_links(a, 6) and await proxies(env.engine, b) == all_links(b, 6)
+    made = [x for x in await actions(env.engine) if x["action"] == "mtproto_extra_users_created"]
+    assert [m["reasons"]["context"]["links"] for m in made] == [6, 3, 6]
+    text_dump = await all_table_text(env.engine)
+    for secret in secrets:  # rule 3: no secret outside the sealed column
+        assert secret not in text_dump
+
+
+async def test_a_test_node_gets_extras_only_while_no_slot_node_runs(env: Env) -> None:
+    await links_per_post(env.engine, 6)
+    t = await make_node(env.engine, is_test=True)
+    await env.run()
+    assert len(await proxies(env.engine, t)) == 6  # alone (test channel): it fills the post
+    s1 = await make_node(env.engine, slot=1, ipv4="203.0.113.11")
+    await env.run()
+    assert len(await proxies(env.engine, s1)) == 6  # the slot node fills a main-channel post
+    assert len(await proxies(env.engine, t)) == 6  # what the test node has, it keeps
+    t2 = await make_node(env.engine, is_test=True, ipv4="203.0.113.12")
+    await env.run()
+    assert await proxies(env.engine, t2) == all_links(t2, 1)  # slot nodes run: no extras for it
+
+
+async def test_extras_are_live_links_never_offered_for_registration_and_follow_the_tag(env: Env) -> None:
+    await links_per_post(env.engine, 3)
+    node = await make_node(env.engine, slot=1)
+    await env.run()
+    await env.make_live(node)
+    primary = proxy_key(node, user_name_for(node))
+    extra_keys = [proxy_key(node, extra_user_name(node, k)) for k in (1, 2)]
+    got = await links(env)
+    assert set(got) == {primary, *extra_keys}
+    assert all(got[k].status == "active" and got[k].extra_of == primary for k in extra_keys)
+    assert got[primary].extra_of is None and got[extra_keys[0]].label == "پروکسی ۱، لینک ۲"
+    assert len({got[k].url for k in got}) == 3  # same server and port, three secrets
+    async with env.engine.begin() as conn:
+        assert [p.key for p in await proxies_to_register(conn)] == [primary]  # never an extra
+    # The sponsor's tag on the primary reaches the extras at once, with the registration link.
+    reg = await registration(env, user_name_for(node), "registered", TAG_A)
+    async with env.engine.begin() as conn:
+        await apply_ad_tag(conn, primary, TAG_A)
+    assert [(u.ad_tag, u.registration_id) for u in await users(env.engine, node)] == [(TAG_A, reg)] * 3
+    async with env.engine.begin() as conn:
+        assert await proxies_to_register(conn) == []
+    with pytest.raises(UnknownProxy):  # an extra has no tag of its own
+        async with env.engine.begin() as conn:
+            await apply_ad_tag(conn, extra_keys[0], TAG_B)
+    # Re-registered on the primary by other code: the loop gives the extras the new tag.
+    async with session_maker(env.engine)() as s:
+        await set_user_sponsor_tag(s, node, user_name_for(node), TAG_B)
+        await s.commit()
+    outcome = (await env.run()).last_outcome
+    assert outcome is not None and outcome.tags_synced == {node: 2}
+    assert {u.ad_tag for u in await users(env.engine, node)} == {TAG_B}
+    async with env.engine.begin() as conn:
+        await apply_ad_tag(conn, primary, None)  # cleared: the extras lose it too
+    assert {(u.ad_tag, u.registration_id) for u in await users(env.engine, node)} == {(None, None)}
+    assert TAG_A not in str(await actions(env.engine)) and TAG_B not in str(await actions(env.engine))
+    # Per-secret counters (D39) are kept for an extra like for the primary.
+    await agent_reports(
+        env.engine,
+        node,
+        applied_etag=await current_etag(env.engine, env.seal_key, node),
+        users=[{"name": extra_user_name(node, 2), "current_connections": 7, "total_octets": 900}],
+    )
+    counted = await rows(
+        env.engine,
+        "SELECT name, last_current_connections AS c FROM telemt_users WHERE node_id = :n ORDER BY name",
+        n=node,
+    )
+    assert [(r.name, r.c) for r in counted] == [(user_name_for(node), None), (extra_user_name(node, 1), None),
+                                                (extra_user_name(node, 2), 7)]  # fmt: skip
+
+
+async def test_an_extra_is_kept_while_its_node_lives_and_goes_with_it(env: Env) -> None:
+    await links_per_post(env.engine, 6)
+    a = await make_node(env.engine, slot=1)
+    await env.run()
+    await env.make_live(a)
+    # More nodes come: a needs no extras any more, but keeps them (its links are in posts).
+    others = [await make_node(env.engine, slot=i, ipv4=f"203.0.113.{20 + i}") for i in range(2, 7)]
+    await env.run()
+    assert await proxies(env.engine, a) == all_links(a, 6)
+    assert all(await proxies(env.engine, n) == all_links(n, 1) for n in others)
+    assert all(u.enabled for u in await users(env.engine, a))
+    got = await links(env)
+    assert sum(1 for x in got.values() if x.extra_of is not None and x.status == "active") == 5
+    # The node leaves service: its extras are disabled with its primary, and listed as ended.
+    await set_node_state(env.engine, a, "retiring")
+    await env.run()
+    assert not any(u.enabled for u in await users(env.engine, a))
+    gone = await rows(env.engine, "SELECT count(*) AS n FROM mtproto_proxies WHERE node_id = :n "
+                                  "AND disabled_at IS NOT NULL", n=a)  # fmt: skip
+    assert gone[0].n == 6
+    got = await links(env)
+    assert {x.status for k, x in got.items() if k.startswith(f"mtproto:{a}:")} == {"expired"}
+    assert len([k for k in got if k.startswith(f"mtproto:{a}:")]) == 6
+
+
+def test_links_per_node() -> None:
+    from proxyhub.mtproto.policy import links_per_node
+
+    assert [links_per_node(6, slotted=n, unslotted=0, has_slot=True) for n in range(1, 8)] == [
+        6,
+        3,
+        2,
+        2,
+        2,
+        1,
+        1,
+    ]
+    assert links_per_node(20, slotted=1, unslotted=0, has_slot=True) == 6  # the cap per node
+    assert links_per_node(1, slotted=1, unslotted=0, has_slot=True) == 1
+    assert links_per_node(6, slotted=0, unslotted=2, has_slot=False) == 3  # test nodes alone
+    assert links_per_node(6, slotted=1, unslotted=2, has_slot=False) == 1  # slot nodes fill the post
+    assert links_per_node(6, slotted=0, unslotted=0, has_slot=True) == 1

@@ -14,6 +14,10 @@
   the users over the slots instead of sending everyone to the lowest ones (a Reality config ends at
   its traffic cap). A companion link (``companion_of``: the XHTTP link of a REALITY config) does not
   count on its own: it comes right after the link it belongs to, when that one is chosen.
+* MTProto (decision D49): first ONE link per node, spread as above; only then, up to
+  ``max_mtproto``, the nodes' EXTRA links (``extra_of``: another secret on the same server), again
+  one per node before a second of any node. So once enough nodes run, new posts take no extra at all
+  (the extras stay on their nodes for the posts that carry them).
 * A post shows no label; a REALITY config that comes with its XHTTP link gets a tiny transport
   marker as the label line over each of its two links' own quotes (:func:`transport_marks`).
 """
@@ -74,12 +78,12 @@ def checked(link: object) -> ProxyLink | None:
         not isinstance(link.expires_at, datetime) or link.expires_at.tzinfo is None
     ):
         return None
-    if link.companion_of is not None and (
-        not isinstance(link.companion_of, str)
-        or not link.companion_of
-        or len(link.companion_of) > MAX_KEY_CHARS
-        or link.companion_of == link.key
-    ):
+    for other in (link.companion_of, link.extra_of):
+        if other is not None and (
+            not isinstance(other, str) or not other or len(other) > MAX_KEY_CHARS or other == link.key
+        ):
+            return None
+    if link.extra_of is not None and link.kind != "mtproto":
         return None
     try:
         label = clean_label(link.label) if isinstance(link.label, str) else ""
@@ -132,8 +136,9 @@ SlotKey = tuple[int, int, str]
 
 
 def _slot_key(link: ProxyLink) -> SlotKey:
-    """Links of one slot together, slots in order; a link without a slot is a group of its own."""
-    return (0, link.slot, "") if link.slot is not None else (1, 0, link.key)
+    """Links of one slot together, slots in order; a link without a slot is a group of its own,
+    together with the extras of the same node (D49)."""
+    return (0, link.slot, "") if link.slot is not None else (1, 0, link.extra_of or link.key)
 
 
 def _longest_first(link: ProxyLink) -> tuple[int, float, str]:
@@ -174,16 +179,19 @@ def for_new_post(
     rotate: int = 0,
     slots_only: bool = False,
 ) -> list[ProxyLink]:
-    """Active links for a new post (see the module doc): MTProto links, then Reality configs that
-    still have at least :data:`MIN_REMAINING` left. ``rotate``: how many posts went before.
-    ``slots_only`` (MAIN channel): only links of the fleet's slots 1-9. A link without a slot comes
-    from a test node (the fleet gives every node of its own a slot), and a test node's proxy is
-    never published in the main channel."""
+    """Active links for a new post (see the module doc): MTProto links (one per node, then extras),
+    then Reality configs that still have at least :data:`MIN_REMAINING` left. ``rotate``: how many
+    posts went before. ``slots_only`` (MAIN channel): only links of the fleet's slots 1-9. A link
+    without a slot comes from a test node (the fleet gives every node of its own a slot), and a test
+    node's proxy is never published in the main channel."""
 
     def ours(x: ProxyLink) -> bool:
         return x.slot is not None or not slots_only
 
-    mtproto = spread([x for x in h.active("mtproto") if ours(x)], max_mtproto, rotate)
+    mtproto_links = [x for x in h.active("mtproto") if ours(x)]
+    mtproto = spread([x for x in mtproto_links if x.extra_of is None], max_mtproto, rotate)
+    extras = [x for x in mtproto_links if x.extra_of is not None]
+    mtproto += spread(extras, max_mtproto - len(mtproto), rotate)  # D49: only to fill the post
     usable = [
         x
         for x in h.active("reality")

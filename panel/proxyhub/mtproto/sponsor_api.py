@@ -7,6 +7,10 @@ where the tag it gets back goes.
   ``secret_name`` (the Telemt user name, unique per node, or the proxy key).
 * :func:`apply_ad_tag`: the tag goes to that proxy's own Telemt user (``access.user_ad_tags``, hot
   reloaded without a restart, docs/11 E2), so one node can carry secrets with different sponsors.
+* **Extras (decision D49)** are never offered for registration: an extra link of a node carries its
+  node's primary tag and registration instead. :func:`apply_ad_tag` takes a primary's key only and
+  gives its tag (set or cleared) to that node's extras at once; the ``mtproto`` loop keeps them in
+  step on every pass too (proxyhub/mtproto/policy.py).
 
 Both run inside the caller's transaction and never commit it. The secret is handed out only here and
 in the public link (rule 3); ``actions_log`` gets neither the secret nor the tag.
@@ -65,13 +69,14 @@ async def _registered_names(db: AsyncConnection) -> set[str]:
 
 
 async def proxies_to_register(db: AsyncConnection) -> list[RegistrableProxy]:
-    """Live proxies on ready nodes without a registration, slot order."""
+    """Live PRIMARY proxies on ready nodes without a registration, slot order (never an extra)."""
     views = await list_proxies(db, load_proxy_seal_key(), datetime.now(UTC))
     taken = await _registered_names(db)
     return [
         RegistrableProxy(key=v.key, host=v.host, port=v.port, secret_hex=v.secret_hex)
         for v in views
-        if v.status == "active"
+        if v.extra_of is None
+        and v.status == "active"
         and v.node_state == NodeState.READY.value
         and v.host is not None
         and v.user not in taken
@@ -81,7 +86,9 @@ async def proxies_to_register(db: AsyncConnection) -> list[RegistrableProxy]:
 
 async def apply_ad_tag(db: AsyncConnection, key: str, ad_tag: str | None) -> None:
     """Put ``ad_tag`` (32 lower-case hex from @MTProxybot, or None to clear it) on the proxy's own
-    Telemt user in the node's desired state. Raises :class:`UnknownProxy` or ``ValueError``."""
+    Telemt user in the node's desired state, and on that node's extras (D49). ``key`` is a primary
+    proxy's key; an extra's key is refused (:class:`UnknownProxy`). Raises :class:`UnknownProxy` or
+    ``ValueError``."""
     if ad_tag is not None and not HEX32.fullmatch(ad_tag):
         raise DesiredStateError("ad_tag must be 32 lower-case hex characters")
     parsed = parse_key(key)
@@ -92,17 +99,35 @@ async def apply_ad_tag(db: AsyncConnection, key: str, ad_tag: str | None) -> Non
         await db.execute(
             select(Node.name)
             .join(MtprotoProxy, MtprotoProxy.node_id == Node.id)
-            .where(MtprotoProxy.node_id == node_id, MtprotoProxy.user_name == user)
+            .where(MtprotoProxy.node_id == node_id, MtprotoProxy.user_name == user, MtprotoProxy.ordinal == 0)
         )
     ).scalar_one_or_none()
     if known is None:
         raise UnknownProxy("no such MTProto proxy")
+    extras = list(
+        (
+            await db.execute(
+                select(MtprotoProxy.user_name).where(
+                    MtprotoProxy.node_id == node_id, MtprotoProxy.ordinal > 0
+                )
+            )
+        ).scalars()
+    )
     # create_savepoint: the session works in a SAVEPOINT of the caller's transaction, and commit()
     # only releases it. Without the commit, a caller already inside a SAVEPOINT (begin_nested) would
     # lose the tag when the session closes while the registration link below still got written.
     session = AsyncSession(bind=db, join_transaction_mode="create_savepoint")
     try:
         await set_user_sponsor_tag(session, node_id, user, ad_tag)
+        # The extras carry the primary's tag (D49); one whose user is missing is remade by the
+        # mtproto loop with the primary's tag.
+        for extra in (
+            await session.execute(
+                select(TelemtUser).where(TelemtUser.node_id == node_id, TelemtUser.name.in_(extras))
+            )
+        ).scalars():
+            extra.ad_tag = ad_tag
+            extra.updated_at = datetime.now(UTC)
         await session.commit()
     finally:
         await session.close()
@@ -124,7 +149,7 @@ async def apply_ad_tag(db: AsyncConnection, key: str, ad_tag: str | None) -> Non
         )
     await db.execute(
         update(TelemtUser)
-        .where(TelemtUser.node_id == node_id, TelemtUser.name == user)
+        .where(TelemtUser.node_id == node_id, TelemtUser.name.in_([user, *extras]))
         .values(registration_id=registration)
     )
     await log_action(
@@ -135,6 +160,11 @@ async def apply_ad_tag(db: AsyncConnection, key: str, ad_tag: str | None) -> Non
         dry_run=False,
         allowed=True,
         reasons=["tag_set" if ad_tag is not None else "tag_cleared"],
-        context={"node_id": str(node_id), "user": user, "registration_linked": registration is not None},
+        context={
+            "node_id": str(node_id),
+            "user": user,
+            "extras": len(extras),
+            "registration_linked": registration is not None,
+        },
         result="sponsor tag written to the proxy's desired Telemt state (tag not logged)",
     )

@@ -8,6 +8,10 @@ secret (a slot's name moves to the replacement node, whose secret is different).
 domain of the ``ee`` secret is the node's own ``tls_domain`` (proxyhub/mtproto/policy.py: the node's
 name while its Xray serves that name with our certificate, else the owner's setting).
 
+A node has its primary proxy (``ordinal`` 0, the one registered with @MTProxybot) and, while a post
+needs more links than nodes run, EXTRA proxies (decision D49): other Telemt users on the same port
+and host, each with its own secret and the primary's sponsor tag (``extra_of``: the primary's key).
+
 Status of a proxy:
 
 * ``pending``: not yet confirmed running on its node (never published);
@@ -35,7 +39,7 @@ from proxyhub.db.models_agent import TelemtNodeConfig, TelemtUser
 from proxyhub.db.models_mtproto import MtprotoProxy
 from proxyhub.fleet.lifecycle import NodeState
 from proxyhub.mtproto.settings import Mode, link_mode
-from proxyhub.mtproto.urls import label_for, proxy_key, proxy_url
+from proxyhub.mtproto.urls import label_for, proxy_key, proxy_url, user_name_for
 
 log = logging.getLogger(__name__)
 
@@ -81,10 +85,12 @@ class ProxyView:
     status: Status
     # The 32-hex secret: only for the public link and @MTProxybot registration (rule 3).
     secret_hex: str = field(repr=False)
+    ordinal: int = 0  # 0: the node's primary proxy; 1 and up: its extras (D49)
+    extra_of: str | None = None  # an extra: its node's primary key (never registered itself)
 
     @property
     def label(self) -> str:
-        return label_for(self.slot, self.is_test)
+        return label_for(self.slot, self.is_test, self.ordinal)
 
     @property
     def url(self) -> str | None:
@@ -119,13 +125,15 @@ def pick_host(
 
 
 async def list_proxies(db: Db, seal_key: bytes, now: datetime) -> list[ProxyView]:
-    """Every node's public proxy (deleted nodes for :data:`DELETED_KEPT_FOR`), slots first."""
+    """Every node's public proxies, its primary first, then its extras (deleted nodes for
+    :data:`DELETED_KEPT_FOR`), slots first."""
     names = await node_names(db)
     rows = (
         await db.execute(
             select(
                 MtprotoProxy.node_id,
                 MtprotoProxy.user_name,
+                MtprotoProxy.ordinal,
                 MtprotoProxy.live_at,
                 Node.name.label("node_name"),
                 Node.state,
@@ -152,9 +160,12 @@ async def list_proxies(db: Db, seal_key: bytes, now: datetime) -> list[ProxyView
             )
             .join(TelemtNodeConfig, TelemtNodeConfig.node_id == MtprotoProxy.node_id)
             .where(or_(Node.state != NodeState.DELETED.value, Node.deleted_at >= now - DELETED_KEPT_FOR))
-            .order_by(Node.slot.asc().nulls_last(), Node.created_at.asc(), Node.id.asc())
+            .order_by(
+                Node.slot.asc().nulls_last(), Node.created_at.asc(), Node.id.asc(), MtprotoProxy.ordinal.asc()
+            )
         )
     ).all()
+    primaries = {r.node_id: r.user_name for r in rows if r.ordinal == 0}
     views: list[ProxyView] = []
     for r in rows:
         try:
@@ -186,6 +197,12 @@ async def list_proxies(db: Db, seal_key: bytes, now: datetime) -> list[ProxyView
                 live_at=r.live_at,
                 status=proxy_status(r.state, bool(r.enabled), r.live_at),
                 secret_hex=secret_hex,
+                ordinal=int(r.ordinal),
+                extra_of=(
+                    proxy_key(r.node_id, primaries.get(r.node_id) or user_name_for(r.node_id))
+                    if r.ordinal > 0
+                    else None
+                ),
             )
         )
     return views

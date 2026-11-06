@@ -129,7 +129,9 @@ async def test_the_real_provider_keeps_listing_a_proxy_until_it_has_its_tag(env:
     users = await mtp.rows(
         env.engine, "SELECT name, ad_tag, registration_id FROM telemt_users WHERE node_id = :n", n=a
     )
-    assert [(u.ad_tag, u.registration_id) for u in users] == [(TAG, written["id"])]
+    # Node a ran alone at first, so it keeps five extra links (D49): they carry the same tag and
+    # registration, and none of them was ever listed for a registration of its own.
+    assert len(users) == 6 and {(u.ad_tag, u.registration_id) for u in users} == {(TAG, written["id"])}
     # The other gets stuck on a reply nobody understands, and «ثبت دوباره» tries it again.
     stuck = FlowResult(result=Stuck(step=Step.SENT_ADDRESS, reason="address_refused"))
     assert await service._record(d, await env.work(second["id"]), stuck) == "stuck:address_refused"
