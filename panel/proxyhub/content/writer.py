@@ -1,6 +1,6 @@
 """The caption writer and quality reviewer: Claude reads one candidate (its cleaned text and its
-photo, or a video's thumbnail), decides whether it may go to the channel, and writes its short
-Persian title and body (decisions D19, D51 and D52).
+photo, or frames sampled across its whole video, proxyhub/content/frames.py), decides whether it may
+go to the channel, and writes its short Persian title and body (decisions D19, D51 and D52).
 
 The supervisor (proxyhub/content/supervisor.py) calls :meth:`CaptionWriter.review` for the best few
 candidates before each posting slot, with no transaction open. The answer is a :class:`Review`:
@@ -42,11 +42,11 @@ class Image:
 class ReviewRequest:
     """What Claude is given: the panel's instructions (``system``, built by qc_prompt from the owner's
     policy and the caption's room) and the candidate as data only (``user_text`` with the source text
-    between nonce markers, and at most one image)."""
+    between nonce markers, and its images: a photo, or a video's frames in order)."""
 
     system: str
     user_text: str
-    image: Image | None = None
+    images: tuple[Image, ...] = ()
 
 
 @dataclass(frozen=True)

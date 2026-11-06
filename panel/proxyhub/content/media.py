@@ -7,8 +7,11 @@
   the owner's browser never contacts the source, and the source's CDN addresses expire, Telegram's
   within hours). Photos are small (a preview page's photo is usually 100 to 300 KB), so this costs
   little;
-* a **video** only once the owner approved the candidate: most candidates are rejected, and a video
-  is up to :data:`VIDEO_MAX_BYTES`. The thumbnail stands in for it in the queue.
+* a **video** only when it is needed: when the content supervisor picks the candidate for a review
+  (decision D52: Claude judges frames sampled across the whole video, proxyhub/content/frames.py;
+  the file is kept for the post if it is approved and removed at once if it is rejected), or once
+  the owner approved a candidate that has no file yet. Most candidates are never reviewed, and a
+  video is up to :data:`VIDEO_MAX_BYTES`. The thumbnail stands in for it in the queue.
 
 **Limits.** A post may go out through the operator account (Telegram Premium) or, when that account
 cannot take it, through the bot with the same file (proxyhub/posts/poster.py), so every file must

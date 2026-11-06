@@ -9,25 +9,37 @@ transaction open while Claude answers:
    waiting, and while fewer than ``per_slot`` candidates were sent to Claude for that slot. This is
    what keeps Claude's use small: at most ``per_slot`` reviews per post.
 2. **Rank** the pending candidates that passed phase A's deterministic gates (not a duplicate, not
-   stale, media downloaded and checked, text cleaned) and whose source is on (:func:`score`): views
-   per hour (log scale), freshness, how many other sources carry the story, an image. Two gates need
-   no Claude and reject at once (backend ``rules``): a video with no cover frame (``no_preview``: the
-   reviewer could not see it) and a photo too large for Claude to read (``image_too_large``).
-3. **Ask Claude** about the best one (proxyhub/content/claude_backends.py): the bridge first, the API
-   key as backup, each within its daily cap and after a pause when it failed. The prompt and its
-   injection hardening: proxyhub/content/qc_prompt.py.
-4. **Decide**: the answer is parsed strictly (unparsable = rejected), then checked again by code
+   stale, a photo downloaded and checked, text cleaned) and whose source is on (:func:`score`): views
+   per hour (log scale), freshness, how many other sources carry the story, a picture. Gates that
+   need no Claude reject at once (backend ``rules``, :func:`pre_gate`): a video whose file cannot be
+   had (``video_unavailable``: no address, over 20 MB, not MP4), a stored video longer than
+   :data:`~proxyhub.content.frames.MAX_SECONDS` (``video_too_long``) and a photo too large for Claude
+   to read (``image_too_large``).
+3. **A video is seen whole** (:meth:`Supervisor._video`): the best candidate's video is downloaded
+   before its review with phase A's own fetcher and limits (proxyhub/content/engine.py
+   :func:`~proxyhub.content.engine.fetch_media`: MP4 only by its bytes, at most 20 MB, a Telegram
+   address read again from its post), with no transaction open, while the media store has room; and
+   :data:`~proxyhub.content.frames.FRAME_COUNT` frames are taken across its whole length with ffmpeg
+   (proxyhub/content/frames.py). A video too long or unreadable is rejected by ``rules`` without
+   Claude; a download that may work later is tried again next round (at most 3 times, then
+   ``video_unavailable``). The file is kept for the post: an approved video is never fetched twice;
+   a rejected one is removed at once (:func:`~proxyhub.content.candidates.drop_video`).
+4. **Ask Claude** about the best one (proxyhub/content/claude_backends.py): the bridge first, the API
+   key as backup, each within its daily cap and after a pause when it failed. A photo goes as one
+   image, a video as its frames in order, in ONE review. The prompt and its injection hardening:
+   proxyhub/content/qc_prompt.py.
+5. **Decide**: the answer is parsed strictly (unparsable = rejected), then checked again by code
    (proxyhub/content/qc_checks.py); approval only when Claude approves AND every check passes. In
    ``auto`` mode an approval takes Claude's title and body and status ``approved`` (the publisher
    posts it at the slot); a rejection is ``rejected``. In ``review`` mode nothing changes status:
    the decision, reasons and caption wait as a suggestion for the owner.
-5. **Sources**: a source whose last ``source_window`` reviewed items were rejected at
+6. **Sources**: a source whose last ``source_window`` reviewed items were rejected at
    ``source_max_reject_pct`` or more (with at least ``source_min`` of them) is turned off, with a
    Persian reason on the sources page (:func:`judge_source`).
-6. **Never a skipped post**: when nothing is approved in time (Claude down, over its cap, every
+7. **Never a skipped post**: when nothing is approved in time (Claude down, over its cap, every
    candidate rejected, no source works) the publisher takes the evergreen content bank as before
    (proxyhub/posts/publisher.py). Nothing here can stop a post.
-7. **Owner alerts**, only for what code cannot fix, each at most once per episode and then once a day
+8. **Owner alerts**, only for what code cannot fix, each at most once per episode and then once a day
    (:func:`alert_due`): Claude unreachable for ``alert_after_hours`` (bridge gone, login expired,
    subscription limit, API key refused), and every source failing for as long.
 
@@ -39,7 +51,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -49,7 +61,8 @@ from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from sqlalchemy.orm import aliased
 
-from proxyhub.content import candidates, qc_checks, qc_prompt, qc_settings, sources
+from proxyhub.content import candidates, frames, media, qc_checks, qc_prompt, qc_settings, sources
+from proxyhub.content import engine as content_engine
 from proxyhub.content.claude_backends import (
     API_URL,
     INPUT,
@@ -62,6 +75,8 @@ from proxyhub.content.claude_backends import (
     ReviewBackend,
 )
 from proxyhub.content.messages import qc_check_fa, qc_outcome_fa
+from proxyhub.content.net import FetchError, SafeHttp
+from proxyhub.content.plugins import PLUGINS, SourcePlugin
 from proxyhub.content.qc_settings import QcConfig
 from proxyhub.content.writer import Image, Review, ReviewRequest
 from proxyhub.db.models_content import ContentCandidate, ContentMedia, ContentQcCall, ContentSource
@@ -99,9 +114,14 @@ COOLDOWN: Final[dict[str, timedelta]] = {
     "api_bad_model": timedelta(hours=1),
 }
 DEFAULT_COOLDOWN: Final = timedelta(minutes=3)
+# What happened to a video before its review (Supervisor._video): a rejection without Claude, an
+# error of the panel's own (the candidate is tried at most MAX_TRIES times), or a later try.
+VIDEO_REJECTS: Final = frozenset({"video_too_long", "video_unreadable", "video_unavailable"})
+VIDEO_ERRORS: Final = frozenset({"ffmpeg_missing", "frames_failed"})
 
 Clock = Callable[[], datetime]
 HarvestFn = Callable[[AsyncConnection], Awaitable[links.Harvest]]
+HttpFactory = Callable[[], SafeHttp]
 
 
 # --- ranking ------------------------------------------------------------------------------------------
@@ -124,20 +144,27 @@ class Pick:
     views: int | None
     media_kind: str | None
     media_state: str
-    has_thumb: bool
     width: int | None
     height: int | None
+    duration: int | None = None  # seconds: a stored video's, by its own header
     extra_sources: int = 0
     score: float = 0.0
 
     @property
     def image_role(self) -> str | None:
-        """Which stored file Claude sees: the photo, or a video's cover frame."""
-        if self.media_kind == "photo" and self.media_state == "ready":
-            return "main"
-        if self.media_kind == "video" and self.has_thumb:
-            return "thumb"
-        return None
+        """The stored file Claude sees as it is: a ready photo. A video is seen through frames taken
+        from its file (proxyhub/content/frames.py), never through its cover alone."""
+        return "main" if self.media_kind == "photo" and self.media_state == "ready" else None
+
+    @property
+    def seen(self) -> bool:
+        """Claude sees a picture of it: its photo, or its video's frames."""
+        return self.image_role is not None or (self.media_kind == "video" and self.media_state != "failed")
+
+    @property
+    def needs_download(self) -> bool:
+        """A video whose file the panel does not have yet: it is downloaded before the review."""
+        return self.media_kind == "video" and self.media_state == "waiting"
 
     @property
     def post_media(self) -> str | None:
@@ -148,22 +175,23 @@ class Pick:
 
 
 def pre_gate(pick: Pick) -> str | None:
-    """A rejection that needs no Claude, or None."""
-    if pick.media_kind == "video" and not pick.has_thumb:
-        return "no_preview"
+    """A rejection that needs no Claude, or None (see the module doc)."""
+    if pick.media_kind == "video":
+        if pick.media_state == "failed":
+            return "video_unavailable"
+        if pick.duration is not None and pick.duration > frames.MAX_SECONDS:
+            return "video_too_long"
     if pick.image_role == "main" and max(pick.width or 0, pick.height or 0) > MAX_IMAGE_SIDE:
         return "image_too_large"
     return None
 
 
 async def eligible(db: AsyncConnection, now: datetime) -> list[Pick]:
-    """Pending, never reviewed candidates of enabled sources that passed phase A's gates, best first."""
+    """Pending, never reviewed candidates of enabled sources that passed phase A's gates, best first.
+    A video is eligible in any media state: its file is downloaded before the review, and one that
+    cannot be had is rejected by :func:`pre_gate`."""
     when = func.coalesce(ContentCandidate.published_at, ContentCandidate.created_at)
-    thumb = aliased(ContentMedia)
     main = aliased(ContentMedia)
-    has_thumb = (
-        select(thumb.id).where(thumb.candidate_id == ContentCandidate.id, thumb.role == "thumb").exists()
-    )
     rows = (
         await db.execute(
             select(
@@ -173,9 +201,9 @@ async def eligible(db: AsyncConnection, now: datetime) -> list[Pick]:
                 ContentCandidate.views,
                 ContentCandidate.media_kind,
                 ContentCandidate.media_state,
-                has_thumb.label("has_thumb"),
                 main.width,
                 main.height,
+                main.duration,
             )
             .join(ContentSource, ContentSource.id == ContentCandidate.source_id)
             .outerjoin(main, and_(main.candidate_id == ContentCandidate.id, main.role == "main"))
@@ -191,10 +219,7 @@ async def eligible(db: AsyncConnection, now: datetime) -> list[Pick]:
                         ContentCandidate.media_kind == "photo",
                         ContentCandidate.media_state.in_(("ready", "failed")),
                     ),
-                    and_(
-                        ContentCandidate.media_kind == "video",
-                        or_(has_thumb, ContentCandidate.thumb_url.is_(None)),
-                    ),
+                    ContentCandidate.media_kind == "video",
                 ),
             )
             .order_by(ContentCandidate.created_at.desc(), ContentCandidate.id.desc())
@@ -212,16 +237,12 @@ async def eligible(db: AsyncConnection, now: datetime) -> list[Pick]:
             views=r.views,
             media_kind=r.media_kind,
             media_state=r.media_state,
-            has_thumb=bool(r.has_thumb),
             width=r.width,
             height=r.height,
+            duration=r.duration,
             extra_sources=len(also.get(int(r.id), [])),
         )
-        picks.append(
-            replace(
-                base, score=score(base.views, base.when, now, base.extra_sources, base.image_role is not None)
-            )
-        )
+        picks.append(replace(base, score=score(base.views, base.when, now, base.extra_sources, base.seen)))
     return sorted(picks, key=lambda p: (-p.score, -p.id))
 
 
@@ -414,6 +435,10 @@ class Supervisor:
     vault: Callable[[], Vault | None]
     harvest: HarvestFn = links.harvest
     api_url: str = API_URL
+    # A video's download (phase A's safe fetcher and source plugins) and its frames.
+    http_factory: HttpFactory = SafeHttp
+    plugins: Mapping[str, SourcePlugin] = field(default_factory=lambda: dict(PLUGINS))
+    sampler: frames.Sampler = field(default_factory=frames.Sampler)
 
     # -- one round --
 
@@ -467,6 +492,10 @@ class Supervisor:
                 if code is not None:
                     picks.remove(pick)
             picks = [p for p in picks if p.source_id not in out.disabled_sources]
+            if any(p.needs_download for p in picks):
+                stored = await candidates.media_bytes_total(conn)
+                if stored + media.VIDEO_MAX_BYTES > content_engine.MEDIA_STORE_MAX:
+                    picks = [p for p in picks if not p.needs_download]  # no room for one more video now
             if not picks:
                 out.action = "no_candidate"
                 return
@@ -476,10 +505,113 @@ class Supervisor:
                 if blocked in ("unavailable", "cooling"):
                     self._unavailable(state, now, state.get("unavailable_reason") or "unavailable")
                 return
-            prepared = await self._prepare(conn, config, picks[0], now)
+        pick = picks[0]
+        sampled: frames.Sampled | None = None
+        if pick.media_kind == "video":
+            got = await self._video(pick)
+            if isinstance(got, str):
+                await self._video_failed(config, pick, got, now, out)
+                return
+            sampled = got
+        async with self.engine.begin() as conn:
+            prepared = await self._prepare(conn, config, pick, now, sampled)
+        if prepared is None:
+            out.action = "gone"
+            return
         review = await ClaudeWriter(backends).review(prepared.request)
         async with self.engine.begin() as conn:
             await self._apply(conn, config, state, prepared, review, now, out)
+
+    # -- a video, before its review --
+
+    async def _video(self, pick: Pick) -> frames.Sampled | str:
+        """The frames of a video candidate (see the module doc), from the panel's own copy of the file,
+        downloaded first when there is none. No transaction is open while the network or ffmpeg
+        works. Else why not: a code of :data:`VIDEO_REJECTS` or :data:`VIDEO_ERRORS`,
+        ``video_retry`` (a download that may work next round) or ``gone``."""
+        data: bytes | None = None
+        task: candidates.MediaTask | None = None
+        async with self.engine.begin() as conn:
+            stored = (await candidates.media_rows(conn, [pick.id])).get(pick.id, {}).get("main")
+            if stored is not None and stored.mime == "video/mp4":
+                found = await candidates.media_data(conn, stored.id)
+                data = found[1] if found is not None else None
+            if data is None:
+                task = await candidates.video_task(conn, pick.id)
+        if data is None:
+            if task is None:
+                return "video_unavailable"
+            downloaded = await self._download(task)
+            if isinstance(downloaded, str):
+                return downloaded
+            data = downloaded
+        try:
+            return await self.sampler.sample(data)
+        except frames.FramesRefused as exc:
+            return exc.code
+        except frames.FramesUnavailable as exc:
+            log.warning("content qc: video frames cannot be taken (%s)", exc.code)
+            return "ffmpeg_missing"
+        except Exception as exc:  # a bug here must not stop the supervisor on one candidate forever
+            log.error("content qc: taking video frames failed (%s)", type(exc).__name__)
+            return "frames_failed"
+
+    async def _download(self, task: candidates.MediaTask) -> bytes | str:
+        """Phase A's download (proxyhub/content/engine.py :func:`fetch_media`), stored like phase A
+        stores it: the post later uses this same file."""
+        try:
+            async with self.http_factory() as http:
+                info, data = await content_engine.fetch_media(http, task, self.plugins)
+        except FetchError as exc:
+            final = exc.code in content_engine.FINAL_ERRORS
+            async with self.engine.begin() as conn:
+                await candidates.media_failed(conn, task, exc.code, self.clock(), final=final)
+            return "video_unavailable" if final else "video_retry"
+        except media.MediaRefused as exc:
+            async with self.engine.begin() as conn:
+                await candidates.media_failed(conn, task, exc.code, self.clock(), final=True)
+            return "video_too_long" if exc.code == "video_too_long" else "video_unavailable"
+        except Exception as exc:  # never the message: it could carry fetched text
+            log.error("content qc: a video download failed (%s)", type(exc).__name__)
+            async with self.engine.begin() as conn:
+                await candidates.media_failed(conn, task, "internal", self.clock(), final=False)
+            return "video_retry"
+        async with self.engine.begin() as conn:
+            if await candidates.get(conn, task.candidate_id) is None:
+                return "gone"
+            await candidates.save_media(conn, task, info, data, self.clock())
+        return data
+
+    async def _video_failed(
+        self, config: QcConfig, pick: Pick, code: str, now: datetime, out: Outcome
+    ) -> None:
+        """A video with no frames: rejected without Claude (``rules``), or tried again later."""
+        out.candidate_id = pick.id
+        if code in VIDEO_REJECTS:
+            out.action, out.decision = "video_rejected", "reject"
+            async with self.engine.begin() as conn:
+                await self._decide(
+                    conn,
+                    config,
+                    pick,
+                    now,
+                    decision="reject",
+                    reasons=[qc_check_fa(code)],
+                    checks=[code],
+                    backend="rules",
+                )
+                out.rule_rejected.append(pick.id)
+                if await judge_source(conn, config, pick.source_id, now):
+                    out.disabled_sources.append(pick.source_id)
+            return
+        out.action = code
+        if code in VIDEO_ERRORS:  # the panel's own fault: at most MAX_TRIES rounds on this candidate
+            async with self.engine.begin() as conn:
+                await conn.execute(
+                    update(ContentCandidate)
+                    .where(ContentCandidate.id == pick.id)
+                    .values(qc_tries=ContentCandidate.qc_tries + 1, qc_error=code, updated_at=now)
+                )
 
     async def _not_needed(
         self, conn: AsyncConnection, config: QcConfig, state: dict[str, Any], now: datetime
@@ -551,18 +683,30 @@ class Supervisor:
             return [], "over_cap"
         return [], "cooling" if "cooling" in why else "unavailable"
 
-    async def _prepare(self, conn: AsyncConnection, config: QcConfig, pick: Pick, now: datetime) -> Prepared:
+    async def _prepare(
+        self,
+        conn: AsyncConnection,
+        config: QcConfig,
+        pick: Pick,
+        now: datetime,
+        sampled: frames.Sampled | None = None,
+    ) -> Prepared | None:
+        """The review request: the prompt, the candidate's text and its images (its photo, or its
+        video's frames in order). None when the candidate is gone."""
         found = await candidates.get(conn, pick.id)
-        assert found is not None
-        image: Image | None = None
-        role = pick.image_role
-        if role is not None:
-            stored = (await candidates.media_rows(conn, [pick.id])).get(pick.id, {}).get(role)
+        if found is None:
+            return None
+        images: tuple[Image, ...] = ()
+        if sampled is not None:
+            images = tuple(Image(mime="image/jpeg", data=f.data) for f in sampled.frames)
+        elif pick.image_role is not None:
+            stored = (await candidates.media_rows(conn, [pick.id])).get(pick.id, {}).get(pick.image_role)
             if stored is not None and stored.mime in ("image/jpeg", "image/png"):
                 data = await candidates.media_data(conn, stored.id)
                 if data is not None:
-                    image = Image(mime=stored.mime, data=data[1])  # type: ignore[arg-type]
+                    images = (Image(mime=stored.mime, data=data[1]),)  # type: ignore[arg-type]
         post_media = pick.post_media
+        shown = len(images) if post_media == "video" else 0
         room: int | None = None
         if post_media is not None:
             try:
@@ -573,10 +717,12 @@ class Supervisor:
         nonce = qc_prompt.new_nonce()
         request = ReviewRequest(
             system=qc_prompt.system_prompt(
-                config, limits, nonce, media_kind=post_media, image_sent=image is not None
+                config, limits, nonce, media_kind=post_media, image_sent=bool(images), frames=shown
             ),
-            user_text=qc_prompt.user_text(found.source_text, nonce, media_kind=post_media if image else None),
-            image=image,
+            user_text=qc_prompt.user_text(
+                found.source_text, nonce, media_kind=post_media if images else None, frames=shown
+            ),
+            images=images,
         )
         names = qc_checks.source_names((s.kind, s.ref, s.label) for s in await sources.list_all(conn))
         return Prepared(pick, request, limits, names)
@@ -725,7 +871,7 @@ class Supervisor:
     ) -> None:
         """Record the review on the candidate and, in ``auto`` mode, act on it (see the module doc).
         The status changes only if the candidate is still pending and unreviewed (the owner may have
-        acted meanwhile)."""
+        acted meanwhile). A rejected video's file goes at once (it was fetched for the review only)."""
         qc: dict[str, Any] = {
             "qc_decision": decision,
             "qc_reasons": [r[: qc_prompt.MAX_REASON_CHARS] for r in reasons][: qc_prompt.MAX_REASONS],
@@ -760,6 +906,8 @@ class Supervisor:
         ).first()
         if done is None:  # the owner decided meanwhile: keep the review for the record only
             await conn.execute(update(ContentCandidate).where(ContentCandidate.id == pick.id).values(**qc))
+        if decision == "reject" and pick.media_kind == "video":
+            await candidates.drop_video(conn, pick.id, now)
         await log_action(
             conn,
             actor=ACTOR,

@@ -117,12 +117,19 @@ QC_OUTCOMES_FA: Final[dict[str, str]] = {
     "api_unreachable": "پنل به API Anthropic نرسید.",
     "api_timeout": "API Anthropic در زمان مجاز جواب نداد.",
     "api_bad_answer": "API Anthropic پاسخ نادرست داد.",
+    "ffmpeg_missing": "ffmpeg در پنل اجرا نشد و فریم‌های ویدیو ساخته نشد؛ مورد بعداً دوباره امتحان میشود.",
+    "frames_failed": "ساختن فریم‌های ویدیو با خطای داخلی پنل روبه‌رو شد؛ مورد بعداً دوباره امتحان میشود.",
 }
 
 QC_CHECKS_FA: Final[dict[str, str]] = {
     "unparsable": "پاسخ Claude در قالب درست نبود.",
     "refused": "Claude از بررسی سر باز زد.",
     "no_preview": "ویدیو تصویر پیش‌نمایش ندارد و ناظر نمیتواند آن را ببیند.",
+    "video_too_long": "ویدیو از ۳ دقیقه بلندتر است و ناظر نمیتواند همه‌ی آن را ببیند.",
+    "video_unreadable": "ویدیو خوانده نشد و ناظر نتوانست فریم‌هایش را ببیند.",
+    "video_unavailable": (
+        "فایل ویدیو برای بازبینی گرفته نشد (نشانی نداشت، از ۲۰ مگابایت بزرگ‌تر بود یا MP4 نبود)."
+    ),
     "image_too_large": "ابعاد عکس برای بررسی Claude بیش از حد بزرگ است.",
     "category_not_allowed": "دسته‌ی این مورد در تنظیمات مجاز نیست.",
     "title_empty": "عنوان خالی بود.",

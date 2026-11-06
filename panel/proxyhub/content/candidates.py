@@ -395,6 +395,59 @@ async def media_tasks(db: Db, limit: int) -> list[MediaTask]:
     return out
 
 
+async def video_task(db: Db, candidate_id: int) -> MediaTask | None:
+    """The download of a pending candidate's video before its review (the content supervisor, D52),
+    or None when there is no address to fetch."""
+    row = (
+        await db.execute(
+            select(
+                ContentCandidate.id,
+                ContentCandidate.media_url,
+                ContentCandidate.source_kind,
+                ContentCandidate.url,
+            ).where(
+                ContentCandidate.id == candidate_id,
+                ContentCandidate.status == "pending",
+                ContentCandidate.media_kind == "video",
+                ContentCandidate.media_state == "waiting",
+                ContentCandidate.media_url.is_not(None),
+            )
+        )
+    ).first()
+    return (
+        None if row is None else MediaTask(int(row.id), "video", str(row.media_url), row.source_kind, row.url)
+    )
+
+
+async def drop_video(db: Db, candidate_id: int, now: datetime) -> bool:
+    """The file of a video the content supervisor rejected goes at once (it was downloaded for the
+    review only, D52). Never the file of a candidate that is approved or posted (the owner may have
+    approved it meanwhile). The candidate waits for its download again, so an owner's later approval
+    (``review`` mode, or moving it back) fetches it as before. A video with no file is left as it is."""
+    found = (
+        await db.execute(
+            update(ContentCandidate)
+            .where(
+                ContentCandidate.id == candidate_id,
+                ContentCandidate.media_kind == "video",
+                ContentCandidate.media_state == "ready",
+                ContentCandidate.status.in_(("pending", "rejected")),
+            )
+            .values(
+                media_state=case((ContentCandidate.media_url.is_not(None), "waiting"), else_="failed"),
+                updated_at=now,
+            )
+            .returning(ContentCandidate.id)
+        )
+    ).first()
+    if found is None:
+        return False
+    await db.execute(
+        delete(ContentMedia).where(ContentMedia.candidate_id == candidate_id, ContentMedia.role == "main")
+    )
+    return True
+
+
 async def media_bytes_total(db: Db) -> int:
     return int((await db.execute(select(func.coalesce(func.sum(ContentMedia.size), 0)))).scalar_one())
 

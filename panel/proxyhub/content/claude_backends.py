@@ -7,15 +7,17 @@ tools and the owner's subscription. Its protocol:
 
 * ``{"op": "health"}`` -> ``{"ok": true, "protocol": 1, "calls_24h", "daily_cap", "busy",
   "logged_in", "claude_version", "version_ok", "rate_limit", "last_outcome", ...}``;
-* ``{"op": "review", "protocol": 1, "model", "system", "content": [text and image blocks],
-  "timeout_s"}`` -> ``{"ok": true, "text", "model", "duration_ms", ...}`` or ``{"ok": false,
-  "error": <code>}``.
+* ``{"op": "review", "protocol": 1, "model", "system", "content": [image blocks, then the text
+  block], "timeout_s"}`` -> ``{"ok": true, "text", "model", "duration_ms", ...}`` or ``{"ok":
+  false, "error": <code>}``. A video's frames are several image blocks in order (at most the
+  bridge's ``MAX_IMAGES``, together under its ``MAX_IMAGES_BYTES``; proxyhub/content/frames.py
+  keeps them under it).
 
 **API** (:class:`ApiBackend`, backup): the Anthropic Messages API with the owner's key from the
 vault, over httpx like every other client of the panel (proxyhub/cloudflare/client.py): one endpoint
 and one request shape do not need the SDK, and the SDK's automatic retries would hide calls from the
 daily cap. The request: ``anthropic-version: 2026-10-21``, the model (``claude-sonnet-5-5`` or
-``claude-haiku-5-5``), the system prompt, one user message (the image block, then the text),
+``claude-haiku-5-5``), the system prompt, one user message (the image blocks, then the text),
 ``output_config.format`` with the answer's JSON Schema (structured output) and ``effort: medium``;
 no sampling parameters (refused since that API version). A ``refusal`` stop reason is NOT retried
 on another model (no server-side fallback): for a safety reviewer a refusal is itself a reason to
@@ -107,18 +109,18 @@ class ReviewBackend(Protocol):
 
 
 def _blocks(request: ReviewRequest) -> list[dict[str, Any]]:
-    blocks: list[dict[str, Any]] = []
-    if request.image is not None:
-        blocks.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": request.image.mime,
-                    "data": base64.b64encode(request.image.data).decode("ascii"),
-                },
-            }
-        )
+    """The user message's content: each image in order (a photo, or a video's frames), then the text."""
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image.mime,
+                "data": base64.b64encode(image.data).decode("ascii"),
+            },
+        }
+        for image in request.images
+    ]
     blocks.append({"type": "text", "text": request.user_text})
     return blocks
 

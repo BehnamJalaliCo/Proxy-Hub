@@ -1,8 +1,11 @@
 # ruff: noqa: E501
 """The content supervisor on a real PostgreSQL (decision D52): automatic approval with Claude's
 caption, the injection cases, unparsable answers, the per-slot cap and the ranking, review mode, a
-source turned off for its rejections, the rule gates, the fallback to the content bank, the backup
-API, the owner's alerts and their de-duplication, the dashboard's API, and migration 0028.
+source turned off for its rejections, the rule gates, a video judged by frames across its whole
+length (downloaded before its review from a real local HTTPS site, frames by the real ffmpeg; a long,
+unreadable or rejected video dropped, a failing download retried and then given up), the fallback
+to the content bank, the backup API, the owner's alerts and their de-duplication, the dashboard's
+API, and migration 0028.
 
 Claude is reached through a local stand-in of the BRIDGE (an in-process unix socket server speaking
 the bridge's own protocol, like the local ports other tests use): it records what the panel sends and
@@ -13,6 +16,7 @@ test_claude_bridge.py and the real Claude Code through it on the server (P22).
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import itertools
 import json
@@ -25,21 +29,33 @@ from types import TracebackType
 from typing import Any, Self
 
 import pytest
+import test_content_support
 from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from test_content_support import clean_content_tables, png
+from test_content_support import (
+    LocalSite,
+    Page,
+    clean_content_tables,
+    mp4,
+    need_ffmpeg,
+    png,
+    real_mp4,
+    site_http,
+)
 from test_fleet_support import ADMIN, CSRF
 from test_posts_publisher import publish, quiet, ready_fleet, slot_time
 from test_posts_support import PROVIDERS, clean_posts_tables, jobs, rows, setup_telegram, vault_at
 
 from proxyhub.api.deps import require_admin
-from proxyhub.content import candidates, qc_settings, sources, supervisor
+from proxyhub.content import candidates, media, qc_settings, sources, supervisor
 from proxyhub.content.claude_backends import VAULT_NAME
+from proxyhub.content.frames import Sampler
 from proxyhub.content.items import FetchedItem, MediaRef
 from proxyhub.content.media import check_for
+from proxyhub.content.net import SafeHttp
 from proxyhub.content.qc_settings import FLAGS
 from proxyhub.content.supervisor import Supervisor
 from proxyhub.posts import links
@@ -213,6 +229,8 @@ async def candidate(
     views: int | None = None,
     kind: str | None = None,
     thumb: bool = True,
+    video_url: bool = True,
+    post: bool = False,
 ) -> int:
     ext = str(next(EXTERNAL))
     ref: MediaRef | None = None
@@ -221,12 +239,13 @@ async def candidate(
     elif kind == "video":
         ref = MediaRef(
             "video",
-            f"https://cdn.example/{ext}.mp4",
+            f"https://cdn.example/{ext}.mp4" if video_url else None,
             thumb_url=f"https://cdn.example/{ext}.jpg" if thumb else None,
         )
+    url = f"https://t.me/{src.ref}/{ext}" if post else None  # the original post (a fresh video address)
     async with engine.begin() as conn:
         await candidates.store_items(
-            conn, src, [FetchedItem(ext, None, when, body, views=views, media=ref)], when
+            conn, src, [FetchedItem(ext, url, when, body, views=views, media=ref)], when
         )
         cid = int(
             (
@@ -242,6 +261,26 @@ async def candidate(
             task = candidates.MediaTask(cid, role, f"https://cdn.example/{ext}")  # type: ignore[arg-type]
             await candidates.save_media(conn, task, check_for(role, data), data, when)  # type: ignore[arg-type]
     return cid
+
+
+async def video_path(engine: AsyncEngine, cid: int) -> str:
+    """The path of the candidate's video on the local site (cdn.example)."""
+    found = await rows(engine, "SELECT media_url FROM content_candidates WHERE id = :i", i=cid)
+    return str(found[0].media_url).removeprefix("https://cdn.example")
+
+
+async def serve(engine: AsyncEngine, site: LocalSite, cid: int, page: bytes | Page) -> str:
+    """The local site answers the candidate's video address with ``page`` (an MP4 by default)."""
+    path = await video_path(engine, cid)
+    site.pages[("cdn.example", path)] = (
+        page if isinstance(page, Page) else Page(body=page, headers={"Content-Type": "video/mp4"})
+    )
+    return path
+
+
+async def files(engine: AsyncEngine, *ids: int) -> dict[int, dict[str, candidates.MediaRow]]:
+    async with engine.connect() as conn:
+        return await candidates.media_rows(conn, list(ids))
 
 
 async def one(engine: AsyncEngine, cid: int) -> candidates.Candidate:
@@ -403,26 +442,238 @@ async def test_review_mode_only_suggests(engine: AsyncEngine, sockdir: Path) -> 
     assert approved is not None and approved.decided_by == "owner"
 
 
-async def test_rule_gates_reject_without_claude(engine: AsyncEngine, sockdir: Path) -> None:
+async def test_rule_gates_reject_without_claude(engine: AsyncEngine, sockdir: Path, tmp_path: Path) -> None:
+    need_ffmpeg()
     now = slot_time(1)
     src = await source(engine, "newsfa", now - timedelta(hours=3))
-    video = await candidate(
-        engine, src, NEWS[0], when=now - timedelta(minutes=20), views=90_000, kind="video", thumb=False
+    no_file = await candidate(
+        engine, src, NEWS[0], when=now - timedelta(minutes=20), views=90_000, kind="video", video_url=False
     )
-    with_frame = await candidate(engine, src, NEWS[1], when=now - timedelta(hours=1), views=100, kind="video")
-    async with StubBridge(sockdir / "bridge.sock") as bridge:
+    no_cover = await candidate(
+        engine, src, NEWS[1], when=now - timedelta(hours=1), views=100, kind="video", thumb=False
+    )
+    async with LocalSite(tmp_path) as site, StubBridge(sockdir / "bridge.sock") as bridge:
+        await serve(engine, site, no_cover, real_mp4(8, 320, 180))
         bridge.says(
             answer(
                 category="sport", title="⚽ پیروزی تیم ملی", body="تیم ملی ایران ازبکستان را با دو گل برد."
             )
         )
-        out = await make(engine, sockdir, Clock(now)).run_round()
+        out = await make(engine, sockdir, Clock(now), http_factory=lambda: site_http(site)).run_round()
         (request,) = bridge.reviews()
-    assert out.rule_rejected == [video] and out.candidate_id == with_frame
-    assert "cover frame" in request["system"] and request["content"][0]["type"] == "image"
-    gated = await one(engine, video)
-    assert (gated.status, gated.qc_backend, gated.qc_checks) == ("rejected", "rules", ["no_preview"])
-    assert (await one(engine, with_frame)).status == "approved"
+    # A video whose file cannot be had is rejected without Claude; one with no cover is fine: Claude
+    # judges the video's own frames, never its cover.
+    assert out.rule_rejected == [no_file] and out.candidate_id == no_cover
+    assert "frames sampled across the whole video" in request["system"]
+    assert [b["type"] for b in request["content"]] == ["image"] * 6 + ["text"]
+    gated = await one(engine, no_file)
+    assert (gated.status, gated.qc_backend, gated.qc_checks) == ("rejected", "rules", ["video_unavailable"])
+    assert candidates.as_json(gated)["qc"]["checks_fa"] == [
+        "فایل ویدیو برای بازبینی گرفته نشد (نشانی نداشت، از ۲۰ مگابایت بزرگ‌تر بود یا MP4 نبود)."
+    ]
+    assert (await one(engine, no_cover)).status == "approved"
+
+
+# --- a video, judged whole ----------------------------------------------------------------------------
+
+
+async def resolve_with_telegram(host: str, port: int) -> list[str]:
+    return ["127.0.0.1"] if host in ("cdn.example", "t.me") else []
+
+
+def embed_page(name: str, post_id: str, video_url: str) -> bytes:
+    """A post's embed page (t.me/<name>/<id>?embed=1) in the markup Telegram's widget uses."""
+    return (
+        f'<div class="tgme_widget_message" data-post="{name}/{post_id}">'
+        '<div class="tgme_widget_message_text">متن</div>'
+        f'<video class="tgme_widget_message_video" src="{video_url}"></video>'
+        '<time datetime="2026-11-07T08:00:00+00:00"></time></div>'
+    ).encode()
+
+
+async def test_a_video_is_judged_by_frames_across_its_whole_length(
+    engine: AsyncEngine, sockdir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    need_ffmpeg()
+    # The local site also answers for t.me: the post's embed page gives the video's fresh address.
+    monkeypatch.setattr(test_content_support, "SITE_NAMES", [*test_content_support.SITE_NAMES, "t.me"])
+    now = slot_time(1)
+    src = await source(engine, "newsfa", now - timedelta(hours=3))
+    cid = await candidate(
+        engine, src, NEWS[1], when=now - timedelta(hours=1), views=50_000, kind="video", post=True
+    )
+    video = real_mp4(8, 320, 180)
+    ext = (await one(engine, cid)).url.rsplit("/", 1)[1]  # type: ignore[union-attr]
+    async with LocalSite(tmp_path) as site, StubBridge(sockdir / "bridge.sock") as bridge:
+        stale = await serve(engine, site, cid, Page(410, b"expired"))  # the stored address expired
+        fresh = f"/fresh-{ext}.mp4"
+        site.pages[("t.me", f"/newsfa/{ext}?embed=1&mode=tme")] = Page(
+            body=embed_page("newsfa", ext, f"https://cdn.example{fresh}"),
+            headers={"Content-Type": "text/html"},
+        )
+        site.pages[("cdn.example", fresh)] = Page(body=video, headers={"Content-Type": "video/mp4"})
+
+        def http() -> SafeHttp:
+            return SafeHttp(
+                resolver=resolve_with_telegram,
+                allow=lambda a: a == "127.0.0.1",
+                ssl_context=site.client_ssl(),
+                connect_port=site.port,
+            )
+
+        bridge.says(
+            answer(
+                category="sport", title="⚽ پیروزی تیم ملی", body="تیم ملی ایران ازبکستان را با دو گل برد."
+            )
+        )
+        out = await make(engine, sockdir, Clock(now), http_factory=http).run_round()
+        (request,) = bridge.reviews()
+    assert (out.action, out.candidate_id, out.decision, out.review) == ("reviewed", cid, "approve", "ok")
+    # ONE review: six JPEG frames in order, then the text; the prompt says what they are.
+    *images, text_block = request["content"]
+    frames = [base64.b64decode(i["source"]["data"]) for i in images]
+    assert len(frames) == 6 and {i["source"]["media_type"] for i in images} == {"image/jpeg"}
+    assert all(media.sniff(f).mime == "image/jpeg" for f in frames) and len(set(frames)) == 6
+    assert "The 6 attached images are frames sampled across its whole video, in order." in text_block["text"]
+    assert "These 6 attached images are frames sampled across the whole video, in order" in request["system"]
+    assert "any frame that breaks a rule rejects the item" in request["system"]
+    # Downloaded once, from the address read again from the post; kept for the post.
+    fetched = [(host, path) for host, path, _ in site.requests]
+    assert fetched.count(("cdn.example", fresh)) == 1 and ("cdn.example", stale) not in fetched
+    approved = await one(engine, cid)
+    assert (approved.status, approved.decided_by, approved.media_state) == ("approved", "qc", "ready")
+    async with engine.connect() as conn:
+        main = await candidates.post_media(conn, approved)
+        assert main is not None and (main.mime, main.duration, main.width) == ("video/mp4", 8, 320)
+        assert await candidates.media_data(conn, main.id) == ("video/mp4", video)
+        tasks = await candidates.media_tasks(conn, 20)
+    assert [t for t in tasks if t.candidate_id == cid] == []  # phase A never fetches it a second time
+
+
+async def test_a_long_unreadable_or_rejected_video_is_dropped(
+    engine: AsyncEngine, sockdir: Path, tmp_path: Path
+) -> None:
+    need_ffmpeg()
+    now = slot_time(1)
+    src = await source(engine, "newsfa", now - timedelta(hours=3))
+    long = await candidate(engine, src, NEWS[0], when=now - timedelta(minutes=10), views=90_000, kind="video")
+    broken = await candidate(
+        engine, src, NEWS[1], when=now - timedelta(minutes=10), views=50_000, kind="video"
+    )
+    fine = await candidate(engine, src, NEWS[2], when=now - timedelta(minutes=10), views=10_000, kind="video")
+    clock = Clock(now)
+    async with LocalSite(tmp_path) as site, StubBridge(sockdir / "bridge.sock") as bridge:
+        await serve(engine, site, long, real_mp4(181, 64, 36, 1))  # over the 3-minute cap
+        await serve(engine, site, broken, mp4(640, 360, 12))  # an MP4 by its header, no track to read
+        await serve(engine, site, fine, real_mp4(8, 320, 180))
+        bridge.says(
+            answer(
+                decision="reject",
+                title="",
+                body="",
+                category="economy",
+                flags={**dict.fromkeys(FLAGS, False), "foreign_branding": True},
+                reasons=["واترمارک یک کانال دیگر در یکی از فریم‌ها دیده میشود."],
+            )
+        )
+        outs = []
+        for minute in range(4):
+            clock.at = now + timedelta(minutes=minute)
+            outs.append(await make(engine, sockdir, clock, http_factory=lambda: site_http(site)).run_round())
+        reviews = bridge.reviews()
+    assert [(o.action, o.candidate_id) for o in outs] == [
+        ("video_rejected", long),
+        ("video_rejected", broken),
+        ("reviewed", fine),
+        ("no_candidate", None),
+    ]
+    assert outs[0].rule_rejected == [long] and outs[1].rule_rejected == [broken]
+    (review,) = reviews  # Claude saw only the video it could judge whole
+    assert len(review["content"]) == 7
+    for cid, code in ((long, "video_too_long"), (broken, "video_unreadable")):
+        rejected = await one(engine, cid)
+        assert (rejected.status, rejected.qc_backend, rejected.qc_checks, rejected.decided_by) == (
+            "rejected",
+            "rules",
+            [code],
+            "qc",
+        )
+    by_claude = await one(engine, fine)
+    assert (by_claude.status, by_claude.qc_backend, by_claude.qc_flags) == (
+        "rejected",
+        "bridge",
+        ["foreign_branding"],
+    )
+    assert candidates.as_json(await one(engine, long))["qc"]["checks_fa"] == [
+        "ویدیو از ۳ دقیقه بلندتر است و ناظر نمیتواند همه‌ی آن را ببیند."
+    ]
+    # Every rejected video's file is gone at once (it was fetched for the review only).
+    assert all("main" not in found for found in (await files(engine, long, broken, fine)).values())
+    (event, *_) = await actions(engine, "content.qc_rejected")
+    assert event.target == f"candidate:{long}" and event.reasons["reasons"] == ["video_too_long"]
+
+
+async def test_a_failing_video_download_is_retried_then_given_up(
+    engine: AsyncEngine, sockdir: Path, tmp_path: Path
+) -> None:
+    now = slot_time(1)
+    src = await source(engine, "newsfa", now - timedelta(hours=3))
+    flaky = await candidate(
+        engine, src, NEWS[0], when=now - timedelta(minutes=10), views=90_000, kind="video"
+    )
+    missing = await candidate(
+        engine, src, NEWS[1], when=now - timedelta(minutes=10), views=50_000, kind="video"
+    )
+    clock = Clock(now)
+    async with LocalSite(tmp_path) as site, StubBridge(sockdir / "bridge.sock") as bridge:
+        await serve(engine, site, flaky, Page(503, b"busy"))
+        await serve(engine, site, missing, Page(404, b"no"))
+        outs = []
+        for minute in range(5):
+            clock.at = now + timedelta(minutes=minute)
+            outs.append(await make(engine, sockdir, clock, http_factory=lambda: site_http(site)).run_round())
+        assert bridge.reviews() == []
+    assert [o.action for o in outs] == ["video_retry"] * 3 + ["video_rejected", "no_candidate"]
+    assert outs[3].rule_rejected == [flaky, missing]  # given up after 3 tries; a 404 at once
+    for cid, error in ((flaky, "http_503"), (missing, "http_404")):
+        found = await one(engine, cid)
+        assert (found.status, found.qc_checks, found.media_state, found.media_error) == (
+            "rejected",
+            ["video_unavailable"],
+            "failed",
+            error,
+        )
+    async with engine.connect() as conn:
+        state = await qc_settings.load_state(conn)
+    assert int(state.get("slot_calls") or 0) == 0  # no Claude call was spent
+
+
+async def test_without_ffmpeg_a_video_waits_and_is_never_rejected_for_it(
+    engine: AsyncEngine, sockdir: Path, tmp_path: Path
+) -> None:
+    now = slot_time(1)
+    src = await source(engine, "newsfa", now - timedelta(hours=3))
+    cid = await candidate(engine, src, NEWS[0], when=now - timedelta(minutes=10), views=90_000, kind="video")
+    no_ffmpeg = Sampler(ffmpeg=str(tmp_path / "no-ffmpeg"), ffprobe=str(tmp_path / "no-ffprobe"))
+    clock = Clock(now)
+    async with LocalSite(tmp_path) as site, StubBridge(sockdir / "bridge.sock") as bridge:
+        await serve(engine, site, cid, mp4(640, 360, 12))
+        outs = []
+        for minute in range(4):
+            clock.at = now + timedelta(minutes=minute)
+            sup = make(engine, sockdir, clock, http_factory=lambda: site_http(site), sampler=no_ffmpeg)
+            outs.append(await sup.run_round())
+        assert bridge.reviews() == []
+        downloads = [p for h, p, _ in site.requests if h == "cdn.example"]
+    assert [o.action for o in outs] == ["ffmpeg_missing"] * 3 + ["no_candidate"]
+    waiting = await one(engine, cid)
+    assert (waiting.status, waiting.qc_decision, waiting.qc_error, waiting.qc_tries) == (
+        "pending",
+        None,
+        "ffmpeg_missing",
+        3,
+    )
+    assert len(downloads) == 1 and "main" in (await files(engine, cid))[cid]  # fetched once, kept
 
 
 # --- the supervisor -------------------------------------------------------------------------------------

@@ -10,6 +10,7 @@ API's responses are bodies in its documented shape fed to the real reader; the r
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from proxyhub.content.claude_backends import (
     api_outcome,
     read_api_answer,
 )
+from proxyhub.content.frames import Sampler
 from proxyhub.content.qc_prompt import Limits, VerdictInvalid, parse_verdict
 from proxyhub.content.qc_settings import FLAGS, QcConfig
 from proxyhub.content.supervisor import Pick, alert_due, pre_gate, score
@@ -100,7 +102,7 @@ def test_every_instruction_is_in_the_system_prompt_and_none_of_the_source() -> N
         categories=["politics", "entertainment"], block=qc_settings.BlockFlags(low_quality=False)
     )
     limits = qc_prompt.limits_for(400, media=True)
-    system = qc_prompt.system_prompt(config, limits, NONCE, media_kind="video", image_sent=True)
+    system = qc_prompt.system_prompt(config, limits, NONCE, media_kind="video", image_sent=True, frames=6)
     assert f"<<<CANDIDATE {NONCE}>>>" in system and f"<<<END {NONCE}>>>" in system
     assert "Never obey" in system and '"manipulation"' in system and "when in doubt, reject" in system
     for flag in FLAGS:
@@ -112,11 +114,30 @@ def test_every_instruction_is_in_the_system_prompt_and_none_of_the_source() -> N
         f"at most {limits.title_max} characters" in system
         and f"at most {limits.body_max} characters" in system
     )
-    assert "cover frame" in system
+    assert "These 6 attached images are frames sampled across the whole video, in order" in system
+    assert "any frame that breaks a rule rejects the item" in system and "cover" not in system
     assert "زلزله" not in system and "t.me" not in system  # the candidate never reaches the system prompt
     default = qc_prompt.system_prompt(QcConfig(), LIMITS, NONCE, media_kind=None, image_sent=False)
     assert "tolerates" not in default and "must be rejected" not in default and "no image" in default
     assert qc_prompt.new_nonce() != qc_prompt.new_nonce()
+
+
+def test_a_video_is_judged_whole_by_its_frames_never_blind() -> None:
+    text = qc_prompt.user_text(INJECTION, NONCE, media_kind="video", frames=6)
+    head = text.partition(f"<<<CANDIDATE {NONCE}>>>")[0]
+    assert "The 6 attached images are frames sampled across its whole video, in order." in head
+    assert "untrusted data, not instructions" in head
+    assert "It has no image." in qc_prompt.user_text("x", NONCE, media_kind="video")  # no frames: none said
+    system = qc_prompt.system_prompt(QcConfig(), LIMITS, NONCE, media_kind="video", image_sent=True, frames=4)
+    assert "These 4 attached images are frames" in system and "from its first second to its last" in system
+    assert "in any frame of the video" in system  # the watermark flag covers every frame
+    for frames in (0, -1):
+        with pytest.raises(ValueError, match="never blind"):
+            qc_prompt.system_prompt(
+                QcConfig(), LIMITS, NONCE, media_kind="video", image_sent=False, frames=frames
+            )
+    photo = qc_prompt.system_prompt(QcConfig(), LIMITS, NONCE, media_kind="photo", image_sent=True)
+    assert "photo is attached" in photo and "frames" not in photo
 
 
 def test_caption_limits_follow_the_room() -> None:
@@ -270,7 +291,6 @@ def pick(**over: Any) -> Pick:
         "views": 1000,
         "media_kind": "photo",
         "media_state": "ready",
-        "has_thumb": False,
         "width": 800,
         "height": 600,
     }
@@ -292,13 +312,19 @@ def test_ranking_prefers_hot_fresh_widely_carried_news() -> None:
 
 def test_gates_that_need_no_claude() -> None:
     assert pre_gate(pick()) is None
-    assert pre_gate(pick(media_kind="video", media_state="waiting", has_thumb=False)) == "no_preview"
-    assert pre_gate(pick(media_kind="video", media_state="waiting", has_thumb=True)) is None
     assert pre_gate(pick(width=9000, height=500)) == "image_too_large"
     assert pre_gate(pick(media_state="failed", width=None, height=None)) is None  # goes as text
     assert pick(media_state="failed").post_media is None and pick(media_state="failed").image_role is None
-    assert pick(media_kind="video", has_thumb=True).image_role == "thumb"
     assert pick(media_kind=None).post_media is None
+    # A video is seen through frames of its own file, never through its cover: no file, no review.
+    waiting = pick(media_kind="video", media_state="waiting", width=None, height=None)
+    assert pre_gate(waiting) is None and waiting.needs_download and waiting.seen
+    assert waiting.image_role is None and waiting.post_media == "video"
+    ready = pick(media_kind="video", media_state="ready", width=640, height=360, duration=180)
+    assert pre_gate(ready) is None and not ready.needs_download
+    assert pre_gate(pick(media_kind="video", media_state="ready", duration=181)) == "video_too_long"
+    failed = pick(media_kind="video", media_state="failed", width=None, height=None)
+    assert pre_gate(failed) == "video_unavailable" and not failed.seen
 
 
 # --- alerts ---------------------------------------------------------------------------------------------
@@ -360,7 +386,7 @@ def test_settings_are_strict_and_default_to_auto() -> None:
 # --- the backends' shapes ---------------------------------------------------------------------------------
 
 
-REQUEST = ReviewRequest(system="SYSTEM", user_text="USER", image=Image(mime="image/png", data=png(4, 3)))
+REQUEST = ReviewRequest(system="SYSTEM", user_text="USER", images=(Image(mime="image/png", data=png(4, 3)),))
 
 
 def test_the_api_request_is_one_user_message_with_structured_output() -> None:
@@ -372,6 +398,15 @@ def test_the_api_request_is_one_user_message_with_structured_output() -> None:
     image, text = message["content"]
     assert image["type"] == "image" and image["source"]["media_type"] == "image/png"
     assert text == {"type": "text", "text": "USER"}
+    frames = tuple(Image(mime="image/jpeg", data=b"\xff\xd8\xff" + bytes([i]) * 10) for i in range(6))
+    (video,) = api_body(ReviewRequest("SYSTEM", "USER", images=frames), "claude-sonnet-5-5")["messages"]
+    *blocks, last = video["content"]
+    assert last == {"type": "text", "text": "USER"} and len(blocks) == 6  # one message, frames in order
+    assert [base64.b64decode(b["source"]["data"]) for b in blocks] == [f.data for f in frames]
+    assert {b["source"]["media_type"] for b in blocks} == {"image/jpeg"}
+    assert api_body(ReviewRequest("SYSTEM", "USER"), "claude-haiku-5-5")["messages"][0]["content"] == [
+        {"type": "text", "text": "USER"}
+    ]
     assert body["output_config"] == {
         "effort": "medium",
         "format": {"type": "json_schema", "schema": qc_prompt.output_schema()},
@@ -494,7 +529,13 @@ def test_the_panel_never_runs_claude_itself_and_reads_the_key_in_one_place() -> 
     root = Path(proxyhub.__file__).parent
     for path in (root / "content").rglob("*.py"):
         source = path.read_text(encoding="utf-8")
-        assert "subprocess" not in source and "os.system" not in source, path  # only the host bridge does
+        assert "os.system" not in source and "shell=True" not in source and "os.popen" not in source, path
+        if path.name != "frames.py":  # Claude runs in the host bridge only; the panel runs only ffmpeg
+            assert "subprocess" not in source, path
+    frames = (root / "content" / "frames.py").read_text(encoding="utf-8")
+    assert "create_subprocess_shell" not in frames and "import subprocess" not in frames
+    assert frames.count("create_subprocess_exec(") == 1  # one runner, argv only
+    assert (Sampler().ffmpeg, Sampler().ffprobe) == ("ffmpeg", "ffprobe")  # the only programs it runs
     readers = sorted(
         p.relative_to(root).as_posix()
         for p in root.rglob("*.py")

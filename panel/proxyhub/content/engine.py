@@ -12,7 +12,9 @@ Every round (a minute), with no transaction open while the network answers:
 3. **media**: up to :data:`MEDIA_PER_ROUND` files are downloaded (approved videos first, then
    photos and video thumbnails of the queue), each checked by its real bytes
    (proxyhub/content/media.py), while the stored total stays under :data:`MEDIA_STORE_MAX`. A
-   Telegram video's address is read again from its post right before (its token expires).
+   Telegram video's address is read again from its post right before (its token expires). A video
+   the content supervisor already downloaded for its review (:func:`fetch_media`, D52) is ready and
+   never fetched twice.
 
 All fetching goes through :class:`~proxyhub.content.net.SafeHttp` (https only, no private address on
 any hop, bounded). A failure is recorded as a short code (the dashboard shows it in Persian); a
@@ -23,7 +25,7 @@ carry fetched text) and recorded as ``internal``.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Final
@@ -43,13 +45,46 @@ MEDIA_PER_ROUND: Final = 6
 MEDIA_STORE_MAX: Final = 300 * 1024 * 1024
 PRUNE_EVERY: Final = timedelta(hours=1)
 # Download errors no retry can fix.
-_FINAL: Final = frozenset(
+FINAL_ERRORS: Final = frozenset(
     {"too_big", "bad_url", "blocked_address", "bad_content_type", "http_404", "http_410"}
 )
 _ACCEPT: Final = {"photo": "image/jpeg, image/png", "thumb": "image/jpeg, image/png", "video": "video/mp4"}
+_LIMIT: Final = {
+    "photo": media.PHOTO_MAX_BYTES,
+    "thumb": media.THUMB_MAX_BYTES,
+    "video": media.VIDEO_MAX_BYTES,
+}
 
 HttpFactory = Callable[[], SafeHttp]
 Clock = Callable[[], datetime]
+
+
+async def fresh_video_url(
+    http: SafeHttp, task: candidates.MediaTask, plugins: Mapping[str, SourcePlugin]
+) -> str:
+    """A Telegram video's current address (its token expires), read again from its post; else the
+    stored one."""
+    plugin = plugins.get("telegram")
+    if task.source_kind != "telegram" or task.post_url is None or not isinstance(plugin, TelegramPreview):
+        return task.url
+    try:
+        found: MediaRef | None = await plugin.fresh_media(http, task.post_url)
+    except FetchError:
+        return task.url
+    return found.url if found is not None and found.kind == "video" and found.url else task.url
+
+
+async def fetch_media(
+    http: SafeHttp, task: candidates.MediaTask, plugins: Mapping[str, SourcePlugin]
+) -> tuple[media.MediaInfo, bytes]:
+    """Download one file of a candidate (a video from a fresh address) within its role's byte limit
+    and check its real bytes. Raises FetchError or MediaRefused. Also the content supervisor's way
+    to fetch a video before its review (proxyhub/content/supervisor.py)."""
+    url = await fresh_video_url(http, task, plugins) if task.role == "video" else task.url
+    fetched = await http.get(
+        url, limit=_LIMIT[task.role], accept=_ACCEPT[task.role], deadline_s=MEDIA_DEADLINE_S
+    )
+    return media.check_download(task.role, fetched.content_type, fetched.body), fetched.body
 
 
 @dataclass
@@ -121,31 +156,11 @@ class Engine:
             await sources.record_ok(conn, current.id, now, len(items))
         return f"ok:{stored.new}"
 
-    async def _fresh_video(self, http: SafeHttp, task: candidates.MediaTask) -> str:
-        """A Telegram video's current address (its token expires), else the stored one."""
-        plugin = self.plugins.get("telegram")
-        if task.source_kind != "telegram" or task.post_url is None or not isinstance(plugin, TelegramPreview):
-            return task.url
-        try:
-            found: MediaRef | None = await plugin.fresh_media(http, task.post_url)
-        except FetchError:
-            return task.url
-        return found.url if found is not None and found.kind == "video" and found.url else task.url
-
     async def _download(self, http: SafeHttp, task: candidates.MediaTask) -> tuple[str, int]:
-        url = await self._fresh_video(http, task) if task.role == "video" else task.url
-        limit = {
-            "photo": media.PHOTO_MAX_BYTES,
-            "thumb": media.THUMB_MAX_BYTES,
-            "video": media.VIDEO_MAX_BYTES,
-        }
         try:
-            fetched = await http.get(
-                url, limit=limit[task.role], accept=_ACCEPT[task.role], deadline_s=MEDIA_DEADLINE_S
-            )
-            info = media.check_download(task.role, fetched.content_type, fetched.body)
+            info, body = await fetch_media(http, task, self.plugins)
         except FetchError as exc:
-            await self._failed(task, exc.code, final=exc.code in _FINAL)
+            await self._failed(task, exc.code, final=exc.code in FINAL_ERRORS)
             return exc.code, 0
         except media.MediaRefused as exc:
             await self._failed(task, exc.code, final=True)
@@ -153,8 +168,8 @@ class Engine:
         async with self.engine.begin() as conn:
             if await candidates.get(conn, task.candidate_id) is None:
                 return "gone", 0
-            await candidates.save_media(conn, task, info, fetched.body, self.clock())
-        return "ok", len(fetched.body)
+            await candidates.save_media(conn, task, info, body, self.clock())
+        return "ok", len(body)
 
     async def _failed(self, task: candidates.MediaTask, code: str, *, final: bool) -> None:
         async with self.engine.begin() as conn:

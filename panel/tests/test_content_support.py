@@ -5,20 +5,28 @@
   test's names (``*.example``) to it and treats 127.0.0.1 as the "public internet", while any other
   address (10.0.0.5, 169.254.169.254) stays forbidden exactly as in production. Nothing external is
   imitated: these are our own pages and feeds.
-* Real files: :func:`png`, :func:`jpeg_header`, :func:`mp4` build valid PNG, JPEG and MP4 bytes.
+* Real files: :func:`png`, :func:`jpeg_header`, :func:`mp4` build valid PNG, JPEG and MP4 bytes;
+  :func:`real_mp4` makes a real, playable MP4 with ffmpeg itself (:func:`need_ffmpeg` skips a test
+  without ffmpeg, or fails it where ``PROXYHUB_REQUIRE_FFMPEG=1``: CI and the test image).
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
+import os
+import shutil
 import ssl
 import struct
+import subprocess
+import tempfile
 import zlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -86,6 +94,60 @@ def mp4(width: int = 640, height: int = 360, seconds: int = 12, brand: bytes = b
     tkhd_body = b"\x00\x00\x00\x07" + b"\x00" * 72 + struct.pack(">II", width << 16, height << 16)
     trak = _box(b"trak", _box(b"tkhd", tkhd_body))
     return ftyp + _box(b"moov", mvhd + trak) + _box(b"mdat", b"\x00" * 64)
+
+
+def need_ffmpeg() -> None:
+    """Skip without ffmpeg/ffprobe; where PROXYHUB_REQUIRE_FFMPEG=1 (CI, the test image) fail instead."""
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        return
+    if os.environ.get("PROXYHUB_REQUIRE_FFMPEG") == "1":
+        pytest.fail("ffmpeg/ffprobe are required here (PROXYHUB_REQUIRE_FFMPEG=1) but not installed")
+    pytest.skip("ffmpeg/ffprobe not installed")
+
+
+@functools.cache
+def real_mp4(seconds: float = 8, width: int = 320, height: int = 180, rate: int = 5) -> bytes:
+    """A real MP4 made by ffmpeg itself: a moving test pattern (MPEG-4 Part 2, ffmpeg's own encoder,
+    so no external codec library is needed) and a silent AAC track, its index at the start."""
+    need_ffmpeg()
+    with tempfile.TemporaryDirectory(prefix="phv-") as tmp:
+        out = os.path.join(tmp, "v.mp4")
+        subprocess.run(  # noqa: S603 - fixed argv, our own output path
+            [
+                shutil.which("ffmpeg") or "ffmpeg",
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"testsrc2=size={width}x{height}:rate={rate}:duration={seconds}",
+                "-f",
+                "lavfi",
+                "-i",
+                f"anullsrc=r=8000:cl=mono:d={seconds}",
+                "-c:v",
+                "mpeg4",
+                "-q:v",
+                "8",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "16k",
+                "-shortest",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                out,
+            ],
+            check=True,
+            timeout=120,
+            stdin=subprocess.DEVNULL,
+        )
+        with open(out, "rb") as f:
+            return f.read()
 
 
 # --- a local HTTPS site ---------------------------------------------------------------------------
