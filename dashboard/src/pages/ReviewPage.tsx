@@ -11,12 +11,14 @@ import {
   Play,
   Rss,
   Save,
+  ShieldCheck,
   Undo2,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
 
+import { QcSupervisorCard } from "../components/QcSupervisorCard";
 import { Button } from "../components/ui/Button";
 import { Badge, Card, CardHeader } from "../components/ui/Card";
 import { EmptyState, LoadError, Skeleton } from "../components/ui/Feedback";
@@ -25,6 +27,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { errorMessage } from "../lib/api";
 import { cn } from "../lib/browser";
 import {
+  CATEGORY_LABEL,
   captionErrors,
   captionLength,
   durationText,
@@ -32,6 +35,8 @@ import {
   KIND_LABEL,
   MEDIA_STATE_TEXT,
   mediaUrl,
+  FLAG_LABEL,
+  qcVerdict,
   setCandidateStatus,
   sizeText,
   SORT_LABEL,
@@ -112,6 +117,40 @@ function Preview({ c }: { c: Candidate }) {
   );
 }
 
+/** The supervisor's review of one candidate (D52): its decision, Claude's reasons and every check. */
+function QcBox({ c }: { c: Candidate }) {
+  const q = c.qc;
+  const verdict = qcVerdict(c);
+  if (!q || !verdict) return null;
+  const backend = q.backend === "bridge" ? "اشتراک Claude" : q.backend === "api" ? "کلید API" : "قاعده‌ی قطعی";
+  return (
+    <div className="flex flex-col gap-1.5 rounded-2xl bg-surface-2 p-3 text-[0.85rem] leading-7">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <ShieldCheck className="size-4 text-fg-muted" />
+        <Badge tone={verdict.tone}>{verdict.label}</Badge>
+        {q.category ? <Badge tone="neutral">{CATEGORY_LABEL[q.category] ?? q.category}</Badge> : null}
+        <span className="text-[0.78rem] text-fg-faint">
+          {backend}
+          {q.at ? ` · ${formatRelative(q.at)}` : ""}
+          {c.decided_by === "owner" ? " · تصمیم آخر با شما" : ""}
+        </span>
+      </div>
+      {q.reasons.length > 0 ? (
+        <ul className="list-inside list-disc text-fg">
+          {q.reasons.map((r) => (
+            <li key={r}>{r}</li>
+          ))}
+        </ul>
+      ) : null}
+      {q.flags.length > 0 ? (
+        <p className="text-danger">پرچم‌ها: {q.flags.map((f) => FLAG_LABEL[f] ?? f).join("، ")}</p>
+      ) : null}
+      {q.checks_fa.length > 0 ? <p className="text-warning">بررسی کد: {q.checks_fa.join(" ")}</p> : null}
+      {q.error_fa && q.decision === null ? <p className="text-fg-muted">{q.error_fa}</p> : null}
+    </div>
+  );
+}
+
 function CandidateCard({ c, budget, index }: { c: Candidate; budget: number | null; index: number }) {
   const qc = useQueryClient();
   const [title, setTitle] = useState(c.title);
@@ -178,6 +217,7 @@ function CandidateCard({ c, budget, index }: { c: Candidate; budget: number | nu
           همین خبر در {c.also_in.join("، ")} هم آمد.
         </p>
       ) : null}
+      <QcBox c={c} />
       {c.media?.error_fa ? <Note tone="warning">{c.media.error_fa} اگر تأیید کنید، پست بی رسانه میرود.</Note> : null}
       <Field label="عنوان (پررنگ، با یک ایموجی)" htmlFor={`cand-title-${String(c.id)}`} error={errors.title ?? null}>
         <TextInput
@@ -305,9 +345,10 @@ export default function ReviewPage() {
     <>
       <PageHeader
         title="صف بازبینی"
-        subtitle="خبرها و سرگرمی‌هایی که منبع‌ها آورده‌اند. هر مورد پیش از رفتن به کانال اینجا تأیید میشود؛ کپشن را همین‌جا ویرایش کنید. پیوند و امضای منبع پاک شده‌اند و لینک‌های پروکسی خودکار زیر کپشن میآیند."
+        subtitle="خبرها و سرگرمی‌هایی که منبع‌ها آورده‌اند. ناظر خودکار (Claude و قاعده‌های قطعی) پیش از هر پست بهترین‌ها را بررسی میکند و کپشن کوتاه فارسی مینویسد. اینجا فقط برای دیدن و تغییر دستی است و لازم نیست. پیوند و امضای منبع پاک شده‌اند و لینک‌های پروکسی خودکار زیر کپشن میآیند."
       />
       <div className="flex flex-col gap-4 sm:gap-5">
+        <QcSupervisorCard />
         <Card>
           <CardHeader
             icon={<Inbox className="size-5" />}
@@ -340,7 +381,9 @@ export default function ReviewPage() {
               </Note>
             ) : null}
             {data && data.counts.approved === 0 && status === "pending" && data.items.length > 0 ? (
-              <Note tone="warning">موردی تأیید نشده است؛ تا تأیید کنید، پست‌ها با بانک محتوای قدیمی میروند.</Note>
+              <Note tone="info">
+                الان موردی تأییدشده نیست؛ ناظر پیش از پست بعدی بهترین‌ها را بررسی میکند. اگر چیزی تأیید نشود، پست با بانک محتوا میرود.
+              </Note>
             ) : null}
           </div>
         </Card>
