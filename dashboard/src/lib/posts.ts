@@ -65,6 +65,10 @@ export interface PostPreview {
   emoji?: { emoji: string; animated: boolean }[];
   content_item: { id: number; title: string; recycled: boolean } | null;
   links: { mtproto: number; reality: number };
+  /** The owner's approved candidate this post would carry (D51); older panels omit it. */
+  candidate?: { id: number; title: string; source: string } | null;
+  /** A photo or video post: its text is the caption (at most caption_limit characters). */
+  media?: { kind: "photo" | "video"; preview_id: number | null; caption_limit: number } | null;
 }
 
 export interface CarriedLink {
