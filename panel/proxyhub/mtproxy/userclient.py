@@ -30,10 +30,16 @@ and, for the operator poster (decision D38; proxyhub/posts/operator.py), Premium
 custom emoji in OUR channels:
 
 * :meth:`OperatorSession.post_in_channel` / :meth:`OperatorSession.edit_channel_post`:
-  ``messages.sendMessage`` / ``messages.editMessage`` with a text and its formatting entities, only
-  in the channels the connection's :class:`ChannelScope` names in ``post_ids`` (the configured test
-  channel, and the main channel only while the owner's main switch is on). No buttons, media,
-  scheduling, "send as", reply or forward ever rides along,
+  ``messages.sendMessage`` / ``messages.editMessage`` with a text (or, for a photo or video post, its
+  caption) and its formatting entities, only in the channels the connection's :class:`ChannelScope`
+  names in ``post_ids`` (the configured test channel, and the main channel only while the owner's
+  main switch is on). No buttons, media, scheduling, "send as", reply or forward ever rides along,
+* :meth:`OperatorSession.post_media_in_channel` (decision D51): a photo or MP4 video post with a
+  caption in those same channels. The file is uploaded in parts on this connection
+  (``upload.saveFilePart`` / ``upload.saveBigFilePart``) under a file id the method itself chose and
+  registered in the scope (``ChannelScope.upload_ids``), then sent with ``messages.sendMedia`` as an
+  uploaded photo or an uploaded ``video/mp4`` document; nothing else can be uploaded or sent as
+  media (no file of another chat, no URL, no spoiler, timer, sticker or cover),
 * :meth:`OperatorSession.my_rights`: ``channels.getParticipant`` of the account ITSELF in one of
   our channels (can it post and edit; does it wrongly have the delete right),
 * :meth:`OperatorSession.emoji_pack`: ``messages.getStickerSet`` of the ONE emoji pack the owner
@@ -49,7 +55,9 @@ Locks (docs/11 section 2.1):
   further (``users.getUsers`` only for the account itself, ``contacts.resolveUsername`` only for @MTProxybot
   and our own channels, the statistics requests only for our configured channels, see :class:`ChannelScope`;
   posts and edits only in the scope's ``post_ids`` with the fields in :data:`_POST_FIELDS` and the
-  entity kinds in :data:`POST_ENTITY_TYPES`; ``channels.getParticipant`` only for the account itself;
+  entity kinds in :data:`POST_ENTITY_TYPES`; a media post and its upload only as
+  :func:`_check_channel_media` and :func:`_check_upload` allow; ``channels.getParticipant`` only for
+  the account itself;
   ``messages.getStickerSet`` only for the scope's one emoji pack).
   The three chat requests (``messages.sendMessage``, ``messages.getHistory`` with a small limit,
   ``messages.getBotCallbackAnswer``) pass only when their peer is the @MTProxybot user that
@@ -79,13 +87,14 @@ import asyncio
 import contextlib
 import logging
 import re
+import secrets
 import time
 import traceback
 from collections import Counter
 from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from telethon import TelegramClient, errors, functions, types
 from telethon import password as tl_password
@@ -100,6 +109,7 @@ log = logging.getLogger(__name__)
 
 MTPROXYBOT: Final = "MTProxybot"
 DEFAULT_DEADLINE_S: Final = 20.0
+MEDIA_SEND_DEADLINE_S: Final = 120.0  # Telegram processes an uploaded video before it answers
 DISCONNECT_DEADLINE_S: Final = 5.0
 
 # --- logging guard ---------------------------------------------------------------------------------
@@ -397,6 +407,9 @@ class ChannelScope:
     graph_tokens: set[str] = field(default_factory=set)
     post_ids: frozenset[int] = frozenset()
     emoji_set: str | None = None
+    # The file ids :meth:`OperatorSession.post_media_in_channel` chose on this connection (D51): the
+    # only files that may be uploaded, and the only files a media post may name.
+    upload_ids: set[int] = field(default_factory=set)
 
 
 def _channel_id(peer: Any) -> int | None:
@@ -634,6 +647,94 @@ def _check_channel_post(request: Any) -> None:
     _check_entities(request.entities, units)
 
 
+# A photo or video post in OUR channels (decision D51): the file's parts, uploaded on this
+# connection under a file id it chose, then messages.sendMedia naming exactly that file.
+UPLOAD_REQUESTS: Final[frozenset[type[Any]]] = frozenset(
+    {functions.upload.SaveFilePartRequest, functions.upload.SaveBigFilePartRequest}
+)
+MEDIA_POST_REQUESTS: Final[frozenset[type[Any]]] = frozenset({functions.messages.SendMediaRequest})
+UPLOAD_PART_BYTES: Final = 512 * 1024  # core.telegram.org/api/files: at most 512 KB per part
+BIG_FILE_BYTES: Final = 10 * 1024 * 1024  # above this: upload.saveBigFilePart
+# The bot's own upload limit (50 MB, core.telegram.org/bots/api#sending-files), far below the
+# account's (2 GB, 4 GB with Premium): the bot must be able to take the same post.
+MAX_UPLOAD_BYTES: Final = 50 * 1024 * 1024
+MAX_UPLOAD_PARTS: Final = MAX_UPLOAD_BYTES // UPLOAD_PART_BYTES
+# A caption's limit for a Premium account (caption_length_limit_premium, core.telegram.org/api/config);
+# the panel itself stays within 1024 (proxyhub/telegram/templates.py CAPTION_LIMIT).
+MAX_CAPTION_TEXT: Final = 4096
+VIDEO_MIME: Final = "video/mp4"
+_MEDIA_POST_FIELDS: Final = frozenset({"peer", "media", "message", "entities", "random_id"})
+_MEDIA_FIELDS: Final[dict[type[Any], frozenset[str]]] = {
+    types.InputMediaUploadedPhoto: frozenset({"file"}),
+    types.InputMediaUploadedDocument: frozenset({"file", "mime_type", "attributes"}),
+}
+_VIDEO_ATTRIBUTE_FIELDS: Final[dict[type[Any], frozenset[str]]] = {
+    types.DocumentAttributeVideo: frozenset({"duration", "w", "h", "supports_streaming"}),
+    types.DocumentAttributeFilename: frozenset({"file_name"}),
+}
+
+
+def _extra_fields(obj: Any, allowed: frozenset[str]) -> list[str]:
+    return sorted(
+        name
+        for name, value in vars(obj).items()
+        if name not in allowed and value is not None and value is not False
+    )
+
+
+def _check_upload(request: Any, scope: ChannelScope) -> None:
+    """A part of a file this connection is uploading for a post in our channels."""
+    if not scope.post_ids or request.file_id not in scope.upload_ids:
+        raise RequestNotAllowed("upload: only a file this connection uploads for a post in our channels")
+    data, part = request.bytes, request.file_part
+    if not isinstance(data, bytes) or not 0 < len(data) <= UPLOAD_PART_BYTES:
+        raise RequestNotAllowed("upload: a part of 1 byte to 512 KB")
+    if not isinstance(part, int) or isinstance(part, bool) or not 0 <= part < MAX_UPLOAD_PARTS:
+        raise RequestNotAllowed("upload: a part number within the file size limit")
+    if type(request) is functions.upload.SaveBigFilePartRequest:
+        total = request.file_total_parts
+        if not isinstance(total, int) or isinstance(total, bool) or not part < total <= MAX_UPLOAD_PARTS:
+            raise RequestNotAllowed("upload: the number of parts within the file size limit")
+
+
+def _check_uploaded_file(file: Any, scope: ChannelScope) -> None:
+    if type(file) not in (types.InputFile, types.InputFileBig) or file.id not in scope.upload_ids:
+        raise RequestNotAllowed("messages.sendMedia: only a file uploaded on this connection")
+    if not isinstance(file.parts, int) or not 1 <= file.parts <= MAX_UPLOAD_PARTS:
+        raise RequestNotAllowed("messages.sendMedia: a file within the size limit")
+
+
+def _check_channel_media(request: Any, scope: ChannelScope) -> None:
+    """A photo or MP4 video post with a caption in one of our channels (the peer was checked by
+    :func:`_post_channel`)."""
+    extra = _extra_fields(request, _MEDIA_POST_FIELDS)
+    if extra:
+        raise RequestNotAllowed(f"messages.sendMedia: fields not allowed: {extra}")
+    text = request.message
+    units = len(text.encode("utf-16-le")) // 2 if isinstance(text, str) else -1
+    if not 0 <= units <= MAX_CAPTION_TEXT:
+        raise RequestNotAllowed(f"messages.sendMedia: a caption of at most {MAX_CAPTION_TEXT} characters")
+    _check_entities(request.entities, units)
+    media = request.media
+    allowed = _MEDIA_FIELDS.get(type(media))
+    if allowed is None:
+        raise RequestNotAllowed(f"messages.sendMedia: media not allowed: {type(media).__name__}")
+    extra = _extra_fields(media, allowed)
+    if extra:
+        raise RequestNotAllowed(f"messages.sendMedia: media fields not allowed: {extra}")
+    _check_uploaded_file(media.file, scope)
+    if type(media) is types.InputMediaUploadedDocument:
+        if media.mime_type != VIDEO_MIME or not isinstance(media.attributes, list):
+            raise RequestNotAllowed("messages.sendMedia: a document is an MP4 video only")
+        kinds = [type(a) for a in media.attributes]
+        if types.DocumentAttributeVideo not in kinds or len(kinds) != len(set(kinds)):
+            raise RequestNotAllowed("messages.sendMedia: a video needs its one video attribute")
+        for attribute in media.attributes:
+            fields = _VIDEO_ATTRIBUTE_FIELDS.get(type(attribute))
+            if fields is None or _extra_fields(attribute, fields):
+                raise RequestNotAllowed("messages.sendMedia: video attributes not allowed")
+
+
 def _check_poster_read(request: Any, scope: ChannelScope) -> None:
     if type(request) is functions.channels.GetParticipantRequest:
         if _channel_id(request.channel) not in scope.channel_ids or type(request.participant) is not (
@@ -668,6 +769,14 @@ def check_request(
     scope = scope or ChannelScope()
     if kind in CHANNEL_POST_REQUESTS and _post_channel(request, scope):
         _check_channel_post(request)
+        return
+    if kind in MEDIA_POST_REQUESTS:
+        if not _post_channel(request, scope):
+            raise RequestNotAllowed("messages.sendMedia: only in the channel this connection posts in")
+        _check_channel_media(request, scope)
+        return
+    if kind in UPLOAD_REQUESTS:
+        _check_upload(request, scope)
         return
     if kind in BOT_CHAT_REQUESTS:
         _check_bot_chat_request(request, bot_id)
@@ -827,9 +936,9 @@ class OperatorSession:
         """Redact ``value`` from every log line until this connection is closed."""
         self._hold.enter_context(LIVE_SECRETS.using(value))
 
-    async def _run(self, call: Any) -> Any:
+    async def _run(self, call: Any, deadline_s: float | None = None) -> Any:
         try:
-            async with asyncio.timeout(self._options.deadline_s):
+            async with asyncio.timeout(deadline_s or self._options.deadline_s):
                 return await call
         except RequestNotAllowed:
             raise
@@ -998,9 +1107,16 @@ class OperatorSession:
         return channel_post_id(result, random_id=request.random_id, channel_id=ref.channel_id)
 
     async def edit_channel_post(
-        self, ref: ChannelRef, message_id: int, text: str, entities: Sequence[TextEntity]
+        self,
+        ref: ChannelRef,
+        message_id: int,
+        text: str,
+        entities: Sequence[TextEntity],
+        *,
+        caption: bool = False,
     ) -> None:
-        """The new text of one of our posts (the scope's ``post_ids``). Never anything else."""
+        """The new text of one of our posts (the scope's ``post_ids``), or with ``caption`` the new
+        caption of a photo or video post (its media stays). Never anything else."""
         await self._run(
             self._client(
                 functions.messages.EditMessageRequest(
@@ -1008,10 +1124,75 @@ class OperatorSession:
                     id=message_id,
                     message=text,
                     entities=tl_entities(entities) or None,
-                    no_webpage=True,
+                    no_webpage=None if caption else True,
                 )
             )
         )
+
+    async def upload_media(self, upload: UploadFile) -> UploadedMedia:
+        """Upload a post's photo or MP4 video on this connection, in parts, under a file id chosen
+        here and registered in the scope (decision D51). Nothing is posted yet: an error here means
+        nothing reached the channel."""
+        size = len(upload.data)
+        if not 0 < size <= MAX_UPLOAD_BYTES or (upload.kind == "video") != (upload.mime == VIDEO_MIME):
+            raise ValueError("a photo, or an MP4 video, of at most 50 MB")
+        file_id = secrets.randbits(63) or 1
+        self._client.scope.upload_ids.add(file_id)
+        parts = [upload.data[i : i + UPLOAD_PART_BYTES] for i in range(0, size, UPLOAD_PART_BYTES)]
+        big = size > BIG_FILE_BYTES
+        for number, part in enumerate(parts):
+            request: Any = (
+                functions.upload.SaveBigFilePartRequest(
+                    file_id=file_id, file_part=number, file_total_parts=len(parts), bytes=part
+                )
+                if big
+                else functions.upload.SaveFilePartRequest(file_id=file_id, file_part=number, bytes=part)
+            )
+            if await self._run(self._client(request)) is not True:
+                raise MtpError("telegram_refused", rpc="FILE_PART_NOT_SAVED")
+        name = (
+            "video.mp4"
+            if upload.kind == "video"
+            else ("photo.png" if upload.mime == "image/png" else "photo.jpg")
+        )
+        file = (
+            types.InputFileBig(id=file_id, parts=len(parts), name=name)
+            if big
+            else types.InputFile(id=file_id, parts=len(parts), name=name, md5_checksum="")
+        )
+        media: Any = (
+            types.InputMediaUploadedDocument(
+                file=file,
+                mime_type=VIDEO_MIME,
+                attributes=[
+                    types.DocumentAttributeVideo(
+                        duration=float(upload.duration or 0),
+                        w=int(upload.width or 0),
+                        h=int(upload.height or 0),
+                        supports_streaming=True,
+                    ),
+                    types.DocumentAttributeFilename(file_name=name),
+                ],
+            )
+            if upload.kind == "video"
+            else types.InputMediaUploadedPhoto(file=file)
+        )
+        return UploadedMedia(media)
+
+    async def post_media_in_channel(
+        self, ref: ChannelRef, uploaded: UploadedMedia, caption: str, entities: Sequence[TextEntity]
+    ) -> int | None:
+        """A photo or video post (uploaded by :meth:`upload_media` on THIS connection) with
+        ``caption`` in one of OUR channels. The new message's id, or None when Telegram's answer
+        does not say it (the post may exist anyway)."""
+        send = functions.messages.SendMediaRequest(
+            peer=ref.input_peer(),
+            media=uploaded.media,
+            message=caption,
+            entities=tl_entities(entities) or None,
+        )
+        result = await self._run(self._client(send), deadline_s=MEDIA_SEND_DEADLINE_S)
+        return channel_post_id(result, random_id=send.random_id, channel_id=ref.channel_id)
 
     async def my_rights(self, ref: ChannelRef) -> ChannelRights:
         """The account's own membership and admin rights in one of our channels."""
@@ -1040,6 +1221,28 @@ class OperatorSession:
             )
         )
         return emoji_pack_of(result)
+
+
+@dataclass(frozen=True)
+class UploadFile:
+    """A post's photo or video as plain data (proxyhub/posts/operator_outbox.py reads it)."""
+
+    kind: Literal["photo", "video"]
+    mime: str
+    data: bytes = field(repr=False)
+    width: int | None = None
+    height: int | None = None
+    duration: int | None = None
+
+
+class UploadedMedia:
+    """A file :meth:`OperatorSession.upload_media` uploaded, as the TL media to send (opaque)."""
+
+    def __init__(self, media: Any) -> None:
+        self.media = media
+
+    def __repr__(self) -> str:
+        return f"UploadedMedia({type(self.media).__name__})"
 
 
 @dataclass(frozen=True)

@@ -12,13 +12,20 @@ A post is always EDITED by the poster that sent it (a bot cannot edit the operat
 message and the other way round), so ``posts.poster`` records its name. The owner's choice is
 :func:`configured` (``posts.operator``; the bot until the owner switches).
 
+**A photo or video post** (decision D51): the job's payload carries ``media`` (:class:`MediaPayload`:
+the kind and the ``content_media`` row whose bytes the outbox uploads at send time) and the text is
+the media's caption, within 1024 characters for both posters
+(proxyhub/telegram/templates.py :data:`CAPTION_LIMIT`), so the bot can take the very same job. Its
+status edits carry ``"caption": true`` and change the caption, never the text.
+
 No poster has a delete operation (CLAUDE.md rule 6).
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Final, Protocol
+from typing import Any, Final, Literal, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -26,6 +33,40 @@ from proxyhub.posts import operator
 from proxyhub.telegram import store as tg_store
 
 POST_KIND: Final = "auto"  # channel_posts.kind of the publisher's posts
+
+
+@dataclass(frozen=True)
+class MediaPayload:
+    """The photo or video of a post, by its stored file (``content_media.id``)."""
+
+    kind: Literal["photo", "video"]
+    media_id: int
+    width: int | None = None
+    height: int | None = None
+    duration: int | None = None
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "media_id": self.media_id,
+            "width": self.width,
+            "height": self.height,
+            "duration": self.duration,
+        }
+
+
+def post_payload(role: str, text_html: str, media: MediaPayload | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"role": role, "text": text_html, "post_kind": POST_KIND}
+    if media is not None:
+        payload["media"] = media.as_json()
+    return payload
+
+
+def edit_payload(channel_post_id: int, text_html: str, caption: bool) -> dict[str, Any]:
+    payload: dict[str, Any] = {"post_id": channel_post_id, "text": text_html}
+    if caption:
+        payload["caption"] = True
+    return payload
 
 
 class Poster(Protocol):
@@ -36,13 +77,19 @@ class Poster(Protocol):
         or None. The publisher then gives the post to the bot."""
         ...
 
-    async def queue_post(self, db: AsyncConnection, *, role: str, text_html: str) -> int:
+    async def queue_post(
+        self, db: AsyncConnection, *, role: str, text_html: str, media: MediaPayload | None = None
+    ) -> int:
         """Queue a new post for the channel of ``role`` in the caller's transaction; returns the
-        outbox job id (``channel_posts.outbox_id`` once it is sent)."""
+        outbox job id (``channel_posts.outbox_id`` once it is sent). With ``media`` the post is
+        that photo or video and ``text_html`` its caption."""
         ...
 
-    async def queue_edit(self, db: AsyncConnection, *, channel_post_id: int, text_html: str) -> int:
-        """Queue an edit of a post this poster sent; returns the outbox job id."""
+    async def queue_edit(
+        self, db: AsyncConnection, *, channel_post_id: int, text_html: str, caption: bool = False
+    ) -> int:
+        """Queue an edit of a post this poster sent (of its caption, for a photo or video post);
+        returns the outbox job id."""
         ...
 
 
@@ -54,13 +101,15 @@ class BotPoster:
     async def unavailable(self, db: AsyncConnection, *, role: str, now: datetime) -> str | None:
         return None  # the bot's own conditions (a bot, a channel) are the publisher's checks
 
-    async def queue_post(self, db: AsyncConnection, *, role: str, text_html: str) -> int:
-        return await tg_store.enqueue(
-            db, "send_post", {"role": role, "text": text_html, "post_kind": POST_KIND}
-        )
+    async def queue_post(
+        self, db: AsyncConnection, *, role: str, text_html: str, media: MediaPayload | None = None
+    ) -> int:
+        return await tg_store.enqueue(db, "send_post", post_payload(role, text_html, media))
 
-    async def queue_edit(self, db: AsyncConnection, *, channel_post_id: int, text_html: str) -> int:
-        return await tg_store.enqueue(db, "edit_post", {"post_id": channel_post_id, "text": text_html})
+    async def queue_edit(
+        self, db: AsyncConnection, *, channel_post_id: int, text_html: str, caption: bool = False
+    ) -> int:
+        return await tg_store.enqueue(db, "edit_post", edit_payload(channel_post_id, text_html, caption))
 
 
 class OperatorPoster:
@@ -72,13 +121,15 @@ class OperatorPoster:
     async def unavailable(self, db: AsyncConnection, *, role: str, now: datetime) -> str | None:
         return await operator.unavailable(db, role=role, now=now)
 
-    async def queue_post(self, db: AsyncConnection, *, role: str, text_html: str) -> int:
-        return await tg_store.enqueue(
-            db, operator.SEND, {"role": role, "text": text_html, "post_kind": POST_KIND}
-        )
+    async def queue_post(
+        self, db: AsyncConnection, *, role: str, text_html: str, media: MediaPayload | None = None
+    ) -> int:
+        return await tg_store.enqueue(db, operator.SEND, post_payload(role, text_html, media))
 
-    async def queue_edit(self, db: AsyncConnection, *, channel_post_id: int, text_html: str) -> int:
-        return await tg_store.enqueue(db, operator.EDIT, {"post_id": channel_post_id, "text": text_html})
+    async def queue_edit(
+        self, db: AsyncConnection, *, channel_post_id: int, text_html: str, caption: bool = False
+    ) -> int:
+        return await tg_store.enqueue(db, operator.EDIT, edit_payload(channel_post_id, text_html, caption))
 
 
 BOT: Final = BotPoster()

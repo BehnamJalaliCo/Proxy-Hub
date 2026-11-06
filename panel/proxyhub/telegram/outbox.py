@@ -2,9 +2,15 @@
 
 Payloads::
 
-    send_post  {"role": "main" | "test", "text": "<html>", "post_kind": "<short name>"}
-    edit_post  {"post_id": <channel_posts.id>, "text": "<html>"}
+    send_post  {"role": "main" | "test", "text": "<html>", "post_kind": "<short name>",
+                "media": {"kind": "photo" | "video", "media_id": <content_media.id>, ...}}  (optional)
+    edit_post  {"post_id": <channel_posts.id>, "text": "<html>", "caption": true}       (optional)
     alert      {"text": "<html>"}                                  -> the owner's private chat
+
+A ``send_post`` with ``media`` (decision D51) is that photo or video, uploaded from the panel's own
+copy (``content_media``, read in step 1), with ``text`` as its caption (sendPhoto / sendVideo); its
+file missing is a failure before anything is sent (``media_missing``). An ``edit_post`` with
+``caption`` changes the caption of such a post (editMessageCaption), never its text.
 
 One job per step (:func:`process_one`), in three short transactions:
 
@@ -50,6 +56,7 @@ from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from proxyhub.db.models import Outbox
+from proxyhub.db.models_content import ContentMedia
 from proxyhub.db.models_telegram import ChannelPost
 from proxyhub.telegram import store
 from proxyhub.telegram.client import (
@@ -100,6 +107,67 @@ class Target:
     role: str | None = None  # send_post
     post_id: int | None = None  # edit_post
     message_id: int | None = None  # edit_post
+
+
+@dataclass(frozen=True)
+class PostMedia:
+    """A post's photo or video, read from ``content_media`` (decision D51)."""
+
+    kind: str  # "photo" | "video"
+    mime: str
+    data: bytes
+    width: int | None = None
+    height: int | None = None
+    duration: int | None = None
+
+    def __repr__(self) -> str:
+        return f"PostMedia(kind={self.kind!r}, mime={self.mime!r}, size={len(self.data)})"
+
+
+def media_ref(payload: dict[str, Any]) -> tuple[str, int] | None:
+    """(kind, content_media id) of a post's media, or None for a text post. A malformed value is
+    ("invalid", 0)."""
+    media = payload.get("media")
+    if media is None:
+        return None
+    if not isinstance(media, dict):
+        return ("invalid", 0)
+    kind, media_id = media.get("kind"), media.get("media_id")
+    if kind not in ("photo", "video") or not isinstance(media_id, int) or isinstance(media_id, bool):
+        return ("invalid", 0)
+    return (str(kind), media_id)
+
+
+async def load_media(conn: AsyncConnection, payload: dict[str, Any]) -> PostMedia | str | None:
+    """The post's media, None for a text post, or why it cannot be sent (``invalid_payload``,
+    ``media_missing``)."""
+    ref = media_ref(payload)
+    if ref is None:
+        return None
+    kind, media_id = ref
+    if kind == "invalid":
+        return "invalid_payload"
+    row = (
+        await conn.execute(
+            select(
+                ContentMedia.mime,
+                ContentMedia.data,
+                ContentMedia.width,
+                ContentMedia.height,
+                ContentMedia.duration,
+            ).where(ContentMedia.id == media_id, ContentMedia.role == "main")
+        )
+    ).first()
+    if row is None or (kind == "video") != (row.mime == "video/mp4"):
+        return "media_missing"
+    return PostMedia(
+        kind=kind,
+        mime=str(row.mime),
+        data=bytes(row.data),
+        width=row.width,
+        height=row.height,
+        duration=row.duration,
+    )
 
 
 # --- job state transitions (each runs inside the caller's transaction) ---------------------------
@@ -359,13 +427,37 @@ async def process_one(
         return "idle"
     job, target = picked
     text_value = _text(job) or ""
+    media: PostMedia | str | None = None
+    if job.kind == "send_post":
+        async with engine.begin() as conn:
+            media = await load_media(conn, job.payload)
+            if isinstance(media, str):  # nothing was sent: the job just fails
+                await finish_failed(conn, job.id, now(), media)
+                log.warning("telegram outbox job %d (send_post): %s", job.id, media)
+                return "failed"
     message_id: int | None = None
     failure: TelegramError | None = None
     try:
         async with make_bot(creds.token) as bot:
             if job.kind == "edit_post":
                 assert target.message_id is not None
-                await bot.edit_message_text(target.chat_id, target.message_id, text_value)
+                if job.payload.get("caption") is True:
+                    await bot.edit_message_caption(target.chat_id, target.message_id, text_value)
+                else:
+                    await bot.edit_message_text(target.chat_id, target.message_id, text_value)
+            elif isinstance(media, PostMedia) and media.kind == "photo":
+                sent = await bot.send_photo(target.chat_id, media.data, mime=media.mime, caption=text_value)
+                message_id = sent.message_id
+            elif isinstance(media, PostMedia):
+                sent = await bot.send_video(
+                    target.chat_id,
+                    media.data,
+                    caption=text_value,
+                    width=media.width,
+                    height=media.height,
+                    duration=media.duration,
+                )
+                message_id = sent.message_id
             else:
                 message_id = (await bot.send_message(target.chat_id, text_value)).message_id
     except TelegramError as exc:

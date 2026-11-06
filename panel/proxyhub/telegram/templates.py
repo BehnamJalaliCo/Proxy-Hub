@@ -58,7 +58,7 @@ import html
 import ipaddress
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from html.parser import HTMLParser
 from typing import Final, Literal
@@ -68,6 +68,15 @@ from proxyhub.posts.entities import emoji_in
 from proxyhub.telegram.schedule import TEHRAN
 
 MAX_MESSAGE_CHARS: Final = 4096
+# A photo's or video's caption (decision D51). Telegram allows 1024 characters after entities
+# parsing to a bot (core.telegram.org/bots/api#sendphoto) and to a user account without Premium
+# (``caption_length_limit_default``, core.telegram.org/api/config), 4096 to a Premium account
+# (``caption_length_limit_premium``). Every media post uses 1024, whoever sends it: a post the
+# operator account (Premium) cannot send goes to the bot with the very same caption
+# (proxyhub/posts/poster.py), and a lapsed Premium must not break a later caption edit.
+CAPTION_LIMIT: Final = 1024
+# Our own bound on a caption's HTML (the proxy words' hidden URLs count here, not in Telegram's limit).
+MAX_CAPTION_HTML: Final = 8192
 # An MTProto link is the word «پروکسی ۱» (D48). A no-break space between the word and its number
 # (and between a status mark and the word), so a narrow screen never wraps inside a word; two words
 # to a row with a bullet between them (a grid on a phone).
@@ -640,8 +649,38 @@ def post_tail(links: Sequence[PostLink], channel_username: str, texts: StatusTex
     return "\n\n".join(parts)
 
 
-def fits(text: str) -> bool:
-    return len(text) <= MAX_MESSAGE_CHARS and utf16_len(visible_text(text)) <= MAX_MESSAGE_CHARS
+def _limits(caption: bool) -> tuple[int, int]:
+    """(visible UTF-16 units, HTML characters) of a text message or of a media caption."""
+    return (CAPTION_LIMIT, MAX_CAPTION_HTML) if caption else (MAX_MESSAGE_CHARS, MAX_MESSAGE_CHARS)
+
+
+def fits(text: str, *, caption: bool = False) -> bool:
+    visible, html_limit = _limits(caption)
+    return len(text) <= html_limit and utf16_len(visible_text(text)) <= visible
+
+
+def later_states(links: Sequence[PostLink]) -> list[list[PostLink]]:
+    """The link part as it is now and in its longest later states (a dead proxy word carries a mark
+    and a strike; a config that ended shows a status line instead of its quote, and with every link
+    dead a closing line comes): every MTProto link dead, and every link dead with each status."""
+    out = [list(links)]
+    for status in ("expired", "full", "burned"):
+        out.append([replace(x, status=status, url=None) if x.kind == "mtproto" else x for x in links])
+        out.append([replace(x, status=status, url=None) for x in links])
+    return out
+
+
+def tail_always_fits(
+    links: Sequence[PostLink],
+    channel_username: str,
+    texts: StatusTexts | None = None,
+    *,
+    caption: bool = False,
+) -> bool:
+    """The link part fits now AND in every later state (:func:`later_states`), so a status edit of
+    the post can always show it, shortening only the content."""
+    texts = texts or StatusTexts()
+    return all(fits(post_tail(v, channel_username, texts), caption=caption) for v in later_states(links))
 
 
 def render_post(
@@ -649,19 +688,23 @@ def render_post(
     links: Sequence[PostLink],
     channel_username: str,
     texts: StatusTexts | None = None,
+    *,
+    caption: bool = False,
 ) -> RenderedPost:
-    """content (optional) + link blocks + channel tag, <= 4096 characters. The content (and only
-    the content) is shortened when the whole does not fit; PostTooLong if the tail alone does not."""
+    """content (optional) + link blocks + channel tag, within one message (4096) or, with
+    ``caption``, within a media caption (:data:`CAPTION_LIMIT`). The content (and only the content)
+    is shortened when the whole does not fit; PostTooLong if the tail alone does not."""
+    visible_max, html_max = _limits(caption)
     tail = post_tail(links, channel_username, texts or StatusTexts())
-    if not fits(tail):
-        raise PostTooLong("the link blocks and channel tag alone exceed one Telegram message")
+    if not fits(tail, caption=caption):
+        raise PostTooLong("the link blocks and channel tag alone exceed one Telegram message or caption")
     if not content_html or not content_html.strip():
         return RenderedPost(text=tail, content_html="")
     joiner = "\n\n"
     content = sanitize_html(
         content_html.strip(),
-        max_html=MAX_MESSAGE_CHARS - len(tail) - len(joiner),
-        max_visible=MAX_MESSAGE_CHARS - utf16_len(visible_text(tail)) - utf16_len(joiner),
+        max_html=html_max - len(tail) - len(joiner),
+        max_visible=visible_max - utf16_len(visible_text(tail)) - utf16_len(joiner),
     )
     if not visible_text(content).strip():
         return RenderedPost(text=tail, content_html="")

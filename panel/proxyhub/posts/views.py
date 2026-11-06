@@ -10,17 +10,26 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from proxyhub.content import candidates
 from proxyhub.db.models import Outbox
+from proxyhub.db.models_content import ContentCandidate
 from proxyhub.db.models_posts import ContentItem, Post, PostLink
 from proxyhub.db.models_telegram import ChannelPost
 from proxyhub.fleet.actions import iso
 from proxyhub.posts import content, entities, links, operator, operators, plan, publisher, settings
 from proxyhub.telegram import store as tg_store
 from proxyhub.telegram.schedule import TEHRAN, quiet_until
-from proxyhub.telegram.templates import utf16_len, visible_text
+from proxyhub.telegram.templates import (
+    CAPTION_LIMIT,
+    PostTooLong,
+    later_states,
+    post_tail,
+    utf16_len,
+    visible_text,
+)
 
 MAX_RECENT = 50
 
@@ -63,6 +72,7 @@ async def status(db: AsyncConnection, now: datetime, h: links.Harvest) -> dict[s
             "reality": len(h.active("reality")),
         },
         "content": await content.counts(db),
+        "candidates": await candidates.counts(db),
     }
 
 
@@ -72,9 +82,22 @@ async def preview(db: AsyncConnection, now: datetime, h: links.Harvest) -> dict[
     channels = await tg_store.channels(db)
     tag = publisher.channel_tag_for(channels)
     chosen = await publisher.choose_links(db, h, now, cfg, cfg.target_role)
-    item, recycled = await content.next_item(db, now, cfg.recycle_after_days)
+    candidate = await candidates.next_for_post(db, now)
+    item, recycled = (
+        (None, False) if candidate is not None else await content.next_item(db, now, cfg.recycle_after_days)
+    )
+    content_html = candidate.content_html() if candidate is not None else publisher.content_for(item)
     names = await operators.operator_labels(db, chosen, now)
-    rendered, chosen = publisher.fit(publisher.content_for(item), chosen, tag, cfg.texts(), names)
+    media_row = await candidates.post_media(db, candidate) if candidate is not None else None
+    rendered = None
+    if media_row is not None and chosen:
+        try:
+            rendered, chosen = publisher.fit_caption(content_html, chosen, tag, cfg.texts(), names)
+        except PostTooLong:
+            media_row = None
+    if rendered is None:
+        media_row = None
+        rendered, chosen = publisher.fit(content_html, chosen, tag, cfg.texts(), names)
     where = await publisher.target(db, cfg)
     pack = await operator.emoji_map(db)
     return {
@@ -86,11 +109,48 @@ async def preview(db: AsyncConnection, now: datetime, h: links.Harvest) -> dict[
         # post always keeps plain emoji.
         "emoji": [{"emoji": e, "animated": a} for e, a in entities.emoji_report(rendered.text, pack)],
         "content_item": {"id": item.id, "title": item.title, "recycled": recycled} if item else None,
+        # The owner's approved candidate (decision D51) goes before the content bank.
+        "candidate": {"id": candidate.id, "title": candidate.title, "source": candidate.source_label}
+        if candidate is not None
+        else None,
+        "media": {
+            "kind": "video" if media_row.mime == "video/mp4" else "photo",
+            "preview_id": (await _preview_id(db, candidate.id)) if candidate is not None else None,
+            "caption_limit": CAPTION_LIMIT,
+        }
+        if media_row is not None
+        else None,
         "links": {
             "mtproto": sum(1 for x in chosen if x.kind == "mtproto"),
             "reality": sum(1 for x in chosen if x.kind == "reality"),
         },
     }
+
+
+async def _preview_id(db: AsyncConnection, candidate_id: int) -> int | None:
+    rows = (await candidates.media_rows(db, [candidate_id])).get(candidate_id, {})
+    main, thumb = rows.get("main"), rows.get("thumb")
+    shown = main if main is not None and main.mime != "video/mp4" else thumb
+    return shown.id if shown is not None else None
+
+
+async def caption_budget(db: AsyncConnection, now: datetime, h: links.Harvest) -> int | None:
+    """How many characters a media post's content (title line + text) may have with the links the
+    next post would carry, in their longest later state (docs/04): the review queue shows it while
+    the owner edits a caption. None while there is no live link at all."""
+    cfg = await settings.load(db)
+    tag = publisher.channel_tag_for(await tg_store.channels(db))
+    chosen = await publisher.choose_links(db, h, now, cfg, cfg.target_role)
+    if not chosen:
+        return None
+    names = await operators.operator_labels(db, chosen, now)
+    try:
+        _, kept = publisher.fit_caption("", chosen, tag, cfg.texts(), names)
+    except PostTooLong:
+        return 0
+    views = publisher.views_for_new_post(kept, names)
+    longest = max(utf16_len(visible_text(post_tail(v, tag, cfg.texts()))) for v in later_states(views))
+    return max(0, CAPTION_LIMIT - longest - 2)
 
 
 def _state(r: Any) -> str:
@@ -118,13 +178,15 @@ async def recent(db: AsyncConnection, now: datetime, limit: int = 20) -> list[di
                 Post.edit_failures,
                 Post.poster,
                 Post.gone_at,
-                ContentItem.title,
+                Post.media_kind,
+                func.coalesce(ContentItem.title, ContentCandidate.title).label("title"),
                 Outbox.done_at,
                 Outbox.last_error,
                 ChannelPost.id.label("cp_id"),
                 ChannelPost.message_id,
             )
             .outerjoin(ContentItem, ContentItem.id == Post.content_item_id)
+            .outerjoin(ContentCandidate, ContentCandidate.id == Post.content_candidate_id)
             .outerjoin(Outbox, Outbox.id == Post.outbox_id)
             .outerjoin(ChannelPost, ChannelPost.outbox_id == Post.outbox_id)
             .order_by(Post.created_at.desc(), Post.id.desc())
@@ -179,6 +241,7 @@ async def recent(db: AsyncConnection, now: datetime, limit: int = 20) -> list[di
                 "watching": r.gone_at is None and now - r.created_at < window,
                 "message_url": message_url,
                 "poster": r.poster,
+                "media": r.media_kind,
             }
         )
     return out
