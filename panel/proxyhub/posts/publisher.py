@@ -1,7 +1,7 @@
 """The publisher's two steps, each run in the caller's transaction (proxyhub/reconcilers/publisher.py).
 
 **New posts** (:func:`publish_due`): when a slot of today's plan is due (proxyhub/posts/plan.py),
-the post is the next content item + the live links of every provider + the channel tag, queued for
+the post is the next content + the live links of every provider + the channel tag, queued for
 the TEST channel, or for the MAIN channel only when the owner turned ``main_enabled`` on. Checks,
 in order: publisher on, a bot, the target channel set, a due slot not yet posted, the day not full,
 not inside a no-post window (D21), at least ``post_interval_min`` since the last post (both
@@ -15,6 +15,15 @@ The post goes through the owner's poster (proxyhub/posts/poster.py); when that i
 account and it cannot take the post now, the post goes to the bot and the reason is logged
 (``posts.poster_fallback``, shown on the Content page).
 
+**The content** (decision D51): the oldest candidate the owner approved in the review queue
+(proxyhub/content/candidates.py), else the old content bank (proxyhub/posts/content.py). A candidate
+with a downloaded photo or video makes a MEDIA post: the file with the content and the links as its
+caption, within :data:`~proxyhub.telegram.templates.CAPTION_LIMIT` (1024) for both posters
+(:func:`fit_caption`). The links must fit now and in every later state; links that cannot are
+dropped from the end (the Reality configs first, ``posts.caption_links_dropped``); when not one fits,
+or the candidate's file failed, the post goes as text (``posts.media_skipped``). The content is what
+gets shortened, never a link.
+
 **Status edits** (:func:`refresh_posts`): every sent post younger than ``edit_window_hours`` is
 rendered again from what it carries, in the order it was posted (a post shows no label: an MTProto
 link is numbered by its place, a config's TCP/XHTTP marker follows from the keys): a link the
@@ -23,7 +32,8 @@ loses its link; a live link takes its provider's current
 URL, so a new active domain (proxyhub.cloudflare.rotation) or a node's slot name replaces the old
 host. When the text differs from the one the channel shows (the last edit that finished without an
 error, else ``channel_posts.text_sha256``) an ``edit_post`` job is queued, through the poster that
-sent the post. Bounds: one edit job per post at a time, :data:`EDIT_MIN_GAP` between two edits of a
+sent the post (for a photo or video post, an edit of its CAPTION, within the caption limit).
+Bounds: one edit job per post at a time, :data:`EDIT_MIN_GAP` between two edits of a
 post, :data:`MAX_EDITS_PER_RUN` per step and :data:`MAX_PENDING_EDITS` waiting at once; the outbox
 paces every message per channel (3 s, 429). A failed edit is retried with backoff and given up after
 :data:`MAX_EDIT_FAILURES` (owner alerted). A link's status in a post never goes back to active, so

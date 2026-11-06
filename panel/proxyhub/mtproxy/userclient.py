@@ -34,8 +34,9 @@ custom emoji in OUR channels:
   caption) and its formatting entities, only in the channels the connection's :class:`ChannelScope`
   names in ``post_ids`` (the configured test channel, and the main channel only while the owner's
   main switch is on). No buttons, media, scheduling, "send as", reply or forward ever rides along,
-* :meth:`OperatorSession.post_media_in_channel` (decision D51): a photo or MP4 video post with a
-  caption in those same channels. The file is uploaded in parts on this connection
+* :meth:`OperatorSession.upload_media` and :meth:`OperatorSession.post_media_in_channel` (decision
+  D51): a photo or MP4 video post with a caption in those same channels. The file is uploaded in
+  parts on this connection
   (``upload.saveFilePart`` / ``upload.saveBigFilePart``) under a file id the method itself chose and
   registered in the scope (``ChannelScope.upload_ids``), then sent with ``messages.sendMedia`` as an
   uploaded photo or an uploaded ``video/mp4`` document; nothing else can be uploaded or sent as
