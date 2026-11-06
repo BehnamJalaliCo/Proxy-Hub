@@ -3,7 +3,8 @@
 Each minute it runs one round of proxyhub/content/engine.py under the loop's advisory lock, with no
 transaction open while a source or a file answers. It only reads public pages, feeds and files
 (never Telegram's API, never a secret) and writes the review queue; nothing reaches a channel
-without the owner's approval (decision D20) and the publisher (proxyhub/posts/publisher.py).
+without an approval (the content supervisor's, decision D52, proxyhub/reconcilers/content_qc.py,
+or the owner's) and the publisher (proxyhub/posts/publisher.py).
 """
 
 from __future__ import annotations

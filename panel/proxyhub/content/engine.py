@@ -35,7 +35,6 @@ from proxyhub.content.items import FetchedItem, MediaRef
 from proxyhub.content.net import MEDIA_DEADLINE_S, FetchError, SafeHttp
 from proxyhub.content.plugins import PLUGINS, SourcePlugin
 from proxyhub.content.telegram_preview import TelegramPreview
-from proxyhub.content.writer import DEFAULT_WRITER, CaptionWriter
 
 log = logging.getLogger(__name__)
 
@@ -68,7 +67,6 @@ class Engine:
     clock: Clock
     http_factory: HttpFactory = SafeHttp
     plugins: dict[str, SourcePlugin] = field(default_factory=lambda: dict(PLUGINS))
-    writer: CaptionWriter = DEFAULT_WRITER
     last_prune: datetime | None = None
 
     async def run_round(self) -> Round:
@@ -119,7 +117,7 @@ class Engine:
             if items is None:
                 await sources.record_error(conn, current, now, code)
                 return code
-            stored = await candidates.store_items(conn, current, items, now, self.writer)
+            stored = await candidates.store_items(conn, current, items, now)
             await sources.record_ok(conn, current.id, now, len(items))
         return f"ok:{stored.new}"
 
