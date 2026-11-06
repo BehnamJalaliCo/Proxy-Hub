@@ -876,11 +876,13 @@ def tgs(art: EmojiArt) -> bytes:
 
 
 def digest(art: Iterable[EmojiArt] = ART) -> str:
-    """One hash of every drawing's name, alt and file: it changes exactly when the pack would."""
+    """One hash of every drawing's name, alt and Lottie JSON: it changes exactly when the pack would.
+    The JSON, not the gzip file: another zlib (zlib-ng in some Python builds) may compress the same
+    drawing to other bytes, and every number in the JSON is already rounded to 2 decimals."""
     h = hashlib.sha256()
     for a in art:
         h.update(f"{a.name}\0{a.alt}\0".encode())
-        h.update(hashlib.sha256(tgs(a)).digest())
+        h.update(hashlib.sha256(_built(a).encode()).digest())
     return h.hexdigest()
 
 

@@ -68,7 +68,7 @@ def test_every_drawing_keeps_telegrams_rules(art: emoji_art.EmojiArt) -> None:
 
 # The pack's drawings as of each ART_VERSION. Telegram never replaces an emoji of a pack (D43), so a
 # changed drawing must go into a NEW pack: bump emoji_art.ART_VERSION and add the new digest here.
-ART_DIGESTS = {2: "a16b7c51d4b319e7f18a1b7e1e96bf6ce8e674b1098ab1755a33d662f611bfd7"}
+ART_DIGESTS = {2: "d27e74308d8f6a6a7c4f72354e3fe060acf977556b560b29b3381f90f55b5bcb"}
 
 
 def test_a_changed_drawing_gets_a_new_pack_version() -> None:

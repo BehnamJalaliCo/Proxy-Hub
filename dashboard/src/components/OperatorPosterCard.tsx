@@ -15,6 +15,7 @@ import {
   checkOperator,
   effectivePoster,
   ownPackText,
+  ownPackUpgrading,
   packErrorText,
   parsePackLink,
   POSTER_LABEL,
@@ -190,7 +191,7 @@ function OwnPackLine({ v, busy, onUse }: { v: OperatorView; busy: boolean; onUse
             {own.link}
           </a>
         ) : null}
-        {own.link && own.state === "ready" && !inUse ? (
+        {own.link && own.state === "ready" && !inUse && !ownPackUpgrading(own) ? (
           <Button size="sm" variant="secondary" loading={busy} onClick={() => onUse(own.link ?? "")}>
             استفاده از این بسته
           </Button>
