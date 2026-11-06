@@ -320,6 +320,42 @@ def tag_hint(hex_words: Iterable[str], tags: Iterable[str]) -> str | None:
     return found.pop() if len(found) == 1 else None
 
 
+def tag_word_matches(word: str, tag: str) -> bool:
+    """A hex word of a label or screen names this tag: the whole tag, or at least
+    :data:`TAG_HINT_MIN` characters of its start or end (the same rule as :func:`tag_hint`)."""
+    word, tag = word.lower(), tag.lower()
+    return len(word) >= TAG_HINT_MIN and (tag.startswith(word) or tag.endswith(word))
+
+
+def label_names_tag(label: str, tag: str) -> bool:
+    """A /myproxies button names this tag: one of its hex words is the tag's start or end. Two
+    registrations of the same address (Hetzner gave a deleted node's IPv4 to a new one) differ
+    only here (P18)."""
+    return any(tag_word_matches(w, tag) for w in list_hex_words(label))
+
+
+_SCREEN_HEX: Final = re.compile(r"(?<![0-9a-z])[0-9a-f]{6,64}(?![0-9a-z])")
+
+
+def screen_hex_words(text: str) -> list[str]:
+    """The hex words (6 to 64 characters) a proxy's screen shows, e.g. its tag in "Proxy <host:port>
+    with the tag <hex>." (P18). An address never yields one: its parts are shorter or not hex."""
+    return _SCREEN_HEX.findall(text.lower())
+
+
+def screen_names_other_tag(text: str, tag: str) -> bool:
+    """The screen shows a tag, and it is not this one: the screen of another registration of the
+    same address. A screen that shows no tag says nothing either way."""
+    words = screen_hex_words(text)
+    return bool(words) and not any(tag_word_matches(w, tag) for w in words)
+
+
+def screen_names_any_tag(text: str, tags: Iterable[str]) -> bool:
+    """The screen shows one of these tags (a live proxy's: it must never be removed)."""
+    words = screen_hex_words(text)
+    return any(tag_word_matches(w, t) for w in words for t in tags)
+
+
 def is_next_page(label: str) -> bool:
     """A pagination button in one of the strict shapes ("Next", "»", "Next »", "➡️", ...)."""
     return bool(NEXT_PAGE.fullmatch(label.strip()))

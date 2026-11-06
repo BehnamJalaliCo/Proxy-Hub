@@ -295,7 +295,9 @@ async def test_a_tag_from_the_bot_is_the_registration_and_lands_in_the_nodes_des
     nodes = {node: "ready"}
     chosen = service.choose([reg], live={}, nodes=nodes, wanted="ipoxxo", default="ipoxxo",
                             campaign_channels=set(), now=datetime.now(UTC))  # fmt: skip
-    assert chosen is not None and chosen.job == PromoteJob(host="203.0.113.13", port=8443, channel="ipoxxo")
+    assert chosen is not None and chosen.job == PromoteJob(
+        host="203.0.113.13", port=8443, channel="ipoxxo", tag=TAG
+    )
     d = deps(engine, vault, provider)
     assert (
         await service._record(d, chosen, FlowResult(result=PromotionSet(channel="ipoxxo"))) == "promotion_set"

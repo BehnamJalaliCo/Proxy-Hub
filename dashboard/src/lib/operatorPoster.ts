@@ -66,6 +66,17 @@ export interface OwnPack {
   checked_at?: string | null;
   /** Telegram asked to wait until then (429); the panel goes on by itself. */
   retry_at?: string | null;
+  /** The drawings' version (panel emoji_art.ART_VERSION). */
+  version?: number;
+  /** The older version of this pack the posts still use while this one is being made; the panel
+   *  moves them over by itself once it is complete. */
+  replaces?: string | null;
+}
+
+/** A newer version of our pack is being made while the posts still use the older one: switching
+ *  by hand now would leave the emoji not uploaded yet as plain ones. */
+export function ownPackUpgrading(p: OwnPack): boolean {
+  return Boolean(p.replaces) && p.emoji < p.total;
 }
 
 export interface OperatorView {
@@ -197,6 +208,12 @@ export function packErrorText(code: string | null, rpc: string | null = null): s
 
 /** One line about the channel's own pack: what the owner reads, and its tone. */
 export function ownPackText(p: OwnPack): { tone: Tone; text: string } {
+  if (ownPackUpgrading(p) && p.state !== "error") {
+    return {
+      tone: "info",
+      text: `نسخه‌ی تازه‌ی بسته در حال ساخت است (${toFaDigits(p.emoji)} از ${toFaDigits(p.total)}). پست‌ها تا کامل شدنش با بسته‌ی قبلی میروند و بعد خودکار به این بسته میروند؛ کاری لازم نیست.`,
+    };
+  }
   if (p.state === "ready") {
     const all = p.emoji >= p.total;
     return {

@@ -20,8 +20,9 @@ Two shapes, by the transport the config was made for (the links contract kind st
 
 The host was fixed when the config was made. The name every user's app shows starts with the
 channel's @name (D41), e.g. ``@ipoxxo 🇩🇪 12``. The label «کانفیگ N» is the owner's (dashboard,
-logs): a channel post never shows it, only the config in a code block, with "TCP" / "XHTTP" as the
-block's marker when both links come (proxyhub/posts/links.py :func:`transport_marks`).
+logs): a channel post never shows it, only the config as inline code in a collapsed quote, with
+"TCP:" / "XHTTP:" as a tiny label when both links come (decision D48; proxyhub/posts/links.py
+:func:`transport_marks`).
 
 Listed: every active config that a serving node of its scope has confirmed (its agent reported
 Xray up, without an error, after the config was made; for ``ws_tls`` also its own TLS check for

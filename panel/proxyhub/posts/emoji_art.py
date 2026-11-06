@@ -13,7 +13,23 @@ rules for it (core.telegram.org/stickers, "Animation Requirements"), all checked
   are the same picture), at most 64 KB;
 * no expressions, masks, layer effects, images, solids, texts, 3D layers, merge paths, star
   shapes, gradient strokes, repeaters, time stretching, time remapping or auto-oriented layers;
-* nothing leaves the canvas (every drawing stays inside :data:`SAFE_MIN`..:data:`SAFE_MAX`).
+* nothing leaves the canvas: in EVERY frame, with its stroke widths and every scale, turn and move
+  of its groups, a drawing stays inside :data:`SAFE_MIN`..:data:`SAFE_MAX` (:func:`frame_box`
+  computes what a frame really draws).
+
+How a drawing reads at text size, beside a normal emoji (:func:`look_problems`, also in the tests).
+The first pack (version 1) broke these, so in posts its emoji looked small or "half" next to a
+normal one: most drawings spanned 55 to 84% of the canvas (🔒 70% tall and 52% wide), some sat off
+centre, and parts faded to 25% or 0% for part of every loop (📡's waves, 📶's bars, 🔋's cells) or
+flashed as a faint disc (⚡'s glow, 0 to 38%). Nothing left the canvas: rendered with rlottie
+(Telegram's renderer) frame by frame, every drawing kept 25 px or more inside it.
+
+* :func:`emoji` scales and centres every drawing so that what it draws over the whole loop spans
+  :data:`FIT_SIZE` (about 90% of the canvas, like a font's emoji), and no frame shrinks below
+  :data:`MIN_FRAME_SIZE`;
+* no fill or stroke ever drops below :data:`MIN_OPACITY` percent (its own opacity times its groups'),
+  except a light "shine" drawn over the glyph; an animation dims, changes colour or moves instead;
+* no trim paths: a half-drawn line looks like a cut-off emoji.
 
 The look: Persian turquoise and gold with a dark navy, solid shapes with a darker edge, so an
 emoji still reads at text size on a light or a dark chat background. The operator SIM cards use
@@ -24,15 +40,21 @@ drawing with the same alt (proxyhub/posts/entities.py), so the alts below are th
 templates use (📡 🔐 🔗 ⚡ ⏳ ⌛ 🔴 🚫 ⏸ ♻️) and the ones the channel's texts use most.
 
 The output is deterministic: the same code gives the same bytes (gzip without a timestamp), so
-the pack's contents only change when this file does.
+the pack's contents only change when this file does. Telegram never replaces an emoji of a pack
+(and the panel never asks it to, D43), so a changed drawing goes into a NEW pack:
+**bump :data:`ART_VERSION` whenever a drawing changes.** own_pack.py then builds the new version
+beside the old one and moves the posts over once it is complete.
 """
 
 from __future__ import annotations
 
+import functools
 import gzip
+import hashlib
+import itertools
 import json
 import math
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -44,6 +66,17 @@ MAX_TGS_BYTES: Final = 64 * 1024
 SAFE_MIN: Final = 24
 SAFE_MAX: Final = CANVAS - SAFE_MIN
 CENTER: Final = CANVAS / 2
+# What a drawing spans over its whole loop (its larger side, strokes included), centred: about 90%
+# of the canvas, as much as a font's emoji fills its square. 2 px inside the safe area on each side.
+FIT_SIZE: Final = SAFE_MAX - SAFE_MIN - 4
+# No frame of the loop is smaller than this (larger side), so the emoji never looks shrunken.
+MIN_FRAME_SIZE: Final = 0.7 * CANVAS
+# No part of a glyph fades below this (percent); only a "shine" over it may be lighter.
+MIN_OPACITY: Final = 60
+SHINE: Final = "shine"
+# The pack's version: a new number makes the panel build a new pack (own_pack.py). Bump it whenever
+# a drawing changes; version 1 is the first pack (2026-11-05), whose emoji looked small and "half".
+ART_VERSION: Final = 2
 
 Json = dict[str, Any]
 Point = tuple[float, float]
@@ -67,6 +100,7 @@ LAPIS: Final = "#2F62D6"
 LAPIS_D: Final = "#1D3F94"
 WHITE: Final = "#FFFFFF"
 GLASS: Final = "#E3F7F5"
+EMPTY: Final = "#C9D3DE"  # an empty battery cell
 # Operator colours only (no logos, no names): Irancell yellow, MCI blue, Rightel purple.
 OP_YELLOW: Final = "#FFC61A"
 OP_YELLOW_D: Final = "#B98A00"
@@ -103,13 +137,6 @@ class Path:
             "v": [[_n(x), _n(y)] for x, y in self.v],
             "c": self.closed,
         }
-
-    def points(self) -> Iterator[Point]:
-        """Every vertex and control point (a Bezier curve stays inside their hull)."""
-        for (x, y), (ix, iy), (ox, oy) in zip(self.v, self.i, self.o, strict=True):
-            yield (x, y)
-            yield (x + ix, y + iy)
-            yield (x + ox, y + oy)
 
 
 def poly(*pts: Point, closed: bool = True) -> Path:
@@ -176,6 +203,11 @@ def loop(*keys: tuple[Any, ...], ease: str = "ease") -> Anim:
     return anim(*keys, (FRAMES, first), ease=ease)
 
 
+def tint(*keys: tuple[Any, ...], ease: str = "ease") -> Anim:
+    """A looped colour: keys of ``(frame, "#RRGGBB"[, ease])``."""
+    return loop(*((k[0], rgba(k[1]), *k[2:]) for k in keys), ease=ease)
+
+
 def _kval(value: Any) -> Any:
     if isinstance(value, Path):
         return [value.json()]
@@ -209,14 +241,18 @@ def shape(path: Path | Anim) -> Json:
     return {"ty": "sh", "d": 1, "ks": prop(path)}
 
 
-def fill(color: str, opacity: Any = 100) -> Json:
-    return {"ty": "fl", "c": prop(rgba(color)), "o": prop(opacity), "r": 1, "bm": 0}
+def _color(color: str | Anim) -> Json:
+    return prop(color if isinstance(color, Anim) else rgba(color))
 
 
-def stroke(color: str, width: float, opacity: Any = 100, *, round_cap: bool = True) -> Json:
+def fill(color: str | Anim, opacity: Any = 100) -> Json:
+    return {"ty": "fl", "c": _color(color), "o": prop(opacity), "r": 1, "bm": 0}
+
+
+def stroke(color: str | Anim, width: float, opacity: Any = 100, *, round_cap: bool = True) -> Json:
     return {
         "ty": "st",
-        "c": prop(rgba(color)),
+        "c": _color(color),
         "o": prop(opacity),
         "w": prop(width),
         "lc": 2 if round_cap else 1,
@@ -224,10 +260,6 @@ def stroke(color: str, width: float, opacity: Any = 100, *, round_cap: bool = Tr
         "ml": 4,
         "bm": 0,
     }
-
-
-def trim(end: Any, start: Any = 0) -> Json:
-    return {"ty": "tm", "s": prop(start), "e": prop(end), "o": prop(0), "m": 1}
 
 
 def transform(
@@ -252,13 +284,13 @@ def transform(
     }
 
 
-def group(*items: Json, t: Json | None = None) -> Json:
+def group(*items: Json, t: Json | None = None, name: str = "g") -> Json:
     """Items top first: a style applies to the shapes listed before it."""
-    return {"ty": "gr", "it": [*items, t or transform()], "nm": "g", "bm": 0}
+    return {"ty": "gr", "it": [*items, t or transform()], "nm": name, "bm": 0}
 
 
 def emoji(name: str, *back_to_front: Json) -> Json:
-    """One shape layer; groups are given back to front."""
+    """One shape layer (groups given back to front), scaled and centred to :data:`FIT_SIZE`."""
     layer = {
         "ddd": 0,
         "ind": 1,
@@ -279,7 +311,7 @@ def emoji(name: str, *back_to_front: Json) -> Json:
         "st": 0,
         "bm": 0,
     }
-    return {
+    doc = {
         "tgs": 1,
         "v": "5.5.2",
         "fr": FPS,
@@ -292,6 +324,7 @@ def emoji(name: str, *back_to_front: Json) -> Json:
         "assets": [],
         "layers": [layer],
     }
+    return _fit(doc)
 
 
 # --- reusable parts -----------------------------------------------------------------------------
@@ -309,8 +342,14 @@ def outlined_line(path: Path | Anim, color: str, edge: str, width: float, edge_w
     return group(shape(path), stroke(color, width), stroke(edge, width + edge_w))
 
 
-def highlight(cx: float, cy: float, w: float, h: float, opacity: float = 35) -> Json:
-    return group(ellipse(cx, cy, w, h), fill(WHITE, opacity))
+def highlight(
+    cx: float, cy: float, w: float, h: float, opacity: float = 35, *, t: Json | None = None
+) -> Json:
+    """A light shine over the glyph (the one thing that may be lighter than :data:`MIN_OPACITY`)."""
+    return group(ellipse(cx, cy, w, h), fill(WHITE, opacity), t=t, name=SHINE)
+
+
+WAVE_DIM: Final = 65  # percent: a wave dims to this, never further (MIN_OPACITY)
 
 
 def waves(
@@ -325,11 +364,11 @@ def waves(
     start: float = 0,
     gap: float = 14,
 ) -> list[Json]:
-    """Arcs that fade together, then light up again one after another (signal / wifi)."""
+    """Arcs that dim together, then light up again one after another (signal / wifi)."""
     out = []
     for n, r in enumerate(radii):
         on = 56 + start + gap * n
-        opacity = loop((0, 100), (40, 100), (52, 25), (on, 25, "linear"), (on + 10, 100))
+        opacity = loop((0, 100), (40, 100), (52, WAVE_DIM), (on, WAVE_DIM, "linear"), (on + 10, 100))
         out.append(line(arc(cx, cy, r, a0, a1), color, width, opacity=opacity))
     return out
 
@@ -351,16 +390,14 @@ def antenna() -> Json:
 
 
 def signal_bars() -> Json:
-    """📶 four bars that drop and fill up again."""
+    """📶 four bars that turn grey and light up again one by one."""
     groups = []
     heights = (96, 168, 240, 312)
     for n, h in enumerate(heights):
         x = 112 + 96 * n
-        bar = rect(x, 440 - h / 2, 64, h, 18)
-        groups.append(group(bar, fill(TOWER, 45)))
         on = 58 + 12 * n
-        opacity = loop((0, 100), (36, 100), (48, 0), (on, 0, "linear"), (on + 8, 100))
-        groups.append(group(bar, stroke(TURQ_D, 14), fill(TURQ), t=transform(opacity=opacity)))
+        color = tint((0, TURQ), (36, TURQ), (48, TOWER), (on, TOWER, "linear"), (on + 8, TURQ))
+        groups.append(group(rect(x, 440 - h / 2, 64, h, 18), stroke(TURQ_D, 14), fill(color)))
     return emoji("signal", *groups)
 
 
@@ -462,22 +499,23 @@ def link() -> Json:
     return emoji("link", chain(-56), chain(56))
 
 
-def _hourglass(rot: Any, top_sand: Any, bottom_sand: Any, stream_o: Any) -> list[Json]:
-    t = transform(rot=rot)
+def _hourglass(t: Json, top_sand: Any, bottom_sand: Any, stream: Any = None) -> list[Json]:
     glass = poly((176, 128), (336, 128), (270, 256), (336, 384), (176, 384), (242, 256))
-    return [
+    parts = [
         group(shape(glass), stroke(NAVY, 16), fill(GLASS, 80), t=t),
         group(shape(top_sand), fill(GOLD), t=t),
         group(shape(bottom_sand), fill(GOLD), t=t),
-        group(rect(256, 318, 10, 124), fill(GOLD, stream_o), t=t),
-        group(
-            rect(256, 100, 228, 40, 14), rect(256, 412, 228, 40, 14), stroke(GOLD_D, 14), fill(TURQ_D), t=t
-        ),
     ]
+    if stream is not None:
+        parts.append(group(shape(stream), fill(GOLD), t=t))
+    parts.append(
+        group(rect(256, 100, 228, 40, 14), rect(256, 412, 228, 40, 14), stroke(GOLD_D, 14), fill(TURQ_D), t=t)
+    )
+    return parts
 
 
 def hourglass_flowing() -> Json:
-    """⏳ sand running down, then the glass turns over."""
+    """⏳ sand running down, then the glass turns over (a little smaller while it turns)."""
     full_top = poly((200, 168), (312, 168), (262, 246), (250, 246))
     empty_top = poly((253, 240), (259, 240), (257, 247), (255, 247))
     empty_bottom = poly((250, 380), (262, 380), (259, 376), (253, 376))
@@ -485,9 +523,13 @@ def hourglass_flowing() -> Json:
     full_bottom = poly((312, 344), (200, 344), (250, 266), (262, 266))
     top = anim((0, full_top), (84, empty_top), (120, empty_top), ease="linear")
     bottom = anim((0, empty_bottom), (84, full_bottom), (120, full_bottom), ease="linear")
-    stream = anim((0, 100), (80, 100, "hold"), (84, 0), (120, 0))
+    # The stream's last grains fall to the pile (no fading).
+    flowing = poly((251, 256), (261, 256), (261, 380), (251, 380))
+    stopped = poly((251, 380), (261, 380), (261, 380), (251, 380))
+    stream = anim((0, flowing), (80, flowing), (86, stopped), (120, stopped))
     rot = anim((0, 0), (94, 0), (120, 180))
-    return emoji("hourglass_flowing", *_hourglass(rot, top, bottom, stream))
+    size = anim((0, [100, 100]), (94, [100, 100]), (100, [82, 82]), (114, [82, 82]), (120, [100, 100]))
+    return emoji("hourglass_flowing", *_hourglass(transform(rot=rot, scale=size), top, bottom, stream))
 
 
 def hourglass_done() -> Json:
@@ -499,18 +541,14 @@ def hourglass_done() -> Json:
         ((256, 316), (40, 0), (-40, 0)),
     )
     rot = loop((0, 0), (20, -10), (40, 8), (56, 0))
-    return emoji("hourglass_done", *_hourglass(rot, empty_top, pile, 0))
+    return emoji("hourglass_done", *_hourglass(transform(rot=rot), empty_top, pile))
 
 
 def red_circle() -> Json:
-    """🔴 a red dot sending out a ring (full)."""
-    ring_s = anim(
-        (0, [100, 100]), (60, [158, 158], "hold"), (61, [100, 100]), (120, [158, 158]), ease="linear"
-    )
-    ring_o = anim((0, 85), (60, 0, "hold"), (61, 85), (120, 0), ease="linear")
-    ring = group(ellipse(256, 256, 240), stroke(RED, 18), t=transform(scale=ring_s, opacity=ring_o))
-    dot = solid(ellipse(256, 256, 240), RED, RED_D, 20)
-    return emoji("red_circle", ring, dot, highlight(214, 206, 84, 52, 40))
+    """🔴 a red dot beating like a live light."""
+    beat = loop((0, [100, 100]), (12, [108, 108]), (24, [100, 100]), (34, [104, 104]), (46, [100, 100]))
+    dot = solid(ellipse(256, 256, 300), RED, RED_D, 22, t=transform(scale=beat))
+    return emoji("red_circle", dot, highlight(204, 196, 104, 64, 40, t=transform(scale=beat)))
 
 
 def no_entry_sign() -> Json:
@@ -562,16 +600,14 @@ def refresh() -> Json:
 
 
 def high_voltage() -> Json:
-    """⚡ a gold bolt flashing."""
-    bolt = poly((292, 52), (146, 290), (244, 290), (212, 460), (366, 206), (268, 206), (330, 52))
-    glow_o = loop((0, 0), (8, 38), (22, 0), (30, 26), (44, 0))
-    glow = group(ellipse(256, 256, 400), fill(GOLD_L, glow_o))
-    s = loop((0, [100, 100]), (8, [108, 108]), (22, [100, 100]), (30, [104, 104]), (44, [100, 100]))
-    body = group(shape(bolt), stroke(GOLD_D, 18), fill(GOLD), t=transform(scale=s))
-    shine = group(
-        shape(poly((292, 92), (196, 250), (228, 250), (300, 120))), fill(WHITE, 45), t=transform(scale=s)
-    )
-    return emoji("bolt", glow, body, shine)
+    """⚡ a broad gold bolt that flashes bright and jumps a little."""
+    bolt = poly((296, 48), (124, 292), (236, 292), (200, 468), (392, 200), (280, 200), (348, 48))
+    flash = tint((0, GOLD), (8, GOLD_L), (22, GOLD), (30, GOLD_L), (44, GOLD))
+    jump = loop((0, [100, 100]), (8, [106, 106]), (22, [100, 100]), (30, [103, 103]), (44, [100, 100]))
+    body = group(shape(bolt), stroke(GOLD_D, 18), fill(flash), t=transform(scale=jump))
+    streak = poly((300, 80), (182, 262), (214, 262), (318, 96))
+    shine = group(shape(streak), fill(WHITE, 45), t=transform(scale=jump), name=SHINE)
+    return emoji("bolt", body, shine)
 
 
 def rocket() -> Json:
@@ -614,29 +650,48 @@ def rocket() -> Json:
     return emoji("rocket", group(*reversed(parts), t=whole))
 
 
-def _check(path: Path, color: str, width: float, end: Any) -> Json:
-    return group(shape(path), trim(end), stroke(color, width))
+def _pop(cx: float, cy: float, at: float) -> Json:
+    """A quick pop around (cx, cy) from frame ``at``: bigger, a little smaller, back."""
+    return transform(
+        (cx, cy),
+        scale=loop(
+            (0, [100, 100]),
+            (at, [100, 100]),
+            (at + 10, [118, 118]),
+            (at + 20, [94, 94]),
+            (at + 30, [100, 100]),
+        ),
+    )
 
 
 def check_mark() -> Json:
-    """✅ a green tile whose white tick is drawn again."""
+    """✅ a green tile whose white tick pops."""
     tile = solid(rect(256, 256, 344, 344, 84), GREEN, GREEN_D, 20)
-    end = anim((0, 100), (60, 100, "hold"), (64, 0), (92, 100), (120, 100))
-    tick = _check(poly((166, 262), (230, 326), (350, 200), closed=False), WHITE, 54, end)
+    path = poly((166, 262), (230, 326), (350, 200), closed=False)
+    tick = group(shape(path), stroke(WHITE, 54), t=_pop(258, 263, 60))
     return emoji("check", tile, tick, highlight(186, 150, 140, 40, 20))
 
 
 def warning() -> Json:
-    """⚠️ a gold warning sign blinking its mark."""
+    """⚠️ a gold warning sign whose mark jumps twice."""
     tri = poly((256, 70), (448, 412), (64, 412))
     sign = group(shape(tri), stroke(GOLD, 44), stroke(GOLD_D, 64), fill(GOLD))
-    o = loop((0, 100), (20, 100), (30, 25), (40, 100), (50, 25), (60, 100))
-    mark = group(rect(256, 248, 42, 136, 21), ellipse(256, 360, 46), fill(NAVY, o))
+    s = loop(
+        (0, [100, 100]),
+        (20, [100, 100]),
+        (28, [116, 116]),
+        (36, [100, 100]),
+        (44, [112, 112]),
+        (52, [100, 100]),
+    )
+    mark = group(
+        rect(256, 248, 42, 136, 21), ellipse(256, 360, 46), fill(NAVY), t=transform((256, 300), scale=s)
+    )
     return emoji("warning", sign, mark)
 
 
 def shield() -> Json:
-    """🛡 a turquoise shield with a gold tick drawn on it."""
+    """🛡 a turquoise shield with a gold tick that pops."""
     body = bez(
         ((256, 56), (0, 0), (0, 0)),
         ((428, 116), (-60, 0), (0, 0)),
@@ -647,9 +702,9 @@ def shield() -> Json:
     )
     s = loop((0, [100, 100]), (20, [106, 106]), (40, [100, 100]))
     guard = group(shape(body), stroke(TURQ_D, 22), fill(TURQ), t=transform(scale=s))
-    inner = group(shape(body), fill(WHITE, 18), t=transform(scale=72))
-    end = anim((0, 100), (60, 100, "hold"), (64, 0), (90, 100), (120, 100))
-    tick = _check(poly((178, 256), (236, 314), (338, 200), closed=False), GOLD, 46, end)
+    inner = group(shape(body), fill(WHITE, 18), t=transform(scale=72), name=SHINE)
+    path = poly((178, 256), (236, 314), (338, 200), closed=False)
+    tick = group(shape(path), stroke(GOLD, 46), t=_pop(258, 257, 60))
     return emoji("shield", guard, inner, tick)
 
 
@@ -700,8 +755,8 @@ def battery() -> Json:
     cells = []
     for n in range(4):
         on = 56 + 12 * n
-        o = loop((0, 100), (34, 100), (44, 0), (on, 0, "linear"), (on + 8, 100))
-        cells.append(group(rect(126 + 76 * n, 256, 58, 146, 14), fill(GREEN), t=transform(opacity=o)))
+        color = tint((0, GREEN), (34, GREEN), (44, EMPTY), (on, EMPTY, "linear"), (on + 8, GREEN))
+        cells.append(group(rect(126 + 76 * n, 256, 58, 146, 14), fill(color)))
     return emoji("battery", case, tip, *cells)
 
 
@@ -805,14 +860,323 @@ ART: Final[tuple[EmojiArt, ...]] = (
 )
 
 
+@functools.cache
+def _built(art: EmojiArt) -> str:
+    """The compact Lottie JSON of a drawing (made once per process: fitting it measures every frame)."""
+    return json.dumps(art.draw(), separators=(",", ":"), ensure_ascii=False)
+
+
 def lottie(art: EmojiArt) -> Json:
-    return art.draw()
+    return dict(json.loads(_built(art)))
 
 
 def tgs(art: EmojiArt) -> bytes:
     """The ``.tgs`` file: gzip of the compact Lottie JSON, without a timestamp (same bytes each run)."""
-    raw = json.dumps(lottie(art), separators=(",", ":"), ensure_ascii=False).encode()
-    return gzip.compress(raw, compresslevel=9, mtime=0)
+    return gzip.compress(_built(art).encode(), compresslevel=9, mtime=0)
+
+
+def digest(art: Iterable[EmojiArt] = ART) -> str:
+    """One hash of every drawing's name, alt and Lottie JSON: it changes exactly when the pack would.
+    The JSON, not the gzip file: another zlib (zlib-ng in some Python builds) may compress the same
+    drawing to other bytes, and every number in the JSON is already rounded to 2 decimals."""
+    h = hashlib.sha256()
+    for a in art:
+        h.update(f"{a.name}\0{a.alt}\0".encode())
+        h.update(hashlib.sha256(_built(a).encode()).digest())
+    return h.hexdigest()
+
+
+# --- what each frame draws ----------------------------------------------------------------------
+Box = tuple[float, float, float, float]  # x0, y0, x1, y1 on the canvas
+Matrix = tuple[float, float, float, float, float, float]  # x' = a x + c y + e, y' = b x + d y + f
+Segment = tuple[Point, Point, Point, Point]  # one cubic Bezier
+IDENTITY: Final[Matrix] = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+KAPPA: Final = 0.5522847498  # a quarter circle as one cubic Bezier (as rlottie draws ellipses)
+
+
+def _bezier1(p1: float, p2: float, t: float) -> float:
+    """The 1-D cubic Bezier 0, p1, p2, 1 at ``t``."""
+    mt = 1 - t
+    return 3 * mt * mt * t * p1 + 3 * mt * t * t * p2 + t * t * t
+
+
+def _eased(key: Json, x: float) -> float:
+    """How far (0..1) a value has gone at time fraction ``x`` between two keyframes: Lottie's easing
+    curve (0,0) (o.x,o.y) (i.x,i.y) (1,1), solved for x."""
+    ox, oy = float(key["o"]["x"][0]), float(key["o"]["y"][0])
+    ix, iy = float(key["i"]["x"][0]), float(key["i"]["y"][0])
+    lo, hi = 0.0, 1.0
+    for _ in range(48):
+        mid = (lo + hi) / 2
+        if _bezier1(ox, ix, mid) < x:
+            lo = mid
+        else:
+            hi = mid
+    return _bezier1(oy, iy, (lo + hi) / 2)
+
+
+def _mix(a: Any, b: Any, u: float) -> Any:
+    if isinstance(a, dict):
+        return {k: _mix(a[k], b[k], u) if k in ("v", "i", "o") else a[k] for k in a}
+    if isinstance(a, list):
+        return [_mix(x, y, u) for x, y in zip(a, b, strict=True)]
+    return a + (b - a) * u
+
+
+def _unwrap(s: list[Any]) -> Any:
+    return s[0] if len(s) == 1 else s
+
+
+def value_at(p: Json, frame: float) -> Any:
+    """A property's value at ``frame``: a number, a list of numbers or a path (Lottie's JSON form)."""
+    if not p.get("a"):
+        return p["k"]
+    keys: list[Json] = p["k"]
+    if frame <= keys[0]["t"]:
+        return _unwrap(keys[0]["s"])
+    for k0, k1 in itertools.pairwise(keys):
+        if frame < k1["t"]:
+            if k0.get("h"):
+                return _unwrap(k0["s"])
+            u = _eased(k0, (frame - k0["t"]) / (k1["t"] - k0["t"]))
+            return _unwrap(_mix(k0["s"], k1["s"], u))
+    return _unwrap(keys[-1]["s"])
+
+
+def _then(outer: Matrix, inner: Matrix) -> Matrix:
+    """``inner`` first, then ``outer``."""
+    a, b, c, d, e, f = outer
+    a2, b2, c2, d2, e2, f2 = inner
+    return (
+        a * a2 + c * b2,
+        b * a2 + d * b2,
+        a * c2 + c * d2,
+        b * c2 + d * d2,
+        a * e2 + c * f2 + e,
+        b * e2 + d * f2 + f,
+    )
+
+
+def _matrix(tr: Json, frame: float) -> Matrix:
+    """A group's (or the layer's) transform at ``frame``: scaled and turned around its anchor, which
+    lands on its position. Positive angles turn clockwise (the canvas' y axis points down)."""
+    px, py = value_at(tr["p"], frame)[:2]
+    ax, ay = value_at(tr["a"], frame)[:2]
+    sx, sy = (float(v) / 100 for v in value_at(tr["s"], frame)[:2])
+    angle = math.radians(float(value_at(tr["r"], frame)))
+    cos, sin = math.cos(angle), math.sin(angle)
+    a, b, c, d = cos * sx, sin * sx, -sin * sy, cos * sy
+    return (a, b, c, d, px - a * ax - c * ay, py - b * ax - d * ay)
+
+
+def _apply(m: Matrix, p: Point) -> Point:
+    a, b, c, d, e, f = m
+    return (a * p[0] + c * p[1] + e, b * p[0] + d * p[1] + f)
+
+
+def _path_segments(path: Json) -> list[Segment]:
+    v, i, o = path["v"], path["i"], path["o"]
+    if len(v) == 1:
+        p = (float(v[0][0]), float(v[0][1]))
+        return [(p, p, p, p)]
+    out: list[Segment] = []
+    for k in range(len(v) if path["c"] else len(v) - 1):
+        j = (k + 1) % len(v)
+        p0, p3 = (float(v[k][0]), float(v[k][1])), (float(v[j][0]), float(v[j][1]))
+        out.append((p0, (p0[0] + o[k][0], p0[1] + o[k][1]), (p3[0] + i[j][0], p3[1] + i[j][1]), p3))
+    return out
+
+
+def _ellipse_segments(cx: float, cy: float, rx: float, ry: float) -> list[Segment]:
+    kx, ky = rx * KAPPA, ry * KAPPA
+    top, right, bottom, left = (cx, cy - ry), (cx + rx, cy), (cx, cy + ry), (cx - rx, cy)
+    return [
+        (top, (cx + kx, cy - ry), (cx + rx, cy - ky), right),
+        (right, (cx + rx, cy + ky), (cx + kx, cy + ry), bottom),
+        (bottom, (cx - kx, cy + ry), (cx - rx, cy + ky), left),
+        (left, (cx - rx, cy - ky), (cx - kx, cy - ry), top),
+    ]
+
+
+def _rect_segments(cx: float, cy: float, hw: float, hh: float, r: float) -> list[Segment]:
+    """A rectangle with round corners of radius ``r`` (at most half its side, as rlottie clamps it)."""
+    r = max(0.0, min(r, hw, hh))
+    x0, y0, x1, y1 = cx - hw, cy - hh, cx + hw, cy + hh
+    k = r * (1 - KAPPA)
+
+    def straight(p: Point, q: Point) -> Segment:
+        return (p, p, q, q)
+
+    a, b, c, d = (x1 - r, y0), (x1, y0 + r), (x1, y1 - r), (x1 - r, y1)
+    e, f, g, h = (x0 + r, y1), (x0, y1 - r), (x0, y0 + r), (x0 + r, y0)
+    return [
+        straight(h, a),
+        (a, (x1 - k, y0), (x1, y0 + k), b),
+        straight(b, c),
+        (c, (x1, y1 - k), (x1 - k, y1), d),
+        straight(d, e),
+        (e, (x0 + k, y1), (x0, y1 - k), f),
+        straight(f, g),
+        (g, (x0, y0 + k), (x0 + k, y0), h),
+    ]
+
+
+def _segments(item: Json, frame: float) -> list[Segment]:
+    if item["ty"] == "sh":
+        return _path_segments(value_at(item["ks"], frame))
+    cx, cy = (float(v) for v in value_at(item["p"], frame))
+    w, h = (float(v) for v in value_at(item["s"], frame))
+    if item["ty"] == "el":
+        return _ellipse_segments(cx, cy, w / 2, h / 2)
+    return _rect_segments(cx, cy, w / 2, h / 2, float(value_at(item["r"], frame)))
+
+
+def _cubic_range(p0: float, p1: float, p2: float, p3: float) -> tuple[float, float]:
+    """The exact lowest and highest value of a 1-D cubic Bezier over 0..1."""
+    lo, hi = min(p0, p3), max(p0, p3)
+    if lo <= min(p1, p2) and max(p1, p2) <= hi:
+        return lo, hi
+    d0, d1, d2 = p1 - p0, p2 - p1, p3 - p2
+    a, b, c = d0 - 2 * d1 + d2, 2 * (d1 - d0), d0  # the derivative / 3
+    roots: list[float] = []
+    if abs(a) < 1e-12:
+        if abs(b) > 1e-12:
+            roots.append(-c / b)
+    elif (disc := b * b - 4 * a * c) >= 0:
+        roots += [(-b + math.sqrt(disc)) / (2 * a), (-b - math.sqrt(disc)) / (2 * a)]
+    for t in roots:
+        if 0 < t < 1:
+            mt = 1 - t
+            value = mt**3 * p0 + 3 * mt * mt * t * p1 + 3 * mt * t * t * p2 + t**3 * p3
+            lo, hi = min(lo, value), max(hi, value)
+    return lo, hi
+
+
+def _segment_box(seg: Segment, m: Matrix) -> Box:
+    p = [_apply(m, q) for q in seg]  # an affine map of a Bezier is the Bezier of the mapped points
+    x0, x1 = _cubic_range(p[0][0], p[1][0], p[2][0], p[3][0])
+    y0, y1 = _cubic_range(p[0][1], p[1][1], p[2][1], p[3][1])
+    return (x0, y0, x1, y1)
+
+
+def union(boxes: Iterable[Box]) -> Box | None:
+    out: Box | None = None
+    for x0, y0, x1, y1 in boxes:
+        out = (
+            (x0, y0, x1, y1)
+            if out is None
+            else (min(out[0], x0), min(out[1], y0), max(out[2], x1), max(out[3], y1))
+        )
+    return out
+
+
+def _marks(items: list[Json], outer: Matrix, frame: float, out: list[Box]) -> list[Box]:
+    """Add to ``out`` the canvas box of everything this group draws at ``frame``; return its shapes'
+    boxes for the styles after it in the groups around it. A stroke grows its shapes by half its
+    width, scaled and turned like the group it is in (round joins and caps: exact)."""
+    tr = next((it for it in items if it.get("ty") == "tr"), None)
+    m = _then(outer, _matrix(tr, frame)) if tr is not None else outer
+    shapes: list[Box] = []
+    for item in items:
+        ty = item.get("ty")
+        if ty in ("sh", "el", "rc"):
+            box = union(_segment_box(s, m) for s in _segments(item, frame))
+            if box is not None:
+                shapes.append(box)
+                out.append(box)
+        elif ty == "gr":
+            shapes += _marks(item["it"], m, frame, out)
+        elif ty == "st":
+            half = float(value_at(item["w"], frame)) / 2
+            gx, gy = half * math.hypot(m[0], m[2]), half * math.hypot(m[1], m[3])
+            out += [(x0 - gx, y0 - gy, x1 + gx, y1 + gy) for x0, y0, x1, y1 in shapes]
+    return shapes
+
+
+def _layer_items(layer: Json) -> list[Json]:
+    """A shape layer as one group: its shapes, then its own transform."""
+    return [*layer.get("shapes", []), {"ty": "tr", **layer["ks"]}]
+
+
+def frame_box(doc: Json, frame: float) -> Box | None:
+    """The canvas box of everything ``doc`` draws at ``frame``: every shape after all its groups'
+    and its layer's transforms, grown by its strokes (None when it draws nothing)."""
+    out: list[Box] = []
+    for layer in doc.get("layers", []):
+        _marks(_layer_items(layer), IDENTITY, frame, out)
+    return union(out)
+
+
+def frame_boxes(doc: Json) -> list[Box | None]:
+    """:func:`frame_box` of every frame the animation shows (both ends included)."""
+    return [frame_box(doc, f) for f in range(int(doc.get("ip", 0)), int(doc.get("op", 0)) + 1)]
+
+
+def _size(box: Box) -> float:
+    return max(box[2] - box[0], box[3] - box[1])
+
+
+def _fit(doc: Json) -> Json:
+    """Scale the drawing so that what it draws over the whole loop spans :data:`FIT_SIZE`, and
+    centre it (one uniform scale around the middle of that span: the boxes scale exactly)."""
+    whole = union(b for b in frame_boxes(doc) if b is not None)
+    if whole is None:
+        return doc
+    centre = ((whole[0] + whole[2]) / 2, (whole[1] + whole[3]) / 2)
+    t = transform(centre, pos=[CENTER, CENTER], scale=100 * FIT_SIZE / _size(whole))
+    for layer in doc["layers"]:
+        layer["shapes"] = [group(*layer["shapes"], t=t, name="fit")]
+    return doc
+
+
+def _lowest(p: Json) -> float:
+    """The lowest value a number property takes (eased keys never overshoot: it is a key's value)."""
+    if not p.get("a"):
+        return float(p["k"])
+    return min(float(_unwrap(key["s"])) for key in p["k"])
+
+
+def faint_parts(doc: Json) -> list[str]:
+    """Every fill or stroke that can drop below :data:`MIN_OPACITY` percent (its opacity times its
+    groups' and its layer's), except in a :data:`SHINE` group; and every trim path."""
+    out: list[str] = []
+
+    def walk(items: list[Json], floor: float, where: str, shine: bool) -> None:
+        tr = next((it for it in items if it.get("ty") == "tr"), None)
+        here = floor * (_lowest(tr["o"]) / 100 if tr is not None else 1.0)
+        for item in items:
+            ty = item.get("ty")
+            if ty == "gr":
+                name = str(item.get("nm", "g"))
+                walk(item["it"], here, f"{where}/{name}", shine or name == SHINE)
+            elif ty == "tm":
+                out.append(f"{where}: trim path (a half-drawn line)")
+            elif ty in ("fl", "st") and not shine and (lowest := here * _lowest(item["o"])) < MIN_OPACITY:
+                out.append(f"{where}: {'fill' if ty == 'fl' else 'stroke'} fades to {lowest:.0f}%")
+
+    for layer in doc.get("layers", []):
+        walk(_layer_items(layer), 1.0, str(layer.get("nm", "layer")), False)
+    return out
+
+
+def look_problems(doc: Json) -> list[str]:
+    """Why a drawing would read badly beside a normal emoji (empty when it reads well): it is
+    small or off centre over its loop, a frame shrinks below :data:`MIN_FRAME_SIZE`, a frame is
+    empty, or a part fades (:func:`faint_parts`)."""
+    out = faint_parts(doc)
+    boxes = frame_boxes(doc)
+    drawn = [b for b in boxes if b is not None]
+    whole = union(drawn)
+    if whole is None or len(drawn) < len(boxes):
+        return [*out, "an empty frame"]
+    if _size(whole) < FIT_SIZE - 1:
+        out.append(f"small: {_size(whole):.0f} of {CANVAS} px")
+    if max(abs((whole[0] + whole[2]) / 2 - CENTER), abs((whole[1] + whole[3]) / 2 - CENTER)) > 2:
+        out.append("off centre")
+    smallest = min(range(len(drawn)), key=lambda f: _size(drawn[f]))
+    if _size(drawn[smallest]) < MIN_FRAME_SIZE:
+        out.append(f"frame {smallest} shrinks to {_size(drawn[smallest]):.0f} px")
+    return out
 
 
 # --- Telegram's rules ---------------------------------------------------------------------------
@@ -833,26 +1197,6 @@ def _walk(node: Any) -> Iterator[Json]:
     elif isinstance(node, list):
         for value in node:
             yield from _walk(value)
-
-
-def _coords(doc: Json) -> Iterator[Point]:
-    """Every point a shape can reach before transforms (vertices, controls, box corners)."""
-    for node in _walk(doc):
-        ty = node.get("ty")
-        if ty == "sh":
-            k = node["ks"]
-            paths = [k["k"]] if k["a"] == 0 else [key["s"][0] for key in k["k"]]
-            for p in paths:
-                for (x, y), (ix, iy), (ox, oy) in zip(p["v"], p["i"], p["o"], strict=True):
-                    yield (x, y)
-                    yield (x + ix, y + iy)
-                    yield (x + ox, y + oy)
-        elif ty in ("rc", "el"):
-            cx, cy = node["p"]["k"]
-            sizes = [node["s"]["k"]] if node["s"]["a"] == 0 else [key["s"] for key in node["s"]["k"]]
-            for w, h in sizes:
-                yield (cx - w / 2, cy - h / 2)
-                yield (cx + w / 2, cy + h / 2)
 
 
 def problems(doc: Json, data: bytes) -> list[str]:
@@ -887,8 +1231,12 @@ def problems(doc: Json, data: bytes) -> list[str]:
             out.append("auto-oriented layer")
         if layer.get("ip", 0) > doc["ip"] or layer.get("op", 0) < doc["op"]:
             out.append("layer shorter than the animation")
-    if any(not SAFE_MIN <= c <= SAFE_MAX for point in _coords(doc) for c in point):
-        out.append("drawn outside the canvas")
+    for box in frame_boxes(doc):
+        if box is not None and not (
+            SAFE_MIN <= box[0] and SAFE_MIN <= box[1] and box[2] <= SAFE_MAX and box[3] <= SAFE_MAX
+        ):
+            out.append("drawn outside the canvas")
+            break
     for node in _walk(doc):
         if "x" in node and isinstance(node.get("x"), str):
             out.append("expression")

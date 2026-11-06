@@ -4,10 +4,16 @@ Registration (3 messages)::
 
     /newproxy  ->  "host:port"  ->  secret  ->  tag (32 hex)
 
-Promotion (4 messages: 2 texts, 2 button presses)::
+Promotion (4 messages: 2 texts, 2 button presses, plus one press per further page of the list)::
 
-    /myproxies  ->  press this proxy's button  ->  press "Set promotion"  ->  https://t.me/<channel>
-                ->  confirmation
+    /myproxies  ->  (next page)*  ->  press this proxy's button  ->  press "Set promotion"
+                ->  https://t.me/<channel>  ->  confirmation
+
+The list names a button "<host> <hex>", the hex being a piece of the registration's tag (P13, P18).
+Hetzner may give a deleted node's IPv4 to a new one, so the list can hold two buttons with the same
+address: the old registration's and ours. With the tag known, only the button that names OUR tag is
+pressed, on whichever page it is; the proxy's screen ("Proxy <host:port> with the tag <hex>") must
+not name another tag either. A list that shows the address but not our tag stops the flow.
 
 :func:`first_action` gives the opening message; :func:`next_action` reads what the bot said after
 our last action (its new or changed messages, and the short answer to a button press) and gives the
@@ -60,11 +66,17 @@ class RegisterJob:
 
 @dataclass(frozen=True)
 class PromoteJob:
-    """Make ``channel`` (a public username) the sponsor of the registered ``host:port``."""
+    """Make ``channel`` (a public username) the sponsor of the registered ``host:port``. ``tag``:
+    the registration's tag, to tell its list button from another registration of the same address."""
 
     host: str
     port: int
     channel: str
+    tag: str | None = None
+
+    def __repr__(self) -> str:
+        tag = "***" if self.tag else None
+        return f"PromoteJob(host={self.host!r}, port={self.port}, channel={self.channel!r}, tag={tag})"
 
     @property
     def address(self) -> str:
@@ -73,7 +85,8 @@ class PromoteJob:
 
 Job = RegisterJob | PromoteJob
 
-MESSAGES_NEEDED: Final[dict[type[RegisterJob] | type[PromoteJob], int]] = {RegisterJob: 3, PromoteJob: 4}
+# A promotion may need one press more: the list's second page (P18: 10 proxies, 2 pages).
+MESSAGES_NEEDED: Final[dict[type[RegisterJob] | type[PromoteJob], int]] = {RegisterJob: 3, PromoteJob: 5}
 
 
 @dataclass(frozen=True)
@@ -176,25 +189,56 @@ def _single(
     return found[0]
 
 
-def _promote(job: PromoteJob, step: Step, seen: Observation, text: str) -> Action | Result:
-    if step is Step.SENT_MYPROXIES:
-        if not replies.is_proxy_list(text):
-            return _stuck(step, "unexpected_reply", text)
-        picked = _single(
-            replies.address_buttons(seen.messages, job.host, job.port),
-            step,
-            "proxy_not_in_list",
-            "proxy_listed_twice",
-            text,
-        )
+def _list_buttons(job: PromoteJob, seen: Observation) -> list[tuple[int, BotButton]]:
+    """The list buttons of this proxy: same address and, with the tag known, naming our tag."""
+    found = replies.address_buttons(seen.messages, job.host, job.port)
+    if job.tag is None or not any(replies.list_hex_words(b.text) for _, b in found):
+        return found  # labels without hex: the address alone decides, as before P18
+    tag = job.tag
+    return [(message_id, b) for message_id, b in found if replies.label_names_tag(b.text, tag)]
+
+
+def _next_page_buttons(seen: Observation) -> list[tuple[int, BotButton]]:
+    return [
+        (message.id, button)
+        for message in seen.messages
+        for row in message.buttons
+        for button in row
+        if button.data is not None and replies.is_next_page(button.text)
+    ]
+
+
+def _in_list(job: PromoteJob, step: Step, seen: Observation, text: str) -> Action | Result:
+    if step is Step.SENT_MYPROXIES and not replies.is_proxy_list(text):
+        return _stuck(step, "unexpected_reply", text)
+    if step is Step.PRESSED_NEXT_PAGE and not seen.messages:  # only a toast: the page did not change
+        return _stuck(step, "proxy_not_in_list", text)
+    mine = _list_buttons(job, seen)
+    if mine:
+        picked = _single(mine, step, "proxy_not_in_list", "proxy_listed_twice", text)
         if isinstance(picked, Stuck):
             return picked
         message_id, button = picked
         assert button.data is not None
         return Press(message_id=message_id, data=button.data, label=button.text, then=Step.PRESSED_PROXY)
+    pages = _next_page_buttons(seen)
+    if len({(message_id, b.data) for message_id, b in pages}) == 1:
+        message_id, button = pages[0]
+        assert button.data is not None
+        return Press(message_id=message_id, data=button.data, label=button.text, then=Step.PRESSED_NEXT_PAGE)
+    if job.tag is not None and replies.address_buttons(seen.messages, job.host, job.port):
+        return _stuck(step, "tag_not_in_list", text)
+    return _stuck(step, "proxy_not_in_list", text)
+
+
+def _promote(job: PromoteJob, step: Step, seen: Observation, text: str) -> Action | Result:
+    if step in (Step.SENT_MYPROXIES, Step.PRESSED_NEXT_PAGE):
+        return _in_list(job, step, seen, text)
     if step is Step.PRESSED_PROXY:
         if replies.mentions_other_address(text, job.host, job.port):
             return _stuck(step, "menu_of_another_proxy", text)
+        if job.tag is not None and replies.screen_names_other_tag(text, job.tag):
+            return _stuck(step, "menu_of_another_tag", text)
         picked = _single(
             replies.promotion_buttons(seen.messages),
             step,

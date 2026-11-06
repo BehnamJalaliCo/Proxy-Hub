@@ -90,11 +90,11 @@ def test_post_has_content_proxy_words_and_channel_tag_last() -> None:
         [("203.0.113.10", 443, SECRET), ("p2.example.com", 8443, "ee" + SECRET + "676f6f676c652e636f6d")],
         "@ipoxxo",
     )
-    assert post.startswith("<b>خبر مهم</b>\nمتن کوتاه\n\n📡 <b>پروکسی‌ها</b>\n⚡ <a href=")
+    assert post.startswith("<b>خبر مهم</b>\nمتن کوتاه\n\n<a href=")  # no header (D48)
     assert post.splitlines()[-1] == "🔗 @ipoxxo"
     words = re.findall(r'<a href="([^"]+)">([^<]+)</a>', post)
-    assert [w for _, w in words] == ["اتصال ۱", "اتصال ۲"]  # connect words, by place
-    assert "پروکسی ۱" not in post
+    assert [w for _, w in words] == ["پروکسی\u00a0۱", "پروکسی\u00a0۲"]  # proxy words, by place
+    assert "</a> • <a href=" in post and "⚡" not in post and "📡" not in post
     first = urlsplit(html.unescape(words[0][0]))
     assert (first.scheme, first.netloc, first.path) == ("https", "t.me", "/proxy")
     assert parse_qs(first.query) == {"server": ["203.0.113.10"], "port": ["443"], "secret": [SECRET]}
@@ -105,7 +105,7 @@ def test_post_has_content_proxy_words_and_channel_tag_last() -> None:
 def test_post_without_content_or_proxies() -> None:
     assert render_proxy_post(None, [], "ipoxxo") == "🔗 @ipoxxo"
     only_proxies = render_proxy_post("   ", [("1.2.3.4", 443, SECRET)], "@ipoxxo")
-    assert only_proxies.startswith("📡 <b>پروکسی‌ها</b>")
+    assert only_proxies.startswith('<a href="https://t.me/proxy?server=1.2.3.4&amp;port=443')
 
 
 def test_content_is_rebuilt_and_escaped() -> None:

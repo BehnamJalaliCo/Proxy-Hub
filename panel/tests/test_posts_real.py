@@ -1,10 +1,11 @@
 """REAL bot test (marker ``telegram``) for the publisher's layout: run on the panel server.
 
 Same environment as tests/test_telegram_real.py (PROXYHUB_TELEGRAM_TEST_TOKEN_FILE and
-PROXYHUB_TELEGRAM_TEST_CHANNEL). It sends one post in the publisher's full layout (bold title,
-blockquote, MTProto connect words, VLESS configs in <pre> blocks, a TCP/XHTTP pair marked by the
-blocks' language, the channel tag) to the private TEST channel, then edits it to a paused/ended
-state and to the all-dead state, proving Telegram accepts every HTML text. The links
+PROXYHUB_TELEGRAM_TEST_CHANNEL). It sends one post in the publisher's compact layout (decision D48:
+bold title, blockquote, the MTProto words «پروکسی N» two to a row, each VLESS config as one line
+over a collapsed quote that holds a TCP/XHTTP pair as labelled inline code, the channel tag) to the
+private TEST channel, then edits it to a paused/ended state and to the all-dead state, proving
+Telegram accepts every HTML text. The links
 point at documentation addresses (RFC 5737, example.com) and a random secret, so nobody can use
 them. Nothing is ever removed (rule 6).
 """

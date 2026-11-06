@@ -191,7 +191,7 @@ def test_promotion_follows_the_published_steps_to_the_channel_link() -> None:
     assert isinstance(next_action(PROMO, Step.PRESSED_PROMOTION, seen(answer=ASSUMED_ASK_CHANNEL[2])), Send)
     for done in ASSUMED_PROMOTION_DONE:
         assert next_action(PROMO, Step.SENT_CHANNEL, seen(done)) == PromotionSet(channel="ipoxxo")
-    assert MESSAGES_NEEDED[PromoteJob] == 4
+    assert MESSAGES_NEEDED[PromoteJob] == 5  # 4, plus the list's second page (P18)
 
 
 def test_labels_with_emoji_or_a_domain_name_still_match_exactly() -> None:
@@ -386,3 +386,82 @@ def test_private_or_malformed_links_are_refused(raw: str, code: str) -> None:
     with pytest.raises(ChannelError) as caught:
         parse_public_channel(raw)
     assert caught.value.code == code
+
+
+# --- P18: one IPv4 registered twice, and a list of two pages ----------------------------------------------
+
+# P18 on the panel server: Hetzner gave a deleted node's IPv4 to the new node, so /myproxies listed
+# 65.109.209.24 twice ("<host> <hex>" each, the hex a piece of each registration's tag) and the
+# promotion stopped with proxy_listed_twice. The list had 10 buttons on 2 pages, two to a row, with
+# "»" under page 1 and "«" under page 2. A proxy's screen read
+# "Proxy <host:port> with the tag <hex>.\nPromoted channel: n/a.\nHow can I help?" with
+# [Set promotion, Stats] and [Delete proxy, « Back to list].
+P18_TAG = "9e8d7c6b" + "0" * 16 + "1a2b3c4d"
+OUR_LABEL = "65.109.209.24 9e8d7c6b"
+OLD_LABEL = "65.109.209.24 5f5f5f5f"
+P18_PROMO = PromoteJob(host="65.109.209.24", port=8443, channel="ipoxxo", tag=P18_TAG)
+REAL_SCREEN = "Proxy 65.109.209.24:8443 with the tag {tag}.\nPromoted channel: n/a.\nHow can I help?"
+
+
+def _page(*labels: str, nav: tuple[str, ...] = ()) -> Observation:
+    rows = [row(*labels[i : i + 2]) for i in range(0, len(labels), 2)]
+    if nav:
+        rows.append(row(*nav))
+    return Observation(messages=(bot(REAL_LIST_HEADER, mid=200, buttons=tuple(rows)),))
+
+
+def _screen(tag: str) -> Observation:
+    buttons = (row(REAL_SET_PROMOTION, "Stats"), row("Delete proxy", "« Back to list"))
+    return Observation(messages=(bot(REAL_SCREEN.format(tag=tag), mid=200, buttons=buttons),))
+
+
+def test_a_reused_ip_is_promoted_on_the_button_that_names_our_tag() -> None:
+    for labels in ((OLD_LABEL, OUR_LABEL), (OUR_LABEL, OLD_LABEL)):
+        pick = next_action(P18_PROMO, Step.SENT_MYPROXIES, _page(*labels))
+        assert isinstance(pick, Press) and pick.label == OUR_LABEL and pick.then is Step.PRESSED_PROXY
+    # Without the tag, as before P18, the two buttons cannot be told apart.
+    untagged = PromoteJob(host="65.109.209.24", port=8443, channel="ipoxxo")
+    stuck = next_action(untagged, Step.SENT_MYPROXIES, _page(OLD_LABEL, OUR_LABEL))
+    assert isinstance(stuck, Stuck) and stuck.reason == "proxy_listed_twice"
+    # Labels without any hex: the address alone decides, as before.
+    plain = next_action(P18_PROMO, Step.SENT_MYPROXIES, _page("65.109.209.24:8443"))
+    assert isinstance(plain, Press) and plain.then is Step.PRESSED_PROXY
+    assert P18_TAG not in repr(P18_PROMO)
+
+
+def test_promotion_turns_pages_until_it_finds_our_button() -> None:
+    page1 = _page(
+        "td0838e67.ipoxxo.online 11aa22bb",
+        "5.161.131.202 33cc44dd",
+        OLD_LABEL,
+        "91.107.251.146 55ee66ff",
+        "t7aae9f0c.ipoxxo.online 77aa88bb",
+        "91.107.189.145 99cc00dd",
+        nav=("»",),
+    )
+    nxt = next_action(P18_PROMO, Step.SENT_MYPROXIES, page1)
+    assert isinstance(nxt, Press) and nxt.then is Step.PRESSED_NEXT_PAGE and nxt.label == "»"
+    page2 = _page(OUR_LABEL, "91.107.189.145 0a0b0c0d", nav=("«",))
+    pick = next_action(P18_PROMO, Step.PRESSED_NEXT_PAGE, page2)
+    assert isinstance(pick, Press) and pick.label == OUR_LABEL and pick.then is Step.PRESSED_PROXY
+    # The last page shows our address without our tag; a page that did not change; no address at all.
+    for step, observation, reason in (
+        (Step.PRESSED_NEXT_PAGE, _page(OLD_LABEL, nav=("«",)), "tag_not_in_list"),
+        (Step.PRESSED_NEXT_PAGE, Observation(messages=(), answer="Loading"), "proxy_not_in_list"),
+        (Step.SENT_MYPROXIES, _page("5.6.7.8 1a2b3c", nav=("«",)), "proxy_not_in_list"),
+        (Step.SENT_MYPROXIES, _page(OLD_LABEL, nav=("»", "Next")), "tag_not_in_list"),  # two ways on
+    ):
+        stuck = next_action(P18_PROMO, step, observation)
+        assert isinstance(stuck, Stuck) and stuck.reason == reason and stuck.step == step, observation
+
+
+def test_the_screen_of_another_registration_is_never_promoted() -> None:
+    other = next_action(P18_PROMO, Step.PRESSED_PROXY, _screen("5f5f5f5f" + "e" * 24))
+    assert isinstance(other, Stuck) and other.reason == "menu_of_another_tag"
+    ours = next_action(P18_PROMO, Step.PRESSED_PROXY, _screen(P18_TAG))
+    assert isinstance(ours, Press) and ours.label == REAL_SET_PROMOTION
+    # A screen that shows no tag at all says nothing either way.
+    plain = Observation(messages=(bot("Proxy 65.109.209.24:8443", buttons=(row(REAL_SET_PROMOTION),)),))
+    assert isinstance(next_action(P18_PROMO, Step.PRESSED_PROXY, plain), Press)
+    assert replies.screen_hex_words(REAL_SCREEN.format(tag=P18_TAG)) == [P18_TAG]
+    assert replies.screen_hex_words("Proxy t7aae9f0c.ipoxxo.online:8443 with the tag n/a") == []

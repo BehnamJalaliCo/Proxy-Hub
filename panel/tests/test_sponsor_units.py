@@ -190,7 +190,8 @@ def test_a_registered_proxy_gets_the_wanted_sponsor_and_campaigns_come_first() -
     registered = reg(REGISTERED, ad_tag=TAG, registered_at=NOW - timedelta(days=2))
     done = reg(REGISTERED, ad_tag=TAG, sponsor_channel="ipoxxo", node=NODE_B)
     work = pick([registered, done])
-    assert work is not None and work.job == PromoteJob(host="1.2.3.4", port=8443, channel="ipoxxo")  # type: ignore[attr-defined]
+    # The job carries the registration's tag: it picks our button when the list names the address twice.
+    assert work is not None and work.job == PromoteJob(host="1.2.3.4", port=8443, channel="ipoxxo", tag=TAG)  # type: ignore[attr-defined]
     assert work.priority == 2  # type: ignore[attr-defined]
     pending = reg(PENDING, node=NODE_B)
     proxy = Proxy(key=str(pending.proxy_key), host="1.2.3.4", port=8443, secret_hex=SECRET)

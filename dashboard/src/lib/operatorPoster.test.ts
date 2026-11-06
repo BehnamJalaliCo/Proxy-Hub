@@ -4,6 +4,7 @@ import { actionLabel, actorLabel } from "./labels";
 import {
   effectivePoster,
   ownPackText,
+  ownPackUpgrading,
   packErrorText,
   parsePackLink,
   POSTER_LABEL,
@@ -145,5 +146,15 @@ describe("the channel's own emoji pack", () => {
     expect(ownPackText({ ...base, state: "error", error: "x" }).tone).toBe("warning");
     expect(ownPackText({ ...base, state: "error", error: "429", retry_at: "2026-11-05T22:05:00Z" }).text).toContain("صبر");
     expect(ownPackText({ ...base, state: "pending", reason: null, emoji: 0 }).text).toContain("خودکار");
+  });
+});
+
+describe("ownPackUpgrading", () => {
+  it("says the posts move to a new version by themselves, and hides the switch until it is complete", () => {
+    const v2: OwnPack = { state: "ready", reason: null, name: "ipoxxo_v2_by_bot", link: "https://t.me/addemoji/ipoxxo_v2_by_bot", emoji: 9, total: 28, error: null, version: 2, replaces: "ipoxxo_by_bot" };
+    expect(ownPackUpgrading(v2)).toBe(true);
+    expect(ownPackText(v2).text).toContain("نسخه‌ی تازه");
+    expect(ownPackUpgrading({ ...v2, emoji: 28 })).toBe(false);
+    expect(ownPackUpgrading({ ...v2, replaces: null })).toBe(false);
   });
 });

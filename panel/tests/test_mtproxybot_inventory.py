@@ -272,6 +272,42 @@ async def test_the_inventory_maps_every_listed_proxy_and_keeps_no_secret(
     assert LIVE_TAG not in json.dumps([a["reasons"] for a in await actions(engine)])
 
 
+async def test_old_registrations_whose_rows_are_gone_are_found_from_what_the_panel_knows(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """P18: the rows of deleted nodes were removed by hand, so their registrations read "unknown".
+    An IPv4 one of our servers had (ip_history) and an older registration of the live address
+    (Hetzner gave the IPv4 again) are ours and dead; the live node's own address is not."""
+    await seed(engine, seal_key)
+    async with engine.begin() as db:
+        await db.execute(
+            text(
+                "INSERT INTO ip_history (ip, prefix24, location, first_seen_at) "
+                "VALUES ('203.0.113.77', '203.0.113.0/24', 'hel1', now())"
+            )
+        )
+    await inventory.request_job(engine, inventory.INVENTORY, actor="admin:owner", now=datetime.now(UTC))
+    await read_the_list(
+        engine,
+        vault,
+        LIVE_LABEL,
+        f"{LIVE_HOST} 0d0e0f10",
+        "203.0.113.77 1a1b1c1d",
+        UNKNOWN_LABEL,
+        "203.0.113.50 2a2b2c2d",
+    )
+    got = [(e["address"], e["status"], e["removable"], e["note"]) for e in (await view(engine))["entries"]]
+    assert got == [
+        (LIVE_HOST, "live", False, None),
+        (LIVE_HOST, "gone", True, "old_tag"),
+        ("203.0.113.77", "gone", True, "no_record"),
+        (UNKNOWN_IP, "unknown", False, None),
+        ("203.0.113.50", "unknown", False, None),  # the live node's own IPv4
+    ]
+    prepared = await prepare(engine, vault)
+    assert prepared.live_tags == frozenset({LIVE_TAG})
+
+
 async def test_the_inventory_then_reads_the_sponsor_of_each_live_proxy(
     engine: AsyncEngine, vault: Vault, seal_key: bytes
 ) -> None:

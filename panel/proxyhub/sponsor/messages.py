@@ -83,6 +83,11 @@ REASON_FA: Final[dict[str, str]] = {
     "no_tag_in_reply": "در پاسخ ربات tag ۳۲ رقمی پیدا نشد.",
     "proxy_not_in_list": "این پروکسی در فهرست ‎/myproxies‎ نبود.",
     "proxy_listed_twice": "این پروکسی دو بار در فهرست ‎/myproxies‎ بود.",
+    "tag_not_in_list": (
+        "نشانی این پروکسی در فهرست ‎/myproxies‎ بود، ولی هیچ دکمه‌ای tag ثبت ما را نداشت "
+        "(احتمالاً ثبت قدیمی همین IP است)."
+    ),
+    "menu_of_another_tag": "صفحه‌ی پروکسی tag دیگری داشت، نه tag ثبت ما؛ چیزی زده نشد.",
     "menu_of_another_proxy": "ربات منوی پروکسی دیگری را نشان داد.",
     "no_set_promotion_button": "دکمه‌ی «Set promotion» پیدا نشد.",
     "several_promotion_buttons": "چند دکمه‌ی «Set promotion» بود.",
@@ -143,6 +148,7 @@ LIST_REASON_FA: Final[dict[str, str]] = {
     "proxy_listed_twice": "دو دکمه‌ی یکسان برای این پروکسی بود و معلوم نبود کدام است.",
     "menu_of_another_proxy": "ربات صفحه‌ی پروکسی دیگری را نشان داد.",
     "menu_does_not_name_proxy": "صفحه‌ی پروکسی نشانی خودش را نشان نداد؛ برای ایمنی چیزی زده نشد.",
+    "menu_of_live_proxy": "صفحه‌ی پروکسی tag یک پروکسی زنده‌ی ما را داشت؛ حذف زده نشد.",
     "no_remove_button": "در صفحه‌ی پروکسی دکمه‌ای با شکل شناخته‌شده‌ی حذف نبود.",
     "several_remove_buttons": "در صفحه‌ی پروکسی چند دکمه‌ی حذف بود؛ برای ایمنی چیزی زده نشد.",
     "confirm_of_another_proxy": "صفحه‌ی تأیید نام پروکسی دیگری را داشت؛ تأیید زده نشد.",

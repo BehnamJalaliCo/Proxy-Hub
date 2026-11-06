@@ -398,12 +398,15 @@ class InviteLink:
 
 @dataclass(frozen=True)
 class StickerSetInfo:
-    """A sticker set as getStickerSet returns it: name, title, kind and each item's alt emoji."""
+    """A sticker set as getStickerSet returns it: name, title, kind, each item's alt emoji, and for
+    a custom emoji set each item's ``custom_emoji_id`` with its alt (the id a post's custom-emoji
+    entity carries, MTProto's document id)."""
 
     name: str
     title: str
     is_custom_emoji: bool
     alts: tuple[str, ...]
+    entries: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_result(cls, result: Any, method: str = "getStickerSet") -> StickerSetInfo:
@@ -412,16 +415,21 @@ class StickerSetInfo:
         stickers = obj.get("stickers")
         if not name or not isinstance(stickers, list):
             raise InvalidResponse(method, "sticker set without a name or stickers")
-        alts = tuple(
-            str(item["emoji"])
-            for item in stickers
-            if isinstance(item, dict) and isinstance(item.get("emoji"), str)
+        items = [item for item in stickers if isinstance(item, dict) and isinstance(item.get("emoji"), str)]
+        entries = tuple(
+            (str(item["custom_emoji_id"]), str(item["emoji"]))
+            for item in items
+            if isinstance(item.get("custom_emoji_id"), str)
+            and item["custom_emoji_id"].isascii()
+            and item["custom_emoji_id"].isdigit()
+            and len(item["custom_emoji_id"]) <= 20
         )
         return cls(
             name=name,
             title=_str(obj, "title") or "",
             is_custom_emoji=obj.get("sticker_type") == "custom_emoji",
-            alts=alts,
+            alts=tuple(str(item["emoji"]) for item in items),
+            entries=entries,
         )
 
 

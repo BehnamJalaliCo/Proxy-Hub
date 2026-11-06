@@ -154,7 +154,11 @@ async def _locked(
             if want_rights and t.role not in found_rights:
                 found_rights[t.role] = {"chat_id": t.chat_id, "status": "error", "error": exc.code}
     async with engine.begin() as conn:
-        if found_pack is not None:
+        # Only for the pack the poster uses NOW: the link (or the channel's own pack, which moves to a
+        # newer version by itself, proxyhub/posts/own_pack.py) may have changed while Telegram answered.
+        if found_pack is not None and operator.same_pack(
+            found_pack.short_name, (await operator.load_config(conn)).emoji_pack
+        ):
             await operator.save_pack(conn, _keep_entries(found_pack, await operator.load_pack(conn)))
         if want_rights:
             await operator.save_rights(conn, {"checked_at": iso(now), "channels": found_rights})

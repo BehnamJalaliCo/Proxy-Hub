@@ -4,8 +4,9 @@ deleted (pure state machines and mapping; no I/O). The I/O is proxyhub/sponsor/d
 
 @MTProxybot has no documentation (docs/11 S4). What is known from real traffic: ``/myproxies``
 answers "Here is the list of all proxies you created:" with one inline button per proxy, labelled
-"<host> <hex>" (P13), and a proxy's button opens its screen, which has "Set promotion". Nothing is
-known of pagination or of the removal flow, so every step below presses only a button in a strict,
+"<host> <hex>" (P13), and a proxy's button opens its screen, which has "Set promotion" (pagination
+and the screen: P18, below). Nothing is known of the confirmation of a removal, so every step below
+presses only a button in a strict,
 documented shape, checks the screen it lands on, and otherwise STOPS with a reason and the screens
 it saw as shapes (:func:`proxyhub.sponsor.replies.shape`: addresses, hex values, links and tokens
 replaced; no secret):
@@ -39,11 +40,21 @@ with the connection's removal permit and under a message that names the permitte
 one uses this address), ``gone`` (every registration of ours at this address is retired and its
 node was deleted), ``retired`` (retired, but its node still exists, e.g. a new address), or
 ``unknown`` (nothing of ours at this address). Only ``gone`` entries that can be told apart are
-``removable``; ``live`` and ``unknown`` ones never are.
+``removable``; ``live`` and ``unknown`` ones never are. Since P18 two more kinds are ``gone``: an
+older registration of a live address (Hetzner gave a deleted node's IPv4 again, :data:`OLD_TAG`)
+and an address of ours whose rows were deleted by hand while nothing holds it now
+(:data:`NO_RECORD`); see :func:`classify`. A removal also stops on a proxy screen that shows the tag
+of one of our live registrations.
+
+P18 saw the real list and screens: 10 buttons on 2 pages, two to a row, "»" under page 1 and "«"
+under page 2; a proxy's screen "Proxy <host:port> with the tag <hex>.\nPromoted channel: n/a.\nHow
+can I help?" with [Set promotion, Stats] and [Delete proxy, « Back to list]. The confirmation after
+"Delete proxy" has not been seen yet.
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -248,6 +259,7 @@ class Target:
     label_fp: str
     words: frozenset[str]
     copies_ok: bool = False
+    live_tags: frozenset[str] = frozenset()
 
     @property
     def address(self) -> str:
@@ -329,6 +341,8 @@ class MenuWalk:
                 )
             if not replies.names_proxy(text, words):
                 return self._stuck(step, "menu_does_not_name_proxy")
+            if replies.screen_names_any_tag(text, self.target.live_tags):
+                return self._stuck(step, "menu_of_live_proxy")
             return self._press_one(
                 step, removes, "remove_button", Step.PRESSED_REMOVE, "menu_does_not_name_proxy"
             )
@@ -422,6 +436,38 @@ class Mapped:
     removable: bool
     ports: tuple[int, ...]
     listed: int
+    note: str | None = None
+
+
+# Why an entry with no dead registration of ours behind it is still ``gone`` (P18):
+OLD_TAG: Final = "old_tag"  # a live address, but the label names an older registration's tag
+NO_RECORD: Final = "no_record"  # our address, its rows deleted, and no node holds it now
+_NODE_LABEL: Final = re.compile(r"^(slot[0-9]{1,4}|t[0-9a-f]{8})$")
+
+
+@dataclass(frozen=True)
+class Known:
+    """What else the panel knows of addresses, for entries whose rows were deleted by hand (P16,
+    P18). Every entry of the second account's list is a proxy WE registered (D37); the question is
+    only whether one of our nodes still uses it.
+
+    ``ips``: every IPv4 one of our servers ever had (``ip_history``). ``zones``: our pool domains
+    (Cloudflare zones); a node's own names are ``slot<N>.<zone>`` and ``t<8 hex>.<zone>``.
+    ``held``: every address a node that is not deleted holds now (its IPv4 and its names) and every
+    address of a registration that is not retired."""
+
+    ips: frozenset[str] = frozenset()
+    zones: frozenset[str] = frozenset()
+    held: frozenset[str] = frozenset()
+
+    def ours_and_free(self, host: str) -> bool:
+        host = host.lower()
+        if host in self.held:
+            return False
+        if host in self.ips:
+            return True
+        label, _, zone = host.partition(".")
+        return zone in self.zones and bool(_NODE_LABEL.fullmatch(label))
 
 
 def node_gone(reg: Reg, nodes: dict[uuid.UUID, str]) -> bool:
@@ -440,13 +486,36 @@ def _at(entry: EntryFacts, reg: Reg) -> bool:
     return reg.host.lower() == entry.host and (entry.port is None or reg.port == entry.port)
 
 
-def classify(entries: Sequence[EntryFacts], regs: Sequence[Reg], nodes: dict[uuid.UUID, str]) -> list[Mapped]:
+def classify(
+    entries: Sequence[EntryFacts],
+    regs: Sequence[Reg],
+    nodes: dict[uuid.UUID, str],
+    known: Known | None = None,
+) -> list[Mapped]:
     """Each entry's status and whether it may be removed (module docstring). A ``gone`` entry is
     removable when the label names its own (dead) registration's tag, or when the list names its
-    address no more often than we have dead registrations there."""
+    address no more often than we have dead registrations there.
+
+    Two more kinds are ``gone`` and removable (P18), each with a ``note``:
+
+    * :data:`OLD_TAG`: a live registration uses the address, another button of the list names that
+      registration's tag, and this button names none of our tags. Hetzner gave the address of a
+      deleted node to a new one; this is the deleted node's registration. (Every live registration
+      at the address must have its own button, or nothing here is removable.)
+    * :data:`NO_RECORD`: nothing of ours is recorded at the address (its rows were deleted by hand),
+      the address is ours (:meth:`Known.ours_and_free`: an IPv4 one of our servers had, or a node
+      name on our domain) and no node and no registration holds it now.
+
+    The removal itself still checks the proxy's screen: it must not show a live tag
+    (:class:`MenuWalk`)."""
+    known = known or Known()
     listed: dict[tuple[str, int | None], int] = {}
     for e in entries:
         listed[(e.host, e.port)] = listed.get((e.host, e.port), 0) + 1
+    labelled: dict[tuple[str, int | None], set[uuid.UUID]] = {}
+    for e in entries:
+        if e.tag_registration_id is not None:
+            labelled.setdefault((e.host, e.port), set()).add(e.tag_registration_id)
     out: list[Mapped] = []
     for e in entries:
         at = [r for r in regs if _at(e, r)]
@@ -457,7 +526,22 @@ def classify(entries: Sequence[EntryFacts], regs: Sequence[Reg], nodes: dict[uui
         ports = tuple(sorted({r.port for r in at}))
         times = listed[(e.host, e.port)]
         if not deciding:
-            out.append(Mapped(UNKNOWN, (), False, False, ports, times))
+            free = known.ours_and_free(e.host)
+            out.append(
+                Mapped(GONE if free else UNKNOWN, (), False, free, ports, times, NO_RECORD if free else None)
+            )
+            continue
+        live_here = [r for r in at if r.state != RETIRED]
+        if (
+            not exact
+            and e.tag_registration_id is None
+            and live_here
+            and all(
+                r.registration_id is not None and r.registration_id in labelled.get((e.host, e.port), set())
+                for r in live_here
+            )
+        ):
+            out.append(Mapped(GONE, tuple(live_here), False, True, ports, times, OLD_TAG))
             continue
         if any(r.state != RETIRED for r in deciding):
             status = LIVE
@@ -471,9 +555,10 @@ def classify(entries: Sequence[EntryFacts], regs: Sequence[Reg], nodes: dict[uui
     return out
 
 
-def target_of(entry: EntryFacts, mapped: Mapped, *, copies: int = 1) -> Target:
+def target_of(entry: EntryFacts, mapped: Mapped, *, copies: int = 1, live_tags: Iterable[str] = ()) -> Target:
     """The walk's target for an entry: its screens may name ``host`` or ``host:port`` for the
-    entry's own port, else for our ports at that address."""
+    entry's own port, else for our ports at that address. ``live_tags``: the tags of our live
+    registrations; a removal stops on a screen that shows one."""
     ports: Iterable[int] = (entry.port,) if entry.port is not None else mapped.ports
     return Target(
         host=entry.host,
@@ -481,4 +566,5 @@ def target_of(entry: EntryFacts, mapped: Mapped, *, copies: int = 1) -> Target:
         label_fp=entry.label_fp,
         words=replies.address_words(entry.host, ports),
         copies_ok=copies > 1 and mapped.removable,
+        live_tags=frozenset(live_tags),
     )

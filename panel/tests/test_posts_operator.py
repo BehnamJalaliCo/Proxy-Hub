@@ -66,7 +66,7 @@ from proxyhub.vault import Vault
 
 pytestmark = pytest.mark.db
 
-PACK = [(5_001, "📡"), (5_002, "⌛"), (5_003, "🔗"), (5_004, "🔐")]
+PACK = [(5_001, "📡"), (5_002, "⌛"), (5_003, "🔗"), (5_004, "🔐"), (5_005, "🔒")]
 
 
 @pytest.fixture
@@ -280,7 +280,9 @@ async def test_a_post_goes_out_with_the_owners_animated_emoji_and_its_message_id
     assert send.message == entities.parse_html(job.payload["text"]).text
     animated = [e for e in send.entities if isinstance(e, types.MessageEntityCustomEmoji)]
     shown = {entities.utf16_slice(send.message, e.offset, e.length): e.document_id for e in animated}
-    assert shown == {"📡": 5_001, "🔐": 5_004, "🔗": 5_003}
+    # The seeded title brings its own emoji (not in the pack); the lock above the config and the
+    # signature are animated (D48: no 📡 or 🔐 header any more).
+    assert shown == {"🔒": 5_005, "🔗": 5_003}
     assert any(isinstance(e, types.MessageEntityTextUrl) for e in send.entities)  # the proxy links
     # Recorded exactly like the bot's post: channel_posts with Telegram's message id, job done.
     [cp] = await rows(engine, "SELECT role, chat_id, message_id, outbox_id, text_sha256 FROM channel_posts")
@@ -608,7 +610,8 @@ async def test_preview_lists_which_emoji_become_animated(engine: AsyncEngine, va
         h = await links.harvest(conn, PROVIDERS)
         preview = await views.preview(conn, datetime.now(UTC), h)
     shown = {x["emoji"]: x["animated"] for x in preview["emoji"]}
-    assert shown["📡"] is True and shown["🔐"] is True and shown["🔗"] is True
+    assert shown["🔒"] is True and shown["🔗"] is True
+    assert "📡" not in shown and "🔐" not in shown  # the headers went with D48
     assert all(isinstance(v, bool) for v in shown.values())
 
 

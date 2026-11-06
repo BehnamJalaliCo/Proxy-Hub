@@ -90,8 +90,8 @@ SETTINGS: dict[str, Any] = {
     "posts_per_day": 10,
     "day_start": "08:00",
     "day_end": "00:00",
-    "max_mtproto": 12,
-    "max_reality": 3,
+    "max_mtproto": 6,
+    "max_reality": 1,
     "edit_window_hours": 48,
     "recycle_after_days": 14,
     "status_texts": {
@@ -258,7 +258,7 @@ async def test_preview_status_and_recent(
     await setup_telegram(engine, vault)
     preview = (await client.get("/api/posts/preview")).json()
     assert preview["blocked"] is None and preview["target"] == "test"
-    assert preview["links"] == {"mtproto": 2, "reality": 2} and preview["content_item"]["recycled"] is False
+    assert preview["links"] == {"mtproto": 2, "reality": 1} and preview["content_item"]["recycled"] is False
     assert node_secret(nodes[0]) in preview["text"] and preview["text"].endswith("🔗 \u200e@ipoxxo")
     assert 0 < preview["chars"] <= 4096
     status = await client.get("/api/posts/status")
@@ -281,7 +281,7 @@ async def test_preview_status_and_recent(
     await set_node(engine, nodes[0], state="burned")
     recent = await client.get("/api/posts/recent")
     post = recent.json()["posts"][0]
-    assert post["state"] == "sent" and post["title"] and len(post["links"]) == 4
+    assert post["state"] == "sent" and post["title"] and len(post["links"]) == 3  # 2 proxies, 1 config
     assert {x["status"] for x in post["links"]} == {"active"}
     for n in nodes:  # rule 3: only the preview carries links
         for value in (node_secret(n), node_vless_id(n)):
@@ -310,7 +310,7 @@ async def test_preview_shows_the_links_the_next_post_takes(
     async def preview_slots() -> list[int]:
         return slots_in((await client.get("/api/posts/preview")).json()["text"])
 
-    assert await preview_slots() == [1, 2, 3]  # 3 Reality configs per post, of 4 slots
+    assert await preview_slots() == [1]  # one Reality config per post (D48), of 4 slots
     planned = (await client.get("/api/posts/status")).json()["today"]["planned"]
     first = datetime.fromisoformat(planned[0]["at"]) + timedelta(seconds=10)
     async with engine.begin() as conn:
@@ -319,5 +319,5 @@ async def test_preview_shows_the_links_the_next_post_takes(
             return await links.harvest(conn, PROVIDERS)
 
         assert await publisher.publish_due(conn, first, harvest) == "queued"
-    assert slots_in((await jobs(engine, "send_post"))[0].payload["text"]) == [1, 2, 3]
-    assert await preview_slots() == [2, 3, 4]  # the next post starts one slot further
+    assert slots_in((await jobs(engine, "send_post"))[0].payload["text"]) == [1]
+    assert await preview_slots() == [2]  # the next post starts one slot further

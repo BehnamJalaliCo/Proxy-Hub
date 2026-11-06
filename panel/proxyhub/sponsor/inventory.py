@@ -43,6 +43,7 @@ from sqlalchemy import delete, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from proxyhub.cloudflare.service import node_dns_name
 from proxyhub.db.models import Setting
 from proxyhub.db.models_sponsor import MtproxybotEntry
 from proxyhub.fleet.actions import iso
@@ -61,7 +62,7 @@ from proxyhub.sponsor.botlist import (
     Removed,
     WalkStuck,
 )
-from proxyhub.sponsor.conversation import Step
+from proxyhub.sponsor.conversation import MESSAGES_NEEDED, PromoteJob, RegisterJob, Step
 from proxyhub.sponsor.messages import cleanup_stuck_alert, list_reason
 from proxyhub.sponsor.provider import node_of
 from proxyhub.sponsor.service import NOT_COUNTED, Deps, _log, with_bot_chat
@@ -87,7 +88,8 @@ MODES: Final = frozenset({LOOK, OBSERVE, REMOVE})
 STATES: Final = frozenset({QUEUED, RUNNING, DONE, STUCK, STOPPED, FAILED})
 MAX_FAILURES: Final = 3
 MAX_SCREENS: Final = 30
-RESERVE: Final = 7  # one registration (3) and one sponsor change (4) stay possible this hour
+# One registration and one sponsor change stay possible this hour.
+RESERVE: Final = MESSAGES_NEEDED[RegisterJob] + MESSAGES_NEEDED[PromoteJob]
 REMOVAL_STEPS: Final = frozenset({Step.PRESSED_REMOVE, Step.PRESSED_CONFIRM})
 # The observation that allows turning removal on: the dead proxy's screen named it and had exactly
 # one button of the removal shape.
@@ -437,10 +439,30 @@ class _Prepared:
     state: BotListState
     plan: Plan
     copies: int
+    live_tags: frozenset[str] = frozenset()
 
 
 def _copies(entries: Sequence[Entry], entry: Entry) -> int:
     return sum(1 for e in entries if e.label_fp == entry.label_fp)
+
+
+async def known_addresses(db: AsyncConnection, regs: Sequence[store.Reg]) -> botlist.Known:
+    """:class:`proxyhub.sponsor.botlist.Known`: the IPv4s our servers ever had, our pool domains, and
+    the addresses held now by a node that is not deleted or by a registration that is not retired."""
+    ips = {str(r[0]) for r in await db.execute(text("SELECT DISTINCT host(ip) FROM ip_history"))}
+    zones = {str(r[0]).lower() for r in await db.execute(text("SELECT name FROM cf_zones"))}
+    held = {r.host.lower() for r in regs if r.state != store.RETIRED}
+    rows = await db.execute(text("SELECT id, slot, host(ipv4) FROM nodes WHERE state <> 'deleted'"))
+    for node_id, slot, ipv4 in rows:
+        if ipv4 is not None:
+            held.add(str(ipv4))
+        held.update(node_dns_name(slot, node_id, zone) for zone in zones)
+    return botlist.Known(ips=frozenset(ips), zones=frozenset(zones), held=frozenset(held))
+
+
+def live_tags(regs: Sequence[store.Reg]) -> frozenset[str]:
+    """The tags of our registrations that are not retired: a removal never touches their screen."""
+    return frozenset(r.ad_tag for r in regs if r.ad_tag and r.state != store.RETIRED)
 
 
 async def _context(
@@ -449,7 +471,8 @@ async def _context(
     regs = await store.load_regs(db)
     nodes = await store.node_states(db, {n for r in regs if (n := node_of(r.proxy_key)) is not None})
     entries = await load_entries(db)
-    mapped = botlist.classify([e.facts() for e in entries], regs, nodes)
+    known = await known_addresses(db, regs)
+    mapped = botlist.classify([e.facts() for e in entries], regs, nodes, known)
     return regs, nodes, entries, mapped
 
 
@@ -464,7 +487,7 @@ async def _prepare(deps: Deps, now: datetime, paused: bool) -> _Prepared | str:
         account = await account_store.load_row(db)
         if account.state != account_state.CONNECTED or account.mtproxybot_id is None:
             return "no_account"
-        _, _, entries, mapped = await _context(db)
+        regs, _, entries, mapped = await _context(db)
         step_plan = plan(job, state.last_list, list(zip(entries, mapped, strict=True)), paused=paused)
         if step_plan.kind == "wait":
             return "paused"
@@ -485,7 +508,7 @@ async def _prepare(deps: Deps, now: datetime, paused: bool) -> _Prepared | str:
                 context={"requested_by": job.requested_by},
             )
         copies = _copies(entries, step_plan.entry) if step_plan.entry is not None else 0
-        return _Prepared(state=state, plan=step_plan, copies=copies)
+        return _Prepared(state=state, plan=step_plan, copies=copies, live_tags=live_tags(regs))
 
 
 async def step(deps: Deps, *, paused: bool = False) -> str:
@@ -503,7 +526,9 @@ async def step(deps: Deps, *, paused: bool = False) -> str:
     if entry is None or mapped is None:
         machine, target = botlist.ListWalk(), "@MTProxybot"
     else:
-        walk_target = botlist.target_of(entry.facts(), mapped, copies=prepared.copies)
+        walk_target = botlist.target_of(
+            entry.facts(), mapped, copies=prepared.copies, live_tags=prepared.live_tags
+        )
         machine, target = MenuWalk(walk_target, remove=the_plan.kind == "remove"), entry.address
         if the_plan.kind == "remove":
             permit = walk_target.words
@@ -933,6 +958,7 @@ def _entry_view(entry: Entry, mapped: Mapped, nodes: dict[uuid.UUID, str], wante
         "status": mapped.status,
         "exact": mapped.exact,
         "removable": mapped.removable and entry.pressable,
+        "note": mapped.note,
         "registration": None
         if reg is None
         else {
