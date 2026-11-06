@@ -714,7 +714,8 @@ async def test_an_extra_is_kept_while_its_node_lives_and_goes_with_it(env: Env) 
     others = [await make_node(env.engine, slot=i, ipv4=f"203.0.113.{20 + i}") for i in range(2, 7)]
     await env.run()
     assert await proxies(env.engine, a) == all_links(a, 6)
-    assert all(await proxies(env.engine, n) == all_links(n, 1) for n in others)
+    for n in others:
+        assert await proxies(env.engine, n) == all_links(n, 1)
     assert all(u.enabled for u in await users(env.engine, a))
     got = await links(env)
     assert sum(1 for x in got.values() if x.extra_of is not None and x.status == "active") == 5

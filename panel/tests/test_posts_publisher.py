@@ -931,8 +931,9 @@ async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep
     await setup_telegram(engine, vault)
     now = slot_time(2)
     try:
-        # Node 1: open only from MCI, an hour ago. Node 2: open from MCI AND Rightel (not one
-        # operator's). Node 3: open only from Rightel, but 7 hours ago (too old), and fresh "down".
+        # Node 1: open only from MCI, an hour ago. Node 2: open from MCI AND Rightel: MCI comes first
+        # and may name two links (owner: up to two per operator). Node 3: open only from Rightel, but
+        # 7 hours ago (too old).
         await probed(
             engine, nodes[0], now - timedelta(hours=1), {"8443": {MCI_KEY: "up", RIGHTEL_KEY: "down"}}
         )
@@ -941,17 +942,21 @@ async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep
         await probed(engine, nodes[2], now - timedelta(hours=8), {"443": {MCI_KEY: "up"}})  # another port
         post_id, _ = await posted(engine, vault, now)
         body = (await jobs(engine, "send_post"))[-1].payload["text"]
-        assert grid_rows(body) == [f"همراه{NBSP}اول • {word(1)}", word(2)]  # named first, no number once
+        mci = f"همراه{NBSP}اول"
+        assert grid_rows(body) == [
+            f"{mci}{NBSP}۱ • {mci}{NBSP}۲",
+            "پروکسی",
+        ]  # named first; a lone word: no number
         assert "—\n🔗 \u200e@ipoxxo" in body
         sql = (
             "SELECT slot, operator FROM post_links WHERE post_id = :p AND kind = 'mtproto' ORDER BY position"
         )
         named = await rows(engine, sql, p=post_id)
-        assert [(r.slot, r.operator) for r in named] == [(1, "mci"), (2, None), (3, None)]
+        assert [(r.slot, r.operator) for r in named] == [(1, "mci"), (2, "mci"), (3, None)]
         [action] = await rows(
             engine, "SELECT reasons::text AS r FROM actions_log WHERE action = 'posts.queued'"
         )
-        assert '"operator_names": ["mci"]' in action.r
+        assert '"operator_names": ["mci", "mci"]' in action.r
         # Later probes never rename a posted link: node 1 is now closed from MCI, node 3 open from
         # Rightel only. An edit (node 2 burns) keeps the names the post was made with.
         later = now + timedelta(minutes=5)
@@ -960,8 +965,8 @@ async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep
         await set_node(engine, nodes[1], state="burned")
         assert await refresh(engine, later + timedelta(minutes=1)) == 1
         edited = await edit_text(engine)
-        assert grid_rows(edited) == [f"همراه{NBSP}اول • 🚫{NBSP}{word(1)}", word(2)]
-        assert f"🚫{NBSP}<s>{word(1)}</s>" in edited
+        assert grid_rows(edited) == [f"{mci}{NBSP}۱ • 🚫{NBSP}{mci}{NBSP}۲", "پروکسی"]
+        assert f"🚫{NBSP}<s>{mci}{NBSP}۲</s>" in edited
         # A new post now reads the new probes: node 3 is Rightel's, node 1 is a plain proxy again.
         await deliver(engine, (await jobs(engine, "edit_post"))[-1].id, message_id=0)
         await quiet(engine, [], interval=0)
