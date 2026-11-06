@@ -36,6 +36,11 @@ not involved; the owner's own switch is ``RealitySettings.enabled``.
   full, nothing above would end it now, and a node of its scope serves Reality and passed the
   scope's target check. It is not renewed while its scope waits to move to a new target (those end
   at their own time so the scope can switch).
+* A REALITY target or server name Xray warns about (proxyhub/targets/risky.py: apple, icloud,
+  microsoft, .ru, .ir, .cn; P19 found a node still on www.apple.com) is never put on a key, and no
+  config is made or renewed on a key that carries one. A scope whose key still carries one leaves it
+  at once for the settings' target, like a failing target: its active configs end as burned. The
+  settings' own target is kept off such names by proxyhub/targets (``auto``) and the API.
 """
 
 from __future__ import annotations
@@ -70,11 +75,12 @@ from proxyhub.reality.store import (
     telemt_clash,
     ws_tls_plan,
 )
+from proxyhub.targets.risky import risky_target
 from proxyhub.vault import Vault, delete_secret
 
 S = NodeState
 EndStatus = Literal["expired", "full", "burned"]
-Retarget = Literal["keep", "wait", "switch", "switch_burn"]
+Retarget = Literal["keep", "hold", "wait", "switch", "switch_burn"]
 # An IP link only works on its own server, while that server is in service.
 IP_SERVING: Final = frozenset({S.READY, S.UNHEALTHY, S.REPAIRING})
 # A node's agent must have reported this recently for the node to get a new config.
@@ -128,16 +134,20 @@ def retarget_decision(
 ) -> Retarget:
     """What happens to a scope whose key may carry an older target than the settings.
 
-    ``keep``: the key already has the settings' target. ``switch``: take the new target now (no
-    active config uses the old one). ``switch_burn``: the old target fails from the scope's nodes, so
-    its active configs cannot work: they end as burned and the new target is taken now. ``wait``:
+    ``keep``: the key already has the settings' target. ``hold``: the settings' target is a name
+    Xray warns about (proxyhub/targets/risky.py), which no key takes; the key stays as it is.
+    ``switch``: take the new target now (no active config uses the old one). ``switch_burn``: the
+    old target fails from the scope's nodes, or is a name Xray warns about, so its active configs
+    cannot work or must not go on: they end as burned and the new target is taken now. ``wait``:
     the old target works and links of it are active; no new config is made on it, and the switch
     follows once they have ended."""
     if key_target == (settings.target, settings.target_host):
         return "keep"
+    if risky_target(settings.target, settings.target_host):
+        return "hold"
     if active_configs == 0:
         return "switch"
-    if old_target_failing:
+    if old_target_failing or risky_target(*key_target):
         return "switch_burn"
     return "wait"
 
@@ -279,6 +289,8 @@ async def renew_configs(conn: AsyncConnection, settings: RealitySettings, now: d
         reality = settings.transport == "reality"
         if reality and (key.target, key.server_name) != (settings.target, settings.target_host):
             continue  # its scope moves to the owner's new target once its configs have ended
+        if reality and risky_target(key.target, key.server_name):
+            continue  # a name Xray warns about: such a config ends at its own time, at the latest
         if key.id not in healthy:
             scope_nodes = [
                 n
@@ -381,8 +393,11 @@ class Retargeted:
     node_id: uuid.UUID | None
     old_target: str
     new_target: str
-    # Configs of the old target that ended as burned with it (it failed from the scope's nodes).
+    # Configs of the old target that ended as burned with it (it failed from the scope's nodes, or
+    # Xray warns about its name).
     burned: tuple[int, ...]
+    # The old target or server name is one Xray warns about (proxyhub/targets/risky.py).
+    old_risky: bool = False
 
 
 async def retarget_scopes(
@@ -390,11 +405,14 @@ async def retarget_scopes(
 ) -> list[Retargeted]:
     """Move every key scope whose target differs from the settings to the settings' target, as
     :func:`retarget_decision` says. Independent of any node being eligible: a scope whose old
-    target fails gets out of that state here, and its nodes then check the new target. Only with
-    the ``reality`` transport (``ws_tls`` has no REALITY target; a later switch back retargets)."""
+    target fails (or has a name Xray warns about) gets out of that state here, and its nodes then
+    check the new target. Only with the ``reality`` transport (``ws_tls`` has no REALITY target; a
+    later switch back retargets). Never onto a target Xray warns about."""
     if settings.transport != "reality":
         return []
     wanted = (settings.target, settings.target_host)
+    if risky_target(*wanted):
+        return []  # "hold" for every key
     stale = sorted(
         (k for k in (await keys_by_scope(conn)).values() if k.target_pair != wanted), key=lambda k: k.id
     )
@@ -426,7 +444,7 @@ async def retarget_scopes(
             active_configs=len(active),
             old_target_failing=failing,
         )
-        if decision in ("keep", "wait"):
+        if decision in ("keep", "hold", "wait"):
             continue
         burned: list[int] = []
         if decision == "switch_burn":
@@ -455,6 +473,7 @@ async def retarget_scopes(
                 old_target=k.target,
                 new_target=settings.target,
                 burned=tuple(sorted(int(i) for i in burned)),
+                old_risky=risky_target(*k.target_pair),
             )
         )
     return out
@@ -512,6 +531,7 @@ class NewKey:
     key_id: int
     slot: int | None
     node_id: uuid.UUID | None
+    target: str = ""  # the REALITY target the key carries
 
 
 async def ensure_keys(
@@ -521,7 +541,16 @@ async def ensure_keys(
     vault_factory: VaultFactory | None = None,
 ) -> list[NewKey]:
     """A key pair (private key in the vault) with the settings' target for every scope that has a
-    node able to serve Reality and no key yet. No config yet: its node first checks the target."""
+    node able to serve Reality and no key yet. No config yet: its node first checks the target.
+
+    Never a target Xray warns about: with ``reality`` no key is made while the settings' target is
+    one (proxyhub/targets replaces it first); ``ws_tls`` uses no REALITY target, so its keys get the
+    default one until a switch back to ``reality`` retargets them."""
+    target, server_name = settings.target, settings.target_host
+    if risky_target(target, server_name):
+        if settings.transport == "reality":
+            return []
+        target, server_name = RealitySettings().target, RealitySettings().target_host
     vaults = vault_factory or VaultFactory()
     by_scope = await _serving_scopes(conn, now, await all_statuses(conn))
     keys = await keys_by_scope(conn)
@@ -542,8 +571,8 @@ async def ensure_keys(
                     node_id=value if kind == "node" else None,
                     public_key=pair.public,
                     short_id=new_short_id(),
-                    target=settings.target,
-                    server_name=settings.target_host,
+                    target=target,
+                    server_name=server_name,
                     secret_name=name,
                     ws_path=new_ws_path(),
                 )
@@ -551,7 +580,12 @@ async def ensure_keys(
             )
         ).scalar_one()
         made.append(
-            NewKey(key_id=int(new_id), slot=node.slot, node_id=None if node.slot is not None else node.id)
+            NewKey(
+                key_id=int(new_id),
+                slot=node.slot,
+                node_id=None if node.slot is not None else node.id,
+                target=target,
+            )
         )
     return made
 
@@ -588,6 +622,8 @@ async def create_configs(conn: AsyncConnection, settings: RealitySettings, now: 
         if settings.transport == "reality":
             if key.target_pair != (settings.target, settings.target_host):
                 continue  # the scope moves to the new target once its configs ended (retarget_scopes)
+            if risky_target(*key.target_pair):
+                continue  # a name Xray warns about: no link ever carries it
             target: tuple[str, str] | None = key.target_pair
         else:
             assert names is not None

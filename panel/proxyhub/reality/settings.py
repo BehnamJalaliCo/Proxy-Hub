@@ -83,6 +83,9 @@ class RealitySettings(BaseModel):
     # D41: a working config gets another cap_hours and cap_gb before it ends (same link).
     renew: bool = True
     # auto: proxyhub/targets picks target_host among the candidates (P15); manual: the owner's.
+    # A name Xray warns about (proxyhub/targets/risky.py, P19) still loads here, so a value stored
+    # earlier never turns the whole settings into defaults; the API refuses a new one, ``auto``
+    # replaces it, and proxyhub/reality/policy.py never puts it on a key or a config.
     target_mode: TargetMode = "auto"
     target_host: str = "dl.google.com"
     target_port: int = Field(default=443, ge=1, le=65535)

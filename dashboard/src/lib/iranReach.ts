@@ -131,10 +131,22 @@ export function normalizeHost(raw: string): string {
   return raw.trim().toLowerCase().replace(/\.+$/, "");
 }
 
-/** The candidate list's problem (Persian), or null: 1 to 12 DNS names, not IPs. */
+/** Xray 26.10.31's own warning for a REALITY server name (infra/conf/transport_security.go), as the
+ * panel refuses it (panel/proxyhub/targets/risky.py): apple, icloud or microsoft anywhere in the
+ * name, or a name ending in .ru, .ir or .cn. */
+export function riskySni(host: string): boolean {
+  const sn = normalizeHost(host);
+  return [".ru", ".ir", ".cn"].some((s) => sn.endsWith(s)) || ["apple", "icloud", "microsoft"].some((w) => sn.includes(w));
+}
+
+/** The candidate list's problem (Persian), or null: 1 to 12 DNS names, not IPs, none Xray warns about. */
 export function candidatesProblem(hosts: string[]): string | null {
   if (hosts.length === 0) return "دست‌کم یک سایت نامزد لازم است.";
   if (hosts.length > 12) return "حداکثر ۱۲ سایت نامزد.";
   const bad = hosts.find((h) => !HOST.test(h) || /^[\d.]+$/.test(h));
-  return bad === undefined ? null : `«${bad}» نام دامنه نیست (مثلاً www.apple.com، نه IP).`;
+  if (bad !== undefined) return `«${bad}» نام دامنه نیست (مثلاً github.com، نه IP).`;
+  const risky = hosts.find(riskySni);
+  return risky === undefined
+    ? null
+    : `«${risky}» سایت هدف نمیشود: خود Xray هشدار میدهد که نامی با apple، icloud یا microsoft (یا پایان ‎.ru، ‎.ir و ‎.cn) احتمال بسته شدن IP سرور را بالا میبرد.`;
 }
