@@ -46,7 +46,7 @@ async def clean(engine: AsyncEngine) -> None:
             {"p": "%.test-reg"},
         )
         await conn.execute(text("DELETE FROM mtproxy_registrations WHERE host LIKE :p"), {"p": "%.test-reg"})
-        await conn.execute(text("DELETE FROM settings WHERE key = 'mtproto'"))
+        await conn.execute(text("DELETE FROM settings WHERE key IN ('mtproto', 'posting')"))
         await conn.execute(text("DELETE FROM actions_log"))
 
 

@@ -32,6 +32,15 @@ def user_name_for(node_id: uuid.UUID) -> str:
     return f"{USER_PREFIX}{node_id.hex[:16]}"
 
 
+def extra_user_name(node_id: uuid.UUID, ordinal: int) -> str:
+    """The node's ``ordinal``-th EXTRA Telemt user (decision D49), next to its primary
+    :func:`user_name_for`: ``mt_<16 hex>_x<ordinal>`` (22 characters, a valid TOML key and metrics
+    label, unique across nodes). Never registered with @MTProxybot."""
+    if not 1 <= ordinal <= 9:
+        raise ValueError("an extra user's ordinal is 1 to 9")
+    return f"{user_name_for(node_id)}_x{ordinal}"
+
+
 def proxy_key(node_id: uuid.UUID, user: str) -> str:
     return f"{KIND}:{node_id}:{user}"
 
@@ -64,10 +73,12 @@ def persian_number(n: int) -> str:
     return str(n).translate(_PERSIAN_DIGITS)
 
 
-def label_for(slot: int | None, is_test: bool) -> str:
-    """Short Persian label for the owner (dashboard, logs): "پروکسی ۳" for slot 3. A channel post
-    numbers its «پروکسی N» words by their place in that post instead, whatever the slot
-    (proxyhub/telegram/templates.py, decision D48)."""
+def label_for(slot: int | None, is_test: bool, ordinal: int = 0) -> str:
+    """Short Persian label for the owner (dashboard, logs): "پروکسی ۳" for slot 3, and for its
+    extra links (decision D49) "پروکسی ۳، لینک ۲" and up. A channel post numbers its words by their
+    place in that post instead, whatever the slot (proxyhub/telegram/templates.py, D48 and D50)."""
     if slot is not None:
-        return f"پروکسی {persian_number(slot)}"
-    return "پروکسی آزمایشی" if is_test else "پروکسی"
+        base = f"پروکسی {persian_number(slot)}"
+    else:
+        base = "پروکسی آزمایشی" if is_test else "پروکسی"
+    return base if ordinal == 0 else f"{base}، لینک {persian_number(ordinal + 1)}"

@@ -6,6 +6,8 @@ import html
 import itertools
 import re
 import secrets
+import uuid
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
@@ -15,7 +17,7 @@ from hypothesis import strategies as st
 from pydantic import ValidationError
 
 from proxyhub.links.contract import ProxyLink
-from proxyhub.posts import content, links, plan
+from proxyhub.posts import content, links, operators, plan
 from proxyhub.posts import settings as posting
 from proxyhub.posts.content import ContentInvalid
 from proxyhub.posts.entities import parse_html
@@ -122,9 +124,9 @@ def test_post_is_title_body_proxy_grid_config_and_tag_in_that_order() -> None:
     assert f">{word(2)}</a>\n<a href=" in post and f">{word(3)}</a>\n\n🔒 " in post
     # The config: ONE line with its end time, then each link under a tiny label line in its OWN
     # collapsed quote that holds nothing but the config as inline code (one tap, one config).
-    assert (f"\n\n{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{quoted(xhttp)}\n\n🔗 ‎@ipoxxo") in post
+    assert (f"\n\n{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{quoted(xhttp)}\n\n—\n🔗 ‎@ipoxxo") in post
     assert one_config_per_quote(post)
-    assert post.endswith("</blockquote>\n\n🔗 ‎@ipoxxo")
+    assert post.endswith("</blockquote>\n\n—\n🔗 ‎@ipoxxo")
     assert "#%40ipoxxo%201" in post  # the config's own name (D41) stays inside it
     # No section headers, no ⚡, no <pre> (Telegram nests no pre in a quote), no «کانفیگ ۱».
     for gone in ("<pre", "⚡", "📡", "🔐", "⏳", "پروکسی‌ها", "کانفیگ ۱", "اتصال"):
@@ -171,7 +173,7 @@ def test_dead_links_keep_their_place_lose_their_link_and_get_marks() -> None:
     # A config with nothing left is ONE status line in its place: no lock line, no quote.
     assert (
         f"<s>{word(4)}</s>\n\n⌛️ زمان این کانفیگ تمام شد\n\n"
-        "🔴 ظرفیت این کانفیگ پر شد\n\n🚫 این کانفیگ از دسترس خارج شد\n\n🔗" in post
+        "🔴 ظرفیت این کانفیگ پر شد\n\n🚫 این کانفیگ از دسترس خارج شد\n\n—\n🔗" in post
     )
     assert "🔒" not in post and QUOTE not in post and "<code" not in post and "vless://" not in post
     assert ALL_DEAD_LINE not in post  # one link still works
@@ -184,14 +186,14 @@ def test_a_config_and_its_xhttp_link_share_one_line_each_in_its_own_quote() -> N
     post = render_post(None, [tcp, xhttp, alone], "@ipoxxo").text
     assert post == (
         f"{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{quoted(xhttp)}\n\n"
-        f"🔒 کانفیگ V2Ray — اعتبار تا پنجشنبه ساعت ۲۰:۳۰\n{quoted(alone)}\n\n🔗 ‎@ipoxxo"
+        f"🔒 کانفیگ V2Ray — اعتبار تا پنجشنبه ساعت ۲۰:۳۰\n{quoted(alone)}\n\n—\n🔗 ‎@ipoxxo"
     )  # a config without its XHTTP link: no label (an older post may carry several configs)
     assert one_config_per_quote(post) and post.count(QUOTE) == 3
     # Half of the pair is not live: its status line takes its place under its label, OUTSIDE any
     # quote, and the line shows the end of the link that still works.
     paused_xhttp = PostLink(kind="reality", status="paused", variant="XHTTP", companion=True)
     half = render_post(None, [tcp, paused_xhttp], "@ipoxxo").text
-    assert half == f"{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{PAUSED_LINE}\n\n🔗 ‎@ipoxxo"
+    assert half == f"{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{PAUSED_LINE}\n\n—\n🔗 ‎@ipoxxo"
     full_tcp = PostLink(kind="reality", status="full", variant="TCP")
     other = render_post(
         None, [full_tcp, rl(1, expires=later, variant="XHTTP", companion=True)], "@ipoxxo"
@@ -249,7 +251,8 @@ def test_paused_links_keep_their_place_without_a_link_and_are_not_dead() -> None
         PostLink(kind="reality", status="paused", url=rl(1).url, variant="TCP"),
     ]
     post = render_post(None, items, "@ipoxxo").text
-    assert post == f"⏸{NBSP}{word(1)}\n\n{PAUSED_LINE}\n\n🔗 ‎@ipoxxo"
+    # One proxy word in the post: no number (D50).
+    assert post == f"⏸{NBSP}پروکسی\n\n{PAUSED_LINE}\n\n—\n🔗 ‎@ipoxxo"
     assert sec not in post and "vless://" not in post
     assert ALL_DEAD_LINE not in post  # paused is not dead: it may come back
     dead_and_paused = [PostLink(kind="mtproto", status="burned"), items[0]]
@@ -273,7 +276,7 @@ def test_body_tags_have_no_custom_emoji_for_the_bot() -> None:
 
 def test_active_link_without_url_is_never_a_link() -> None:
     post = render_post(None, [PostLink(kind="mtproto", status="active")], "@ipoxxo").text
-    assert "<a " not in post and f"🚫{NBSP}<s>{word(1)}</s>" in post
+    assert "<a " not in post and f"🚫{NBSP}<s>پروکسی</s>" in post
     config = render_post(None, [PostLink(kind="reality", status="active")], "@ipoxxo").text
     assert "<code" not in config and QUOTE not in config and "🚫 این کانفیگ از دسترس خارج شد" in config
 
@@ -298,7 +301,7 @@ def test_a_marker_is_only_ever_a_plain_word() -> None:
         assert ended.split("\n")[0] == "🔴 ظرفیت این کانفیگ پر شد"
         half = render_post(None, [rl(1, variant="TCP"), PostLink(kind="reality", status="full", variant=bad,
                                                                 companion=True)], "@ipoxxo").text  # fmt: skip
-        assert "</code></blockquote>\n\n🔴 ظرفیت این کانفیگ پر شد\n\n🔗" in half
+        assert "</code></blockquote>\n\n🔴 ظرفیت این کانفیگ پر شد\n\n—\n🔗" in half
     assert (
         config_quote("vless://a@b:1?x=1&y=<2>", "XHTTP")
         == "XHTTP\n<blockquote expandable><code>vless://a@b:1?x=1&amp;y=&lt;2&gt;</code></blockquote>"
@@ -399,6 +402,102 @@ def test_any_content_renders_inside_the_limits(title: str, body: str) -> None:
     post = render_post(compose_content(title, body) if title.strip() or body.strip() else None,
                        [mt(1), rl(1)], "@ipoxxo").text  # fmt: skip
     assert fits(post) and post.endswith("🔗 ‎@ipoxxo")
+
+
+# --- operator names (decision D50) -----------------------------------------------------------------
+
+
+def named(i: int, operator: str | None, status: str = "active") -> PostLink:
+    return replace(mt(i, status=status), operator=operator)
+
+
+def grid(post: str) -> list[str]:
+    """The visible rows of a post's proxy grid (the first block of a post without content)."""
+    return visible_text(post.split("\n\n")[0]).split("\n")
+
+
+def test_operator_names_come_first_and_a_repeated_word_is_numbered_by_its_place() -> None:
+    links = [
+        named(1, None),
+        named(2, "mci"),
+        named(3, None),
+        named(4, "rightel"),
+        named(5, "mci"),
+        named(6, None),
+    ]
+    post = render_post(None, links, "@ipoxxo").text
+    assert grid(post) == [
+        f"همراه{NBSP}اول{NBSP}۱ • همراه{NBSP}اول{NBSP}۲",
+        f"رایتل • پروکسی{NBSP}۱",  # a word that shows once has no number
+        f"پروکسی{NBSP}۲ • پروکسی{NBSP}۳",
+    ]
+    # Within a word the posted order stays: the first «همراه اول» is link 2, the first «پروکسی» link 1.
+    hrefs = re.findall(r'<a href="([^"]+)">', post)
+    order = [links[i].url for i in (1, 4, 3, 0, 2, 5)]
+    assert hrefs == [html.escape(u or "", quote=True) for u in order]
+    assert not any(row.startswith("•") for row in grid(post))  # no leading bullet (see the report)
+    assert render_post(None, links, "@ipoxxo") == render_post(None, links, "@ipoxxo")
+
+
+def test_a_named_link_keeps_its_name_when_it_ends_or_pauses() -> None:
+    links = [named(1, "mci", "burned"), named(2, "mci"), named(3, "rightel", "paused"), named(4, None)]
+    post = render_post(None, links, "@ipoxxo").text
+    assert f"🚫{NBSP}<s>همراه{NBSP}اول{NBSP}۱</s> • <a href=" in post
+    assert f">همراه{NBSP}اول{NBSP}۲</a>\n⏸{NBSP}رایتل • <a href=" in post
+    assert post.count("<a href=") == 2  # a dead or paused word has no link, named or not
+
+
+def test_posts_without_names_keep_their_words_and_get_the_sign_off() -> None:
+    """A post made before D50 has no stored names: the same «پروکسی N» words as before."""
+    post = render_post(None, [mt(i) for i in range(1, 5)], "@ipoxxo").text
+    assert grid(post) == [f"پروکسی{NBSP}۱ • پروکسی{NBSP}۲", f"پروکسی{NBSP}۳ • پروکسی{NBSP}۴"]
+    assert post.endswith("\n\n—\n🔗 \u200e@ipoxxo")
+    unknown = render_post(None, [named(1, "tci"), named(2, None)], "@ipoxxo").text
+    assert grid(unknown) == [f"پروکسی{NBSP}۱ • پروکسی{NBSP}۲"]  # an unknown code is no name
+    assert "همراه" not in unknown
+
+
+def tls_round(cells: dict[str, dict[str, str]]) -> dict[str, Any]:
+    """A probe round's observations as proxyhub/probes stores them (port -> network -> cell)."""
+    return {"https": {"state": "reachable", "cells": cells}, "globalping": {"state": "invalid"}}
+
+
+MCI, RIGHTEL, IRANCELL, DC = "asn:197207", "asn:57218", "asn:44244", "asn:205585"
+
+
+@pytest.mark.parametrize(
+    ("rounds", "seen"),
+    [
+        ([tls_round({"8443": {MCI: "up", RIGHTEL: "down"}})], ["mci"]),
+        ([tls_round({"8443": {MCI: "down", RIGHTEL: "up"}})], ["rightel"]),
+        ([tls_round({"8443": {MCI: "up", RIGHTEL: "up"}})], ["mci", "rightel"]),
+        ([tls_round({"8443": {MCI: "up", RIGHTEL: "invalid"}})], ["mci"]),
+        ([tls_round({"8443": {MCI: "down"}}), tls_round({"8443": {MCI: "up"}})], []),  # fresh down wins
+        ([tls_round({"8443": {MCI: "invalid"}}), tls_round({"8443": {MCI: "up"}})], ["mci"]),  # older
+        ([tls_round({"443": {MCI: "up"}, "8443": {MCI: "down"}})], []),  # the MTProto port decides
+        ([tls_round({"443": {MCI: "up"}})], []),
+        ([tls_round({"8443": {DC: "up"}})], []),  # a data-centre probe never names a link
+        ([tls_round({"8443": {IRANCELL: "up", MCI: "down"}})], []),  # Irancell is never named (owner)
+        ([], []),
+        ([{"https": "junk"}, {"https": {"cells": {"8443": ["up"]}}}, None], []),
+    ],
+)
+def test_a_link_counts_as_open_only_from_the_operators_seen_open_on_its_port(
+    rounds: list[Any], seen: list[str]
+) -> None:
+    assert operators.open_from(rounds, 8443) == seen
+
+
+def test_each_operator_names_at_most_two_links_and_only_links_seen_open_from_it() -> None:
+    """Owner, 2026-11-06: up to two per operator; Irancell's links stay «پروکسی» (no Irancell name)."""
+    order = [f"k{i}" for i in range(1, 7)]
+    everywhere = {k: ["mci", "rightel"] for k in order}
+    assert operators.assign(everywhere, order) == {"k1": "mci", "k2": "mci", "k3": "rightel", "k4": "rightel"}
+    assert "irancell" not in operators.OPERATOR_ASNS
+    # A link is never named after an operator it was not seen open from.
+    mixed = {"k1": ["rightel"], "k2": [], "k3": ["mci"], "k4": ["mci", "rightel"]}
+    assert operators.assign(mixed, list(mixed)) == {"k1": "rightel", "k3": "mci", "k4": "mci"}
+    assert operators.assign({}, []) == {}
 
 
 # --- transport markers (proxyhub/posts/links.py) -------------------------------------------------
@@ -578,6 +677,46 @@ def test_the_main_channel_never_gets_a_test_nodes_link() -> None:
     assert [x.key for x in main] == ["mtproto:slot"]
     test = links.for_new_post(h, now, max_mtproto=12, max_reality=3)
     assert {x.key for x in test} == {"mtproto:slot", "mtproto:test", "reality:9"}
+
+
+def test_a_post_takes_one_link_per_node_first_then_extras_round_robin() -> None:
+    """D49: six links; with fewer nodes, extra links of the same nodes fill the post, one per node
+    before a second of any node; with enough nodes no extra is taken at all."""
+    now = datetime(2026, 11, 6, 12, 0, tzinfo=UTC)
+
+    def mtl(node: int, slot: int | None, extra: int = 0) -> ProxyLink:
+        primary = f"mtproto:{uuid.UUID(int=node)}:mt_{node:016x}"
+        key = primary if extra == 0 else f"{primary}_x{extra}"
+        return link(key=key, slot=slot, extra_of=primary if extra else None)
+
+    two = [mtl(n, n, x) for n in (1, 2) for x in range(3)]
+    h = links.Harvest(links={x.key: x for x in two})
+    got = links.for_new_post(h, now, max_mtproto=6, max_reality=0)
+    assert [(x.slot, x.extra_of is not None) for x in got] == [
+        (1, False), (2, False), (1, True), (1, True), (2, True), (2, True)
+    ]  # fmt: skip
+    four = links.for_new_post(h, now, max_mtproto=4, max_reality=0)
+    assert [x.key for x in four] == [two[0].key, two[3].key, two[1].key, two[4].key]  # x1 of each node
+    many = [mtl(n, n, x) for n in range(1, 8) for x in range(2)]
+    seven = links.for_new_post(
+        links.Harvest(links={x.key: x for x in many}), now, max_mtproto=6, max_reality=0
+    )
+    assert len(seven) == 6 and all(x.extra_of is None for x in seven)  # enough nodes: no extra
+    # A test node (no slot): its extras group with it; never in the main channel.
+    test_node = [mtl(9, None, x) for x in range(3)]
+    mixed = links.Harvest(links={x.key: x for x in [mtl(1, 1), mtl(1, 1, 1), *test_node]})
+    test_post = links.for_new_post(mixed, now, max_mtproto=4, max_reality=0)
+    assert [x.key for x in test_post] == [mtl(1, 1).key, test_node[0].key, mtl(1, 1, 1).key, test_node[1].key]
+    main_post = links.for_new_post(mixed, now, max_mtproto=4, max_reality=0, slots_only=True)
+    assert [x.key for x in main_post] == [mtl(1, 1).key, mtl(1, 1, 1).key]
+
+
+def test_checked_refuses_a_bad_extra_of() -> None:
+    assert links.checked(link(extra_of="mtproto:x:mt_a")) is not None
+    for bad in ("", "k" * 201):
+        assert links.checked(link(extra_of=bad)) is None
+    assert links.checked(link(key="mtproto:n1:slot1", extra_of="mtproto:n1:slot1")) is None
+    assert links.checked(link(kind="reality", url="vless://a@b:1", extra_of="reality:1")) is None
 
 
 def test_selection_orders_by_slot_caps_and_skips_ending_configs() -> None:

@@ -161,7 +161,15 @@ async def test_proxies_list_contract(client: AsyncClient, engine: AsyncEngine) -
     assert r.status_code == 200
     body = r.json()
     assert body["active_domain"] == ZONE_NAME
-    first, second = body["proxies"]
+    # Node one ran alone at first: its primary and five extra links (D49, six links a post); the
+    # pending node came after it (three links each). Extras follow their node's primary.
+    mine = [x for x in body["proxies"] if x["node_id"] == str(one)]
+    theirs = [x for x in body["proxies"] if x["node_id"] == str(pending)]
+    assert body["proxies"] == mine + theirs and (len(mine), len(theirs)) == (6, 3)
+    assert [x["label"] for x in mine] == ["پروکسی ۱"] + [f"پروکسی ۱، لینک {d}" for d in "۲۳۴۵۶"]
+    assert {(x["host"], x["port"], x["status"]) for x in mine} == {(f"slot1.{ZONE_NAME}", 8443, "active")}
+    assert len({x["link"] for x in mine}) == 6  # one secret each
+    first, second = mine[0], theirs[0]
     secret = await secret_of(engine, one)
     assert first == {
         "key": proxy_key(one, user_name_for(one)),

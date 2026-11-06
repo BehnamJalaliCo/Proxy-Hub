@@ -20,8 +20,13 @@ the link part stays short so news can sit above it):
 
 * a bold title line with one emoji (:data:`TITLE_MARK` when the title has none), and the body in a
   blockquote (:func:`compose_content`);
-* the MTProto links as the words «پروکسی N», numbered by their place in the post, two to a row with
-  " • " between them, and no header (the words already say what they are);
+* the MTProto links as words, two to a row with " • " between them, and no header (the words say
+  what they are). A link's word is «پروکسی», or an operator's name («همراه اول», «رایتل»; never
+  «ایرانسل», the owner's choice) when the post was made with the panel's own fresh probe from that
+  operator's network (decision D50, proxyhub/posts/operators.py; stored with the post, so an edit
+  never renames a link). Operator-named links come first (MCI, then Rightel), then «پروکسی». A word that shows
+  once has no number; a word that repeats is numbered by its place among the same words
+  («همراه اول ۱», «همراه اول ۲», «پروکسی ۱» …), Persian digits, no-break spaces inside;
 * each VLESS config as ONE short line, «🔒 کانفیگ V2Ray — اعتبار تا جمعه ساعت ۰۹:۰۰», and under it
   each of its links (the config and, for a REALITY config, its XHTTP link) as a tiny label line
   ("TCP" / "XHTTP") over its OWN collapsed quote (``<blockquote expandable>``) that holds nothing but
@@ -29,7 +34,7 @@ the link part stays short so news can sit above it):
   exactly one config (the owner on iPhone, 2026-11-06: a quote that held both gave V2Box only one).
   Telegram shows about three lines of a collapsed quote. No ``<pre>`` there: Telegram nests neither
   a pre nor a quote inside a quote, while inline code inside a quote is meant to be;
-* the channel tag.
+* a short line «—», then the channel tag (decision D50, the competitor's sign-off).
 
 The owner (2026-11-05): no «کانفیگ N» next to a config, so a post never shows a provider's label.
 The name inside the config itself (``#@ipoxxo …``, D41) is the provider's and stays.
@@ -153,9 +158,30 @@ def proxy_word(n: int) -> str:
     return f"{PROXY_WORD}{NBSP}{fa_digits(n)}"
 
 
+def numbered(words: Sequence[str]) -> list[str]:
+    """The words as a post shows them (D50): a word that shows once has no number; a word that
+    repeats is numbered by its place among the same words. No-break spaces inside each, so a word
+    never wraps."""
+    counts: dict[str, int] = {}
+    for word in words:
+        counts[word] = counts.get(word, 0) + 1
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for word in words:
+        seen[word] = seen.get(word, 0) + 1
+        text = word.replace(" ", NBSP)
+        out.append(text if counts[word] == 1 else f"{text}{NBSP}{fa_digits(seen[word])}")
+    return out
+
+
+def link_word(url: str, text: str) -> str:
+    """``<a href=url>text</a>``: the whole word is the link, with no mark (D48)."""
+    return f'<a href="{html.escape(url, quote=True)}">{text}</a>'
+
+
 def live_word(url: str, n: int) -> str:
-    """``<a href=url>پروکسی n</a>``: the whole word is the link, with no mark (D48)."""
-    return f'<a href="{html.escape(url, quote=True)}">{proxy_word(n)}</a>'
+    """``<a href=url>پروکسی n</a>``."""
+    return link_word(url, proxy_word(n))
 
 
 def word_rows(words: Sequence[str]) -> str:
@@ -168,7 +194,8 @@ def word_rows(words: Sequence[str]) -> str:
 def proxy_block(proxies: Sequence[tuple[str, int, str]]) -> str:
     """The proxy words alone: they say «پروکسی» themselves, so no header (D48)."""
     links = [proxy_link(server, port, secret) for server, port, secret in proxies]
-    return word_rows([live_word(url, n) for n, url in enumerate(links, start=1)])
+    words = numbered([PROXY_WORD] * len(links))
+    return word_rows([link_word(url, text) for url, text in zip(links, words, strict=True)])
 
 
 def render_proxy_post(
@@ -335,6 +362,11 @@ TITLE_MARK: Final = "📡"
 # The one line above a config's quote (D48): «🔒 کانفیگ V2Ray — اعتبار تا …».
 REALITY_MARK: Final = "🔒"
 REALITY_NAME: Final = "کانفیگ V2Ray"
+# The line over the channel tag, under the link part (decision D50).
+SIGN_OFF: Final = "—"
+# An MTProto link's word when the post names it after an operator (decision D50), in the order a
+# post shows them; any other link is «پروکسی».
+OPERATOR_WORDS: Final[dict[str, str]] = {"mci": "همراه اول", "irancell": "ایرانسل", "rightel": "رایتل"}
 ALL_DEAD_LINE: Final = "♻️ <i>کانفیگ‌های این پست دیگر کار نمیکنند؛ کانفیگ تازه در پست‌های جدید کانال است.</i>"
 STATUS_MARKS: Final = {"expired": "⌛️", "full": "🔴", "burned": "🚫"}
 PAUSED_MARK: Final = "⏸"
@@ -393,6 +425,8 @@ class PostLink:
     expires_at: datetime | None = None
     variant: str | None = None
     companion: bool = False
+    # The operator a post names this MTProto link after (decision D50), stored with the post.
+    operator: str | None = None
 
     @property
     def live(self) -> bool:
@@ -490,22 +524,35 @@ def tehran_until(at: datetime) -> str:
     return f"{WEEKDAYS_FA[local.weekday()]} ساعت {_tehran_clock(local)}"
 
 
-def _mtproto_word(link: PostLink, n: int) -> str:
-    """A live link is a proxy word; a paused one keeps its word and a pause mark, without the
-    link; a dead one is struck through behind its status mark, without the link."""
+def _mtproto_word(link: PostLink, text: str) -> str:
+    """A live link is its word; a paused one keeps its word and a pause mark, without the link; a
+    dead one is struck through behind its status mark, without the link. An operator's name stays
+    in every state (D50)."""
     if link.live:
         assert link.url is not None
-        return live_word(link.url, n)
+        return link_word(link.url, text)
     if link.status == "paused":
-        return f"{PAUSED_MARK}{NBSP}{proxy_word(n)}"
+        return f"{PAUSED_MARK}{NBSP}{text}"
     mark = STATUS_MARKS.get(link.status, STATUS_MARKS["burned"])
-    return f"{mark}{NBSP}<s>{proxy_word(n)}</s>"
+    return f"{mark}{NBSP}<s>{text}</s>"
+
+
+def _word_of(link: PostLink) -> str:
+    return OPERATOR_WORDS.get(link.operator or "", PROXY_WORD)
+
+
+def _word_rank(link: PostLink) -> int:
+    order = list(OPERATOR_WORDS)
+    return order.index(link.operator) if link.operator in OPERATOR_WORDS else len(order)
 
 
 def _mtproto_block(links: Sequence[PostLink]) -> str:
-    """The proxy grid, numbered by place among the post's MTProto links, which never changes (an
-    edit renders a post's links in the order they were posted). No header: the words say «پروکسی»."""
-    return word_rows([_mtproto_word(link, n) for n, link in enumerate(links, start=1)])
+    """The proxy grid (D50): operator-named links first (MCI, Rightel, Irancell), then «پروکسی»,
+    each group in the order the links were posted, which never changes (an edit renders a post's
+    links in that order, with the names stored with them). No header: the words say what they are."""
+    ordered = sorted(links, key=_word_rank)  # stable: the posted order within a word
+    words = numbered([_word_of(link) for link in ordered])
+    return word_rows([_mtproto_word(link, text) for link, text in zip(ordered, words, strict=True)])
 
 
 def _marker(variant: str | None) -> str | None:
@@ -578,7 +625,8 @@ def _reality_block(links: Sequence[PostLink], texts: StatusTexts) -> str:
 
 
 def post_tail(links: Sequence[PostLink], channel_username: str, texts: StatusTexts) -> str:
-    """Everything under the content: the proxy grid, the configs, the closing line, the channel tag."""
+    """Everything under the content: the proxy grid, the configs, the closing line, then «—» and the
+    channel tag (D50)."""
     mtproto = [x for x in links if x.kind == "mtproto"]
     reality = [x for x in links if x.kind == "reality"]
     parts: list[str] = []
@@ -588,7 +636,7 @@ def post_tail(links: Sequence[PostLink], channel_username: str, texts: StatusTex
         parts.append(_reality_block(reality, texts))
     if links and all(x.dead for x in links):
         parts.append(ALL_DEAD_LINE)
-    parts.append(TAG_PREFIX + LRM + html.escape(channel_tag(channel_username), quote=False))
+    parts.append(f"{SIGN_OFF}\n{TAG_PREFIX}{LRM}{html.escape(channel_tag(channel_username), quote=False)}")
     return "\n\n".join(parts)
 
 

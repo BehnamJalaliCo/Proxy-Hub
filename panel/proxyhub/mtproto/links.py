@@ -1,6 +1,7 @@
 """Links contract (cross-team contract item 3): the MTProto links the channel posts publish.
 
-One link per node: the node's long-lived proxy, as ``https://t.me/proxy?server=..&port=..&secret=..``
+One link per node, the node's long-lived primary proxy, plus its EXTRA links (decision D49:
+``extra_of`` names the primary), each as ``https://t.me/proxy?server=..&port=..&secret=..``
 (:mod:`proxyhub.mtproto.urls`), host per contract item 2. Only proxies that were confirmed running
 are listed; a proxy whose node left service stays listed as ``expired`` (``burned`` when its node
 was found filtered) for :data:`proxyhub.mtproto.service.DELETED_KEPT_FOR` after deletion, so a post
@@ -40,6 +41,7 @@ def to_link(view: ProxyView) -> ProxyLink | None:
         url=url,
         expires_at=None,
         status=status,
+        extra_of=view.extra_of,
     )
 
 

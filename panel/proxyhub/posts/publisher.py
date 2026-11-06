@@ -8,6 +8,9 @@ not inside a no-post window (D21), at least ``post_interval_min`` since the last
 channels), and no earlier post still waiting in the outbox. **A post never goes without at least
 one live link** (docs/04): then nothing is queued, the slot stays due until its grace ends, and the
 owner hears it at most once a day (not while the fleet's kill switch is on: nothing can run then).
+Its MTProto links take an operator's name only from the panel's own fresh probes (decision D50,
+proxyhub/posts/operators.py); the names are stored with the links (``post_links.operator``) and every
+later render of the post uses them, so a status edit never renames a link.
 The post goes through the owner's poster (proxyhub/posts/poster.py); when that is the operator
 account and it cannot take the post now, the post goes to the bot and the reason is logged
 (``posts.poster_fallback``, shown on the Content page).
@@ -67,7 +70,7 @@ from proxyhub.db.models_telegram import ChannelPost
 from proxyhub.fleet.actions import iso, log_action
 from proxyhub.fleet.settings_store import SettingsCorrupt, load_fleet_settings
 from proxyhub.links.contract import ProxyLink
-from proxyhub.posts import content, links, operator, plan, settings
+from proxyhub.posts import content, links, operator, operators, plan, settings
 from proxyhub.posts.messages import (
     CONTENT_RECYCLED_ALERT_FA,
     EDITS_GIVEN_UP_FA,
@@ -128,19 +131,33 @@ def with_marks(views: Sequence[LinkView], keys: Sequence[tuple[str, str]]) -> li
     ]
 
 
-def views_for_new_post(chosen: Sequence[ProxyLink]) -> list[LinkView]:
-    views = [LinkView(kind=x.kind, status="active", url=x.url, expires_at=x.expires_at) for x in chosen]
+def views_for_new_post(chosen: Sequence[ProxyLink], names: Mapping[str, str] | None = None) -> list[LinkView]:
+    """``names``: key -> the operator a link is named after (:func:`operators.operator_labels`)."""
+    views = [
+        LinkView(
+            kind=x.kind,
+            status="active",
+            url=x.url,
+            expires_at=x.expires_at,
+            operator=(names or {}).get(x.key),
+        )
+        for x in chosen
+    ]
     return with_marks(views, [(x.kind, x.key) for x in chosen])
 
 
 def fit(
-    content_html: str, chosen: Sequence[ProxyLink], tag: str, texts: StatusTexts
+    content_html: str,
+    chosen: Sequence[ProxyLink],
+    tag: str,
+    texts: StatusTexts,
+    names: Mapping[str, str] | None = None,
 ) -> tuple[RenderedPost, list[ProxyLink]]:
     """Render; if even the links do not fit one message, drop links from the end (Reality first)."""
     kept = list(chosen)
     while True:
         try:
-            return render_post(content_html, views_for_new_post(kept), tag, texts), kept
+            return render_post(content_html, views_for_new_post(kept, names), tag, texts), kept
         except PostTooLong:
             if not kept:
                 raise
@@ -279,7 +296,8 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
             await _alert_once(db, now, "no_links_alert_at", NO_LINKS_REPEAT, NO_LINKS_ALERT_FA)
         return "no_links"
     item, recycled = await content.next_item(db, now, cfg.recycle_after_days)
-    rendered, chosen = fit(content_for(item), chosen, where.tag, cfg.texts())
+    names = await operators.operator_labels(db, chosen, now)  # D50: decided once, stored below
+    rendered, chosen = fit(content_for(item), chosen, where.tag, cfg.texts(), names)
     if not chosen:
         return "no_links"
     poster, fallback = await for_new_post(db, poster, role=where.role, now=now)
@@ -314,6 +332,7 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
                 "label": x.label,
                 "expires_at": x.expires_at,
                 "status": "active",
+                "operator": names.get(x.key),
             }
             for i, x in enumerate(chosen)
         ],
@@ -343,6 +362,8 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
             "content_item_id": item.id if item else None,
             "recycled": recycled,
             "mtproto": sum(1 for x in chosen if x.kind == "mtproto"),
+            "mtproto_extras": sum(1 for x in chosen if x.extra_of is not None),
+            "operator_names": sorted(names[x.key] for x in chosen if x.key in names),
             "reality": sum(1 for x in chosen if x.kind == "reality"),
             "poster": poster.name,
         },
@@ -501,6 +522,7 @@ class _Carried:
     expires_at: datetime | None
     status: str
     missing_since: datetime | None = None
+    operator: str | None = None  # the operator the post names this link after (D50)
 
 
 async def _carried(db: AsyncConnection, post_id: int) -> list[_Carried]:
@@ -514,6 +536,7 @@ async def _carried(db: AsyncConnection, post_id: int) -> list[_Carried]:
                 PostLink.expires_at,
                 PostLink.status,
                 PostLink.missing_since,
+                PostLink.operator,
             )
             .where(PostLink.post_id == post_id)
             .order_by(PostLink.position)
@@ -528,6 +551,7 @@ async def _carried(db: AsyncConnection, post_id: int) -> list[_Carried]:
             expires_at=r.expires_at,
             status=r.status,
             missing_since=r.missing_since,
+            operator=r.operator,
         )
         for r in rows
     ]
@@ -621,7 +645,10 @@ async def refresh_posts(
         shown = [current_view(c, h, now) for c in carried]
         if any(x.unsure for x in shown):
             continue  # a link is missing for a moment only: wait before showing it as paused
-        views = with_marks([x.view for x in shown], [(c.kind, c.key) for c in carried])
+        views = with_marks(
+            [replace(x.view, operator=c.operator) for c, x in zip(carried, shown, strict=True)],
+            [(c.kind, c.key) for c in carried],
+        )
         changes = [(c, x.new_status) for c, x in zip(carried, shown, strict=True) if x.new_status]
         paused = [c.label for c, x in zip(carried, shown, strict=True) if x.view.status == "paused"]
         try:

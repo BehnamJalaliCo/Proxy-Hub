@@ -231,7 +231,9 @@ async def test_telemt_accepts_the_published_link_and_reloads_it_disabled_when_th
     await agent_reports(world.engine, world.node, applied_etag=etag)
     await world.run_loop()
     async with world.engine.begin() as conn:
-        (link,) = await provide_links(conn)
+        # One node and six links per post: the node also carries extras (D49); this test is about
+        # the primary user's link.
+        (link,) = [x for x in await provide_links(conn) if x.extra_of is None]
     assert link.status == "active" and link.slot == 1
 
     query = parse_qs(urlsplit(link.url).query)
@@ -258,5 +260,5 @@ async def test_telemt_accepts_the_published_link_and_reloads_it_disabled_when_th
     assert proc.poll() is None, "Telemt did not survive the reload of the panel's file"
     await asyncio.to_thread(_wait_listening, world.port, proc, 10)
     async with world.engine.begin() as conn:
-        (link,) = await provide_links(conn)
-    assert link.status == "expired"
+        ended = await provide_links(conn)
+    assert ended and {x.status for x in ended} == {"expired"}  # the primary and its extras (D49)

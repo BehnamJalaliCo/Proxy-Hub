@@ -45,7 +45,14 @@ from proxyhub.posts.poster import BotPoster
 from proxyhub.reconcilers.publisher import PublisherReconciler
 from proxyhub.telegram import store
 from proxyhub.telegram.schedule import TEHRAN, QuietWindow
-from proxyhub.telegram.templates import ALL_DEAD_LINE, NBSP, PAUSED_LINE, WORD_SEPARATOR, proxy_word
+from proxyhub.telegram.templates import (
+    ALL_DEAD_LINE,
+    NBSP,
+    PAUSED_LINE,
+    WORD_SEPARATOR,
+    proxy_word,
+    visible_text,
+)
 from proxyhub.vault import Vault
 
 pytestmark = pytest.mark.db
@@ -174,7 +181,7 @@ async def test_due_post_carries_content_links_and_tag(engine: AsyncEngine, vault
     assert f"{QUOTE}<code>vless://{node_vless_id(nodes[0])}@slot1.proxyhub-posts.example:443" in body
     assert body.count(LOCK) == 1 and body.count("vless://") == 1 and "<pre" not in body
     assert f">{word(2)}</a>\n<a href=" in body and f">{word(3)}</a>\n\n{LOCK}" in body
-    assert body.endswith("</blockquote>\n\n🔗 \u200e@ipoxxo")
+    assert body.endswith("</blockquote>\n\n—\n🔗 \u200e@ipoxxo")
     [post] = await rows(engine, "SELECT * FROM posts")
     assert (post.role, post.plan_slot, post.outbox_id, post.poster) == ("test", 1, job.id, "bot")
     assert post.content_html and post.channel_tag == "@ipoxxo" and post.content_item_id == first.id
@@ -482,7 +489,7 @@ async def test_expired_and_gone_links(engine: AsyncEngine, vault: Vault) -> None
     # Missing for the whole grace: the post shows them as paused (not dead) with its other changes.
     assert await refresh(engine, t + publisher.MISSING_GRACE) == 1
     body = await edit_text(engine)
-    assert f"</a>{SEP}⏸{NBSP}{word(2)}\n\n⌛️ زمان این کانفیگ تمام شد\n\n{PAUSED_LINE}\n\n🔗" in body
+    assert f"</a>{SEP}⏸{NBSP}{word(2)}\n\n⌛️ زمان این کانفیگ تمام شد\n\n{PAUSED_LINE}\n\n—\n🔗" in body
     assert "<s>" not in body and "<code" not in body and "🔒" not in body
     assert node_secret(nodes[1]) not in body and node_vless_id(nodes[1]) not in body
     assert node_secret(nodes[0]) in body  # node 1's MTProto link still works
@@ -546,7 +553,7 @@ async def test_a_missing_config_past_its_own_expiry_is_marked_expired(
     # Its provider no longer lists the config at all, and the config's own end has passed.
     assert await refresh(engine, later, [mtproto_provider]) == 1
     body = await edit_text(engine)
-    assert "</a>\n\n⌛️ زمان این کانفیگ تمام شد\n\n🔗" in body and node_secret(nodes[0]) in body
+    assert "</a>\n\n⌛️ زمان این کانفیگ تمام شد\n\n—\n🔗" in body and node_secret(nodes[0]) in body
     got = {label: status for label, (status, _) in (await carried_links(engine, post_id)).items()}
     assert got == {"پروکسی ۱": "active", "ریلیتی ۱": "expired"}
 
@@ -612,7 +619,7 @@ async def test_a_config_and_its_xhttp_link_are_marked_in_the_post_and_its_edits(
     assert body.count(LOCK) == 1 and body.count(QUOTE) == 2 and "<pre" not in body
     assert f"\nTCP\n{QUOTE}<code>vless://{node_vless_id(nodes[0])}@" in body
     assert f"</code></blockquote>\n\nXHTTP\n{QUOTE}<code>vless://{node_vless_id(nodes[0])}@" in body
-    assert body.count("</code></blockquote>\n\n🔗") == 1  # the pair stays together, then the tag
+    assert body.count("</code></blockquote>\n\n—\n🔗") == 1  # the pair stays together, then the tag
     carried = await rows(engine, "SELECT key, label FROM post_links WHERE kind = 'reality' ORDER BY position")
     assert [c.key.endswith(":xhttp") for c in carried] == [False, True]
     assert not any(c.label in body for c in carried)  # the owner's labels; a post shows none
@@ -621,7 +628,7 @@ async def test_a_config_and_its_xhttp_link_are_marked_in_the_post_and_its_edits(
     await set_node(engine, nodes[0], state="burned")
     assert await refresh(engine, now + timedelta(minutes=1), providers) == 1
     edited = await edit_text(engine)
-    assert f">{word(2)}</a>\n\n🚫 این کانفیگ از دسترس خارج شد\n\n🔗" in edited
+    assert f">{word(2)}</a>\n\n🚫 این کانفیگ از دسترس خارج شد\n\n—\n🔗" in edited
     assert node_vless_id(nodes[0]) not in edited and "🔒" not in edited and QUOTE not in edited
     assert "TCP" not in edited and "XHTTP" not in edited
     assert f"🚫{NBSP}<s>{word(1)}</s>{SEP}<a href=" in edited
@@ -730,7 +737,7 @@ def before_d48(text_html: str) -> str:
         text_html.replace(SEP, "  ")
         .replace(f"پروکسی{NBSP}", f"⚡{NBSP}اتصال{NBSP}")
         .replace(QUOTE, "<pre>")
-        .replace("</blockquote>\n\n🔗", "</pre>\n\n🔗")
+        .replace("</blockquote>\n\n—\n🔗", "</pre>\n\n—\n🔗")
     )
 
 
@@ -878,6 +885,100 @@ async def test_a_gone_post_does_not_stop_the_others(engine: AsyncEngine, vault: 
     assert (await jobs(engine, "edit_post"))[-1].payload["post_id"] == live_cp
     states = {r.id: r.gone_at is not None for r in await rows(engine, "SELECT id, gone_at FROM posts")}
     assert states == {gone_post: True, live_post: False}
+
+
+# --- operator names (decision D50) -------------------------------------------------------------------
+
+MCI_KEY, RIGHTEL_KEY = "asn:197207", "asn:57218"
+
+
+async def probed(engine: AsyncEngine, node: Any, at: datetime, cells: dict[str, dict[str, str]]) -> None:
+    """One probe round of the node as proxyhub/probes stores it: TLS cells per port and network."""
+    import json
+
+    async with engine.begin() as conn:
+        cycle = (
+            await conn.execute(
+                text("INSERT INTO probe_cycles (started_at, finished_at) VALUES (:t, :t) RETURNING id"),
+                {"t": at},
+            )
+        ).scalar_one()
+        await conn.execute(
+            text(
+                "INSERT INTO probe_rounds (cycle_id, node_id, started_at, finished_at, trigger, target_ip, "
+                "port, observations, verdict, verdict_reasons) VALUES (:c, :n, :t, :t, 'schedule', "
+                "CAST('203.0.113.10' AS inet), 8443, CAST(:o AS jsonb), 'ok', '[]')"
+            ),
+            {
+                "c": cycle,
+                "n": node,
+                "t": at,
+                "o": json.dumps({"https": {"state": "partial", "cells": cells}}),
+            },
+        )
+
+
+def grid_rows(body: str) -> list[str]:
+    """The visible rows of the proxy grid: the block right after the content's quote."""
+    after = body.split("</blockquote>\n\n", 1)[1]
+    return visible_text(after.split("\n\n", 1)[0]).split("\n")
+
+
+async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep_the_name(
+    engine: AsyncEngine, vault: Vault
+) -> None:
+    nodes = await ready_fleet(engine, 3)
+    await setup_telegram(engine, vault)
+    now = slot_time(2)
+    try:
+        # Node 1: open only from MCI, an hour ago. Node 2: open from MCI AND Rightel: MCI comes first
+        # and may name two links (owner: up to two per operator). Node 3: open only from Rightel, but
+        # 7 hours ago (too old).
+        await probed(
+            engine, nodes[0], now - timedelta(hours=1), {"8443": {MCI_KEY: "up", RIGHTEL_KEY: "down"}}
+        )
+        await probed(engine, nodes[1], now - timedelta(hours=1), {"8443": {MCI_KEY: "up", RIGHTEL_KEY: "up"}})
+        await probed(engine, nodes[2], now - timedelta(hours=7), {"8443": {RIGHTEL_KEY: "up"}})
+        await probed(engine, nodes[2], now - timedelta(hours=8), {"443": {MCI_KEY: "up"}})  # another port
+        post_id, _ = await posted(engine, vault, now)
+        body = (await jobs(engine, "send_post"))[-1].payload["text"]
+        mci = f"همراه{NBSP}اول"
+        assert grid_rows(body) == [
+            f"{mci}{NBSP}۱ • {mci}{NBSP}۲",
+            "پروکسی",
+        ]  # named first; a lone word: no number
+        assert "—\n🔗 \u200e@ipoxxo" in body
+        sql = (
+            "SELECT slot, operator FROM post_links WHERE post_id = :p AND kind = 'mtproto' ORDER BY position"
+        )
+        named = await rows(engine, sql, p=post_id)
+        assert [(r.slot, r.operator) for r in named] == [(1, "mci"), (2, "mci"), (3, None)]
+        [action] = await rows(
+            engine, "SELECT reasons::text AS r FROM actions_log WHERE action = 'posts.queued'"
+        )
+        assert '"operator_names": ["mci", "mci"]' in action.r
+        # Later probes never rename a posted link: node 1 is now closed from MCI, node 3 open from
+        # Rightel only. An edit (node 2 burns) keeps the names the post was made with.
+        later = now + timedelta(minutes=5)
+        await probed(engine, nodes[0], later, {"8443": {MCI_KEY: "down"}})
+        await probed(engine, nodes[2], later, {"8443": {RIGHTEL_KEY: "up"}})
+        await set_node(engine, nodes[1], state="burned")
+        assert await refresh(engine, later + timedelta(minutes=1)) == 1
+        edited = await edit_text(engine)
+        assert grid_rows(edited) == [f"{mci}{NBSP}۱ • 🚫{NBSP}{mci}{NBSP}۲", "پروکسی"]
+        assert f"🚫{NBSP}<s>{mci}{NBSP}۲</s>" in edited
+        # A new post now reads the new probes: node 3 is Rightel's, node 1 is a plain proxy again.
+        await deliver(engine, (await jobs(engine, "edit_post"))[-1].id, message_id=0)
+        await quiet(engine, [], interval=0)
+        second = slot_time(3)
+        await probed(engine, nodes[2], second - timedelta(minutes=10), {"8443": {RIGHTEL_KEY: "up"}})
+        assert await publish(engine, second) == "queued"
+        body2 = (await jobs(engine, "send_post"))[-1].payload["text"]
+        assert grid_rows(body2)[0].startswith("رایتل • ")
+        assert "همراه" not in visible_text(body2.split("—")[0].split("</blockquote>", 1)[1])
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM probe_cycles"))
 
 
 # --- the loop ------------------------------------------------------------------------------------
