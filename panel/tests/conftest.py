@@ -36,6 +36,14 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(
                 pytest.mark.skip(reason="needs a real Cloudflare token (PROXYHUB_CLOUDFLARE_TEST_TOKEN_FILE)")
             )
+        if "claude" in item.keywords and os.environ.get("PROXYHUB_CLAUDE_BRIDGE_TESTS") != "1":
+            item.add_marker(
+                pytest.mark.skip(reason="real Claude Code, logged in (set PROXYHUB_CLAUDE_BRIDGE_TESTS=1)")
+            )
+        if "anthropic_api" in item.keywords and not os.environ.get("PROXYHUB_ANTHROPIC_TEST_KEY_FILE"):
+            item.add_marker(
+                pytest.mark.skip(reason="needs a real Anthropic API key (PROXYHUB_ANTHROPIC_TEST_KEY_FILE)")
+            )
         if "globalping" in item.keywords and os.environ.get("PROXYHUB_GLOBALPING_TESTS") != "1":
             item.add_marker(
                 pytest.mark.skip(reason="real Globalping API calls (set PROXYHUB_GLOBALPING_TESTS=1)")

@@ -87,7 +87,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck deploy/*.sh deploy/backup/*.sh deploy/monitoring/*.sh ops/scripts/*.sh node-image/*.sh
+      - run: shellcheck deploy/*.sh deploy/backup/*.sh deploy/claude-bridge/*.sh deploy/monitoring/*.sh ops/scripts/*.sh node-image/*.sh
       - run: shellcheck -s sh deploy/monitoring/alertmanager/entrypoint.sh
       # promtool config/rules/rule unit tests, amtool for every receiver variant, the runtime
       # bot-token leak check of Alertmanager, loki and alloy, all with the pinned images.

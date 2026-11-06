@@ -85,4 +85,6 @@ markers = [
     "telegram_user: real MTProto to Telegram as the operator account (D37); needs PROXYHUB_TELEGRAM_USER_TEST_FILE",
     "cloudflare: talks to a real Cloudflare account; needs PROXYHUB_CLOUDFLARE_TEST_TOKEN_FILE",
     "globalping: real Globalping API measurements; needs PROXYHUB_GLOBALPING_TESTS=1",
+    "claude: real Claude Code (claude -p) through the bridge; needs PROXYHUB_CLAUDE_BRIDGE_TESTS=1",
+    "anthropic_api: the real Anthropic Messages API; needs PROXYHUB_ANTHROPIC_TEST_KEY_FILE",
 ]

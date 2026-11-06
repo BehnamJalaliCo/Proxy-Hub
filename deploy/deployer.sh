@@ -152,6 +152,11 @@ if deploy_commit "$target"; then
   install -m 0755 "$CHECKOUT/deploy/deployer.sh" /usr/local/sbin/proxyhub-deploy
   install -m 0755 "$CHECKOUT/deploy/verify_main.sh" /usr/local/sbin/proxyhub-verify-main
   install -m 0644 "$CHECKOUT/deploy/known_hosts.github" "$ETC/known_hosts"
+  # The Claude bridge (D52), only where P22 installed it: refresh its copy from this good commit.
+  # Never fails a deploy: the panel falls back to the content bank while the bridge is away.
+  if [ -f "$CHECKOUT/deploy/claude-bridge/install.sh" ]; then
+    bash "$CHECKOUT/deploy/claude-bridge/install.sh" --update || log "claude bridge refresh failed"
+  fi
   log "ok: $target is healthy"
 else
   echo "$target" > "$STATE/failed_commit"
