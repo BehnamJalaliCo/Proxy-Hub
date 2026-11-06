@@ -123,6 +123,32 @@ async def test_the_pack_and_the_rights_are_read_once_a_day(
     assert [type(r).__name__ for r in requests].count("GetParticipantRequest") == 2
 
 
+async def test_a_read_of_a_pack_the_poster_left_meanwhile_is_not_stored(
+    engine: AsyncEngine, vault: Vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's link, or the channel's own pack moving to its newer version by itself
+    (proxyhub/posts/own_pack.py), may change while Telegram answers: that read is not stored over
+    the pack the poster uses now."""
+    await setup_operator(engine, vault)  # the poster uses EMOJI_SET
+    await store_pack(engine, [(9_001, "📡")], short_name="Newer_Pack")
+    real = operator_checks._read_pack
+
+    async def read_then_move(op: Any, short_name: str, now: Any) -> operator.StoredPack:
+        found = await real(op, short_name, now)
+        async with engine.begin() as conn:
+            await operator.save_config(
+                conn, operator.OperatorConfig(poster="operator", emoji_pack="Newer_Pack")
+            )
+        return found
+
+    monkeypatch.setattr(operator_checks, "_read_pack", read_then_move)
+    with telegram_answers(monkeypatch, checks_answers(ENTRIES)) as requests:
+        assert await check(engine, vault) == "ok"
+    assert requests[0].stickerset.short_name == EMOJI_SET
+    async with engine.connect() as conn:
+        assert await operator.emoji_map(conn) == {"📡": 9_001}
+
+
 @pytest.mark.parametrize(
     ("rights", "warnings"),
     [

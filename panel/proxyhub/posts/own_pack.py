@@ -1,28 +1,38 @@
-"""The channel's own animated emoji pack (D38): the bot makes it once, the operator poster uses it.
+"""The channel's own animated emoji pack (D38): the bot makes it, the operator poster uses it.
 
 The owner asked for an emoji pack about Iran's internet and operators. No public pack fits, and a
 pack made by someone else shows ITS title (often another channel's ad) when a reader taps one of
 its emoji. So the bot makes our own pack from the drawings in proxyhub/posts/emoji_art.py:
 
-* name ``<channel>_by_<bot>`` (Telegram requires the ``_by_<bot username>`` ending; only this bot can
-  make or change a set with that name), title ``@<channel>`` (the main channel's public username),
-  owner: the owner's own Telegram account (the private chat the owner paired with the bot, which
-  is the owner's user id). The pack is the owner's: @Stickers shows it in the owner's sets.
+* name ``<channel>_by_<bot>`` for the first drawings, ``<channel>_v<N>_by_<bot>`` for version N of
+  them (:data:`~proxyhub.posts.emoji_art.ART_VERSION`; Telegram requires the ``_by_<bot username>``
+  ending, and only this bot can make or change a set with that name), title ``@<channel>`` (the
+  main channel's public username), owner: the owner's own Telegram account (the private chat the
+  owner paired with the bot, which is the owner's user id). The pack is the owner's: @Stickers
+  shows it in the owner's sets.
 * Bot API ``getStickerSet``; if there is no such set, ``createNewStickerSet`` with the FIRST drawing
   only; then, a minute apart, ``addStickerToSet`` for at most :data:`ADD_PER_RUN` drawings the pack
   lacks, until it has them all (P17: creating it with all 28 at once got ``429 retry after 301``
-  twice). Nothing in a pack is ever removed or replaced.
+  twice). Nothing in a pack is ever removed or replaced (D43).
 * When Telegram answers 429, the next try waits exactly its ``retry_after`` (plus a few seconds), not
   a fixed hour; any other failure is tried again an hour later.
-* Once the pack has every drawing and the owner has not chosen a pack (``posts.operator.emoji_pack``
-  empty), it becomes the one the operator poster uses (proxyhub/posts/operator.py,
-  :func:`~proxyhub.posts.operator.emoji_map`). A pack the owner pasted is never replaced.
+* Once the pack has every drawing, it becomes the one the operator poster uses
+  (``posts.operator.emoji_pack``, proxyhub/posts/operator.py) when the owner has chosen none, or when
+  the posts still use an OLDER version of this same pack. With it, the emoji ids the bot just read
+  are stored as the poster's pack (``posts.operator.pack``), so no post goes out without them; the
+  operator account reads the pack again at its next check. A pack the owner pasted is never
+  replaced.
+
+Changed drawings (a new ``ART_VERSION``): the new version is a new pack, built beside the old one
+with the same pacing while posts keep the old one, and taken over only once it is complete. The
+old pack stays in the owner's account (nothing is deleted); the owner may remove it in @Stickers.
 
 It runs while the fleet's kill switch is OFF and the bot, the owner's chat and a main channel with a
 public @username exist; once complete, it checks once a day that the pack is still there.
 
-``settings`` row ``posts.own_pack``: ``{"name", "title", "owner_id", "alts", "created_at",
-"checked_at", "attempted_at", "retry_at", "error"}`` (no secret).
+``settings`` row ``posts.own_pack`` (the pack being made, or made; no secret): ``{"name", "title",
+"owner_id", "alts", "entries" ([custom emoji id, alt] pairs), "created_at", "checked_at",
+"attempted_at", "retry_at", "error"}``.
 """
 
 from __future__ import annotations
@@ -68,12 +78,21 @@ BotFactory = Callable[[SecretValue], BotClient]
 # --- pure parts ----------------------------------------------------------------------------------------
 
 
-def pack_name(channel_username: str, bot_username: str) -> str | None:
-    """``<channel>_by_<bot>`` (lower case), or None when Telegram would refuse that name."""
+def pack_name(channel_username: str, bot_username: str, version: int = emoji_art.ART_VERSION) -> str | None:
+    """``<channel>_by_<bot>`` for version 1, ``<channel>_v<version>_by_<bot>`` after it (lower case),
+    or None when Telegram would refuse that name."""
     channel = channel_username.lstrip("@").strip("_").lower()
     bot = bot_username.lstrip("@").lower()
-    name = f"{channel}_by_{bot}"
+    name = f"{channel}_by_{bot}" if version <= 1 else f"{channel}_v{version}_by_{bot}"
     return name if channel and bot and STICKER_SET_NAME_RE.fullmatch(name) else None
+
+
+def older_names(
+    channel_username: str, bot_username: str, version: int = emoji_art.ART_VERSION
+) -> tuple[str, ...]:
+    """The names of this pack's earlier versions (newest first): only this bot can make them."""
+    names = (pack_name(channel_username, bot_username, v) for v in range(version - 1, 0, -1))
+    return tuple(n for n in names if n is not None)
 
 
 def pack_title(channel_username: str) -> str:
@@ -103,6 +122,7 @@ class PackState:
     attempted_at: datetime | None = None  # the last try, worked or not
     error: str | None = None
     retry_at: datetime | None = None  # Telegram asked us to wait until then (429)
+    entries: tuple[tuple[str, str], ...] = ()  # (custom emoji id, alt) as the bot last read them
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -110,6 +130,7 @@ class PackState:
             "title": self.title,
             "owner_id": self.owner_id,
             "alts": list(self.alts),
+            "entries": [list(e) for e in self.entries],
             "created_at": iso(self.created_at),
             "checked_at": iso(self.checked_at),
             "attempted_at": iso(self.attempted_at),
@@ -140,7 +161,35 @@ def error_code(exc: TelegramError) -> str:
     return str(exc)[:200]
 
 
+def complete(state: PackState | None) -> bool:
+    return state is not None and state.error is None and bool(state.alts) and not missing(state.alts)
+
+
+def emoji_ids(state: PackState) -> tuple[tuple[int, str], ...] | None:
+    """The pack's (document id, alt) pairs for the poster, or None unless they cover every drawing."""
+    if missing([alt for _, alt in state.entries]):
+        return None
+    return tuple((int(i), alt) for i, alt in state.entries)
+
+
 # --- state ----------------------------------------------------------------------------------------------
+
+
+def _entries(value: Any) -> tuple[tuple[str, str], ...]:
+    out: list[tuple[str, str]] = []
+    for item in value if isinstance(value, list) else []:
+        if (
+            isinstance(item, list)
+            and len(item) == 2
+            and isinstance(item[0], str)
+            and item[0].isascii()
+            and item[0].isdigit()
+            and len(item[0]) <= 20
+            and isinstance(item[1], str)
+            and 0 < len(item[1]) <= 16
+        ):
+            out.append((item[0], item[1]))
+    return tuple(out)
 
 
 async def load_state(db: tg_store.Db) -> PackState | None:
@@ -154,6 +203,7 @@ async def load_state(db: tg_store.Db) -> PackState | None:
         title=str(value.get("title") or ""),
         owner_id=owner if isinstance(owner, int) and not isinstance(owner, bool) else None,
         alts=tuple(a for a in alts if isinstance(a, str)) if isinstance(alts, list) else (),
+        entries=_entries(value.get("entries")),
         created_at=operator.parse_time(value.get("created_at")),
         checked_at=operator.parse_time(value.get("checked_at")),
         attempted_at=operator.parse_time(value.get("attempted_at")),
@@ -171,6 +221,7 @@ class Target:
     name: str
     title: str
     owner_id: int
+    older: tuple[str, ...] = ()  # this pack's earlier versions (see :func:`older_names`)
 
 
 async def target(db: tg_store.Db) -> Target | str:
@@ -190,23 +241,38 @@ async def target(db: tg_store.Db) -> Target | str:
     name = pack_name(channel, bot.username)
     if name is None:
         return "bad_name"
-    return Target(name=name, title=pack_title(channel), owner_id=owner)
+    return Target(
+        name=name, title=pack_title(channel), owner_id=owner, older=older_names(channel, bot.username)
+    )
 
 
-async def choose_if_unset(db: tg_store.Db, name: str, now: datetime) -> bool:
-    """Make ``name`` the operator poster's pack when the owner has not chosen one."""
+async def choose(db: tg_store.Db, found: Target, state: PackState, now: datetime) -> bool:
+    """Make the COMPLETE pack ``state`` (named ``found.name``) the operator poster's pack when the
+    owner has chosen none, or when the poster still uses an older version of it; then also store its
+    emoji ids as the poster's pack, so posts keep their animated emoji through the switch. An older
+    version is only left once the new one's ids cover every drawing. A pack the owner pasted stays."""
     config = await operator.load_config(db)
-    if config.emoji_pack is not None:
+    old = config.emoji_pack
+    replacing = old is not None and any(operator.same_pack(old, n) for n in found.older)
+    if old is not None and not replacing:
         return False
-    await operator.save_config(db, operator.OperatorConfig(poster=config.poster, emoji_pack=name))
+    ids = emoji_ids(state)
+    if replacing and ids is None:
+        return False
+    await operator.save_config(db, operator.OperatorConfig(poster=config.poster, emoji_pack=found.name))
+    if ids is not None:
+        # attempted_at None: the operator account reads the pack again at its next check.
+        await operator.save_pack(
+            db, operator.StoredPack(short_name=found.name, title=state.title, entries=ids, fetched_at=now)
+        )
     await log_action(
         db,
         actor="worker",
         action=CHOSEN_ACTION,
-        target=name,
+        target=found.name,
         dry_run=False,
         allowed=True,
-        context={"at": iso(now)},
+        context={"at": iso(now), "replaces": old},
         result="ok",
     )
     return True
@@ -235,16 +301,13 @@ def failed_state(prev: PackState | None, found: Target, talk: Talk, now: datetim
         title=prev.title if prev else found.title,
         owner_id=found.owner_id,
         alts=prev.alts if prev else (),
+        entries=prev.entries if prev else (),
         created_at=prev.created_at if prev else None,
         checked_at=prev.checked_at if prev else None,
         attempted_at=now,
         error=talk.error,
         retry_at=retry_at,
     )
-
-
-def complete(state: PackState | None) -> bool:
-    return state is not None and state.error is None and bool(state.alts) and not missing(state.alts)
 
 
 async def ensure(
@@ -257,14 +320,14 @@ async def ensure(
 ) -> str:
     """One step towards the complete pack, when due. Returns the reason it cannot (see :func:`target`),
     ``vault_unavailable``, ``not_due``, ``created``, ``extended``, ``ok``, ``not_emoji_set``,
-    ``rate_limited`` or ``failed``. A COMPLETE pack becomes the poster's pack if the owner chose none."""
+    ``rate_limited`` or ``failed``. A COMPLETE pack becomes the poster's pack (see :func:`choose`)."""
     async with engine.begin() as conn:
         found = await target(conn)
         if isinstance(found, str):
             return found
         state = await load_state(conn)
         if state is not None and state.name == found.name and complete(state):
-            await choose_if_unset(conn, found.name, now)
+            await choose(conn, found, state, now)
         if not force and not due(state, found.name, now):
             return "not_due"
         try:
@@ -288,6 +351,7 @@ async def ensure(
             title=info.title,
             owner_id=found.owner_id,
             alts=info.alts,
+            entries=info.entries,
             created_at=now if talk.outcome == "created" else (prev.created_at if prev else None),
             checked_at=now,
             attempted_at=now,
@@ -302,11 +366,11 @@ async def ensure(
                 target=found.name,
                 dry_run=False,
                 allowed=True,
-                context={"emoji": len(info.alts), "of": len(emoji_art.ART)},
+                context={"emoji": len(info.alts), "of": len(emoji_art.ART), "version": emoji_art.ART_VERSION},
                 result="ok",
             )
         if done:
-            await choose_if_unset(conn, found.name, now)
+            await choose(conn, found, new, now)
     return talk.outcome
 
 
@@ -343,9 +407,15 @@ async def _talk(bot_factory: BotFactory, token: SecretValue, found: Target) -> T
 
 
 async def status(db: tg_store.Db) -> dict[str, Any]:
-    """The pack for the Content page."""
+    """The pack for the Content page. ``replaces``: the older version of this pack the posts still
+    use while this one is being made (they move over by themselves once it is complete)."""
     state = await load_state(db)
     found = await target(db)
+    config = await operator.load_config(db)
+    older = found.older if isinstance(found, Target) else ()
+    replaces = next((n for n in older if operator.same_pack(config.emoji_pack, n)), None)
+    if state is not None and operator.same_pack(state.name, replaces):
+        replaces = None  # the new version's first step has not run yet
     if state is None:
         return {
             "state": "waiting" if isinstance(found, str) else "pending",
@@ -355,6 +425,8 @@ async def status(db: tg_store.Db) -> dict[str, Any]:
             "emoji": 0,
             "total": len(emoji_art.ART),
             "error": None,
+            "version": emoji_art.ART_VERSION,
+            "replaces": replaces,
         }
     return {
         "state": "error" if state.error else ("ready" if state.alts else "pending"),
@@ -366,4 +438,6 @@ async def status(db: tg_store.Db) -> dict[str, Any]:
         "error": state.error,
         "checked_at": iso(state.checked_at),
         "retry_at": iso(state.retry_at),
+        "version": emoji_art.ART_VERSION,
+        "replaces": replaces,
     }
