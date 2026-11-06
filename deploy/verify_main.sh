@@ -4,8 +4,11 @@
 #   verify_main.sh CHECKOUT BASE TARGET KEYRING
 #
 # Exit 0 only if EVERY first-parent commit in BASE..TARGET is a pull-request merge made by GitHub
-# itself ("Merge pull request #N from ..."), with two parents, committed by GitHub and signed with
-# GitHub's web-flow key whose fingerprint is pinned below. A commit pushed straight to main breaks
+# itself ("Merge pull request #N from ..." as GitHub titles it, or "Merge pull request #N: ..." when
+# the merge was given a title, as PRs #19 and #20 were), with two parents, committed by GitHub and
+# signed with GitHub's web-flow key whose fingerprint is pinned below. The title is only a sanity
+# check; the parents, the committer and the signature are what count, and since D47 GitHub itself
+# lets nothing onto main but a pull-request merge. A commit pushed straight to main breaks
 # that chain (it is unsigned or single-parent), so it and everything after it are refused.
 # BASE is the deployed commit ("none" on a first deploy); if it is not an ancestor of TARGET, the
 # chain starts at their merge base. KEYRING is GitHub's public key (https://github.com/web-flow.gpg),
@@ -55,7 +58,7 @@ for c in $commits; do
   parents="$(git -C "$checkout" rev-list --parents -n 1 "$c" | wc -w)"
   [ "$parents" -eq 3 ] || refuse "$short is not a merge commit (a direct push to main?)"
   subject="$(git -C "$checkout" log -1 --format=%s "$c")"
-  [[ "$subject" =~ ^Merge\ pull\ request\ \#[0-9]+\ from\  ]] || refuse "$short is not a pull-request merge"
+  [[ "$subject" =~ ^Merge\ pull\ request\ \#[0-9]+(\ from\ |:\ ) ]] || refuse "$short is not a pull-request merge"
   committer="$(git -C "$checkout" log -1 --format='%cn <%ce>' "$c")"
   [ "$committer" = "GitHub <noreply@github.com>" ] || refuse "$short was not committed by GitHub"
   status="$(git -C "$checkout" verify-commit --raw "$c" 2>&1)" || refuse "$short has no valid GitHub signature"
