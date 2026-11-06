@@ -67,7 +67,9 @@ CHANNEL_STATS_MESSAGES = {"GetMessagesViewsRequest"}
 # uploaded itself (proxyhub/mtproxy/userclient.py _check_channel_media / _check_upload).
 CHANNEL_POST_MESSAGES = {"EditMessageRequest", "GetStickerSetRequest", "SendMediaRequest"}
 # channels.*: the statistics' full channel, and (D38) the account's own membership (its rights).
-CHANNELS_REQUESTS = {"GetFullChannelRequest", "GetParticipantRequest"}
+# D55: one post of the owner's content sources read again (channels.getMessages, pinned to the
+# source channels this connection resolved; proxyhub/content/telegram_account.py).
+CHANNELS_REQUESTS = {"GetFullChannelRequest", "GetParticipantRequest", "GetMessagesRequest"}
 # Every request class the operator client can EVER let through (any scope, any bot chat), by TL
 # name. Nothing that deletes, forwards, uploads, joins, leaves, reports, invites or changes rights.
 OPERATOR_PASSABLE = {
@@ -94,7 +96,16 @@ OPERATOR_PASSABLE = {
     "messages.SendMediaRequest",
     "upload.SaveFilePartRequest",
     "upload.SaveBigFilePartRequest",
+    # D55: the owner's content sources, read-only: one post again, a file part of a post this
+    # connection read, and the authorization export Telegram needs to serve a file kept in another
+    # data centre (only while such a file exists on the connection).
+    "channels.GetMessagesRequest",
+    "upload.GetFileRequest",
+    "auth.ExportAuthorizationRequest",
 }
+# D55's export carries "Export" on purpose (Telethon's own way to fetch a file from another data
+# centre); it passes only on a connection that read a source post with a file.
+SOURCE_READ_PASSABLE = {"auth.ExportAuthorizationRequest"}
 # The three D51 requests above carry "Media", "Save" and the upload namespace on purpose; every other
 # passable request is still checked against these words.
 MEDIA_POST_PASSABLE = {
@@ -369,11 +380,17 @@ def test_the_operator_client_can_let_through_exactly_these_requests() -> None:
         CHANNEL_POST_REQUESTS,
         MEDIA_POST_REQUESTS,
         POSTER_READ_REQUESTS,
+        SOURCE_READ_REQUESTS,
         UPLOAD_REQUESTS,
     )
 
     every = (
-        ALLOWED_REQUESTS | BOT_CHAT_REQUESTS | CHANNEL_POST_REQUESTS | MEDIA_POST_REQUESTS | UPLOAD_REQUESTS
+        ALLOWED_REQUESTS
+        | BOT_CHAT_REQUESTS
+        | CHANNEL_POST_REQUESTS
+        | MEDIA_POST_REQUESTS
+        | UPLOAD_REQUESTS
+        | SOURCE_READ_REQUESTS
     )
     passable = {_tl_name(k) for k in every}
     assert passable == OPERATOR_PASSABLE, sorted(passable ^ OPERATOR_PASSABLE)
@@ -386,7 +403,12 @@ def test_the_operator_client_can_let_through_exactly_these_requests() -> None:
         "channels.GetParticipantRequest",
         "messages.GetStickerSetRequest",
     }
-    for name in passable - MEDIA_POST_PASSABLE:  # editing a POST is allowed; admins, titles, photos not
+    assert {_tl_name(k) for k in SOURCE_READ_REQUESTS} == {
+        "channels.GetMessagesRequest",
+        "upload.GetFileRequest",
+        "auth.ExportAuthorizationRequest",
+    }
+    for name in passable - MEDIA_POST_PASSABLE - SOURCE_READ_PASSABLE:  # editing a POST is allowed
         assert not FORBIDDEN_REQUEST_WORDS.search(name), name
 
 

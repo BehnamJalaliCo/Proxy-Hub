@@ -78,6 +78,13 @@ systemctl daemon-reload
 systemctl enable "$UNIT" >/dev/null 2>&1
 systemctl restart "$UNIT"
 
+# systemctl returns before the bridge has made its socket (P22): wait for it, at most 20 s.
+for _ in $(seq 1 40); do
+  [ -S "$SOCK_DIR/bridge.sock" ] && break
+  sleep 0.5
+done
+[ -S "$SOCK_DIR/bridge.sock" ] || { echo "the bridge did not make its socket; see: journalctl -u $UNIT"; exit 1; }
+
 echo "claude bridge installed: unit $UNIT, socket $SOCK_DIR/bridge.sock"
 if [ ! -x "$HOME_DIR/.local/bin/claude" ]; then
   echo "next: install Claude Code for $USER_NAME and log in with the owner's subscription (P22)"

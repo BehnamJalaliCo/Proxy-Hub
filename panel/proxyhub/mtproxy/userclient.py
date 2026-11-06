@@ -46,8 +46,20 @@ custom emoji in OUR channels:
 * :meth:`OperatorSession.emoji_pack`: ``messages.getStickerSet`` of the ONE emoji pack the owner
   configured (``ChannelScope.emoji_set``), by its short name.
 
+and (decision D55; proxyhub/content/telegram_account.py), READ-ONLY, the owner's public Telegram
+content sources, on a connection whose :class:`ChannelScope` names them in ``source_names``:
+
+* :meth:`OperatorSession.resolve_source`: ``contacts.resolveUsername`` of one of those names (a
+  broadcast channel only; its id joins ``source_ids``),
+* :meth:`OperatorSession.read_source` / :meth:`OperatorSession.source_message`:
+  ``messages.getHistory`` (at most :data:`MAX_SOURCE_HISTORY` posts) and ``channels.getMessages``
+  (a few posts) of those channels only,
+* :meth:`OperatorSession.download_source_media`: ``upload.getFile`` parts of a photo or document
+  of a post read on this same connection (``source_files``), and ``auth.exportAuthorization`` only
+  while such a file exists (Telegram's way to serve a file kept in another data centre).
+
 Any other peer, any delete request, any forward and any send outside the @MTProxybot chat and our
-configured channels are refused before a byte leaves.
+configured channels are refused before a byte leaves. Nothing joins a channel or marks it read.
 
 Locks (docs/11 section 2.1):
 
@@ -411,6 +423,13 @@ class ChannelScope:
     # The file ids :meth:`OperatorSession.post_media_in_channel` chose on this connection (D51): the
     # only files that may be uploaded, and the only files a media post may name.
     upload_ids: set[int] = field(default_factory=set)
+    # D55: the owner's Telegram content sources this connection may READ: their usernames (lower
+    # case, no @), the channel ids resolved for those names (on this connection, or by an earlier one
+    # and kept by proxyhub/content/telegram_account.py), and the photo and document ids of the
+    # messages this connection read from them (the only files it may download).
+    source_names: frozenset[str] = frozenset()
+    source_ids: set[int] = field(default_factory=set)
+    source_files: set[int] = field(default_factory=set)
 
 
 def _channel_id(peer: Any) -> int | None:
@@ -752,6 +771,68 @@ def _check_poster_read(request: Any, scope: ChannelScope) -> None:
         raise RequestNotAllowed("messages.getStickerSet: only the emoji pack the owner configured")
 
 
+# The owner's Telegram content sources (decision D55, proxyhub/content/telegram_account.py): read
+# a public channel's recent posts and download their photo or video, nothing else. Pinned to the
+# scope: the history and single messages only of the source channels (:attr:`ChannelScope.source_ids`),
+# a file part only of a photo or document read on this connection (:attr:`ChannelScope.source_files`),
+# and the authorization export (Telegram's way to fetch a file kept in another data centre) only
+# while such a file exists. Nothing here joins, marks read, forwards or writes anywhere.
+SOURCE_READ_REQUESTS: Final[frozenset[type[Any]]] = frozenset(
+    {
+        functions.channels.GetMessagesRequest,
+        functions.upload.GetFileRequest,
+        functions.auth.ExportAuthorizationRequest,
+    }
+)
+MAX_SOURCE_HISTORY: Final = 30
+MAX_SOURCE_MESSAGES: Final = 10
+MAX_FILE_PART: Final = 1024 * 1024  # upload.getFile: Telegram's own limit per request
+TELEGRAM_DCS: Final = range(1, 6)
+
+
+def _source_history(request: Any, scope: ChannelScope) -> None:
+    if _channel_id(request.peer) not in scope.source_ids:
+        raise RequestNotAllowed("messages.getHistory: only the owner's content sources")
+    kind = functions.messages.GetHistoryRequest
+    extra = [
+        name
+        for name, value in vars(request).items()
+        if name not in _BOT_FIELDS[kind] and value is not None and value is not False
+    ]
+    limit = request.limit
+    if extra or not isinstance(limit, int) or isinstance(limit, bool) or not 0 < limit <= MAX_SOURCE_HISTORY:
+        raise RequestNotAllowed(f"messages.getHistory: a source's last {MAX_SOURCE_HISTORY} posts only")
+
+
+def _check_source_read(request: Any, scope: ChannelScope) -> None:
+    kind = type(request)
+    if kind is functions.channels.GetMessagesRequest:
+        ids = request.id
+        if (
+            _channel_id(request.channel) not in scope.source_ids
+            or not isinstance(ids, list)
+            or not 0 < len(ids) <= MAX_SOURCE_MESSAGES
+            or any(type(i) is not types.InputMessageID for i in ids)
+        ):
+            raise RequestNotAllowed("channels.getMessages: a few posts of the owner's content sources")
+        return
+    if kind is functions.upload.GetFileRequest:
+        location = request.location
+        if (
+            type(location) not in (types.InputPhotoFileLocation, types.InputDocumentFileLocation)
+            or int(location.id) not in scope.source_files
+            or request.cdn_supported
+            or not isinstance(request.limit, int)
+            or not 0 < request.limit <= MAX_FILE_PART
+            or not isinstance(request.offset, int)
+            or request.offset < 0
+        ):
+            raise RequestNotAllowed("upload.getFile: only a photo or video of a source post read here")
+        return
+    if not scope.source_files or request.dc_id not in TELEGRAM_DCS:
+        raise RequestNotAllowed("auth.exportAuthorization: only to download a source post's file")
+
+
 def check_request(
     request: Any,
     scope: ChannelScope | None = None,
@@ -779,6 +860,12 @@ def check_request(
     if kind in UPLOAD_REQUESTS:
         _check_upload(request, scope)
         return
+    if kind is functions.messages.GetHistoryRequest and _channel_id(getattr(request, "peer", None)):
+        _source_history(request, scope)
+        return
+    if kind in SOURCE_READ_REQUESTS:
+        _check_source_read(request, scope)
+        return
     if kind in BOT_CHAT_REQUESTS:
         _check_bot_chat_request(request, bot_id)
         if kind is functions.messages.GetBotCallbackAnswerRequest:
@@ -794,8 +881,10 @@ def check_request(
         raise RequestNotAllowed("users.getUsers is allowed only for the account itself")
     if kind is functions.contacts.ResolveUsernameRequest:
         name = str(request.username).lower()
-        if name != MTPROXYBOT.lower() and name not in scope.usernames:
-            raise RequestNotAllowed("contacts.resolveUsername: only @MTProxybot and our own channels")
+        if name != MTPROXYBOT.lower() and name not in scope.usernames and name not in scope.source_names:
+            raise RequestNotAllowed(
+                "contacts.resolveUsername: only @MTProxybot, our own channels and the owner's content sources"
+            )
     if kind in (functions.channels.GetFullChannelRequest, functions.stats.GetBroadcastStatsRequest):
         if _channel_id(request.channel) not in scope.channel_ids:
             raise RequestNotAllowed(f"{kind.__name__}: only our configured channels")
@@ -932,6 +1021,8 @@ class OperatorSession:
         self._creds = creds
         self._options = options
         self._hold = hold
+        # D55: the files of the source posts this connection read, by (channel id, message id).
+        self._source_files: dict[tuple[int, int], _SourceFile] = {}
 
     def _keep_out_of_logs(self, value: str) -> None:
         """Redact ``value`` from every log line until this connection is closed."""
@@ -1222,6 +1313,241 @@ class OperatorSession:
             )
         )
         return emoji_pack_of(result)
+
+    # --- the owner's Telegram content sources (decision D55): read only, checked against the scope ---
+
+    async def resolve_source(self, username: str) -> ChannelRef:
+        """One of the owner's content sources (the scope's ``source_names``) by its public
+        username; a broadcast channel only. Its id joins the scope's ``source_ids``."""
+        name = username.lstrip("@").lower()
+        try:
+            found = await self._run(self._client(functions.contacts.ResolveUsernameRequest(username=name)))
+        except MtpError as exc:
+            if exc.rpc in ("USERNAME_NOT_OCCUPIED", "USERNAME_INVALID"):
+                raise MtpError("source_not_found", rpc=exc.rpc) from None
+            raise
+        peer = getattr(found, "peer", None)
+        if not isinstance(peer, types.PeerChannel):
+            raise MtpError("source_not_channel")
+        for chat in getattr(found, "chats", []):
+            if isinstance(chat, types.Channel) and int(chat.id) == int(peer.channel_id):
+                if not chat.broadcast or chat.access_hash is None:
+                    break
+                ref = ChannelRef(channel_id=int(chat.id), access_hash=int(chat.access_hash))
+                self._client.scope.source_ids.add(ref.channel_id)
+                return ref
+        raise MtpError("source_not_channel")
+
+    async def read_source(self, ref: ChannelRef, limit: int = MAX_SOURCE_HISTORY) -> list[SourcePost]:
+        """The last ``limit`` posts of a source channel (``messages.getHistory``), newest first.
+        Service messages are left out."""
+        result = await self._run(
+            self._client(
+                functions.messages.GetHistoryRequest(
+                    peer=ref.input_peer(),
+                    offset_id=0,
+                    offset_date=None,
+                    add_offset=0,
+                    limit=min(limit, MAX_SOURCE_HISTORY),
+                    max_id=0,
+                    min_id=0,
+                    hash=0,
+                )
+            )
+        )
+        return [
+            self._source_post(ref, m) for m in getattr(result, "messages", []) if isinstance(m, types.Message)
+        ]
+
+    async def source_message(self, ref: ChannelRef, message_id: int) -> SourcePost | None:
+        """One post of a source channel, read again (its file reference is fresh)."""
+        result = await self._run(
+            self._client(
+                functions.channels.GetMessagesRequest(
+                    channel=ref.input_channel(), id=[types.InputMessageID(id=message_id)]
+                )
+            )
+        )
+        for m in getattr(result, "messages", []):
+            if isinstance(m, types.Message) and int(m.id) == message_id:
+                return self._source_post(ref, m)
+        return None
+
+    def _source_post(self, ref: ChannelRef, message: Any) -> SourcePost:
+        found = _source_file(message.media)
+        if found is not None:
+            self._client.scope.source_files.add(found.file_id)
+            self._source_files[(ref.channel_id, int(message.id))] = found
+        views = message.views
+        grouped = message.grouped_id
+        return SourcePost(
+            id=int(message.id),
+            date=message.date if isinstance(message.date, datetime) else None,
+            text=message.message if isinstance(message.message, str) else "",
+            views=int(views) if isinstance(views, int) and views >= 0 else None,
+            grouped_id=int(grouped) if isinstance(grouped, int) else None,
+            media=found.media if found is not None else None,
+        )
+
+    async def download_source_media(
+        self, ref: ChannelRef, message_id: int, role: Literal["photo", "thumb", "video"], limit: int
+    ) -> bytes:
+        """The photo, the video or the video's thumbnail of a source post this connection read, at
+        most ``limit`` bytes (refused before a byte is fetched when Telegram says it is bigger)."""
+        found = self._source_files.get((ref.channel_id, message_id))
+        if found is None:
+            raise MtpError("source_media_gone")
+        location, size = found.location(role, limit)
+        data = await self._run(
+            self._client.download_file(location, bytes, dc_id=found.dc_id, file_size=size),
+            deadline_s=SOURCE_DOWNLOAD_DEADLINE_S,
+        )
+        if not isinstance(data, bytes) or not data:
+            raise MtpError("source_media_gone")
+        if len(data) > limit:
+            raise MtpError("source_media_too_big")
+        return data
+
+
+# --- the owner's content sources (decision D55): plain values out ------------------------------------
+
+SOURCE_DOWNLOAD_DEADLINE_S: Final = 120.0
+
+
+@dataclass(frozen=True)
+class SourceMedia:
+    """A source post's photo or video. ``size``: bytes of the file the panel would fetch (a photo's
+    largest size); ``mime``: a video's declared type."""
+
+    kind: Literal["photo", "video"]
+    size: int | None
+    mime: str | None = None
+    duration: int | None = None
+    width: int | None = None
+    height: int | None = None
+    has_thumb: bool = False
+
+
+@dataclass(frozen=True)
+class SourcePost:
+    """One post of a content source, as plain values (no Telethon object leaves this module)."""
+
+    id: int
+    date: datetime | None
+    text: str
+    views: int | None
+    grouped_id: int | None
+    media: SourceMedia | None
+
+
+def _photo_sizes(sizes: Any) -> list[tuple[str, int, int, int]]:
+    """(type, bytes, width, height) of the downloadable sizes, smallest first."""
+    out: list[tuple[str, int, int, int]] = []
+    for size in sizes or []:
+        if isinstance(size, types.PhotoSize):
+            out.append((str(size.type), int(size.size), int(size.w), int(size.h)))
+        elif isinstance(size, types.PhotoSizeProgressive) and size.sizes:
+            out.append((str(size.type), int(max(size.sizes)), int(size.w), int(size.h)))
+    return sorted(out, key=lambda x: x[1])
+
+
+@dataclass(frozen=True)
+class _SourceFile:
+    media: SourceMedia
+    file_id: int
+    access_hash: int
+    file_reference: bytes = field(repr=False)
+    dc_id: int
+    sizes: tuple[tuple[str, int, int, int], ...] = ()  # a photo's sizes, or a video's thumbnails
+
+    def location(self, role: str, limit: int) -> tuple[Any, int]:
+        if role == "video" and self.media.kind == "video":
+            size = self.media.size or 0
+            if size > limit:
+                raise MtpError("source_media_too_big")
+            return (
+                types.InputDocumentFileLocation(
+                    id=self.file_id,
+                    access_hash=self.access_hash,
+                    file_reference=self.file_reference,
+                    thumb_size="",
+                ),
+                size,
+            )
+        fitting = [s for s in self.sizes if s[1] <= limit]
+        if role not in ("photo", "thumb") or (role == "photo") != (self.media.kind == "photo"):
+            raise MtpError("source_media_gone")
+        if not fitting:
+            raise MtpError("source_media_too_big" if self.sizes else "source_media_gone")
+        kind, size, _, _ = fitting[-1]
+        if role == "photo":
+            return (
+                types.InputPhotoFileLocation(
+                    id=self.file_id,
+                    access_hash=self.access_hash,
+                    file_reference=self.file_reference,
+                    thumb_size=kind,
+                ),
+                size,
+            )
+        return (
+            types.InputDocumentFileLocation(
+                id=self.file_id,
+                access_hash=self.access_hash,
+                file_reference=self.file_reference,
+                thumb_size=kind,
+            ),
+            size,
+        )
+
+
+def _source_file(media: Any) -> _SourceFile | None:
+    """A post's photo, or its video (not a GIF, a round video note or a self-destructing file)."""
+    if isinstance(media, types.MessageMediaPhoto) and isinstance(media.photo, types.Photo):
+        if media.ttl_seconds:
+            return None
+        photo = media.photo
+        sizes = _photo_sizes(photo.sizes)
+        if not sizes:
+            return None
+        _, size, w, h = sizes[-1]
+        return _SourceFile(
+            media=SourceMedia(kind="photo", size=size, mime="image/jpeg", width=w, height=h),
+            file_id=int(photo.id),
+            access_hash=int(photo.access_hash),
+            file_reference=bytes(photo.file_reference or b""),
+            dc_id=int(photo.dc_id),
+            sizes=tuple(sizes),
+        )
+    if not isinstance(media, types.MessageMediaDocument) or not isinstance(media.document, types.Document):
+        return None
+    if media.ttl_seconds or media.round or media.voice:
+        return None
+    document = media.document
+    attributes = list(document.attributes or [])
+    not_a_video = types.DocumentAttributeAnimated | types.DocumentAttributeSticker
+    if any(isinstance(a, not_a_video) for a in attributes):
+        return None
+    video = next((a for a in attributes if isinstance(a, types.DocumentAttributeVideo)), None)
+    if video is None or video.round_message:
+        return None
+    thumbs = _photo_sizes(document.thumbs)
+    return _SourceFile(
+        media=SourceMedia(
+            kind="video",
+            size=int(document.size),
+            mime=str(document.mime_type or "").lower() or None,
+            duration=int(video.duration or 0) or None,
+            width=int(video.w or 0) or None,
+            height=int(video.h or 0) or None,
+            has_thumb=bool(thumbs),
+        ),
+        file_id=int(document.id),
+        access_hash=int(document.access_hash),
+        file_reference=bytes(document.file_reference or b""),
+        dc_id=int(document.dc_id),
+        sizes=tuple(thumbs),
+    )
 
 
 @dataclass(frozen=True)
