@@ -524,6 +524,102 @@ async def test_a_working_target_is_switched_once_its_configs_have_ended(world: W
     assert c3.slot == 5
 
 
+APPLE = ("www.apple.com:443", "www.apple.com")
+GITHUB = ("github.com:443", "github.com")
+
+
+async def test_a_scope_still_on_a_risky_target_leaves_it_at_once(world: World) -> None:
+    """P19 on the panel server: the settings already say github.com (the auto switch of P17), but
+    the test node's key still carried www.apple.com while its configs were in use ("wait"), so its
+    links had sni=www.apple.com. Xray warns about that name: the scope leaves it at the next pass."""
+    node = await world.node(slot=7)
+    now = datetime.now(UTC)
+    await world.report(node, now=now)
+    [c1] = await _create(world, now)
+    # The key as it was before P19: on apple, with an active config, and the node passing apple.
+    await world.rows("UPDATE reality_keys SET target = :t, server_name = :s", t=APPLE[0], s=APPLE[1])
+    [old] = await _keys(world)
+    async with world.engine.begin() as conn:
+        await save_reality_settings(conn, reality_settings(target_host="github.com"))
+    await world.report(node, now=now, target_ok=True, checked=APPLE)
+    # Not renewed either (an hour before its end it would be, on a safe target).
+    assert await renew_configs_at(world, c1.expires_at - timedelta(minutes=30)) == []
+
+    await _loop(world)
+    assert [(c.id, c.status) for c in await _configs(world)] == [(c1.config_id, "burned")]
+    [key] = await _keys(world)
+    assert (key.target, key.server_name) == GITHUB and key.short_id != old.short_id
+    assert (key.public_key, key.secret_name) == (old.public_key, old.secret_name)
+    logs = await world.rows(
+        "SELECT action, target, reasons FROM actions_log WHERE actor = 'reality' "
+        "AND action IN ('reality_target_switched', 'reality_config_ended') ORDER BY id"
+    )
+    assert [(r.action, r.target, r.reasons["reasons"]) for r in logs] == [
+        ("reality_config_ended", f"reality:{c1.config_id}", ["burned", "target_replaced"]),
+        ("reality_target_switched", "slot:7", ["risky_sni"]),
+    ]
+    assert logs[1].reasons["context"] == {"from": APPLE[0], "to": GITHUB[0], "burned": 1}
+    section = await _section(world, node)
+    assert section is not None
+    assert (section["target"], section["server_names"], section["users"]) == (GITHUB[0], [GITHUB[1]], [])
+
+    # Once: the next passes change nothing until the node has checked github.com, then configs resume.
+    await _loop(world)
+    assert len(await world.rows("SELECT id FROM actions_log WHERE action = 'reality_target_switched'")) == 1
+    assert [c.status for c in await _configs(world)] == ["burned"]
+    await world.report(node, now=datetime.now(UTC), target_ok=True, checked=GITHUB)
+    await _loop(world)
+    fresh = [c for c in await _configs(world) if c.status == "active"]
+    assert len(fresh) == 1
+    await world.report(node, now=datetime.now(UTC) + timedelta(seconds=30), target_ok=True, checked=GITHUB)
+    async with world.engine.connect() as conn:
+        links = [link for link in await provide_links(conn) if link.status == "active"]
+    assert links and all("sni=github.com" in link.url and "apple" not in link.url for link in links)
+
+
+async def renew_configs_at(world: World, now: datetime) -> list[int]:
+    async with world.engine.begin() as conn:
+        return await renew_configs(conn, reality_settings(target_host=APPLE[1]), now)
+
+
+async def test_a_risky_manual_target_is_never_used_and_the_owner_is_told_daily(world: World) -> None:
+    """A manual target saved before the API refused such names: no key takes it, no config is made
+    or renewed, the scopes keep what they have, and the owner hears about it once a day."""
+    working = await world.node(slot=8)
+    now = datetime.now(UTC)
+    await world.report(working, now=now)
+    [c1] = await _create(world, now)  # on the default target
+    async with world.engine.begin() as conn:
+        await save_reality_settings(conn, reality_settings(target_mode="manual", target_host="www.apple.com"))
+    new = await world.node(slot=9, ipv4="203.0.113.19")
+    await world.report(new, now=now, target_ok=None)
+    for _ in range(2):
+        await _loop(world)
+    keys = await _keys(world)
+    assert [(k.slot, k.target) for k in keys] == [(8, "dl.google.com:443")]  # none for slot 9, slot 8 held
+    assert [(c.id, c.status) for c in await _configs(world)] == [(c1.config_id, "active")]
+    assert await renew_configs_at(world, c1.expires_at - timedelta(minutes=30)) == []
+    told = await world.rows(
+        "SELECT allowed, reasons FROM actions_log WHERE action = 'reality_target_risky' ORDER BY id"
+    )
+    assert [(r.allowed, r.reasons["reasons"], r.reasons["context"]) for r in told] == [
+        (False, ["risky_sni"], {"target": APPLE[0]})
+    ]
+    assert await _section(world, new) is None
+
+    # In auto mode the targets loop replaces it (with its own note): no second note from here.
+    async with world.engine.begin() as conn:
+        await save_reality_settings(conn, reality_settings(target_host="www.apple.com"))
+    await world.rows("DELETE FROM settings WHERE key = 'reality.state'")
+    await _loop(world)
+    assert len(await world.rows("SELECT id FROM actions_log WHERE action = 'reality_target_risky'")) == 1
+    # ws_tls uses no REALITY target: a new scope still gets its key, with the default target.
+    ws = RealitySettings(transport="ws_tls", target_host="www.apple.com")
+    async with world.engine.begin() as conn:
+        [made] = await ensure_keys(conn, ws, now)
+    assert made.slot == 9 and made.target == "dl.google.com:443"
+
+
 # --- desired state and the agent API ---------------------------------------------------------------
 
 

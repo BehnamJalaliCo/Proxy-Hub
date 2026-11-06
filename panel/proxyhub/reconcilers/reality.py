@@ -6,7 +6,10 @@ slotless node that is gone.
 Every change goes to actions_log (actor ``reality``) without the config's UUID: that is the
 credential a link carries. The owner hears about what code cannot fix by itself: a node from which
 the REALITY target fails its TLS 1.3 + HTTP/2 check, or (``ws_tls``) whose own TLS inbound fails
-its check (at most one alert a day).
+its check, or a ``manual`` target saved before P19 whose name Xray warns about (no config is made on
+it; proxyhub/targets/risky.py), each at most one alert a day. A scope that leaves such a name is
+logged with reason ``risky_sni``; in ``auto`` mode the targets loop's switch note already told the
+owner.
 """
 
 from __future__ import annotations
@@ -31,9 +34,17 @@ from proxyhub.reality.policy import (
     retarget_scopes,
     scope_label,
 )
-from proxyhub.reality.settings import PORT, Transport, load_reality_settings, load_state, save_state
+from proxyhub.reality.settings import (
+    PORT,
+    RealitySettings,
+    Transport,
+    load_reality_settings,
+    load_state,
+    save_state,
+)
 from proxyhub.reality.store import all_statuses, live_nodes, target_verdict
 from proxyhub.reconcilers.base import Reconciler
+from proxyhub.targets.risky import RISKY_RULE_FA, risky_target
 from proxyhub.telegram.store import enqueue_owner_alert
 from proxyhub.telegram.templates import fa_digits
 
@@ -62,6 +73,14 @@ def tls_alert_text(nodes: list[str]) -> str:
         "⚠️ <b>WebSocket + TLS</b>: آزمون TLS خود node با نام دامنه و گواهی خودش روی "
         f"{fa_digits(len(nodes))} node رد شد ({names}). روی این nodeها کانفیگ تازه ساخته نمیشود. "
         "node هر چند دقیقه دوباره میآزماید و اگر درست شد، ساخت کانفیگ خودش از سر گرفته میشود."
+    )
+
+
+def risky_target_alert_text(host: str) -> str:
+    return (
+        f"⚠️ <b>Reality</b>: سایت هدف دستی <code>{html.escape(host)}</code> دیگر به کار نمیرود. "
+        f"{RISKY_RULE_FA} تا عوض نشود، کانفیگ Reality تازه‌ای ساخته یا تمدید نمیشود. در صفحه‌ی Reality "
+        "سایت هدف دیگری بگذارید یا «خودکار» را بزنید."
     )
 
 
@@ -98,6 +117,10 @@ class RealityReconciler(Reconciler):
         for r in await retarget_scopes(conn, settings, now):
             for config_id in r.burned:
                 await self._ended(conn, config_id, ["burned", "target_replaced"])
+            if r.old_risky:
+                why = "risky_sni"  # left at once, even with configs in use (proxyhub/targets/risky.py)
+            else:
+                why = "old_target_failed" if r.burned else "no_active_configs"
             await log_action(
                 conn,
                 actor=ACTOR,
@@ -105,7 +128,7 @@ class RealityReconciler(Reconciler):
                 target=scope_label(r.slot, r.node_id),
                 dry_run=False,
                 allowed=True,
-                reasons=["old_target_failed" if r.burned else "no_active_configs"],
+                reasons=[why],
                 context={"from": r.old_target, "to": r.new_target, "burned": len(r.burned)},
             )
         if settings.enabled:
@@ -118,7 +141,7 @@ class RealityReconciler(Reconciler):
                     dry_run=False,
                     allowed=True,
                     reasons=["new_scope"],
-                    context={"target": settings.target},
+                    context={"target": k.target},
                 )
             for c in await create_configs(conn, settings, now):
                 await log_action(
@@ -138,6 +161,37 @@ class RealityReconciler(Reconciler):
                     },
                 )
         await self._target_alert(conn, now, settings.transport)
+        await self._risky_manual_alert(conn, now, settings)
+
+    async def _risky_manual_alert(
+        self, conn: AsyncConnection, now: datetime, settings: RealitySettings
+    ) -> None:
+        """A ``manual`` target whose name Xray warns about (saved before the API refused such names):
+        nothing is made on it, and only the owner can pick another (``auto`` replaces it by itself)."""
+        if not (
+            settings.enabled
+            and settings.transport == "reality"
+            and settings.target_mode == "manual"
+            and risky_target(settings.target, settings.target_host)
+        ):
+            return
+        state = await load_state(conn)
+        last = state.get("risky_target_alert_at")
+        if isinstance(last, str) and now - datetime.fromisoformat(last) < TARGET_ALERT_REPEAT:
+            return
+        await enqueue_owner_alert(conn, risky_target_alert_text(settings.target_host))
+        await log_action(
+            conn,
+            actor=ACTOR,
+            action="reality_target_risky",
+            target=None,
+            dry_run=False,
+            allowed=False,
+            reasons=["risky_sni"],
+            context={"target": settings.target},
+        )
+        state["risky_target_alert_at"] = now.isoformat()
+        await save_state(conn, state)
 
     async def _ended(self, conn: AsyncConnection, config_id: int, reasons: list[str]) -> None:
         await log_action(

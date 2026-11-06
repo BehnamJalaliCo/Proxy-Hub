@@ -8,7 +8,8 @@ PUT /api/targets/settings   {candidates: [...], interval_h, enabled} -> the GET 
 
 The ``auto`` / ``manual`` switch itself is part of the Reality and MTProto settings
 (PUT /api/reality/settings, PUT /api/mtproto/settings: ``target_mode``). Errors are
-``{"error", "message_fa"}``; input values are never echoed back.
+``{"error", "message_fa"}``; input values are never echoed back. A candidate whose name Xray warns
+about (proxyhub/targets/risky.py) is refused with its own message_fa that states the rule.
 """
 
 from __future__ import annotations
@@ -24,7 +25,13 @@ from proxyhub.api.deps import AdminIdentity, ApiError, ApiRoute, db_session, req
 from proxyhub.fleet.actions import log_action
 from proxyhub.probes.settings import load_probe_settings
 from proxyhub.targets import service
-from proxyhub.targets.settings import TargetSettings, load_target_settings, save_target_settings
+from proxyhub.targets.risky import RISKY_RULE_FA
+from proxyhub.targets.settings import (
+    RISKY_ERROR,
+    TargetSettings,
+    load_target_settings,
+    save_target_settings,
+)
 
 router = APIRouter(prefix="/api/targets", tags=["targets"], route_class=ApiRoute)
 
@@ -32,6 +39,7 @@ Admin = Annotated[AdminIdentity, Depends(require_admin)]
 Db = Annotated[AsyncSession, Depends(db_session)]
 
 INVALID_FA = "فهرست سایت‌های نامزد پذیرفته نشد: ۱ تا ۱۲ نام دامنه (نه IP)، و فاصله‌ی سنجش ۱ تا ۴۸ ساعت."
+RISKY_FA = f"فهرست سایت‌های نامزد پذیرفته نشد. {RISKY_RULE_FA} آن نام را بردارید و دوباره ذخیره کنید."
 
 
 async def _body(db: AsyncSession, settings: TargetSettings) -> dict[str, Any]:
@@ -52,8 +60,12 @@ async def put_target_settings(admin: Admin, db: Db, payload: Annotated[Any, Body
         new = TargetSettings.model_validate(payload)
     except ValidationError as exc:
         fields = sorted({str(e["loc"][0]) for e in exc.errors() if e.get("loc")})
+        risky = any(e["type"] == RISKY_ERROR for e in exc.errors())
         raise ApiError(
-            "invalid_settings", status_code=422, message_fa=INVALID_FA, extra={"fields": fields}
+            "invalid_settings",
+            status_code=422,
+            message_fa=RISKY_FA if risky else INVALID_FA,
+            extra={"fields": fields},
         ) from None
     old = await load_target_settings(db)
     a, b = old.model_dump(mode="json"), new.model_dump(mode="json")

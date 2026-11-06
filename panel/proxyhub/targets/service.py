@@ -305,6 +305,11 @@ def _nets_fa(keys: Sequence[str]) -> str:
 
 
 def why_fa(choice: Choice) -> str:
+    if choice.why == "risky_sni":
+        return (
+            "نامش از نام‌هایی است که خود Xray درباره‌شان هشدار میدهد (apple، icloud، microsoft، یا "
+            "‎.ru، ‎.ir و ‎.cn): چنین SNIای احتمال بسته شدن IP سرور را بالا میبرد"
+        )
     if choice.why == "not_a_candidate":
         return "در فهرست سایت‌های نامزد (صفحه‌ی «تنظیمات») نیست"
     if choice.why == "node_check_failed":
@@ -318,12 +323,23 @@ def reality_switch_text(old: str, new: str, choice: Choice, transport: str, node
         if node_passed
         else "؛ nodeها آن را خودشان میآزمایند و کانفیگ تازه فقط پس از قبول شدن ساخته میشود"
     )
+    if choice.why != "risky_sni":
+        old_configs = (
+            "کانفیگ‌های فعالِ هدف قبلی تا پایان زمان خودشان کار میکنند (مگر هدف قبلی از خود node رد شده باشد). "
+        )
+    elif transport == "reality":
+        # proxyhub/reality/policy.py retarget_decision: a scope leaves a risky target at once.
+        old_configs = (
+            "کانفیگ‌های فعالِ هدف قبلی همین حالا کنار میروند (🚫 روی پست‌ها) و کانفیگ تازه با هدف "
+            "تازه ساخته میشود. "
+        )
+    else:
+        old_configs = ""
     text = (
         f"🔁 <b>Reality</b>: سایت هدف خودکار از <code>{html.escape(old)}</code> به "
         f"<code>{html.escape(new)}</code> عوض شد، چون هدف قبلی {why_fa(choice)}. "
         f"<code>{html.escape(new)}</code> از ایران (همراه اول و رایتل) با دست‌دادن TLS باز است{checked}.\n"
-        "کانفیگ‌های فعالِ هدف قبلی تا پایان زمان خودشان کار میکنند (مگر هدف قبلی از خود node رد شده "
-        "باشد). برای انتخاب دستی، در صفحه‌ی Reality حالت «دستی» را بزنید."
+        f"{old_configs}برای انتخاب دستی، در صفحه‌ی Reality حالت «دستی» را بزنید."
     )
     if transport != "reality":
         text += "\nکانفیگ‌های فعلی WebSocket + TLS اند؛ این هدف وقتی به کار میآید که Reality روشن شود."
