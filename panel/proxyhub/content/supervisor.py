@@ -78,6 +78,7 @@ from proxyhub.content.messages import qc_check_fa, qc_outcome_fa
 from proxyhub.content.net import FetchError, SafeHttp
 from proxyhub.content.plugins import PLUGINS, SourcePlugin
 from proxyhub.content.qc_settings import QcConfig
+from proxyhub.content.telegram_account import AccountReader
 from proxyhub.content.writer import Image, Review, ReviewRequest
 from proxyhub.db.models_content import ContentCandidate, ContentMedia, ContentQcCall, ContentSource
 from proxyhub.fleet.actions import iso, log_action
@@ -439,6 +440,8 @@ class Supervisor:
     http_factory: HttpFactory = SafeHttp
     plugins: Mapping[str, SourcePlugin] = field(default_factory=lambda: dict(PLUGINS))
     sampler: frames.Sampler = field(default_factory=frames.Sampler)
+    # D55: a video of a post the operator account read is downloaded by the account.
+    account: AccountReader | None = None
 
     # -- one round --
 
@@ -561,7 +564,7 @@ class Supervisor:
         stores it: the post later uses this same file."""
         try:
             async with self.http_factory() as http:
-                info, data = await content_engine.fetch_media(http, task, self.plugins)
+                info, data = await content_engine.fetch_media(http, task, self.plugins, self.account)
         except FetchError as exc:
             final = exc.code in content_engine.FINAL_ERRORS
             async with self.engine.begin() as conn:

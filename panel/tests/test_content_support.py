@@ -39,6 +39,7 @@ from proxyhub.content.net import SafeHttp
 CLEAN_SQL = (
     "DELETE FROM content_qc_calls",
     "DELETE FROM settings WHERE key LIKE 'content.qc%'",
+    "DELETE FROM settings WHERE key = 'content.tg_channels'",
     "DELETE FROM secrets WHERE name = 'anthropic_api_key'",
     "DELETE FROM content_media",
     "UPDATE posts SET content_candidate_id = NULL",

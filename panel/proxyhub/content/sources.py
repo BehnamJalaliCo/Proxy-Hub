@@ -297,7 +297,11 @@ async def auto_disable(db: Db, source_id: int, now: datetime, reason: str, detai
     return done is not None
 
 
-async def record_ok(db: Db, source_id: int, now: datetime, count: int) -> None:
+async def record_ok(
+    db: Db, source_id: int, now: datetime, count: int, *, every: timedelta = FETCH_EVERY
+) -> None:
+    """A read worked. ``every``: when to read again (a Telegram source read with the operator
+    account waits longer, proxyhub/content/telegram_account.py)."""
     await db.execute(
         update(ContentSource)
         .where(ContentSource.id == source_id)
@@ -306,7 +310,7 @@ async def record_ok(db: Db, source_id: int, now: datetime, count: int) -> None:
             last_ok_at=now,
             last_error=None,
             failures=0,
-            next_fetch_at=now + FETCH_EVERY,
+            next_fetch_at=now + every,
             last_count=count,
         )
     )
