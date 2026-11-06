@@ -17,9 +17,17 @@ passed first, then the one open on more key networks, then the faster one, then 
 The nodes then check the new target; only a target they pass ever gets configs
 (proxyhub/reality/policy.py), and one they fail is replaced at the next pass here.
 
+A name Xray warns about (proxyhub/targets/risky.py: apple, icloud, microsoft, .ru, .ir, .cn) is never
+chosen, whatever the measurements say, and a current target with such a name is replaced before
+anything else is looked at (``risky_sni``). Without this an old www.apple.com could even rank first
+again (P19): a key that waits for its configs to end keeps its old target, and its nodes keep passing
+that one, while they never check the new one. Once replaced such a name can never come back, so the
+switch and its note to the owner happen once.
+
 MTProto (:func:`choose_mtproto`, nodes without their own DNS name only): every ``ee`` link of those
 nodes carries the domain, so the current one is replaced only when it FAILS: blocked from Iran. The
-replacement is the best candidate open from Iran.
+replacement is the best candidate open from Iran. Xray's warning is about REALITY server names, not
+Telemt's fake-TLS domain, so a current ``www.microsoft.com`` (D40) is not replaced on that ground.
 """
 
 from __future__ import annotations
@@ -30,12 +38,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Final, Literal
 
+from proxyhub.targets.risky import risky_sni
+
 FRESH: Final = timedelta(hours=24)
 NODE_MEMORY: Final = timedelta(days=7)
 
 NetState = Literal["up", "down", "nodata"]
 NodeCheck = Literal["passed", "failed"]
-Why = Literal["not_a_candidate", "node_check_failed", "blocked_from_iran"]
+Why = Literal["risky_sni", "not_a_candidate", "node_check_failed", "blocked_from_iran"]
 
 
 @dataclass(frozen=True)
@@ -125,6 +135,8 @@ def _bad(
     current: str, listed: Sequence[str], states: Mapping[str, Candidate], keys: Sequence[str], now: datetime
 ) -> tuple[Why | None, tuple[str, ...]]:
     cur = states.get(current)
+    if risky_sni(current):
+        return "risky_sni", ()
     if current not in listed:
         return "not_a_candidate", ()
     if node_check(cur, now) == "failed":
@@ -163,6 +175,7 @@ def choose_reality(
         h
         for h in listed
         if h != current
+        and not risky_sni(h)
         and open_from_iran(states.get(h), keys, now)
         and node_check(states.get(h), now) != "failed"
     ]

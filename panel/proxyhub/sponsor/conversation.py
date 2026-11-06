@@ -13,7 +13,9 @@ The list names a button "<host> <hex>", the hex being a piece of the registratio
 Hetzner may give a deleted node's IPv4 to a new one, so the list can hold two buttons with the same
 address: the old registration's and ours. With the tag known, only the button that names OUR tag is
 pressed, on whichever page it is; the proxy's screen ("Proxy <host:port> with the tag <hex>") must
-not name another tag either. A list that shows the address but not our tag stops the flow.
+not name another tag either. A list that shows the address but not our tag stops the flow. A bot
+that has no proxy of this account at all ("You didn't create any proxy yet", P19) gives
+:class:`Forgotten`: the registration is retired and the proxy is registered again.
 
 :func:`first_action` gives the opening message; :func:`next_action` reads what the bot said after
 our last action (its new or changed messages, and the short answer to a button press) and gives the
@@ -119,6 +121,13 @@ class PromotionSet:
 
 
 @dataclass(frozen=True)
+class Forgotten:
+    """@MTProxybot has no proxy of this account at all (``/myproxies``: "You didn't create any
+    proxy yet"): the registration and its tag are gone on the bot's side (P19: the owner deleted
+    every proxy by hand). The proxy has to be registered again."""
+
+
+@dataclass(frozen=True)
 class Stuck:
     step: Step
     reason: str
@@ -126,7 +135,7 @@ class Stuck:
 
 
 Action = Send | Press
-Result = Registered | PromotionSet | Stuck
+Result = Registered | PromotionSet | Forgotten | Stuck
 
 
 @dataclass(frozen=True)
@@ -209,6 +218,8 @@ def _next_page_buttons(seen: Observation) -> list[tuple[int, BotButton]]:
 
 
 def _in_list(job: PromoteJob, step: Step, seen: Observation, text: str) -> Action | Result:
+    if step is Step.SENT_MYPROXIES and replies.no_proxies(text):
+        return Forgotten()
     if step is Step.SENT_MYPROXIES and not replies.is_proxy_list(text):
         return _stuck(step, "unexpected_reply", text)
     if step is Step.PRESSED_NEXT_PAGE and not seen.messages:  # only a toast: the page did not change

@@ -273,6 +273,25 @@ def test_retarget_decision() -> None:
     assert d(new, 2, True) == "switch_burn"  # those links cannot work anyway
     assert d(new, 2, False) == d(new, 1, False) == "wait"  # posted links keep working to their end
 
+    # P19: a key still on a name Xray warns about leaves it at once, even with working links in use;
+    # no key ever moves onto such a name (the settings' one is replaced first, proxyhub/targets).
+    for host in ("www.apple.com", "WWW.iCloud.com", "www.microsoft.com", "cdn.example.ru"):
+        key = (f"{host.lower()}:443", host.lower())
+        assert (
+            retarget_decision(key_target=key, settings=new, active_configs=2, old_target_failing=False)
+            == "switch_burn"
+        )
+        assert (
+            retarget_decision(key_target=key, settings=new, active_configs=0, old_target_failing=False)
+            == "switch"
+        )
+        risky = RealitySettings(target_host=host)
+        assert d(risky, 0, False) == d(risky, 2, True) == "hold"
+        assert (
+            retarget_decision(key_target=key, settings=risky, active_configs=2, old_target_failing=False)
+            == "keep"
+        )  # nothing to move to; no config is made or renewed on it (policy)
+
 
 def test_labels_and_hosts() -> None:
     assert config_email(42) == "cfg-42@proxyhub" and config_id_from_email("cfg-42@proxyhub") == 42

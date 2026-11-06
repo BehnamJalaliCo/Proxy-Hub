@@ -12,6 +12,7 @@ import {
   nodeCheckInfo,
   normalizeHost,
   portsText,
+  riskySni,
   targetCell,
 } from "./iranReach";
 import type { LocationReach, LocationNetwork, TargetCandidate, TargetNetwork } from "./types";
@@ -125,10 +126,23 @@ describe("candidate sites", () => {
 
   it("checks the list like the server", () => {
     expect(normalizeHost(" WWW.Apple.com. ")).toBe("www.apple.com");
-    expect(candidatesProblem(["www.apple.com", "github.com"])).toBeNull();
+    expect(candidatesProblem(["www.mozilla.org", "github.com"])).toBeNull();
     expect(candidatesProblem([])).toMatch(PERSIAN);
     expect(candidatesProblem(["1.1.1.1"])).toContain("1.1.1.1");
     expect(candidatesProblem(["no spaces.com"])).not.toBeNull();
     expect(candidatesProblem(Array.from({ length: 13 }, (_, i) => `s${String(i)}.example.com`))).toContain("۱۲");
+  });
+
+  it("refuses the names Xray warns about, like the server (P19)", () => {
+    for (const h of ["www.apple.com", "appleid.apple.com", "www.icloud.com", "www.microsoft.com", "login.microsoftonline.com", "pineapple.example.org", "cdn.example.ru", "www.example.ir", "mirror.example.cn"]) {
+      expect(riskySni(h)).toBe(true);
+    }
+    for (const h of ["github.com", "www.speedtest.net", "aws.amazon.com", "dl.google.com", "ru.example.com", "shop.example.run", "cn.example.org"]) {
+      expect(riskySni(h)).toBe(false);
+    }
+    const problem = candidatesProblem(["github.com", "www.apple.com"]);
+    expect(problem).toContain("www.apple.com");
+    expect(problem).toContain("Xray");
+    expect(problem).toMatch(PERSIAN);
   });
 });

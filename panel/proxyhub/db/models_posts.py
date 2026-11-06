@@ -113,6 +113,10 @@ class Post(Base):
     # sha256 of the text of the post's last edit that finished without an error, i.e. what the
     # channel shows ("message is not modified" also counts; channel_posts.text_sha256 is not set then).
     shown_sha256: Mapped[str | None] = mapped_column(String(64))
+    # When an edit found the message gone from the channel (someone deleted it by hand): the post is
+    # never edited again and the owner is not alerted (the dashboard shows it). Rule 6: the panel itself
+    # never deletes a post.
+    gone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PostLink(Base):

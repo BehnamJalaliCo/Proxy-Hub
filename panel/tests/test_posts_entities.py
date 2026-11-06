@@ -210,17 +210,16 @@ def test_the_real_template_matches_telethons_own_html_parser() -> None:
         for t in sorted(theirs, key=lambda t: (t.offset, -t.length))
         if type(t).__name__ == "MessageEntityBlockquote"
     ]
-    assert [e.collapsed for e in ours.entities if e.kind == "blockquote"] == [False, True, True]
-    # The body's quote, then one collapsed quote per config (D48). Each config is one inline code
-    # entity over exactly the config, inside its quote; no pre anywhere (Telegram nests none in a
-    # quote).
+    assert [e.collapsed for e in ours.entities if e.kind == "blockquote"] == [False, True, True, True]
+    # The body's quote, then one collapsed quote per config LINK (TCP, XHTTP, the WS config): each
+    # quote covers exactly its one inline-code config and nothing else, so copying it gives one
+    # config; no pre anywhere (Telegram nests none in a quote).
     quotes = [e for e in ours.entities if e.kind == "blockquote" and e.collapsed]
     configs = [e for e in ours.entities if e.kind == "code" and covered(ours, e).startswith("vless://")]
     assert len(configs) == 3 and not any(e.kind == "pre" for e in ours.entities)
     assert all("\n" not in covered(ours, e) for e in configs)
-    assert [sum(q.offset <= c.offset and c.end <= q.end for c in configs) for q in quotes] == [2, 1]
-    pair = covered(ours, quotes[0])
-    assert pair.startswith("TCP:\nvless://") and "\n\nXHTTP:\nvless://" in pair
+    assert [(q.offset, q.length) for q in quotes] == [(c.offset, c.length) for c in configs]
+    assert "\nTCP\nvless://" in ours.text and "\n\nXHTTP\nvless://" in ours.text  # labels outside
     # The proxy words are the links' whole text, with no mark (D48).
     words = [covered(ours, e) for e in ours.entities if e.kind == "text_url"]
     assert words == [f"پروکسی{NBSP}۱", f"پروکسی{NBSP}۴"]
@@ -302,17 +301,18 @@ def test_an_emoji_inside_a_link_or_a_config_block_stays_plain() -> None:
     """A link holds no entity but bold, italic, underline, strike and spoiler, and pre or code
     none at all (core.telegram.org/bots/api#formatting-options)."""
     m = operator_message(
-        '⚡ <a href="https://t.me/proxy?server=a.b&amp;port=1&amp;secret=x">⚡ اتصال <b>📡</b></a> '
-        '<pre><code class="language-XHTTP">vless://a@b:1#⚡</code></pre> ⚡',
+        'x ⚡ <a href="https://t.me/proxy?server=a.b&amp;port=1&amp;secret=x">⚡ اتصال <b>📡</b></a> '
+        '<pre><code class="language-XHTTP">vless://a@b:1#⚡</code></pre> '
+        "<blockquote expandable><code>vless://a@b:1#⚡</code></blockquote> ⚡",
         PACK,
     )
     assert customs(m) == [("⚡", 5_012), ("⚡", 5_012)]  # the first and the last one only
-    assert [e.offset for e in m.entities if e.kind == "custom_emoji"] == [0, utf16_len(m.text) - 1]
+    assert [e.offset for e in m.entities if e.kind == "custom_emoji"] == [2, utf16_len(m.text) - 1]
 
 
-def test_a_quote_takes_custom_emoji_but_its_inline_code_does_not() -> None:
-    """D48: a config sits as inline code in a collapsed quote. A quote may hold a custom emoji (a
-    status line in a config's place gets its animated twin); the code inside it stays plain."""
+def test_a_configs_quote_holds_only_its_code_and_a_status_line_gets_its_custom_emoji() -> None:
+    """A config sits alone as inline code in its own collapsed quote (the code stays plain); the
+    status line of the pair's ended link is outside any quote and gets its animated twin."""
     pair = [
         PostLink(
             kind="reality",
@@ -326,11 +326,13 @@ def test_a_quote_takes_custom_emoji_but_its_inline_code_does_not() -> None:
     m = operator_message(render_post(None, pair, "@ipoxxo").text, PACK)
     [quote] = [e for e in m.entities if e.kind == "blockquote"]
     [code] = [e for e in m.entities if e.kind == "code"]
-    assert quote.collapsed and quote.offset < code.offset and code.end < quote.end
+    assert quote.collapsed and (quote.offset, quote.end) == (code.offset, code.end)
     got = [(covered(m, e), e.offset) for e in m.entities if e.kind == "custom_emoji"]
-    assert [emoji for emoji, _ in got] == ["🔒", "⌛️", "🔗"]  # the "⌛" inside the config stays plain
-    status = m.text.index("⌛️ زمان این کانفیگ تمام شد")
-    assert got[1][1] == utf16_len(m.text[:status]) and quote.offset < got[1][1] < quote.end
+    # The "⌛" inside the config stays plain, and so does the 🔒: without content it is the
+    # message's first character (see the next test).
+    assert [emoji for emoji, _ in got] == ["⌛️", "🔗"] and m.text.startswith("🔒")
+    status = m.text.index("XHTTP\n⌛️ زمان این کانفیگ تمام شد") + len("XHTTP\n")
+    assert got[0][1] == utf16_len(m.text[:status]) and got[0][1] > quote.end
 
 
 def test_a_quote_and_its_only_code_are_ordered_outer_first() -> None:
@@ -351,7 +353,33 @@ def test_no_pack_or_no_match_leaves_the_message_as_it_is() -> None:
 def test_at_most_max_custom_emoji() -> None:
     m = with_custom_emoji(MessageText("📡" * (MAX_CUSTOM_EMOJI + 5)), PACK)
     assert m.custom_emoji_count() == MAX_CUSTOM_EMOJI
-    assert m.entities[-1].offset == 2 * (MAX_CUSTOM_EMOJI - 1)
+    assert m.entities[0].offset == 2  # the message's first emoji stays plain
+    assert m.entities[-1].offset == 2 * MAX_CUSTOM_EMOJI
+
+
+@pytest.mark.parametrize(
+    "title", ["🔄 به‌روزرسانی‌ها را عقب نیندازید", "🔄\ufe0f به‌روزرسانی‌ها را عقب نیندازید"]
+)
+def test_the_messages_first_character_stays_a_plain_emoji(title: str) -> None:
+    """iOS draws no custom emoji at the very start of a message: the bold title's 🔄 (in our pack)
+    showed nothing on the owner's iPhone, while the same pack's 🔒 and 🔗 at later line starts did.
+    The first character keeps its font emoji; every other emoji of the pack still gets its twin."""
+    config = PostLink(kind="reality", status="active", url="vless://a@203.0.113.9:443#x")
+    post = render_post(compose_content(title, "متن"), [config], "@ipoxxo").text
+    pack = {**PACK, emoji_key("🔄"): 5_020}
+    plain = parse_html(post)
+    m = with_custom_emoji(plain, pack)
+    assert m.text.startswith(title) and m.text == plain.text
+    first = next(emoji_in(m.text))
+    assert (first.offset, first.length) == (0, 3 if "\ufe0f" in title else 2)  # what the entity would be
+    assert not any(e.kind == "custom_emoji" and e.offset == 0 for e in m.entities)
+    assert [(e.kind, e.offset) for e in m.entities][:1] == [("bold", 0)]  # the bold line is untouched
+    assert [covered(m, e) for e in m.entities if e.kind == "custom_emoji"] == ["🔒", "🔗"]
+    assert dict(emoji_report(post, pack))["🔒"] is True
+    assert dict(emoji_report(post, pack))[first.emoji] is False  # the dashboard says it stays plain
+    # Not only the title: whatever stands first in a message stays plain; a later twin still counts.
+    again = with_custom_emoji(MessageText("🔄 x 🔄"), pack)
+    assert [(e.offset, e.document_id) for e in again.entities] == [(5, 5_020)]
 
 
 def test_the_bot_path_keeps_plain_emoji() -> None:
@@ -431,9 +459,9 @@ def test_each_emoji_kind_after_mixed_text(emoji: str) -> None:
 
 
 def test_the_compact_layouts_emoji_sit_on_exact_utf16_offsets() -> None:
-    """D48: the title line's emoji (the panel's own when a title has none), the lock above a config
-    and the signature; each custom emoji covers exactly its two units after Persian text, no-break
-    spaces and bullets."""
+    """D48: the title line's emoji (the panel's own when a title has none; it stays a plain emoji as
+    the message's first character), the lock above a config and the signature; each custom emoji
+    covers exactly its two units after Persian text, no-break spaces and bullets."""
     six = [
         PostLink(
             kind="mtproto",
@@ -451,8 +479,8 @@ def test_the_compact_layouts_emoji_sit_on_exact_utf16_offsets() -> None:
     tag = "🔗 \u200e@ipoxxo"
     assert m.text == f"{title}\n\nمتن خبر\n\n{grid}\n\n{lock}\nvless://a@203.0.113.9:443#x\n\n{tag}"
     got = [(covered(m, e), e.offset, e.length, e.document_id) for e in m.entities if e.kind == "custom_emoji"]
+    assert m.text.startswith(TITLE_MARK)  # a plain emoji: no entity at offset 0 (iOS)
     assert got == [
-        ("📡", 0, 2, 5_001),
         ("🔒", utf16_len(f"{title}\n\nمتن خبر\n\n{grid}\n\n"), 2, 5_013),
         ("🔗", utf16_len(m.text) - utf16_len(tag), 2, 5_003),
     ]

@@ -41,7 +41,7 @@ from proxyhub.telegram.templates import (
     PostTooLong,
     StatusTexts,
     compose_content,
-    config_code,
+    config_quote,
     fa_digits,
     fits,
     mtproto_url,
@@ -87,6 +87,18 @@ def code(link: PostLink) -> str:
     return f"<code>{html.escape(link.url or '', quote=False)}</code>"
 
 
+def quoted(link: PostLink) -> str:
+    """A live config as a post shows it: its own collapsed quote with nothing but its code."""
+    return f"<blockquote expandable>{code(link)}</blockquote>"
+
+
+def one_config_per_quote(post: str) -> bool:
+    """Every collapsed quote holds exactly one config as inline code and nothing else (owner,
+    iPhone + V2Box: copying a quote must give exactly one config)."""
+    quotes = re.findall(r"<blockquote expandable>(.*?)</blockquote>", post, flags=re.DOTALL)
+    return all(re.fullmatch(r"<code>vless://[^<\s]+</code>", q) for q in quotes)
+
+
 CONTENT = compose_content("💡 عنوان <آزمایشی>", "متن <b>پررنگ</b> و <i>کج</i>\nخط دوم")
 EXP = datetime(2026, 11, 5, 15, 0, tzinfo=UTC)  # Thursday 18:30 Tehran
 LINE = "🔒 کانفیگ V2Ray — اعتبار تا پنجشنبه ساعت ۱۸:۳۰"
@@ -108,17 +120,16 @@ def test_post_is_title_body_proxy_grid_config_and_tag_in_that_order() -> None:
         f'&amp;port=8443&amp;secret={sec}">{word(1)}</a>{WORD_SEPARATOR}<a href="' in post
     )
     assert f">{word(2)}</a>\n<a href=" in post and f">{word(3)}</a>\n\n🔒 " in post
-    # The config: ONE line with its end time, then ONE collapsed quote with the pair, each a tiny
-    # label and the config as inline code (a tap copies it).
-    assert (
-        f"\n\n{LINE}\n{QUOTE}TCP:\n{code(tcp)}\n\nXHTTP:\n{code(xhttp)}</blockquote>\n\n🔗 ‎@ipoxxo"
-    ) in post
+    # The config: ONE line with its end time, then each link under a tiny label line in its OWN
+    # collapsed quote that holds nothing but the config as inline code (one tap, one config).
+    assert (f"\n\n{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{quoted(xhttp)}\n\n🔗 ‎@ipoxxo") in post
+    assert one_config_per_quote(post)
     assert post.endswith("</blockquote>\n\n🔗 ‎@ipoxxo")
     assert "#%40ipoxxo%201" in post  # the config's own name (D41) stays inside it
     # No section headers, no ⚡, no <pre> (Telegram nests no pre in a quote), no «کانفیگ ۱».
     for gone in ("<pre", "⚡", "📡", "🔐", "⏳", "پروکسی‌ها", "کانفیگ ۱", "اتصال"):
         assert gone not in post, gone
-    assert post.count("<blockquote") == 2  # the body's and the config's
+    assert post.count("<blockquote") == 3  # the body's, then one per config link
     assert visible_text(post).count("https://") == 0
     assert ALL_DEAD_LINE not in post
     assert fits(post)
@@ -166,25 +177,27 @@ def test_dead_links_keep_their_place_lose_their_link_and_get_marks() -> None:
     assert ALL_DEAD_LINE not in post  # one link still works
 
 
-def test_a_config_and_its_xhttp_link_share_one_line_and_one_quote() -> None:
+def test_a_config_and_its_xhttp_link_share_one_line_each_in_its_own_quote() -> None:
     later = EXP + timedelta(hours=2)
     tcp, xhttp = rl(1, expires=EXP, variant="TCP"), rl(1, expires=EXP, variant="XHTTP", companion=True)
     alone = rl(2, expires=later)
     post = render_post(None, [tcp, xhttp, alone], "@ipoxxo").text
     assert post == (
-        f"{LINE}\n{QUOTE}TCP:\n{code(tcp)}\n\nXHTTP:\n{code(xhttp)}</blockquote>\n\n"
-        f"🔒 کانفیگ V2Ray — اعتبار تا پنجشنبه ساعت ۲۰:۳۰\n{QUOTE}{code(alone)}</blockquote>\n\n🔗 ‎@ipoxxo"
+        f"{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{quoted(xhttp)}\n\n"
+        f"🔒 کانفیگ V2Ray — اعتبار تا پنجشنبه ساعت ۲۰:۳۰\n{quoted(alone)}\n\n🔗 ‎@ipoxxo"
     )  # a config without its XHTTP link: no label (an older post may carry several configs)
-    # Half of the pair is not live: its status line takes its place under its label, and the line
-    # shows the end of the link that still works.
+    assert one_config_per_quote(post) and post.count(QUOTE) == 3
+    # Half of the pair is not live: its status line takes its place under its label, OUTSIDE any
+    # quote, and the line shows the end of the link that still works.
     paused_xhttp = PostLink(kind="reality", status="paused", variant="XHTTP", companion=True)
     half = render_post(None, [tcp, paused_xhttp], "@ipoxxo").text
-    assert f"{LINE}\n{QUOTE}TCP:\n{code(tcp)}\n\nXHTTP:\n{PAUSED_LINE}</blockquote>\n\n🔗" in half
+    assert half == f"{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{PAUSED_LINE}\n\n🔗 ‎@ipoxxo"
     full_tcp = PostLink(kind="reality", status="full", variant="TCP")
     other = render_post(
         None, [full_tcp, rl(1, expires=later, variant="XHTTP", companion=True)], "@ipoxxo"
     ).text
-    assert f"۲۰:۳۰\n{QUOTE}TCP:\n🔴 ظرفیت این کانفیگ پر شد\n\nXHTTP:\n<code>" in other
+    assert f"۲۰:۳۰\nTCP\n🔴 ظرفیت این کانفیگ پر شد\n\nXHTTP\n{QUOTE}<code>" in other
+    assert one_config_per_quote(other) and other.count(QUOTE) == 1
     # Both end: ONE status line for the pair, no quote; the pause line only when both are paused.
     for statuses, line in [
         (("full", "full"), "🔴 ظرفیت این کانفیگ پر شد"),
@@ -280,17 +293,20 @@ def test_a_dead_link_never_shows_its_url_even_if_it_still_has_one() -> None:
 def test_a_marker_is_only_ever_a_plain_word() -> None:
     for bad in ('"><b>x</b>', "a b", "x" * 17, "", None):
         live = render_post(None, [rl(1, variant=bad)], "@ipoxxo").text
-        assert f"{QUOTE}<code>vless://" in live and ":\n<code>" not in live and "<b>x" not in live
+        assert live.startswith(f"🔒 کانفیگ V2Ray\n{QUOTE}<code>vless://") and "<b>x" not in live
         ended = render_post(None, [PostLink(kind="reality", status="full", variant=bad)], "@ipoxxo").text
         assert ended.split("\n")[0] == "🔴 ظرفیت این کانفیگ پر شد"
         half = render_post(None, [rl(1, variant="TCP"), PostLink(kind="reality", status="full", variant=bad,
                                                                 companion=True)], "@ipoxxo").text  # fmt: skip
-        assert "</code>\n\n🔴 ظرفیت این کانفیگ پر شد</blockquote>" in half
+        assert "</code></blockquote>\n\n🔴 ظرفیت این کانفیگ پر شد\n\n🔗" in half
     assert (
-        config_code("vless://a@b:1?x=1&y=<2>", "XHTTP")
-        == "XHTTP:\n<code>vless://a@b:1?x=1&amp;y=&lt;2&gt;</code>"
+        config_quote("vless://a@b:1?x=1&y=<2>", "XHTTP")
+        == "XHTTP\n<blockquote expandable><code>vless://a@b:1?x=1&amp;y=&lt;2&gt;</code></blockquote>"
     )
-    assert config_code("vless://a@b:1", '"><b>') == "<code>vless://a@b:1</code>"
+    assert (
+        config_quote("vless://a@b:1", '"><b>')
+        == "<blockquote expandable><code>vless://a@b:1</code></blockquote>"
+    )
 
 
 def test_content_is_shortened_but_links_and_tag_never() -> None:
@@ -344,7 +360,7 @@ def test_the_link_blocks_use_few_entities() -> None:
     ]
     tail = render_post(None, items, "@ipoxxo").text
     assert len(parse_html(tail).entities) <= 40
-    assert fits(tail)
+    assert fits(tail) and one_config_per_quote(tail)
 
 
 def test_too_many_links_raise_and_fit_drops_from_the_end() -> None:

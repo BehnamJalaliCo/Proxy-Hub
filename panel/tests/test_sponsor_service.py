@@ -62,6 +62,7 @@ from proxyhub.mtproxy.userclient import (
 )
 from proxyhub.sponsor import driver, pacing, service, store
 from proxyhub.sponsor.conversation import (
+    Forgotten,
     PromoteJob,
     PromotionSet,
     Registered,
@@ -307,6 +308,33 @@ async def test_a_tag_from_the_bot_is_the_registration_and_lands_in_the_nodes_des
     (reg,) = await load(engine)
     assert service.choose([reg], live={}, nodes=nodes, wanted="ipoxxo", default="ipoxxo",
                           campaign_channels=set(), now=datetime.now(UTC)) is None  # fmt: skip
+
+
+async def test_a_registration_the_bot_no_longer_has_is_retired_and_the_proxy_registers_again(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """P19: the owner deleted every proxy in @MTProxybot by hand, and /myproxies answered "You
+    didn't create any proxy yet". The registration retires for good, its tag leaves the node, and
+    the next pass follows the proxy as a new candidate: it is never revived with the dead tag."""
+    await kill_switch(engine, False)
+    provider = TelemtUsersProvider(seal_key)
+    node = await create_proxy_node(engine, seal_key, ipv4="203.0.113.16")
+    reg_id = await register(engine, vault, provider)
+    d = deps(engine, vault, provider)
+    outcome = FlowResult(result=Forgotten(), last_step=Step.SENT_MYPROXIES)
+    assert await service._record(d, await work_for(engine, provider, reg_id), outcome) == "forgotten"
+    (written,) = await registration_rows(engine)
+    assert (written["state"], written["state_reason"]) == ("retired", "removed_in_bot")
+    assert await user_tags(engine, node) == {user_name(node): None}
+    assert await listed(engine, provider) == [key_of(node)]
+    await service.run_once(d)
+    rows = await regs(engine)
+    fresh = [r for r in rows if r["registration_id"] is None]
+    assert len(fresh) == 1 and fresh[0]["proxy_key"] == key_of(node) and fresh[0]["id"] != reg_id
+    logged = [a["action"] for a in await actions(engine)]
+    assert "sponsor.registration_forgotten" in logged and "sponsor.tag_cleared" in logged
+    assert "sponsor.registration_reused" not in logged
+    assert TAG not in json.dumps([a["reasons"] for a in await actions(engine)])
 
 
 async def test_a_tag_the_node_could_not_take_is_tried_again(

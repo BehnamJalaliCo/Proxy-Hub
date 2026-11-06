@@ -250,7 +250,7 @@ function RegistrationRow({ r, index, now, onRetry }: { r: SponsorRegistration; i
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-fg-faint">
         {r.registered_at ? <span title={formatJalali(r.registered_at)}>ثبت: {formatRelative(r.registered_at, now)}</span> : null}
         {r.promotion_set_at ? <span title={formatJalali(r.promotion_set_at)}>آخرین تنظیم اسپانسر: {formatRelative(r.promotion_set_at, now)}</span> : null}
-        {retired && r.state_reason ? <span>دلیل: {r.state_reason === "node_gone" ? "node حذف شد" : r.state_reason === "address_changed" ? "نشانی عوض شد" : r.state_reason}</span> : null}
+        {retired && r.state_reason ? <span>دلیل: {r.state_reason === "node_gone" ? "node حذف شد" : r.state_reason === "address_changed" ? "نشانی عوض شد" : r.state_reason === "removed_in_bot" ? "در ‎@MTProxybot‎ پاک شده بود؛ دوباره ثبت شد" : r.state_reason}</span> : null}
       </div>
     </motion.li>
   );

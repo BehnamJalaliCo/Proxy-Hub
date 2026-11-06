@@ -15,7 +15,7 @@
   its traffic cap). A companion link (``companion_of``: the XHTTP link of a REALITY config) does not
   count on its own: it comes right after the link it belongs to, when that one is chosen.
 * A post shows no label; a REALITY config that comes with its XHTTP link gets a tiny transport
-  marker as the label of each of its two links in the config's quote (:func:`transport_marks`).
+  marker as the label line over each of its two links' own quotes (:func:`transport_marks`).
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ STATUSES: Final = ("active", "expired", "full", "burned")
 MAX_KEY_CHARS: Final = 200
 # A config that ends sooner than this is not put into a NEW post.
 MIN_REMAINING: Final = timedelta(hours=1)
-# The transport markers a post shows by a REALITY config's two links ("TCP:", "XHTTP:", D48).
+# The transport markers a post shows over a REALITY config's two links ("TCP", "XHTTP", D48).
 TCP_MARK: Final = "TCP"
 XHTTP_MARK: Final = "XHTTP"
 

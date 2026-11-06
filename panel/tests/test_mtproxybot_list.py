@@ -306,7 +306,8 @@ def test_the_list_walk_reads_at_most_max_pages() -> None:
 
 
 def test_the_list_walk_stops_on_anything_but_the_list() -> None:
-    stuck = ListWalk().next(Step.SENT_MYPROXIES, seen(msg("You have no proxies yet.")))
+    # ("You have no proxies yet." is no longer here: since P19 it is the empty list, read below.)
+    stuck = ListWalk().next(Step.SENT_MYPROXIES, seen(msg("Sorry, something went wrong.")))
     assert isinstance(stuck, WalkStuck) and stuck.reason == "unexpected_reply" and stuck.screens
     assert isinstance(ListWalk().next(Step.PRESSED_PROXY, listing(REAL_LABEL)), WalkStuck)
 
@@ -638,3 +639,12 @@ def test_a_removal_never_presses_delete_on_a_screen_that_shows_a_live_tag() -> N
         else:
             assert isinstance(result, Press) and result.label == "Delete proxy"
             assert result.then is Step.PRESSED_REMOVE
+
+
+def test_an_account_without_any_proxy_has_an_empty_complete_list() -> None:
+    """P19: after the owner deleted every proxy by hand, /myproxies answers with no list at all."""
+    nothing = seen(msg("You didn't create any proxy yet. Please use /newproxy command."))
+    read = ListWalk().next(Step.SENT_MYPROXIES, nothing)
+    assert isinstance(read, ListRead) and read.complete and read.entries == () and read.note == "empty"
+    stuck = MenuWalk(target(), remove=False).next(Step.SENT_MYPROXIES, nothing)
+    assert isinstance(stuck, WalkStuck) and stuck.reason == "proxy_not_in_list"

@@ -1,10 +1,13 @@
 """P15 (pure): the automatic REALITY target / fake-TLS domain choice among the owner's candidate
 sites, from their TLS handshakes measured from Iran and our nodes' own checks. Globalping answers are
 the real recorded shapes in tests/test_net_support.py (decision D10); nothing imitates a service.
+P19: names Xray warns about (proxyhub/targets/risky.py) are refused, filtered and never chosen.
 """
 
 from __future__ import annotations
 
+import itertools
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -24,6 +27,7 @@ from proxyhub.probes.types import Measurement
 from proxyhub.reality.settings import RealitySettings
 from proxyhub.targets.choice import (
     Candidate,
+    Choice,
     NetResult,
     choose_mtproto,
     choose_reality,
@@ -32,6 +36,7 @@ from proxyhub.targets.choice import (
     node_check,
     open_from_iran,
 )
+from proxyhub.targets.risky import risky_sni, risky_target
 from proxyhub.targets.service import (
     Due,
     due_round,
@@ -41,8 +46,9 @@ from proxyhub.targets.service import (
     reality_switch_text,
     round_cost,
     target_locations,
+    why_fa,
 )
-from proxyhub.targets.settings import DEFAULT_CANDIDATES, TargetSettings
+from proxyhub.targets.settings import DEFAULT_CANDIDATES, RISKY_ERROR, TargetSettings, without_risky
 
 KEYS = ["asn:197207", "asn:57218"]
 KEY_ASNS = [197207, 57218]
@@ -79,8 +85,9 @@ def cand(
 
 UP = {"asn:197207": "up", "asn:57218": "up"}
 MCI_DOWN = {"asn:197207": "down", "asn:57218": "up"}
-# The choice logic on a fixed list (the P15 order, apple first); the defaults are pinned below.
-LISTED = ["www.apple.com", "github.com", "aws.amazon.com", "www.speedtest.net", "www.cloudflare.com"]
+# The choice logic on a fixed list (the P15 order, with www.mozilla.org where www.apple.com was: P19
+# refuses that name); the defaults are pinned below.
+LISTED = ["www.mozilla.org", "github.com", "aws.amazon.com", "www.speedtest.net", "www.cloudflare.com"]
 
 
 def states(*cs: Candidate) -> dict[str, Candidate]:
@@ -108,7 +115,7 @@ def test_iran_view_and_node_check() -> None:
 def test_reality_auto_leaves_dl_google_for_the_best_open_candidate() -> None:
     st_ = states(
         cand("dl.google.com", UP, ms=2200),
-        cand("www.apple.com", UP, ms=500),
+        cand("www.mozilla.org", UP, ms=500),
         cand("github.com", UP, ms=400),
         cand("aws.amazon.com", {"asn:57218": "up"}, ms=100),
         cand("www.speedtest.net", MCI_DOWN, ms=50),
@@ -116,40 +123,40 @@ def test_reality_auto_leaves_dl_google_for_the_best_open_candidate() -> None:
     c = choose_reality("dl.google.com", LISTED, st_, KEYS, T0)
     assert (c.host, c.switch, c.why) == ("github.com", True, "not_a_candidate")  # open on both, fastest
     # A candidate our nodes already passed comes first; one they failed is never chosen.
-    st2 = {**st_, "www.apple.com": cand("www.apple.com", UP, ms=500, node_ok=2)}
-    assert choose_reality("dl.google.com", LISTED, st2, KEYS, T0).host == "www.apple.com"
+    st2 = {**st_, "www.mozilla.org": cand("www.mozilla.org", UP, ms=500, node_ok=2)}
+    assert choose_reality("dl.google.com", LISTED, st2, KEYS, T0).host == "www.mozilla.org"
     st3 = {**st_, "github.com": cand("github.com", UP, ms=400, node_fail=1)}
-    assert choose_reality("dl.google.com", LISTED, st3, KEYS, T0).host == "www.apple.com"
+    assert choose_reality("dl.google.com", LISTED, st3, KEYS, T0).host == "www.mozilla.org"
 
 
 def test_reality_auto_keeps_a_working_current_target() -> None:
-    st_ = states(cand("www.apple.com", UP, node_ok=1), cand("github.com", UP, ms=10))
-    assert choose_reality("www.apple.com", LISTED, st_, KEYS, T0).switch is False  # no churn
-    once = states(cand("www.apple.com", MCI_DOWN, UP), cand("github.com", UP))
-    assert choose_reality("www.apple.com", LISTED, once, KEYS, T0).switch is False  # one round: wait
-    assert confirm_due(once["www.apple.com"], KEYS, T0, timedelta(minutes=30))
-    twice = states(cand("www.apple.com", MCI_DOWN, MCI_DOWN), cand("github.com", UP))
-    c = choose_reality("www.apple.com", LISTED, twice, KEYS, T0)
+    st_ = states(cand("www.mozilla.org", UP, node_ok=1), cand("github.com", UP, ms=10))
+    assert choose_reality("www.mozilla.org", LISTED, st_, KEYS, T0).switch is False  # no churn
+    once = states(cand("www.mozilla.org", MCI_DOWN, UP), cand("github.com", UP))
+    assert choose_reality("www.mozilla.org", LISTED, once, KEYS, T0).switch is False  # one round: wait
+    assert confirm_due(once["www.mozilla.org"], KEYS, T0, timedelta(minutes=30))
+    twice = states(cand("www.mozilla.org", MCI_DOWN, MCI_DOWN), cand("github.com", UP))
+    c = choose_reality("www.mozilla.org", LISTED, twice, KEYS, T0)
     assert (c.host, c.why, c.networks) == ("github.com", "blocked_from_iran", ("asn:197207",))
-    assert not confirm_due(twice["www.apple.com"], KEYS, T0, timedelta(minutes=30))
-    failed = states(cand("www.apple.com", UP, node_ok=3, node_fail=1), cand("github.com", UP))
-    assert choose_reality("www.apple.com", LISTED, failed, KEYS, T0).why == "node_check_failed"
+    assert not confirm_due(twice["www.mozilla.org"], KEYS, T0, timedelta(minutes=30))
+    failed = states(cand("www.mozilla.org", UP, node_ok=3, node_fail=1), cand("github.com", UP))
+    assert choose_reality("www.mozilla.org", LISTED, failed, KEYS, T0).why == "node_check_failed"
     # Nothing better: the current one stays, and the reason is kept for the owner's note.
-    alone = states(cand("www.apple.com", MCI_DOWN, MCI_DOWN))
-    c = choose_reality("www.apple.com", LISTED, alone, KEYS, T0)
-    assert (c.host, c.switch, c.why) == ("www.apple.com", False, "blocked_from_iran")
+    alone = states(cand("www.mozilla.org", MCI_DOWN, MCI_DOWN))
+    c = choose_reality("www.mozilla.org", LISTED, alone, KEYS, T0)
+    assert (c.host, c.switch, c.why) == ("www.mozilla.org", False, "blocked_from_iran")
     # No measurement at all yet: nothing moves.
     assert choose_reality("dl.google.com", LISTED, {}, KEYS, T0).switch is False
 
 
 def test_mtproto_auto_replaces_only_a_failing_domain() -> None:
     st_ = states(
-        cand("www.microsoft.com", MCI_DOWN), cand("www.apple.com", UP), cand("github.com", UP, ms=900)
+        cand("www.microsoft.com", MCI_DOWN), cand("www.mozilla.org", UP), cand("github.com", UP, ms=900)
     )
     assert choose_mtproto("www.microsoft.com", LISTED, st_, KEYS, T0).switch is False  # one round
     st_["www.microsoft.com"] = cand("www.microsoft.com", MCI_DOWN, MCI_DOWN)
     c = choose_mtproto("www.microsoft.com", LISTED, st_, KEYS, T0)
-    assert (c.host, c.switch, c.why) == ("www.apple.com", True, "blocked_from_iran")
+    assert (c.host, c.switch, c.why) == ("www.mozilla.org", True, "blocked_from_iran")
     # Not a candidate but working: kept (every ee link of the nodes without their own name carries it).
     assert (
         choose_mtproto("www.example.org", LISTED, {"www.example.org": cand("x", UP)}, KEYS, T0).switch
@@ -159,13 +166,13 @@ def test_mtproto_auto_replaces_only_a_failing_domain() -> None:
 
 def test_target_texts_are_persian_and_name_the_reason() -> None:
     blocked = choose_reality(
-        "www.apple.com",
+        "www.mozilla.org",
         LISTED,
-        states(cand("www.apple.com", MCI_DOWN, MCI_DOWN), cand("github.com", UP)),
+        states(cand("www.mozilla.org", MCI_DOWN, MCI_DOWN), cand("github.com", UP)),
         KEYS,
         T0,
     )
-    text = reality_switch_text("www.apple.com", "github.com", blocked, "ws_tls", False)
+    text = reality_switch_text("www.mozilla.org", "github.com", blocked, "ws_tls", False)
     assert "همراه اول" in text and "github.com" in text and "WebSocket" in text and "دستی" in text
     text = reality_switch_text(
         "dl.google.com",
@@ -175,7 +182,7 @@ def test_target_texts_are_persian_and_name_the_reason() -> None:
         True,
     )
     assert "فهرست سایت‌های نامزد" in text and "قبول کرده‌اند" in text and "WebSocket" not in text
-    assert "D42" in mtproto_switch_text("www.microsoft.com", "www.apple.com", blocked)
+    assert "D42" in mtproto_switch_text("www.microsoft.com", "www.mozilla.org", blocked)
     assert "سایت هدف Reality و دامنه‌ی TLS" in no_candidate_text(["reality", "mtproto"])
 
 
@@ -247,8 +254,8 @@ def test_net_results_count_only_where_the_control_worked() -> None:
 
 
 def test_target_settings_and_modes() -> None:
-    s = TargetSettings.model_validate({"candidates": [" WWW.Apple.com. ", "www.apple.com", "github.com"]})
-    assert s.candidates == ["www.apple.com", "github.com"]
+    s = TargetSettings.model_validate({"candidates": [" WWW.Mozilla.org. ", "www.mozilla.org", "github.com"]})
+    assert s.candidates == ["www.mozilla.org", "github.com"]
     for bad in ([], ["1.1.1.1"], ["no spaces.com"], [f"s{i}.example.com" for i in range(13)]):
         with pytest.raises(ValidationError):
             TargetSettings.model_validate({"candidates": bad})
@@ -259,3 +266,148 @@ def test_target_settings_and_modes() -> None:
     with pytest.raises(ValidationError):
         MtprotoSettings.model_validate({"target_mode": "sometimes"})
     assert RealitySettings.model_validate({"target_mode": "manual"}).target_mode == "manual"
+
+
+# --- P19: names Xray warns about ---------------------------------------------------------------------------
+
+# Xray 26.10.31 infra/conf/transport_security.go: lower-cased, ends with .ru/.ir/.cn, or contains
+# apple/icloud/microsoft anywhere (a whole label or a part of one).
+RISKY = [
+    "www.apple.com",
+    "WWW.Apple.COM.",
+    " appleid.apple.com ",
+    "www.icloud.com",
+    "www.microsoft.com",
+    "login.microsoftonline.com",
+    "pineapple.example.org",
+    "cdn.example.ru",
+    "www.example.ir",
+    "mirror.example.cn",
+]
+SAFE = [
+    *DEFAULT_CANDIDATES,
+    "dl.google.com",
+    "appl.example.com",
+    "ru.example.com",
+    "shop.example.run",
+    "irancell.example.com",
+    "cn.example.org",
+]
+
+
+def test_risky_names_are_xrays_own_rule() -> None:
+    for name in RISKY:
+        assert risky_sni(name), name
+    for name in SAFE:
+        assert not risky_sni(name), name
+    assert not risky_sni(RealitySettings().target_host)
+    assert risky_target("www.apple.com:443", "www.apple.com")
+    assert risky_target("github.com:443", "www.icloud.com") and risky_target(
+        "www.icloud.com:443", "github.com"
+    )
+    assert not risky_target("github.com:443", "github.com") and not risky_target(
+        "dl.google.com", "dl.google.com"
+    )
+    # MTProto's fake-TLS domain is Telemt's, not an Xray REALITY name: its D40 default stays valid.
+    assert risky_sni(MtprotoSettings().tls_domain)
+    assert (
+        MtprotoSettings.model_validate({"tls_domain": "www.microsoft.com"}).tls_domain == "www.microsoft.com"
+    )
+
+
+def test_the_candidate_list_refuses_a_risky_name_and_a_stored_one_is_left_out(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for bad in (
+        ["www.apple.com"],
+        ["github.com", " WWW.iCloud.com. "],
+        ["login.microsoftonline.com"],
+        ["x.ru"],
+    ):
+        with pytest.raises(ValidationError) as exc:
+            TargetSettings.model_validate({"candidates": bad})
+        assert [e["type"] for e in exc.value.errors()] == [RISKY_ERROR]
+    # A list saved before P16 (apple first), as the dashboard stored it.
+    stored = {
+        "enabled": True,
+        "candidates": ["www.apple.com", "github.com", "WWW.iCloud.com", "aws.amazon.com"],
+        "interval_h": 4,
+    }
+    monkeypatch.setattr("proxyhub.targets.settings._dropped_logged", set())
+    with caplog.at_level(logging.WARNING, logger="proxyhub.targets.settings"):
+        filtered = without_risky(stored)
+        assert without_risky(stored) == filtered
+    assert filtered == {"enabled": True, "candidates": ["github.com", "aws.amazon.com"], "interval_h": 4}
+    assert TargetSettings.model_validate(filtered).candidates == ["github.com", "aws.amazon.com"]
+    said = [r.getMessage() for r in caplog.records]
+    assert said == [
+        "targets: stored candidate(s) www.apple.com, www.icloud.com left out: Xray warns about them"
+    ]
+    assert stored["candidates"][0] == "www.apple.com"  # the stored value itself is not changed
+    # Nothing but risky names: the defaults (the other settings stay).
+    only = without_risky({"candidates": ["www.apple.com"], "interval_h": 8})
+    assert only == {"candidates": list(DEFAULT_CANDIDATES), "interval_h": 8}
+    clean = {"candidates": ["github.com"]}
+    assert without_risky(clean) is clean
+    for other in (None, [1], {"candidates": "www.apple.com"}):
+        assert without_risky(other) == other
+
+
+VARIANTS = {
+    "open": lambda h: cand(h, UP, ms=900),
+    "blocked": lambda h: cand(h, MCI_DOWN, MCI_DOWN),
+    "node_failed": lambda h: cand(h, UP, node_fail=1),
+    "unmeasured": lambda h: cand(h, None),
+}
+
+
+def test_reality_auto_never_chooses_a_risky_name() -> None:
+    risky = ["www.apple.com", "www.icloud.com", "login.microsoftonline.com", "cdn.example.ru"]
+    listed = [*risky, "github.com", "aws.amazon.com"]  # as if a stored list had not been filtered
+    # The risky ones look best in every way: open everywhere, the fastest, passed by our nodes.
+    best = {h: cand(h, UP, UP, ms=10, node_ok=1) for h in risky}
+    for current, gh, aws in itertools.product(["dl.google.com", "github.com", *risky], VARIANTS, VARIANTS):
+        st_ = {
+            **best,
+            "github.com": VARIANTS[gh]("github.com"),
+            "aws.amazon.com": VARIANTS[aws]("aws.amazon.com"),
+        }
+        c = choose_reality(current, listed, st_, KEYS, T0)
+        assert not (c.switch and risky_sni(c.host)), (current, gh, aws, c)
+        if risky_sni(current):
+            assert c.why == "risky_sni" and c.switch == ("open" in (gh, aws)), (current, gh, aws, c)
+
+
+def test_reality_auto_leaves_a_risky_current_target_once() -> None:
+    # P19: the stored list still had www.apple.com, and our nodes kept passing it (a key that waits
+    # for its configs to end keeps its target, and the nodes check that one).
+    listed = ["www.apple.com", *LISTED]
+    st_ = states(
+        cand("www.apple.com", UP, UP, ms=50, node_ok=1),
+        cand("github.com", UP, ms=400),
+        cand("aws.amazon.com", UP, ms=300),
+    )
+    c = choose_reality("www.apple.com", listed, st_, KEYS, T0)
+    assert (c.host, c.switch, c.why) == ("aws.amazon.com", True, "risky_sni")  # the best safe one
+    # Settled: the next passes keep it, and apple never comes back, even with nothing else open.
+    assert choose_reality("aws.amazon.com", listed, st_, KEYS, T0) == Choice("aws.amazon.com", False)
+    closed = {
+        **st_,
+        "aws.amazon.com": cand("aws.amazon.com", MCI_DOWN, MCI_DOWN),
+        "github.com": cand("github.com", MCI_DOWN, MCI_DOWN),
+    }
+    back = choose_reality("aws.amazon.com", listed, closed, KEYS, T0)
+    assert (back.host, back.switch, back.why) == ("aws.amazon.com", False, "blocked_from_iran")
+    # No safe site open yet: the risky one stays for now (the owner gets the no-candidate note).
+    alone = choose_reality("www.apple.com", listed, states(cand("www.apple.com", UP, node_ok=1)), KEYS, T0)
+    assert (alone.host, alone.switch, alone.why) == ("www.apple.com", False, "risky_sni")
+    # MTProto keeps a working www.microsoft.com (Telemt's fake-TLS domain, D40).
+    mt = states(cand("www.microsoft.com", UP, UP), cand("github.com", UP))
+    assert choose_mtproto("www.microsoft.com", LISTED, mt, KEYS, T0).switch is False
+
+    # The usual note, with the reason; the old configs end now (proxyhub/reality/policy.py).
+    text = reality_switch_text("www.apple.com", "aws.amazon.com", c, "reality", False)
+    assert "Xray" in why_fa(c) and why_fa(c) in text and "aws.amazon.com" in text
+    assert "همین حالا کنار میروند" in text and "تا پایان زمان خودشان" not in text
+    ws = reality_switch_text("www.apple.com", "aws.amazon.com", c, "ws_tls", False)
+    assert "Xray" in ws and "همین حالا" not in ws and "WebSocket" in ws

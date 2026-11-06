@@ -22,11 +22,13 @@ the link part stays short so news can sit above it):
   blockquote (:func:`compose_content`);
 * the MTProto links as the words «پروکسی N», numbered by their place in the post, two to a row with
   " • " between them, and no header (the words already say what they are);
-* each VLESS config as ONE short line, «🔒 کانفیگ V2Ray — اعتبار تا جمعه ساعت ۰۹:۰۰», with ONE
-  collapsed quote (``<blockquote expandable>``) under it that holds the config and, for a REALITY
-  config, its XHTTP link: each as a tiny label ("TCP:" / "XHTTP:") and the config as inline code (a
-  tap copies it). Telegram shows about three lines of a collapsed quote. No ``<pre>`` there: Telegram
-  nests neither a pre nor a quote inside a quote, while inline code inside a quote is meant to be;
+* each VLESS config as ONE short line, «🔒 کانفیگ V2Ray — اعتبار تا جمعه ساعت ۰۹:۰۰», and under it
+  each of its links (the config and, for a REALITY config, its XHTTP link) as a tiny label line
+  ("TCP" / "XHTTP") over its OWN collapsed quote (``<blockquote expandable>``) that holds nothing but
+  that link as inline code. One quote, one config: a tap on the code, or copying the quote, gives
+  exactly one config (the owner on iPhone, 2026-11-06: a quote that held both gave V2Box only one).
+  Telegram shows about three lines of a collapsed quote. No ``<pre>`` there: Telegram nests neither
+  a pre nor a quote inside a quote, while inline code inside a quote is meant to be;
 * the channel tag.
 
 The owner (2026-11-05): no «کانفیگ N» next to a config, so a post never shows a provider's label.
@@ -34,8 +36,9 @@ The name inside the config itself (``#@ipoxxo …``, D41) is the provider's and 
 
 A link that is no longer active keeps its place with a status mark and LOSES its link or config
 (docs/04: nobody should tap or copy a dead config): a proxy word is struck through behind the status
-mark; in a config's quote, the config that ended is replaced by its status line under its label, and
-when no config of the pair is left, the line and the quote become one status line. When every link
+mark; a link of a config that is not live keeps its label and shows its status line, outside any
+quote, where its quote was; when no link of the pair is left, the lock line and the quotes become one
+status line. When every link
 of a post is dead a closing line points to the newer posts. A ``paused`` link (its provider has not
 listed it for a while, see proxyhub/posts/publisher.py) keeps its place, without a strike, with a
 pause mark and without its link; it is not dead and gets its link back when it is listed again.
@@ -354,7 +357,7 @@ BODY_TAGS: Final = frozenset(
 )
 _VLESS_RE = re.compile(r"^vless://[\x21-\x7e]+$")
 _SPACES = re.compile(r"\s+")
-# A config's transport marker is its label in the quote ("TCP:"): letters, digits, _ + - only.
+# A config's transport marker is the label line over its quote ("TCP"): letters, digits, _ + - only.
 _VARIANT_RE = re.compile(r"^[A-Za-z0-9_+-]{1,16}$")
 
 
@@ -379,10 +382,10 @@ class PostLink:
     """One link as a post shows it. ``url`` is a checked URL (:func:`mtproto_url`,
     :func:`vless_url`) and is only used while ``status`` is active. No label: a post never shows a
     provider's label (the module doc). ``variant``: a config's tiny transport marker ("TCP",
-    "XHTTP"), shown as its label in the quote, or None. ``companion``: this config link is another
-    way into the config of the link right before it (a REALITY config's XHTTP link after its TCP
-    link), so the two share one line and one quote. proxyhub/posts/links.py :func:`transport_marks`
-    sets both."""
+    "XHTTP"), shown as the label line over its quote, or None. ``companion``: this config link is
+    another way into the config of the link right before it (a REALITY config's XHTTP link after its
+    TCP link), so the two share one lock line (each still in its own quote). proxyhub/posts/links.py
+    :func:`transport_marks` sets both."""
 
     kind: LinkKind
     status: ShownStatus
@@ -517,15 +520,17 @@ def reality_line(until: datetime | None) -> str:
 
 
 def _labelled(variant: str | None, body: str) -> str:
+    """``body`` under its transport marker's label line ("TCP"), or alone without a marker."""
     marker = _marker(variant)
-    return f"{marker}:\n{body}" if marker else body
+    return f"{marker}\n{body}" if marker else body
 
 
-def config_code(url: str, variant: str | None = None) -> str:
-    """One config in its quote: the transport marker as a tiny label on its own line ("TCP:"), then
-    the config as inline code (Telegram copies it with one tap). Never a ``<pre>``: Telegram nests
-    no pre inside a quote."""
-    return _labelled(variant, f"<code>{html.escape(url, quote=False)}</code>")
+def config_quote(url: str, variant: str | None = None) -> str:
+    """One link of a config: its transport marker as a tiny label line ("TCP"), then its OWN collapsed
+    quote holding nothing but the link as inline code. Copying the quote or tapping the code gives
+    exactly this one config. Never a ``<pre>``: Telegram nests no pre inside a quote."""
+    code = f"<code>{html.escape(url, quote=False)}</code>"
+    return _labelled(variant, f"<blockquote expandable>{code}</blockquote>")
 
 
 def _status_line(link: PostLink, texts: StatusTexts) -> str:
@@ -548,21 +553,22 @@ def _config_groups(links: Sequence[PostLink]) -> list[list[PostLink]]:
 
 
 def _config_group(group: Sequence[PostLink], texts: StatusTexts) -> str:
-    """One config: its line (with the earliest end of its live links; a config and its XHTTP link
-    end together) and its collapsed quote, where a link that is not live shows its status line in its
-    place, under its label. With nothing live left: ONE status line and no quote (the first ended
-    link's status; the pause line only when every link is merely paused)."""
+    """One config: its lock line (with the earliest end of its live links; a config and its XHTTP
+    link end together), then each link under its label, a live one in its own collapsed quote, one
+    that is not live as its status line outside any quote. With nothing live left: ONE status line
+    and no quote (the first ended link's status; the pause line only when every link is merely
+    paused)."""
     live = [x for x in group if x.live]
     if not live:
         ended = [x for x in group if x.status != "paused"]
         return _status_line(ended[0] if ended else group[0], texts)
     ends = [x.expires_at for x in live if x.expires_at is not None]
     entries = [
-        config_code(x.url, x.variant) if x.live and x.url else _labelled(x.variant, _status_line(x, texts))
+        config_quote(x.url, x.variant) if x.live and x.url else _labelled(x.variant, _status_line(x, texts))
         for x in group
     ]
-    quote = "\n\n".join(entries)
-    return f"{reality_line(min(ends) if ends else None)}\n<blockquote expandable>{quote}</blockquote>"
+    links = "\n\n".join(entries)
+    return f"{reality_line(min(ends) if ends else None)}\n{links}"
 
 
 def _reality_block(links: Sequence[PostLink], texts: StatusTexts) -> str:

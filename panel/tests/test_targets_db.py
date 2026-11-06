@@ -6,6 +6,7 @@ are pointed at a closed local port where a call would leave the sandbox.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -40,7 +41,7 @@ from proxyhub.targets.service import (
     record_node_checks,
     store_round,
 )
-from proxyhub.targets.settings import TargetSettings, load_state, save_target_settings
+from proxyhub.targets.settings import TargetSettings, load_state, load_target_settings, save_target_settings
 from proxyhub.telegram.store import set_owner_chat
 
 pytestmark = [pytest.mark.db]
@@ -165,8 +166,9 @@ async def test_rounds_and_node_checks_are_stored_per_site(engine: AsyncEngine) -
     assert apple.iran["asn:197207"].state == "up"  # its Iranian rounds are untouched
 
 
-# The P15 list (apple first): these tests pin the choice logic, not today's defaults (P16 dropped apple).
-P15 = TargetSettings(candidates=["www.apple.com", "github.com", "aws.amazon.com", "www.speedtest.net"])
+# The P15 list with www.mozilla.org where www.apple.com was (P19 refuses that name): these tests pin
+# the choice logic, not today's defaults.
+P15 = TargetSettings(candidates=["www.mozilla.org", "github.com", "aws.amazon.com", "www.speedtest.net"])
 
 
 async def test_auto_mode_switches_targets_logs_and_tells_the_owner(engine: AsyncEngine) -> None:
@@ -174,15 +176,16 @@ async def test_auto_mode_switches_targets_logs_and_tells_the_owner(engine: Async
     async with engine.begin() as conn:
         await set_owner_chat(conn, 424242, now)
         await store_round(
-            conn, site_round(now - timedelta(hours=7), ["www.apple.com", "github.com"], ["www.microsoft.com"])
+            conn,
+            site_round(now - timedelta(hours=7), ["www.mozilla.org", "github.com"], ["www.microsoft.com"]),
         )
         await store_round(
-            conn, site_round(now - timedelta(hours=1), ["www.apple.com"], ["www.microsoft.com"])
+            conn, site_round(now - timedelta(hours=1), ["www.mozilla.org"], ["www.microsoft.com"])
         )
         switched = await apply_auto(conn, P15, KEYS, now)
     assert [(s.kind, s.old, s.new, s.why) for s in switched] == [
-        ("reality", "dl.google.com", "www.apple.com", "not_a_candidate"),
-        ("mtproto", "www.microsoft.com", "www.apple.com", "blocked_from_iran"),
+        ("reality", "dl.google.com", "www.mozilla.org", "not_a_candidate"),
+        ("mtproto", "www.microsoft.com", "www.mozilla.org", "blocked_from_iran"),
     ]
     async with engine.connect() as conn:
         reality = await load_reality_settings(conn)
@@ -192,8 +195,8 @@ async def test_auto_mode_switches_targets_logs_and_tells_the_owner(engine: Async
             .scalars()
             .all()
         )
-    assert (reality.target_host, reality.target_port, reality.target_mode) == ("www.apple.com", 443, "auto")
-    assert (mt.tls_domain, mt.port, mt.target_mode) == ("www.apple.com", 8443, "auto")
+    assert (reality.target_host, reality.target_port, reality.target_mode) == ("www.mozilla.org", 443, "auto")
+    assert (mt.tls_domain, mt.port, mt.target_mode) == ("www.mozilla.org", 8443, "auto")
     assert len(alerts) == 2 and "Reality" in alerts[0]["text"] and "MTProto" in alerts[1]["text"]
     assert "همراه اول" in alerts[1]["text"] and "D42" in alerts[1]["text"]
     log = [
@@ -201,8 +204,8 @@ async def test_auto_mode_switches_targets_logs_and_tells_the_owner(engine: Async
         for a in await actions(engine)
     ]
     assert log == [
-        ("target_auto_switched", "reality", "dl.google.com", "www.apple.com"),
-        ("target_auto_switched", "mtproto", "www.microsoft.com", "www.apple.com"),
+        ("target_auto_switched", "reality", "dl.google.com", "www.mozilla.org"),
+        ("target_auto_switched", "mtproto", "www.microsoft.com", "www.mozilla.org"),
     ]
     # Settled: the next pass changes nothing.
     async with engine.begin() as conn:
@@ -216,7 +219,7 @@ async def test_manual_mode_never_switches_and_no_open_site_is_told_daily(engine:
         await save_reality_settings(conn, RealitySettings(target_mode="manual"))
         await save_settings(conn, MtprotoSettings(target_mode="manual"))
         for at in (now - timedelta(hours=7), now - timedelta(hours=1)):
-            await store_round(conn, site_round(at, ["www.apple.com"], ["www.microsoft.com"]))
+            await store_round(conn, site_round(at, ["www.mozilla.org"], ["www.microsoft.com"]))
         assert await apply_auto(conn, P15, KEYS, now) == []
     async with engine.connect() as conn:
         assert (await load_reality_settings(conn)).target_host == "dl.google.com"
@@ -226,12 +229,12 @@ async def test_manual_mode_never_switches_and_no_open_site_is_told_daily(engine:
         await save_settings(conn, MtprotoSettings())
         await conn.execute(text("DELETE FROM target_states"))
         for at in (now - timedelta(hours=7), now - timedelta(hours=1)):
-            await store_round(conn, site_round(at, [], ["www.microsoft.com", "www.apple.com"]))
-        only = TargetSettings(candidates=["www.apple.com"])
+            await store_round(conn, site_round(at, [], ["www.microsoft.com", "www.mozilla.org"]))
+        only = TargetSettings(candidates=["www.mozilla.org"])
         assert await apply_auto(conn, only, KEYS, now) == []
         assert await apply_auto(conn, only, KEYS, now + timedelta(hours=1)) == []
         await store_round(
-            conn, site_round(now + timedelta(hours=20), [], ["www.microsoft.com", "www.apple.com"])
+            conn, site_round(now + timedelta(hours=20), [], ["www.microsoft.com", "www.mozilla.org"])
         )
         assert await apply_auto(conn, only, KEYS, now + timedelta(hours=25)) == []
     async with engine.connect() as conn:
@@ -252,7 +255,7 @@ async def test_corrupt_settings_are_never_overwritten_by_a_switch(engine: AsyncE
             {"r": '{"cap_gb": -1}', "m": '{"port": 22}'},
         )
         for at in (now - timedelta(hours=7), now - timedelta(hours=1)):
-            await store_round(conn, site_round(at, ["www.apple.com"], ["www.microsoft.com"]))
+            await store_round(conn, site_round(at, ["www.mozilla.org"], ["www.microsoft.com"]))
         assert await apply_auto(conn, P15, KEYS, now) == []
     async with engine.connect() as conn:
         stored = dict(
@@ -263,6 +266,57 @@ async def test_corrupt_settings_are_never_overwritten_by_a_switch(engine: AsyncE
             ).all()
         )
     assert stored == {"reality": {"cap_gb": -1}, "mtproto": {"port": 22}}  # left for the owner to repair
+
+
+async def test_auto_mode_leaves_a_risky_target_once_with_the_usual_note(engine: AsyncEngine) -> None:
+    """P19: a list stored before P16 still has www.apple.com, the Reality target is www.apple.com,
+    and our nodes keep passing it. The list loads without it, and the target moves to the best safe
+    site once, with one note; MTProto's www.microsoft.com (Telemt, D40) stays."""
+    now = datetime.now(UTC)
+    old_list = {
+        "enabled": True,
+        "candidates": ["www.apple.com", "github.com", "aws.amazon.com"],
+        "interval_h": 6,
+    }
+    async with engine.begin() as conn:
+        await set_owner_chat(conn, 424242, now)
+        await conn.execute(
+            text("INSERT INTO settings (key, value) VALUES ('targets', CAST(:v AS jsonb))"),
+            {"v": json.dumps(old_list)},
+        )
+        await save_reality_settings(conn, RealitySettings(transport="reality", target_host="www.apple.com"))
+        for at in (now - timedelta(hours=7), now - timedelta(hours=1)):
+            await store_round(conn, site_round(at, ["www.apple.com", "github.com"], []))
+        await conn.execute(
+            text("UPDATE target_states SET node_ok_at = :at WHERE host = 'www.apple.com'"), {"at": now}
+        )
+        settings = await load_target_settings(conn)
+        assert settings.candidates == ["github.com", "aws.amazon.com"]
+        switched = await apply_auto(conn, settings, KEYS, now)
+        # Settled: no second switch and no second note, even on a list that still had apple.
+        assert await apply_auto(conn, settings, KEYS, now + timedelta(minutes=1)) == []
+        unfiltered = TargetSettings.model_construct(
+            candidates=old_list["candidates"], enabled=True, interval_h=6
+        )
+        assert await apply_auto(conn, unfiltered, KEYS, now + timedelta(minutes=2)) == []
+    assert [(s.kind, s.old, s.new, s.why) for s in switched] == [
+        ("reality", "www.apple.com", "github.com", "risky_sni")
+    ]
+    async with engine.connect() as conn:
+        reality = await load_reality_settings(conn)
+        mt = await load_settings(conn)
+        alerts = (await conn.execute(text("SELECT payload FROM outbox WHERE kind = 'alert'"))).scalars().all()
+        stored = (await conn.execute(text("SELECT value FROM settings WHERE key = 'targets'"))).scalar_one()
+    assert (reality.target_host, reality.target_mode, reality.transport) == ("github.com", "auto", "reality")
+    assert mt.tls_domain == "www.microsoft.com"
+    [alert] = alerts
+    assert "www.apple.com" in alert["text"] and "Xray" in alert["text"]
+    assert "همین حالا کنار میروند" in alert["text"]
+    assert [
+        (a["action"], a["target"], a["reasons"]["reasons"], a["reasons"]["context"]["to"])
+        for a in await actions(engine)
+    ] == [("target_auto_switched", "reality", ["risky_sni"], "github.com")]
+    assert stored == old_list  # filtered when loaded; the owner's next save writes the list without it
 
 
 async def test_the_targets_loop_with_globalping_unreachable(engine: AsyncEngine) -> None:
@@ -396,13 +450,26 @@ async def test_targets_over_http(client: AsyncClient, engine: AsyncEngine) -> No
     ]
     assert "www.apple.com" not in [c["host"] for c in body["candidates"]]  # not listed (P16), not current
 
+    # P19: a name Xray warns about is refused with its own Persian reason (the name is not echoed).
+    for risky in (
+        ["WWW.Apple.com", "github.com"],
+        ["github.com", "login.microsoftonline.com"],
+        ["x.icloud.com"],
+    ):
+        r = await client.put("/api/targets/settings", json={"candidates": risky, "interval_h": 4})
+        assert r.status_code == 422 and r.json()["error"] == "invalid_settings", r.text
+        assert r.json()["fields"] == ["candidates"]
+        assert "Xray" in r.json()["message_fa"] and "apple" in r.json()["message_fa"]
+        assert "microsoftonline" not in r.text and "x.icloud" not in r.text
+    assert [a for a in await actions(engine) if a["action"] == "settings_update"] == []
+
     r = await client.put(
-        "/api/targets/settings", json={"candidates": ["WWW.Apple.com", "github.com"], "interval_h": 4}
+        "/api/targets/settings", json={"candidates": ["WWW.Mozilla.org", "github.com"], "interval_h": 4}
     )
     assert r.status_code == 200, r.text
     assert r.json()["settings"] == {
         "enabled": True,
-        "candidates": ["www.apple.com", "github.com"],
+        "candidates": ["www.mozilla.org", "github.com"],
         "interval_h": 4,
     }
     (log,) = [a for a in await actions(engine) if a["action"] == "settings_update"]
@@ -410,7 +477,21 @@ async def test_targets_over_http(client: AsyncClient, engine: AsyncEngine) -> No
     for bad in ({"candidates": ["1.1.1.1"]}, {"candidates": []}, {"interval_h": 0}, {"extra": 1}, [1]):
         r = await client.put("/api/targets/settings", json=bad)
         assert r.status_code == 422 and r.json()["error"] == "invalid_settings" and r.json()["message_fa"]
-        assert "1.1.1.1" not in r.text
+        assert "1.1.1.1" not in r.text and "Xray" not in r.json()["message_fa"]
+
+    # A list stored before P16 is shown (and used) without apple.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE settings SET value = CAST(:v AS jsonb) WHERE key = 'targets'"),
+            {
+                "v": json.dumps(
+                    {"enabled": True, "candidates": ["www.apple.com", "github.com"], "interval_h": 4}
+                )
+            },
+        )
+    body = (await client.get("/api/targets")).json()
+    assert body["settings"]["candidates"] == ["github.com"]
+    assert "www.apple.com" not in [c["host"] for c in body["candidates"]]
 
 
 @pytest.mark.redis
@@ -418,9 +499,29 @@ async def test_the_reality_target_mode_is_a_setting(client: AsyncClient, engine:
     payload = RealitySettings().model_dump(mode="json")
     assert payload["target_mode"] == "auto"
     r = await client.put(
-        "/api/reality/settings", json={**payload, "target_mode": "manual", "target_host": "www.apple.com"}
+        "/api/reality/settings", json={**payload, "target_mode": "manual", "target_host": "www.example.org"}
     )
     assert r.status_code == 200, r.text
-    assert r.json()["target_mode"] == "manual" and r.json()["target_host"] == "www.apple.com"
+    assert r.json()["target_mode"] == "manual" and r.json()["target_host"] == "www.example.org"
     r = await client.put("/api/reality/settings", json={**payload, "target_mode": "sometimes"})
     assert r.status_code == 422 and r.json()["fields"] == ["target_mode"]
+
+    # P19: a new target whose name Xray warns about is refused, in either mode, with the reason.
+    for mode, host in (("manual", "WWW.Apple.com"), ("auto", "www.icloud.com"), ("manual", "cdn.example.ru")):
+        r = await client.put(
+            "/api/reality/settings", json={**payload, "target_mode": mode, "target_host": host}
+        )
+        assert r.status_code == 422 and r.json()["fields"] == ["target_host"], r.text
+        assert "Xray" in r.json()["message_fa"] and host.lower() not in r.text.lower()  # not echoed
+    async with engine.connect() as conn:
+        assert (await load_reality_settings(conn)).target_host == "www.example.org"
+    # One stored before P19 is kept as it is when the owner saves another field (auto replaces it,
+    # and proxyhub/reality/policy.py never uses it); a different risky name is still refused.
+    async with engine.begin() as conn:
+        await save_reality_settings(conn, RealitySettings(target_host="www.apple.com"))
+    r = await client.put(
+        "/api/reality/settings", json={**payload, "target_host": "www.apple.com", "cap_gb": 500}
+    )
+    assert r.status_code == 200 and r.json()["cap_gb"] == 500, r.text
+    r = await client.put("/api/reality/settings", json={**payload, "target_host": "apple.com", "cap_gb": 500})
+    assert r.status_code == 422 and r.json()["fields"] == ["target_host"]

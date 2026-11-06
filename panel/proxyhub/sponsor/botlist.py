@@ -221,6 +221,8 @@ class ListWalk:
         number = len(self.pages) + 1
         self.screens.append(screen_of(f"list_page_{number}", seen))
         if step is Step.SENT_MYPROXIES:
+            if replies.no_proxies(seen.text):  # the account has no proxy at all (P19)
+                return self._done(complete=True, note="empty")
             if not replies.is_proxy_list(seen.text):
                 return WalkStuck(step=step, reason="unexpected_reply", screens=tuple(self.screens))
         elif step is not Step.PRESSED_NEXT_PAGE:
@@ -384,6 +386,8 @@ class MenuWalk:
     def _in_list(self, step: Step, seen: Observation) -> Press | WalkStuck:
         self.pages += 1
         self.screens.append(screen_of(f"list_page_{self.pages}", seen))
+        if step is Step.SENT_MYPROXIES and replies.no_proxies(seen.text):
+            return self._stuck(step, "proxy_not_in_list")
         if step is Step.SENT_MYPROXIES and not replies.is_proxy_list(seen.text):
             return self._stuck(step, "unexpected_reply")
         page = read_page(seen.messages, self.pages)
