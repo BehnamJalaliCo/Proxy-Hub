@@ -953,13 +953,17 @@ async def test_the_go_agent_accepts_and_renders_the_panels_document(world: World
         async with async_sessionmaker(world.engine, expire_on_commit=False)() as session:
             return canonical_json(await build_desired_state(session, seal, node))
 
+    # The Go agent checks a config's end against the REAL clock, so this test's times are relative
+    # to now (with the fixed T0 it began failing once T0 + 48 h had passed): the first config is
+    # made 13 F hours ago and ends 11 F hours from now, the second F hours ago.
+    t0 = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=13 * F)
     # A new scope: the key without any user yet, so the node can check the target first.
-    await world.report(node, now=T0, target_ok=None)
-    await _create(world, T0)
+    await world.report(node, now=t0, target_ok=None)
+    await _create(world, t0)
     _go_panel_document(node, await body(), tmp_path / "key-only.json", 0)
     # Then two configs.
-    await world.report(node, now=T0)
-    await _create(world, T0)
-    await world.report(node, now=T0 + timedelta(hours=12 * F))
-    await _create(world, T0 + timedelta(hours=12 * F))
+    await world.report(node, now=t0)
+    await _create(world, t0)
+    await world.report(node, now=t0 + timedelta(hours=12 * F))
+    await _create(world, t0 + timedelta(hours=12 * F))
     _go_panel_document(node, await body(), tmp_path / "desired.json", 2)
