@@ -366,7 +366,7 @@ REALITY_NAME: Final = "کانفیگ V2Ray"
 SIGN_OFF: Final = "—"
 # An MTProto link's word when the post names it after an operator (decision D50), in the order a
 # post shows them; any other link is «پروکسی».
-OPERATOR_WORDS: Final[dict[str, str]] = {"mci": "همراه اول", "rightel": "رایتل", "irancell": "ایرانسل"}
+OPERATOR_WORDS: Final[dict[str, str]] = {"mci": "همراه اول", "irancell": "ایرانسل", "rightel": "رایتل"}
 ALL_DEAD_LINE: Final = "♻️ <i>کانفیگ‌های این پست دیگر کار نمیکنند؛ کانفیگ تازه در پست‌های جدید کانال است.</i>"
 STATUS_MARKS: Final = {"expired": "⌛️", "full": "🔴", "burned": "🚫"}
 PAUSED_MARK: Final = "⏸"

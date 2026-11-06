@@ -466,26 +466,48 @@ MCI, RIGHTEL, IRANCELL, DC = "asn:197207", "asn:57218", "asn:44244", "asn:205585
 
 
 @pytest.mark.parametrize(
-    ("rounds", "name"),
+    ("rounds", "seen"),
     [
-        ([tls_round({"8443": {MCI: "up", RIGHTEL: "down"}})], "mci"),
-        ([tls_round({"8443": {MCI: "down", RIGHTEL: "up"}})], "rightel"),
-        ([tls_round({"8443": {MCI: "up", RIGHTEL: "up"}})], None),  # open on two: not one operator's
-        ([tls_round({"8443": {MCI: "up", RIGHTEL: "invalid"}})], "mci"),
-        ([tls_round({"8443": {MCI: "down"}}), tls_round({"8443": {MCI: "up"}})], None),  # fresh down wins
-        ([tls_round({"8443": {MCI: "invalid"}}), tls_round({"8443": {MCI: "up"}})], "mci"),  # invalid: older
-        ([tls_round({"443": {MCI: "up"}, "8443": {MCI: "down"}})], None),  # the MTProto port decides
-        ([tls_round({"443": {MCI: "up"}})], None),
-        ([tls_round({"8443": {DC: "up"}})], None),  # a data-centre probe never names a link
-        ([tls_round({"8443": {IRANCELL: "up", MCI: "down"}})], "irancell"),  # ready for an Irancell probe
-        ([], None),
-        ([{"https": "junk"}, {"https": {"cells": {"8443": ["up"]}}}, None], None),
+        ([tls_round({"8443": {MCI: "up", RIGHTEL: "down"}})], ["mci"]),
+        ([tls_round({"8443": {MCI: "down", RIGHTEL: "up"}})], ["rightel"]),
+        ([tls_round({"8443": {MCI: "up", RIGHTEL: "up"}})], ["mci", "rightel"]),
+        ([tls_round({"8443": {MCI: "up", RIGHTEL: "invalid"}})], ["mci"]),
+        ([tls_round({"8443": {MCI: "down"}}), tls_round({"8443": {MCI: "up"}})], []),  # fresh down wins
+        ([tls_round({"8443": {MCI: "invalid"}}), tls_round({"8443": {MCI: "up"}})], ["mci"]),  # older
+        ([tls_round({"443": {MCI: "up"}, "8443": {MCI: "down"}})], []),  # the MTProto port decides
+        ([tls_round({"443": {MCI: "up"}})], []),
+        ([tls_round({"8443": {DC: "up"}})], []),  # a data-centre probe never names a link
+        ([tls_round({"8443": {IRANCELL: "up", MCI: "down"}})], ["irancell"]),  # ready for an Irancell probe
+        ([], []),
+        ([{"https": "junk"}, {"https": {"cells": {"8443": ["up"]}}}, None], []),
     ],
 )
-def test_a_link_is_named_only_after_the_one_operator_seen_open_on_its_port(
-    rounds: list[Any], name: str | None
+def test_a_link_counts_as_open_only_from_the_operators_seen_open_on_its_port(
+    rounds: list[Any], seen: list[str]
 ) -> None:
-    assert operators.operator_for(rounds, 8443) == name
+    assert operators.open_from(rounds, 8443) == seen
+
+
+def test_each_operator_names_at_most_two_links_and_only_links_seen_open_from_it() -> None:
+    """Owner, 2026-11-06: up to two per operator, Irancell too; the rest stay «پروکسی»."""
+    everywhere = ["mci", "irancell", "rightel"]
+    six = {f"k{i}": everywhere for i in range(1, 7)}
+    order = list(six)
+    assert operators.assign(six, order) == {
+        "k1": "mci", "k2": "mci", "k3": "irancell", "k4": "irancell", "k5": "rightel", "k6": "rightel",
+    }  # fmt: skip
+    # Today: no Irancell probe, so no Irancell name; MCI and Rightel two each.
+    no_irancell = {k: ["mci", "rightel"] for k in order}
+    assert operators.assign(no_irancell, order) == {
+        "k1": "mci",
+        "k2": "mci",
+        "k3": "rightel",
+        "k4": "rightel",
+    }
+    # A link is never named after an operator it was not seen open from.
+    mixed = {"k1": ["rightel"], "k2": [], "k3": ["mci"], "k4": ["mci", "rightel"]}
+    assert operators.assign(mixed, list(mixed)) == {"k1": "rightel", "k3": "mci", "k4": "mci"}
+    assert operators.assign({}, []) == {}
 
 
 # --- transport markers (proxyhub/posts/links.py) -------------------------------------------------
