@@ -137,6 +137,16 @@ def test_pull_request_merges_signed_by_github_pass(world: tuple[Repo, Key, Key])
     assert "OK (2 merge commit(s)" in r.stdout
 
 
+def test_a_titled_pull_request_merge_passes(world: tuple[Repo, Key, Key]) -> None:
+    """PRs #19 and #20 were merged with a title of their own ("Merge pull request #N: ...")."""
+    repo, github, _ = world
+    start = repo.head()
+    m1 = repo.merge_pr("a", 19, key=github, subject="Merge pull request #19: HANDOFF.md, D46, D47")
+    m2 = repo.merge_pr("b", 20, key=github)
+    r = verify(repo, start, m2, github.public, github.fpr)
+    assert r.returncode == 0 and f"ok {m1[:12]} Merge pull request #19: " in r.stdout, r.stdout
+
+
 def test_same_commit_and_first_deploy(world: tuple[Repo, Key, Key]) -> None:
     repo, github, _ = world
     m1 = repo.merge_pr("a", 1, key=github)
@@ -160,6 +170,9 @@ def test_a_direct_push_to_main_is_refused_even_under_a_later_good_merge(world: t
     [
         ({"key": None}, "no valid GitHub signature"),
         ({"subject": "Merge branch 'a'"}, "not a pull-request merge"),
+        ({"subject": "Merge pull request #1"}, "not a pull-request merge"),
+        ({"subject": "Merge pull request #x: title"}, "not a pull-request merge"),
+        ({"subject": "Merged pull request #1: title"}, "not a pull-request merge"),
         ({"committer": ("Mallory", "m@example.invalid")}, "not committed by GitHub"),
     ],
 )
