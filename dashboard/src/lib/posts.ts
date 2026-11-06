@@ -334,8 +334,10 @@ export function validateContent(title: string, body: string, tagsRaw: string): {
 
 export type TgNode =
   | { type: "text"; text: string }
-  /** ``lang``: a pre block's language (``<pre><code class="language-x">``), shown in its header. */
-  | { type: "el"; tag: TgTag; href?: string; lang?: string; children: TgNode[] };
+  /** ``lang``: a pre block's language (``<pre><code class="language-x">``), shown in its header.
+   * ``expandable``: a collapsed quote (``<blockquote expandable>``), as a post's VLESS config sits
+   * in one (D48); Telegram shows about three lines of it until it is tapped. */
+  | { type: "el"; tag: TgTag; href?: string; lang?: string; expandable?: boolean; children: TgNode[] };
 
 export type TgTag = "b" | "i" | "u" | "s" | "code" | "pre" | "blockquote" | "a" | "spoiler";
 
@@ -381,7 +383,7 @@ const LANGUAGE = /class\s*=\s*"language-([A-Za-z0-9_+-]{1,30})"/i;
 
 /** The tags Telegram shows, as a tree. Unknown tags keep their text; only http(s)/tg links are kept.
  * A ``code`` right inside a ``pre`` is no node of its own: it names the pre block's language, as in
- * Telegram (a VLESS config's "TCP" / "XHTTP" marker). */
+ * Telegram. A ``blockquote expandable`` is a collapsed quote (a post's VLESS config since D48). */
 export function parseTgHtml(html: string): TgNode[] {
   const root: TgNode[] = [];
   const stack: { tag: string; node: Extract<TgNode, { type: "el" }> | null }[] = [];
@@ -418,6 +420,7 @@ export function parseTgHtml(html: string): TgNode[] {
       if (lang && pre.lang === undefined) pre.lang = lang;
     } else if (tag && !(name === "span" && !/class\s*=\s*"tg-spoiler"/i.test(attrs ?? ""))) {
       node = { type: "el", tag, children: [] };
+      if (tag === "blockquote" && /(^|\s)expandable(\s|=|$)/i.test(attrs ?? "")) node.expandable = true;
       if (tag === "a") {
         const href = decodeEntities(/href\s*=\s*"([^"]*)"/i.exec(attrs ?? "")?.[1] ?? "");
         if (SAFE_HREF.test(href)) node.href = href;
@@ -436,6 +439,17 @@ export function plainText(nodes: TgNode[]): string {
 /** What Telegram counts (UTF-16 units of the visible text). */
 export function visibleLength(html: string): number {
   return plainText(parseTgHtml(html)).trim().length;
+}
+
+/** The emoji the panel puts on a post's title line when the title brings none (D48). */
+export const TITLE_MARK = "📡";
+
+/** A post's title line as the panel composes it (panel/proxyhub/telegram/templates.py title_line):
+ * one line, with the title's own emoji, else {@link TITLE_MARK} in front of it. */
+export function titleLine(title: string): string {
+  const t = title.replace(/\s+/g, " ").trim();
+  if (t === "" || /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3/u.test(t)) return t;
+  return `${TITLE_MARK} ${t}`;
 }
 
 /** One-line excerpt of a body for lists. */

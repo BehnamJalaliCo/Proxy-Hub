@@ -88,15 +88,12 @@ def test_every_alt_is_one_distinct_emoji() -> None:
 
 def test_the_pack_draws_every_emoji_of_the_post_templates() -> None:
     texts = [
-        templates.PROXY_HEADER,
+        templates.TITLE_MARK,  # the title line's emoji when a title has none (D48)
+        templates.REALITY_MARK,  # the line above a config's quote (D48)
         templates.TAG_PREFIX,
-        templates.MTPROTO_HEADER,
-        templates.REALITY_HEADER,
         templates.ALL_DEAD_LINE,
         templates.PAUSED_LINE,
         templates.PAUSED_MARK,
-        templates.LIVE_MARK,
-        "⏳",  # a config's end time
         *templates.STATUS_MARKS.values(),
     ]
     used = {emoji_key(e.emoji) for t in texts for e in emoji_in(t)}

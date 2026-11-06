@@ -4,6 +4,7 @@ import {
   ArchiveRestore,
   Bold,
   CalendarClock,
+  ChevronDown,
   CircleAlert,
   CircleCheck,
   Code,
@@ -55,6 +56,7 @@ import {
   ROLE_LABEL,
   sameSettings,
   setContentStatus,
+  titleLine,
   toDraft,
   updateContent,
   validateContent,
@@ -132,8 +134,8 @@ function TgNodes({ nodes }: { nodes: TgNode[] }) {
               </code>
             );
           case "pre":
-            // As Telegram draws a code block: its language (a config's "TCP" / "XHTTP") in the
-            // header, long lines wrapped.
+            // As Telegram draws a code block: its language in the header, long lines wrapped. (Since
+            // D48 a post puts its configs as inline code in a collapsed quote, never in a pre.)
             return (
               <div key={i} dir="ltr" className="my-1 overflow-hidden rounded-lg bg-surface-3">
                 {n.lang ? <div className="px-2 pt-1.5 font-mono text-[0.68rem] font-bold text-brand">{n.lang}</div> : null}
@@ -141,7 +143,9 @@ function TgNodes({ nodes }: { nodes: TgNode[] }) {
               </div>
             );
           case "blockquote":
-            return (
+            return n.expandable ? (
+              <ExpandableQuote key={i}>{inner}</ExpandableQuote>
+            ) : (
               <blockquote key={i} className="my-1 block rounded-lg border-s-[3px] border-brand bg-brand-soft/50 px-3 py-1.5">
                 {inner}
               </blockquote>
@@ -160,6 +164,26 @@ function TgNodes({ nodes }: { nodes: TgNode[] }) {
         return null;
       })}
     </>
+  );
+}
+
+/** A collapsed quote as Telegram draws one (`<blockquote expandable>`: a post's VLESS config, D48):
+ * about three lines and an arrow until it is opened. */
+function ExpandableQuote({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <blockquote className="relative my-1 block rounded-lg border-s-[3px] border-brand bg-brand-soft/50 py-1.5 ps-3 pe-8">
+      <div className={cn(!open && "max-h-[5.25rem] overflow-hidden")}>{children}</div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label={open ? "بستن نقل‌قول" : "باز کردن نقل‌قول"}
+        className="absolute end-1.5 bottom-1.5 grid size-6 place-items-center rounded-md text-brand hover:bg-brand-soft"
+      >
+        <ChevronDown className={cn("size-4 transition-transform", open && "rotate-180")} />
+      </button>
+    </blockquote>
   );
 }
 
@@ -691,7 +715,8 @@ function Editor({ item, onDone }: { item: ContentItem | null; onDone: () => void
       .finally(() => setBusy(false));
   };
 
-  const previewHtml = `<b>${title.replace(/</g, "&lt;")}</b>\n\n<blockquote>${body}</blockquote>`;
+  // As the panel composes it: the title line with one emoji (D48), then the body in a quote.
+  const previewHtml = `<b>${titleLine(title).replace(/</g, "&lt;")}</b>\n\n<blockquote>${body}</blockquote>`;
 
   return (
     <form
@@ -702,7 +727,7 @@ function Editor({ item, onDone }: { item: ContentItem | null; onDone: () => void
       }}
       className="flex flex-col gap-4"
     >
-      <Field label="عنوان" htmlFor="ct-title" hint="یک خط کوتاه و گیرا؛ با یک ایموجی در اول بهتر دیده میشود." error={submitted ? (errors.title ?? null) : null}>
+      <Field label="عنوان" htmlFor="ct-title" hint="یک خط کوتاه و گیرا با یک ایموجی در اول؛ اگر ایموجی نگذارید، پنل 📡 را جلویش میگذارد." error={submitted ? (errors.title ?? null) : null}>
         <TextInput id="ct-title" value={title} maxLength={LIMITS.title + 20} onChange={(e) => setTitle(e.target.value)} invalid={submitted && Boolean(errors.title)} placeholder="💡 ترفند امروز" />
       </Field>
       <div className="flex flex-col gap-1.5">

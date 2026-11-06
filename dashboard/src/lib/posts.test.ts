@@ -10,6 +10,8 @@ import {
   plainText,
   postsThatFit,
   sameSettings,
+  titleLine,
+  TITLE_MARK,
   toDraft,
   validateContent,
   validateSettings,
@@ -25,8 +27,8 @@ const DEFAULTS: PostingSettings = {
   posts_per_day: 10,
   day_start: "08:00",
   day_end: "00:00",
-  max_mtproto: 12,
-  max_reality: 3,
+  max_mtproto: 6,
+  max_reality: 1,
   edit_window_hours: 48,
   recycle_after_days: 14,
   status_texts: { expired: "⌛️ زمان این کانفیگ تمام شد", full: "🔴 ظرفیت این کانفیگ پر شد", burned: "🚫 این کانفیگ از دسترس خارج شد" },
@@ -114,6 +116,23 @@ describe("Telegram HTML reader", () => {
     expect((parseTgHtml('<pre><code class="language-a b">x</code></pre>')[0] as Extract<TgNode, { type: "el" }>).lang).toBeUndefined();
   });
 
+  it("reads a config's collapsed quote with its labelled inline code (D48)", () => {
+    const html =
+      '🔒 کانفیگ V2Ray — اعتبار تا جمعه ساعت ۰۹:۰۰\n<blockquote expandable>TCP:\n<code>vless://a@b:443?x=1&amp;y=2</code>\n\nXHTTP:\n<code>vless://a@b:2083</code></blockquote>\n\n<blockquote>متن</blockquote>';
+    const nodes = parseTgHtml(html);
+    const quote = nodes[1] as Extract<TgNode, { type: "el" }>;
+    expect(quote.tag).toBe("blockquote");
+    expect(quote.expandable).toBe(true);
+    const codes = quote.children.filter((n): n is Extract<TgNode, { type: "el" }> => n.type === "el");
+    expect(codes.map((c) => [c.tag, plainText(c.children)])).toEqual([
+      ["code", "vless://a@b:443?x=1&y=2"],
+      ["code", "vless://a@b:2083"],
+    ]);
+    expect(plainText(quote.children)).toBe("TCP:\nvless://a@b:443?x=1&y=2\n\nXHTTP:\nvless://a@b:2083");
+    // A plain quote (a post's body) is not collapsed.
+    expect((nodes[3] as Extract<TgNode, { type: "el" }>).expandable).toBeUndefined();
+  });
+
   it("drops unsafe links and unknown tags but keeps their text", () => {
     const nodes = parseTgHtml('<a href="javascript:alert(1)">بد</a><script>x</script><span>y</span><span class="tg-spoiler">z</span>');
     const link = nodes[0] as Extract<TgNode, { type: "el" }>;
@@ -141,6 +160,17 @@ describe("Telegram HTML reader", () => {
   it("wraps a selection for the toolbar", () => {
     expect(wrapSelection("سلام دنیا", 5, 9, "<b>", "</b>")).toEqual({ text: "سلام <b>دنیا</b>", start: 8, end: 12 });
     expect(wrapSelection("abc", 3, 3, "<i>", "</i>").text).toBe("abc<i></i>");
+  });
+});
+
+describe("title line", () => {
+  it("keeps the title's own emoji, else puts the panel's in front, as the server does", () => {
+    expect(titleLine("  عنوان   بی ایموجی ")).toBe(`${TITLE_MARK} عنوان بی ایموجی`);
+    expect(titleLine("💡 ترفند امروز")).toBe("💡 ترفند امروز");
+    expect(titleLine("خبر مهم 🔥")).toBe("خبر مهم 🔥");
+    expect(titleLine("🇮🇷 ایران")).toBe("🇮🇷 ایران");
+    expect(titleLine("۱۲ نکته")).toBe(`${TITLE_MARK} ۱۲ نکته`);
+    expect(titleLine("   ")).toBe("");
   });
 });
 
