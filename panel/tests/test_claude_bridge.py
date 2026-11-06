@@ -2,10 +2,11 @@
 """The host's Claude bridge (deploy/claude-bridge/bridge.py, decision D52): its own unit tests.
 
 What is tested here is the bridge's own work: the exact argv it gives Claude Code (fixed flags, no
-tool, nothing of the candidate), the stdin message it rebuilds from checked blocks, how it reads
-Claude Code's stream-json output, the timeout that kills the whole process group, the 24-hour cap
-kept across restarts, one review at a time, the peer check, and that nothing of the content is
-logged. The ``claude`` it starts is a small local stand-in script that records its argv and stdin and
+tool, nothing of the candidate), the stdin message it rebuilds from checked blocks (several images in
+order for a video's frames, within their count and byte caps, and the panel's frame budget always
+fitting them), how it reads Claude Code's stream-json output, the timeout that kills the whole
+process group, the 24-hour cap kept across restarts, one review at a time, the peer check, and that
+nothing of the content is logged. The ``claude`` it starts is a small local stand-in script that records its argv and stdin and
 prints the stream-json events Claude Code prints (shapes seen in a real run of Claude Code 2.1.319);
 Claude Code's real behaviour is tested by :func:`test_real_claude_code_through_the_bridge`
 (``PROXYHUB_CLAUDE_BRIDGE_TESTS=1`` on a machine where ``claude`` is logged in; P22 on the server).
@@ -30,7 +31,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-from test_content_support import png
+from test_content_support import png, real_mp4
 
 REPO = Path(__file__).resolve().parents[2]
 BRIDGE_PATH = REPO / "deploy" / "claude-bridge" / "bridge.py"
@@ -262,7 +263,8 @@ def test_stdin_is_rebuilt_from_checked_blocks_only() -> None:
             "bad_image",
         ),
         (
-            [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image}}] * 3,
+            [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image}}]
+            * (bridge.MAX_IMAGES + 1),
             "bad_request",
         ),
         ([{"type": "text", "text": "x" * (bridge.MAX_TEXT_CHARS + 1)}], "bad_request"),
@@ -271,6 +273,76 @@ def test_stdin_is_rebuilt_from_checked_blocks_only() -> None:
         with pytest.raises(bridge.Refused) as err:
             bridge.build_input(content)
         assert err.value.code == code, content
+
+
+def image_block(data: bytes, media_type: str = "image/jpeg") -> dict[str, Any]:
+    encoded = base64.b64encode(data).decode()
+    return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": encoded}}
+
+
+def jpeg(size: int, seed: int = 0) -> bytes:
+    """``size`` bytes that are a JPEG by their first bytes (all the bridge checks of an image)."""
+    return b"\xff\xd8\xff\xe0" + bytes([seed % 256]) * (size - 4)
+
+
+def test_a_videos_frames_go_as_several_images_in_order() -> None:
+    frames = [jpeg(2000, i) for i in range(6)]
+    line = bridge.build_input([*(image_block(f) for f in frames), {"type": "text", "text": CANDIDATE}])
+    content = json.loads(line)["message"]["content"]
+    assert [b["type"] for b in content] == ["image"] * 6 + ["text"]
+    assert [base64.b64decode(b["source"]["data"]) for b in content[:6]] == frames  # the order is kept
+    assert bridge.build_input([image_block(png(4, 3), "image/png"), image_block(jpeg(50))])  # mixed is fine
+    text = {"type": "text", "text": CANDIDATE}
+    cases: list[tuple[list[dict[str, Any]], str]] = [
+        ([*(image_block(f) for f in frames), image_block(png(4, 3)), text], "bad_image"),  # PNG called JPEG
+        ([image_block(jpeg(50), "image/png"), text], "bad_image"),  # JPEG called PNG
+        ([image_block(b"GIF89a" + b"0" * 20), text], "bad_image"),
+        ([*(image_block(jpeg(100, i)) for i in range(bridge.MAX_IMAGES + 1)), text], "bad_request"),
+        ([image_block(jpeg(bridge.MAX_IMAGE_BYTES + 1)), text], "too_large"),
+        ([*(image_block(jpeg(bridge.MAX_IMAGES_BYTES // 4 + 1, i)) for i in range(4)), text], "too_large"),
+    ]
+    for content_blocks, code in cases:
+        with pytest.raises(bridge.Refused) as err:
+            bridge.build_input(content_blocks)
+        assert err.value.code == code, (len(content_blocks), code)
+    at_cap = [image_block(jpeg(bridge.MAX_IMAGES_BYTES // 4, i)) for i in range(4)]
+    assert len(bridge.build_input([*at_cap, text])) <= bridge.STDIN_MAX_BYTES  # all the room, still fits
+
+
+def test_the_panels_frames_always_fit_the_bridge() -> None:
+    """The panel's frame budget (proxyhub/content/frames.py) against the bridge's caps, with the
+    longest text and prompt either side can send: a video review is never refused for its size."""
+    from proxyhub.content import frames, qc_prompt
+
+    assert frames.FRAME_COUNT <= bridge.MAX_IMAGES and frames.MAX_FRAME_BYTES <= bridge.MAX_IMAGE_BYTES
+    assert frames.MAX_TOTAL_BYTES <= bridge.MAX_IMAGES_BYTES
+    each = frames.MAX_TOTAL_BYTES // frames.FRAME_COUNT
+    nonce = qc_prompt.new_nonce()
+    text = qc_prompt.user_text("ژ" * 10_000, nonce, media_kind="video", frames=frames.FRAME_COUNT)
+    blocks = [
+        *(image_block(jpeg(each, i)) for i in range(frames.FRAME_COUNT)),
+        {"type": "text", "text": text},
+    ]
+    request = {
+        "op": "review",
+        "protocol": 1,
+        "model": "sonnet",
+        "system": "ژ" * bridge.MAX_SYSTEM_CHARS,
+        "content": blocks,
+        "timeout_s": 150,
+    }
+    line = (json.dumps(request, ensure_ascii=False) + "\n").encode()  # as the panel sends it
+    assert len(line) <= bridge.MAX_REQUEST_BYTES
+    assert len(bridge.build_input(blocks)) <= bridge.STDIN_MAX_BYTES
+    # The bridge's own worst case: every image byte it allows, the longest text and system prompt.
+    each = bridge.MAX_IMAGES_BYTES // bridge.MAX_IMAGES
+    worst_blocks = [
+        *(image_block(jpeg(each, i)) for i in range(bridge.MAX_IMAGES)),
+        {"type": "text", "text": "\U0001f600" * bridge.MAX_TEXT_CHARS},
+    ]
+    worst = {**request, "content": worst_blocks, "system": "\U0001f600" * bridge.MAX_SYSTEM_CHARS}
+    assert len((json.dumps(worst, ensure_ascii=False) + "\n").encode()) <= bridge.MAX_REQUEST_BYTES
+    assert len(bridge.build_input(worst_blocks)) <= bridge.STDIN_MAX_BYTES
 
 
 def _events(*events: dict[str, Any]) -> list[bytes]:
@@ -356,6 +428,23 @@ async def test_a_review_carries_the_candidate_on_stdin_only_and_logs_no_content(
     assert "review outcome=ok" in logged
     for secret in ("CANDIDATE-TEXT", "SYSTEM-PROMPT", "model text", "decision", "t.me"):
         assert secret not in logged
+
+
+async def test_a_review_with_a_videos_frames_reaches_claude_in_order(workdir: Path) -> None:
+    stub_claude(workdir, answer='{"decision": "reject"}')
+    cfg = config(workdir)
+    frames = [jpeg(150_000, i) for i in range(6)]  # about the size of real 768 px frames
+    request = review(content=[*(image_block(f) for f in frames), {"type": "text", "text": CANDIDATE}])
+    async with running(cfg):
+        answer = await ask(cfg, request)
+    assert answer["ok"] is True, answer
+    sent = json.loads(read_bytes(workdir / "stdin.bin"))["message"]["content"]
+    assert [base64.b64decode(b["source"]["data"]) for b in sent[:-1]] == frames
+    assert sent[-1] == {"type": "text", "text": CANDIDATE}
+
+
+def read_bytes(path: Path) -> bytes:
+    return path.read_bytes()
 
 
 async def test_a_run_that_lists_tools_is_killed_and_refused(workdir: Path) -> None:
@@ -546,3 +635,35 @@ async def test_real_qc_prompt_through_the_bridge(workdir: Path) -> None:
     assert plain.decision == "approve" and plain_checks == [], (plain, plain_checks)
     assert attack.decision == "reject" or attack_checks, (attack, attack_checks)
     assert "manipulation" in attack.flags or attack_checks
+
+
+@pytest.mark.claude
+async def test_real_video_frames_through_the_bridge(workdir: Path) -> None:
+    """A video's frames (the real ffmpeg on a real MP4) as several images in ONE real review: Claude
+    Code takes them all and the panel's prompt gets an answer that parses."""
+    from proxyhub.content import qc_prompt
+    from proxyhub.content.claude_backends import BridgeBackend
+    from proxyhub.content.frames import Sampler
+    from proxyhub.content.qc_settings import QcConfig
+    from proxyhub.content.writer import Image, ReviewRequest
+
+    found = shutil.which("claude")
+    assert found
+    sampled = await Sampler().sample(real_mp4(8, 640, 360))
+    assert len(sampled.frames) == 6
+    cfg = config(workdir, claude_bin=found, home=os.environ.get("HOME", str(workdir)))
+    limits = qc_prompt.limits_for(None, media=True)
+    nonce = qc_prompt.new_nonce()
+    request = ReviewRequest(
+        system=qc_prompt.system_prompt(
+            QcConfig(), limits, nonce, media_kind="video", image_sent=True, frames=6
+        ),
+        user_text=qc_prompt.user_text(
+            "یک ویدیوی آزمایشی با الگوی رنگی متحرک.", nonce, media_kind="video", frames=6
+        ),
+        images=tuple(Image(mime="image/jpeg", data=f.data) for f in sampled.frames),
+    )
+    async with running(cfg):
+        got = await BridgeBackend(cfg.socket_path, "sonnet", 180).review(request)
+    assert isinstance(got, tuple), got
+    qc_prompt.parse_verdict(got[1])  # a test pattern is no news: either decision is fine, the shape is not

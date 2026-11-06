@@ -41,7 +41,10 @@ The panel runs in containers and never holds the subscription login. This small 
 **Limits:** one review at a time (a second gets ``busy`` at once), a timeout per review (10 to 300
 s), and a cap of reviews in any 24 hours (``--daily-cap``, kept in a state file across restarts and
 counted when a run STARTS, so a failing loop cannot spend more). Requests are at most 9 MB (Claude
-Code reads at most 10 MB from stdin); only JPEG and PNG images, checked by their first bytes.
+Code reads at most 10 MB from stdin). A review carries at most :data:`MAX_IMAGES` images (a photo, or
+a video's frames in order, panel/proxyhub/content/frames.py), only JPEG and PNG checked by their
+first bytes, each at most :data:`MAX_IMAGE_BYTES` and all together at most :data:`MAX_IMAGES_BYTES`
+decoded (with base64 and the text that stays under the stdin cap).
 
 **Logging:** counts and outcomes only (``review outcome=ok duration_ms=… calls_24h=…``). Never the
 candidate, the prompt, Claude's answer or Claude Code's stderr (its length at most).
@@ -79,8 +82,10 @@ MAX_STDOUT_BYTES = 8 * 1024 * 1024
 MAX_RESULT_CHARS = 20_000
 MAX_SYSTEM_CHARS = 60_000
 MAX_TEXT_CHARS = 30_000
-MAX_BLOCKS = 6
-MAX_IMAGES = 2
+MAX_IMAGES = 8  # a video's frames (the panel sends 6) or one photo
+MAX_BLOCKS = MAX_IMAGES + 2
+MAX_IMAGE_BYTES = 5 * 1024 * 1024  # one image, decoded (the Messages API's own limit per image)
+MAX_IMAGES_BYTES = 6 * 1024 * 1024  # all images, decoded: 8 MB as base64, under STDIN_MAX_BYTES
 MIN_TIMEOUT_S = 10
 MAX_TIMEOUT_S = 300
 DEFAULT_TIMEOUT_S = 150
@@ -155,29 +160,38 @@ def child_env(home: str) -> dict[str, str]:
     }
 
 
-def _image_block(block: dict[str, Any]) -> dict[str, Any]:
+def _image_block(block: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """One checked image block and its decoded size: base64 of a JPEG or PNG (by its first bytes,
+    which must match the declared type), at most :data:`MAX_IMAGE_BYTES`."""
     source = block.get("source")
     if not isinstance(source, dict) or set(source) != {"type", "media_type", "data"}:
         raise Refused("bad_request")
     media_type, data = source.get("media_type"), source.get("data")
     if source.get("type") != "base64" or media_type not in IMAGE_MAGIC or not isinstance(data, str):
         raise Refused("bad_image")
+    if len(data) > (MAX_IMAGE_BYTES + 2) // 3 * 4:
+        raise Refused("too_large")
     try:
         raw = base64.b64decode(data, validate=True)
     except (binascii.Error, ValueError):
         raise Refused("bad_image") from None
     if not raw or not raw.startswith(IMAGE_MAGIC[media_type]):
         raise Refused("bad_image")
-    return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise Refused("too_large")
+    return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}}, len(raw)
 
 
 def build_input(content: Any) -> bytes:
     """The one stream-json ``user`` message on stdin, rebuilt from checked blocks only (text and
-    JPEG/PNG images): no field of the request is passed through unchecked."""
+    JPEG/PNG images, several images in their order): no field of the request is passed through
+    unchecked. At most :data:`MAX_IMAGES` images (else ``bad_request``), each and all together
+    within their byte caps (else ``too_large``)."""
     if not isinstance(content, list) or not 1 <= len(content) <= MAX_BLOCKS:
         raise Refused("bad_request")
     blocks: list[dict[str, Any]] = []
     images = 0
+    image_bytes = 0
     for block in content:
         if not isinstance(block, dict):
             raise Refused("bad_request")
@@ -191,7 +205,11 @@ def build_input(content: Any) -> bytes:
             images += 1
             if images > MAX_IMAGES:
                 raise Refused("bad_request")
-            blocks.append(_image_block(block))
+            checked, size = _image_block(block)
+            image_bytes += size
+            if image_bytes > MAX_IMAGES_BYTES:
+                raise Refused("too_large")
+            blocks.append(checked)
         else:
             raise Refused("bad_request")
     message = {"type": "user", "message": {"role": "user", "content": blocks}, "parent_tool_use_id": None}
