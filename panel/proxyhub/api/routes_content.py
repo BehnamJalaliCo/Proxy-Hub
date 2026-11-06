@@ -16,6 +16,9 @@ Owner only (``require_admin``; CSRF on writes). Errors are ``{"error", "message_
 ``not_editable``           409     the candidate was posted, expired or is a duplicate
 ``candidate_not_found``    404
 ``media_not_found``        404     the file was removed (its post went out or the item ended)
+``qc_settings_invalid``    422     the supervisor's settings did not validate
+``api_key_invalid``        422     not an Anthropic API key (``sk-ant-…``, one line)
+``vault_unavailable``      503     the panel's master key cannot be read
 =========================  ======  ===========================================================
 
 * ``GET  /api/content/sources`` / ``POST`` (``kind``, ``ref``, ``label``) / ``PUT /{id}``
@@ -27,6 +30,11 @@ Owner only (``require_admin``; CSRF on writes). Errors are ``{"error", "message_
   edited caption at the same time).
 * ``GET  /api/content/media/{id}``: a candidate's photo, thumbnail or video, the panel's own copy
   (never a redirect to the source), with its sniffed type, ``nosniff`` and a sandboxing policy.
+* ``GET  /api/content/qc``: the content supervisor (decision D52): its settings, the calls of the
+  last 24 hours per backend and their caps, the bridge's health, whether an API key is stored (never
+  the key), the last outcome and the decisions of the last 24 hours. ``PUT`` replaces the settings
+  (proxyhub/content/qc_settings.py). ``PUT /api/content/qc/api-key`` (``key``) stores the Anthropic
+  API key in the vault (never returned, never logged); ``DELETE`` removes it.
 
 No proxy link, secret or source media URL is returned. Nothing here touches a channel: an approved
 candidate is posted by the publisher (proxyhub/posts/publisher.py).
@@ -35,19 +43,23 @@ candidate is posted by the publisher (proxyhub/posts/publisher.py).
 from __future__ import annotations
 
 import json
+import re
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from proxyhub.api.deps import AdminIdentity, ApiError, ApiRoute, db_session, require_admin
-from proxyhub.content import candidates, sources
+from proxyhub.content import candidates, qc_settings, sources, supervisor
 from proxyhub.content.candidates import CandidateInvalid
+from proxyhub.content.claude_backends import VAULT_NAME
 from proxyhub.content.items import SourceInvalid
-from proxyhub.content.messages import API_ERRORS_FA
+from proxyhub.content.messages import API_ERRORS_FA, QC_API_ERRORS_FA
 from proxyhub.fleet.actions import log_action
 from proxyhub.posts import links, views
 from proxyhub.telegram import store as tg_store
+from proxyhub.vault import Vault, VaultError, delete_secret, secret_exists
 
 api = APIRouter(prefix="/api/content", tags=["content"], route_class=ApiRoute)
 
@@ -68,7 +80,11 @@ STATUS: dict[str, int] = {
     "not_editable": 409,
     "candidate_not_found": 404,
     "media_not_found": 404,
+    "qc_settings_invalid": 422,
+    "api_key_invalid": 422,
+    "vault_unavailable": 503,
 }
+API_KEY_RE = re.compile(r"^sk-ant-[A-Za-z0-9_\-]{20,300}$")
 MEDIA_HEADERS: dict[str, str] = {
     "Cache-Control": "private, max-age=3600",
     "X-Content-Type-Options": "nosniff",
@@ -82,7 +98,7 @@ def _err(code: str) -> ApiError:
     return ApiError(
         code,
         status_code=STATUS.get(code, 400),
-        message_fa=API_ERRORS_FA.get(code, API_ERRORS_FA["invalid_request"]),
+        message_fa=API_ERRORS_FA.get(code) or QC_API_ERRORS_FA.get(code) or API_ERRORS_FA["invalid_request"],
     )
 
 
@@ -107,9 +123,12 @@ async def _body(request: Request, keys: set[str], required: set[str]) -> dict[st
 async def get_sources(admin: Admin, db: Db) -> dict[str, Any]:
     found = await sources.list_all(db)
     pending = await sources.pending_counts(db)
+    config = await qc_settings.load(db)
+    conn = await db.connection()
+    quality = await supervisor.quality_by_source(conn, config.source_window)
     await db.rollback()
     return {
-        "sources": [s.as_json(pending.get(s.id, 0)) for s in found],
+        "sources": [s.as_json(pending.get(s.id, 0), quality.get(s.id)) for s in found],
         "max_sources": sources.MAX_SOURCES,
         "fetch_every_min": int(sources.FETCH_EVERY.total_seconds() // 60),
     }
@@ -293,6 +312,91 @@ async def get_media(admin: Admin, db: Db, media_id: int) -> Response:
         raise _err("media_not_found")
     mime, data = found
     return Response(content=data, media_type=mime, headers=MEDIA_HEADERS)
+
+
+# --- the content supervisor (decision D52) ---------------------------------------------------------------
+
+
+@api.get("/qc")
+async def get_qc(admin: Admin, db: Db) -> dict[str, Any]:
+    conn = await db.connection()
+    out = await supervisor.status(conn, tg_store.now_utc(), await secret_exists(conn, VAULT_NAME))
+    await db.rollback()
+    return out
+
+
+@api.put("/qc")
+async def put_qc(admin: Admin, db: Db, request: Request) -> dict[str, Any]:
+    try:
+        value = json.loads(await request.body())
+    except (ValueError, RecursionError):
+        raise _err("invalid_request") from None
+    try:
+        config = qc_settings.parse(value)
+    except ValidationError:
+        raise _err("qc_settings_invalid") from None
+    before = await qc_settings.load(db)
+    await qc_settings.save(db, config)
+    changed = {
+        k: v for k, v in config.as_json().items() if before.as_json().get(k) != v and k != "forbidden_words"
+    }
+    if before.forbidden_words != config.forbidden_words:
+        changed["forbidden_words_count"] = len(config.forbidden_words)
+    await log_action(
+        db,
+        actor=_actor(admin),
+        action="content.qc_settings",
+        target="content.qc",
+        dry_run=False,
+        allowed=True,
+        context={"changed": changed},
+    )
+    await db.commit()
+    return await get_qc(admin, db)
+
+
+def qc_vault() -> Vault:
+    try:
+        return Vault.from_config()
+    except VaultError:
+        raise _err("vault_unavailable") from None
+
+
+@api.put("/qc/api-key")
+async def put_api_key(
+    admin: Admin, db: Db, request: Request, vault: Annotated[Vault, Depends(qc_vault)]
+) -> dict[str, Any]:
+    value = await _body(request, {"key"}, {"key"})
+    key = value["key"]
+    if not isinstance(key, str) or not API_KEY_RE.fullmatch(key.strip()):
+        raise _err("api_key_invalid")
+    await vault.put(db, VAULT_NAME, key.strip())
+    await log_action(
+        db,
+        actor=_actor(admin),
+        action="content.qc_api_key_set",
+        target="vault:" + VAULT_NAME,
+        dry_run=False,
+        allowed=True,
+    )
+    await db.commit()
+    return {"api_key_set": True}
+
+
+@api.delete("/qc/api-key")
+async def delete_api_key(admin: Admin, db: Db) -> dict[str, Any]:
+    removed = await delete_secret(db, VAULT_NAME)
+    if removed:
+        await log_action(
+            db,
+            actor=_actor(admin),
+            action="content.qc_api_key_removed",
+            target="vault:" + VAULT_NAME,
+            dry_run=False,
+            allowed=True,
+        )
+    await db.commit()
+    return {"api_key_set": False, "removed": removed}
 
 
 router = APIRouter()

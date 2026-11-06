@@ -16,18 +16,28 @@
   dashboard shows them through the panel's own API, never from the source. Media is removed once
   the post went out or the candidate ended, so these rows stay few and short-lived.
 
+* QC (decision D52, migration 0028): each candidate carries the content supervisor's review
+  (``qc_*``: Claude's decision, Persian reasons, category and safety flags, the deterministic checks
+  that failed, which backend answered) and who decided it (``decided_by``: the owner or ``qc``). A
+  source the supervisor turned off says why (``disabled_reason``, ``disabled_detail``); its quality
+  is judged again from ``quality_reset_at`` (set when the owner turns it back on).
+* ``content_qc_calls``: one row per attempt to reach Claude (backend, outcome, time, tokens): the
+  daily caps and the dashboard's counts. Never the candidate, the prompt or Claude's answer.
+
 Nothing here records anything about the people who read a channel (rule 7).
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
+    Double,
     ForeignKey,
     Index,
     Integer,
@@ -37,6 +47,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from proxyhub.db.models import Base
@@ -47,6 +58,9 @@ MEDIA_KINDS = ("photo", "video")
 MEDIA_STATES = ("none", "waiting", "ready", "failed")
 MEDIA_ROLES = ("main", "thumb")
 MEDIA_MIMES = ("image/jpeg", "image/png", "video/mp4")
+QC_DECISIONS = ("approve", "reject")
+QC_BACKENDS = ("bridge", "api", "rules")
+DECIDERS = ("owner", "qc")
 
 
 def _in(values: tuple[str, ...]) -> str:
@@ -80,6 +94,11 @@ class ContentSource(Base):
     failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")  # in a row
     next_fetch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # D52: why the source is off when the supervisor turned it off (a code; Persian in the dashboard).
+    disabled_reason: Mapped[str | None] = mapped_column(String(40))
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    disabled_detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    quality_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ContentCandidate(Base):
@@ -91,8 +110,13 @@ class ContentCandidate(Base):
         CheckConstraint(f"media_state IN ({_in(MEDIA_STATES)})", name="media_state"),
         CheckConstraint("views IS NULL OR views >= 0", name="views"),
         CheckConstraint("length(title) <= 120 AND length(body) <= 2000", name="caption_length"),
+        CheckConstraint(f"qc_decision IS NULL OR qc_decision IN ({_in(QC_DECISIONS)})", name="qc_decision"),
+        CheckConstraint(f"qc_backend IS NULL OR qc_backend IN ({_in(QC_BACKENDS)})", name="qc_backend"),
+        CheckConstraint(f"decided_by IS NULL OR decided_by IN ({_in(DECIDERS)})", name="decided_by"),
+        CheckConstraint("qc_tries >= 0", name="qc_tries"),
         UniqueConstraint("source_id", "external_id", name="uq_content_candidates_source_external"),
         Index("ix_content_candidates_status_created", "status", "created_at"),
+        Index("ix_content_candidates_source_qc", "source_id", "qc_at"),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     source_id: Mapped[int | None] = mapped_column(
@@ -123,6 +147,18 @@ class ContentCandidate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # D52, the content supervisor's review (proxyhub/content/supervisor.py).
+    qc_decision: Mapped[str | None] = mapped_column(String(8))
+    qc_reasons: Mapped[list[str] | None] = mapped_column(JSONB)  # Claude's, Persian, short
+    qc_flags: Mapped[list[str] | None] = mapped_column(JSONB)  # the safety flags reported true
+    qc_checks: Mapped[list[str] | None] = mapped_column(JSONB)  # the deterministic checks that failed
+    qc_category: Mapped[str | None] = mapped_column(String(24))
+    qc_error: Mapped[str | None] = mapped_column(String(40))  # no usable answer (unparsable, ...)
+    qc_backend: Mapped[str | None] = mapped_column(String(8))
+    qc_model: Mapped[str | None] = mapped_column(String(64))
+    qc_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    qc_tries: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    decided_by: Mapped[str | None] = mapped_column(String(8))
 
 
 class ContentMedia(Base):
@@ -149,3 +185,27 @@ class ContentMedia(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class ContentQcCall(Base):
+    """One attempt to reach Claude (decision D52). ``reached``: the attempt may have spent quota, so
+    it counts toward the backend's daily cap."""
+
+    __tablename__ = "content_qc_calls"
+    __table_args__ = (
+        CheckConstraint("backend IN ('bridge', 'api')", name="backend"),
+        Index("ix_content_qc_calls_backend_at", "backend", "at"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    backend: Mapped[str] = mapped_column(String(8), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(40), nullable=False)
+    reached: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    candidate_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("content_candidates.id", ondelete="SET NULL")
+    )
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    model: Mapped[str | None] = mapped_column(String(64))
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    cost_usd: Mapped[float | None] = mapped_column(Double)

@@ -7,6 +7,9 @@
 * At most :data:`MAX_SOURCES` sources. Removing a source drops its candidates that were never
   reviewed (and their media); approved, used and rejected candidates stay, with the source's
   name copied on them.
+* **The supervisor** (decision D52, proxyhub/content/supervisor.py) turns a source off by itself
+  when most of its recent items were rejected (:func:`auto_disable`, with the reason kept for the
+  dashboard); the owner turning it back on forgets that verdict.
 * **Reading** (proxyhub/content/engine.py): a source is read every :data:`FETCH_EVERY`; after an
   error the next read waits :func:`backoff` (5 min, 10, 20 ... at most 6 h), and the error's code
   is kept for the dashboard until a read works again.
@@ -73,13 +76,17 @@ class Source:
     failures: int
     next_fetch_at: datetime | None
     last_count: int
+    disabled_reason: str | None = None
+    disabled_at: datetime | None = None
+    disabled_detail: dict[str, Any] | None = None
+    quality_reset_at: datetime | None = None
 
     @property
     def link(self) -> str:
         return PLUGINS[self.kind].link(self.ref)
 
-    def as_json(self, pending: int = 0) -> dict[str, Any]:
-        from proxyhub.content.messages import error_fa
+    def as_json(self, pending: int = 0, quality: dict[str, Any] | None = None) -> dict[str, Any]:
+        from proxyhub.content.messages import error_fa, source_disabled_fa
 
         return {
             "id": self.id,
@@ -97,6 +104,11 @@ class Source:
             "next_fetch_at": iso(self.next_fetch_at),
             "last_count": self.last_count,
             "pending": pending,
+            # D52: the supervisor's verdict on this source.
+            "disabled_reason": self.disabled_reason,
+            "disabled_reason_fa": source_disabled_fa(self.disabled_reason, self.disabled_detail),
+            "disabled_at": iso(self.disabled_at),
+            "quality": quality,
         }
 
 
@@ -113,6 +125,10 @@ _COLS = (
     ContentSource.failures,
     ContentSource.next_fetch_at,
     ContentSource.last_count,
+    ContentSource.disabled_reason,
+    ContentSource.disabled_at,
+    ContentSource.disabled_detail,
+    ContentSource.quality_reset_at,
 )
 
 
@@ -130,6 +146,10 @@ def _source(r: Any) -> Source:
         failures=int(r.failures),
         next_fetch_at=r.next_fetch_at,
         last_count=int(r.last_count),
+        disabled_reason=r.disabled_reason,
+        disabled_at=r.disabled_at,
+        disabled_detail=dict(r.disabled_detail) if isinstance(r.disabled_detail, dict) else None,
+        quality_reset_at=r.quality_reset_at,
     )
 
 
@@ -217,6 +237,10 @@ async def update_source(
         values["enabled"] = enabled
         if enabled and not current.enabled:  # turned on again: read soon, errors forgotten
             values.update(next_fetch_at=None, failures=0)
+            # The supervisor's verdict is forgotten too: quality is judged afresh from now (D52).
+            values.update(disabled_reason=None, disabled_at=None, disabled_detail=None, quality_reset_at=now)
+        elif not enabled and current.enabled:  # the owner's own choice, not the supervisor's
+            values.update(disabled_reason=None, disabled_at=now, disabled_detail=None)
     if label is not None:
         values["label"] = check_label(label, PLUGINS[current.kind].default_label(current.ref))
     await db.execute(update(ContentSource).where(ContentSource.id == source_id).values(**values))
@@ -252,6 +276,25 @@ async def remove(db: Db, source_id: int) -> int | None:
     ).all()
     await db.execute(delete(ContentSource).where(ContentSource.id == source_id))
     return len(dropped)
+
+
+async def auto_disable(db: Db, source_id: int, now: datetime, reason: str, detail: dict[str, Any]) -> bool:
+    """The supervisor turns a source off (decision D52). Returns False when it was already off."""
+    done = (
+        await db.execute(
+            update(ContentSource)
+            .where(ContentSource.id == source_id, ContentSource.enabled.is_(True))
+            .values(
+                enabled=False,
+                disabled_reason=reason[:40],
+                disabled_at=now,
+                disabled_detail=detail,
+                updated_at=now,
+            )
+            .returning(ContentSource.id)
+        )
+    ).first()
+    return done is not None
 
 
 async def record_ok(db: Db, source_id: int, now: datetime, count: int) -> None:

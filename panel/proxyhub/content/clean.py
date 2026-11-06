@@ -258,6 +258,25 @@ def norm_text(text: str) -> str:
     return " ".join(words)[:MAX_NORM_CHARS]
 
 
+def norm_text_keep_all(text: str) -> str:
+    """Like :func:`norm_text` but every word kept (no stop words, links or length cut): the same
+    letters, digits and case, for matching a name or a word inside a caption."""
+    t = _DIACRITICS.sub("", text.translate(_LETTERS)).lower()
+    return " ".join(_NON_WORD.sub(" ", t).split())
+
+
+# An invitation to join or follow, as a channel signs off (narrower than _JOIN_WORDS: «عضویت» and
+# a list of platforms are ordinary words in news).
+_INVITATION = re.compile(
+    r"(?i)عضو\s*شو|جوین|بپیوندید|دنبال\s*کنید|کانال\s*ما|لینک\s*کانال|🆔|\bjoin\b|\bsubscribe\b|\bfollow\s+us\b"
+)
+
+
+def looks_like_signature(text: str) -> bool:
+    """A caption that invites readers to join or follow somewhere (a signature)."""
+    return _INVITATION.search(text) is not None
+
+
 def similar(a: str, b: str) -> bool:
     """Two normalized texts tell the same news: half their word pairs are shared, or nearly every
     word of the shorter one is in the longer one. Short texts (under :data:`MIN_WORDS` words) are

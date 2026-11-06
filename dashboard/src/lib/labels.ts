@@ -316,6 +316,13 @@ const ACTION: Record<string, string> = {
   "content.source_removed": "حذف منبع محتوا",
   "content.candidate_edited": "ویرایش کپشن در صف بازبینی",
   "content.candidate_status": "تأیید یا رد در صف بازبینی",
+  "content.qc_approved": "تأیید خودکار ناظر محتوا",
+  "content.qc_rejected": "رد خودکار ناظر محتوا",
+  "content.source_auto_disabled": "خاموشی منبع به دست ناظر",
+  "content.owner_alert": "هشدار ناظر محتوا به مالک",
+  "content.qc_settings": "تغییر تنظیمات ناظر محتوا",
+  "content.qc_api_key_set": "ذخیره‌ی کلید API Anthropic",
+  "content.qc_api_key_removed": "پاک کردن کلید API Anthropic",
   "posts.caption_links_dropped": "چند کانفیگ در کپشن پست عکس‌دار جا نشد و نیامد",
   "posts.media_skipped": "پست بی عکس و ویدیو رفت",
 };

@@ -61,6 +61,10 @@ class RuntimeConfig(BaseSettings):
     acme_directory_url: str = "https://acme-v02.api.letsencrypt.org/directory"
     acme_ca_file: Path | None = None
 
+    # The host's Claude bridge (decision D52, deploy/claude-bridge): its unix socket as the worker
+    # sees it (deploy/docker-compose.yml mounts the directory read-only). Absent = no bridge.
+    claude_bridge_socket: Path = Path("/run/claude-bridge/bridge.sock")
+
     log_level: str = "INFO"
     git_commit: str = os.environ.get("PROXYHUB_GIT_COMMIT", "unknown")
 

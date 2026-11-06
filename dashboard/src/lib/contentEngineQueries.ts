@@ -3,12 +3,13 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { isEndpointMissing } from "./api";
-import { getQueue, getSources, type CandidateStatus, type QueueSort } from "./contentEngine";
+import { getQc, getQueue, getSources, type CandidateStatus, type QueueSort } from "./contentEngine";
 
 export const contentKeys = {
   all: ["content-engine"] as const,
   sources: ["content-engine", "sources"] as const,
   queue: (status: CandidateStatus, sort: QueueSort) => ["content-engine", "queue", status, sort] as const,
+  qc: ["content-engine", "qc"] as const,
 };
 
 function every(ms: number) {
@@ -25,3 +26,7 @@ export const useQueue = (status: CandidateStatus, sort: QueueSort) =>
     queryFn: ({ signal }) => getQueue(status, sort, signal),
     refetchInterval: every(60_000),
   });
+
+/** The content supervisor (D52): settings, bridge health, calls and caps. */
+export const useQc = () =>
+  useQuery({ queryKey: contentKeys.qc, queryFn: ({ signal }) => getQc(signal), refetchInterval: every(60_000) });

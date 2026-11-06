@@ -31,6 +31,11 @@ PATHS = {
     ("PUT", "/api/content/candidates/{candidate_id}"),
     ("POST", "/api/content/candidates/{candidate_id}/status"),
     ("GET", "/api/content/media/{media_id}"),
+    # D52, the content supervisor.
+    ("GET", "/api/content/qc"),
+    ("PUT", "/api/content/qc"),
+    ("PUT", "/api/content/qc/api-key"),
+    ("DELETE", "/api/content/qc/api-key"),
 }
 NEWS = (
     "🔻 هشدار عراق\nوزیر خارجه عراق نسبت به ورود گروه‌های مسلح نزدیک به ایران به هرگونه درگیری نظامی "

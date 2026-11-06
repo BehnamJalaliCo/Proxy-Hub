@@ -73,3 +73,113 @@ def media_error_fa(code: str | None) -> str | None:
     if code is None:
         return None
     return MEDIA_ERRORS_FA.get(code) or error_fa(code)
+
+
+# --- the content supervisor (decision D52) ----------------------------------------------------------
+
+QC_OUTCOMES_FA: Final[dict[str, str]] = {
+    "ok": "Claude پاسخ داد.",
+    "unparsable": "پاسخ Claude در قالب درست نبود؛ مورد رد شد.",
+    "refused": "Claude از بررسی این مورد سر باز زد؛ مورد رد شد.",
+    "empty": "Claude پاسخی نداد.",
+    "too_long": "پاسخ Claude بیش از حد بلند بود.",
+    "max_turns": "Claude در یک نوبت پاسخ کامل نداد.",
+    "unavailable": "هیچ راهی به Claude تنظیم نشده است (پل سرور یا کلید API).",
+    "off": "ناظر Claude در تنظیمات خاموش است.",
+    "over_cap": "سقف روزانه‌ی تماس با Claude پر شده است.",
+    "bridge_missing": "پل Claude روی سرور نصب یا روشن نیست.",
+    "bridge_denied": "worker اجازه‌ی وصل شدن به پل Claude را ندارد.",
+    "bridge_refused": "پل Claude اتصال را نپذیرفت.",
+    "bridge_timeout": "پل Claude در زمان مجاز جواب نداد.",
+    "bridge_bad_answer": "پل Claude پاسخ نادرست داد.",
+    "busy": "پل Claude مشغول بررسی دیگری بود.",
+    "cap": "سقف روزانه‌ی خود پل Claude پر شده است.",
+    "auth": "ورود اشتراک Claude روی سرور باطل شده است؛ باید دوباره وارد شود (P22).",
+    "rate_limited": "سقف مصرف اشتراک Claude فعلاً پر است؛ خودش باز میشود.",
+    "timeout": "Claude در زمان مجاز جواب نداد.",
+    "claude_failed": "اجرای Claude Code روی سرور ناموفق بود.",
+    "claude_missing": "Claude Code برای کاربر پل نصب نیست.",
+    "tools_present": "Claude Code ابزار داشت و پل اجرا را متوقف کرد.",
+    "tools_unknown": "Claude Code فهرست ابزارهایش را نگفت و پل پاسخ را نپذیرفت.",
+    "peer_not_allowed": "پل Claude این درخواست‌کننده را نپذیرفت.",
+    "bad_request": "درخواست پنل به پل پذیرفته نشد.",
+    "bad_image": "تصویر برای Claude پذیرفته نشد.",
+    "too_large": "درخواست برای Claude بیش از حد بزرگ بود.",
+    "bad_model": "نام مدل Claude پذیرفته نشد.",
+    "internal": "خطای داخلی پل Claude.",
+    "api_auth": "کلید API Anthropic پذیرفته نشد.",
+    "api_rate_limited": "سقف درخواست API Anthropic پر است.",
+    "api_bad_request": "API Anthropic درخواست را نپذیرفت.",
+    "api_bad_model": "مدل انتخاب‌شده در API Anthropic پیدا نشد.",
+    "api_too_large": "درخواست برای API Anthropic بیش از حد بزرگ بود.",
+    "api_overloaded": "API Anthropic فعلاً شلوغ است.",
+    "api_unavailable": "API Anthropic در دسترس نیست.",
+    "api_unreachable": "پنل به API Anthropic نرسید.",
+    "api_timeout": "API Anthropic در زمان مجاز جواب نداد.",
+    "api_bad_answer": "API Anthropic پاسخ نادرست داد.",
+}
+
+QC_CHECKS_FA: Final[dict[str, str]] = {
+    "unparsable": "پاسخ Claude در قالب درست نبود.",
+    "refused": "Claude از بررسی سر باز زد.",
+    "no_preview": "ویدیو تصویر پیش‌نمایش ندارد و ناظر نمیتواند آن را ببیند.",
+    "image_too_large": "ابعاد عکس برای بررسی Claude بیش از حد بزرگ است.",
+    "category_not_allowed": "دسته‌ی این مورد در تنظیمات مجاز نیست.",
+    "title_empty": "عنوان خالی بود.",
+    "title_too_long": "عنوان از سقف طول بلندتر بود.",
+    "title_emoji": "عنوان باید دقیقاً با یک ایموجی شروع شود.",
+    "body_too_long": "متن از سقف طول بلندتر بود.",
+    "caption_too_long": "کپشن با لینک‌های فعلی جا نمیشد.",
+    "control_chars": "متن نویسه‌ی نامعتبر داشت.",
+    "link": "متن لینک یا نشانی وب داشت.",
+    "mention": "متن @ داشت.",
+    "hashtag": "متن هشتگ داشت.",
+    "phone": "متن شماره‌ی تلفن داشت.",
+    "signature": "متن دعوت به عضویت یا امضای کانال داشت.",
+    "source_name": "متن نام یکی از منبع‌ها را داشت.",
+    "not_persian": "متن بیشتر فارسی نبود.",
+    "forbidden_word": "متن یکی از واژه‌های ممنوع تنظیمات را داشت.",
+}
+
+QC_FLAGS_FA: Final[dict[str, str]] = {
+    "sexual": "محتوای جنسی یا برهنگی",
+    "graphic_violence": "خشونت شدید یا صحنه‌ی دلخراش",
+    "hate": "نفرت یا توهین به یک گروه",
+    "ads_scam": "تبلیغ، کلاهبرداری، قمار یا تبلیغ کانال دیگر",
+    "foreign_branding": "واترمارک یا لوگوی کانال یا برند دیگر",
+    "low_quality": "کیفیت پایین یا ناخوانا",
+    "clickbait": "تیتر فریبنده یا شایعه",
+    "manipulation": "تلاش برای دستور دادن به ناظر",
+}
+
+QC_API_ERRORS_FA: Final[dict[str, str]] = {
+    "qc_settings_invalid": "تنظیمات ناظر پذیرفته نشد؛ عددها و گزینه‌ها را بررسی کنید.",
+    "api_key_invalid": "کلید API Anthropic باید با sk-ant- شروع شود و یک خط باشد.",
+    "vault_unavailable": "گاوصندوق رمزهای پنل در دسترس نیست.",
+}
+
+
+def qc_outcome_fa(code: str | None) -> str | None:
+    if code is None:
+        return None
+    return QC_OUTCOMES_FA.get(code) or f"Claude در دسترس نبود ({code})."
+
+
+def qc_check_fa(code: str) -> str:
+    if code.startswith("flag:"):
+        return f"پرچم ایمنی: {QC_FLAGS_FA.get(code[5:], code[5:])}"
+    return QC_CHECKS_FA.get(code) or code
+
+
+def source_disabled_fa(reason: str | None, detail: dict[str, object] | None) -> str | None:
+    """Why the supervisor turned a source off, in Persian (the sources page)."""
+    if reason is None:
+        return None
+    from proxyhub.telegram.templates import fa_digits
+
+    detail = detail or {}
+    if reason == "qc_rejects":
+        rejected = fa_digits(str(detail.get("rejected", "?")))
+        of = fa_digits(str(detail.get("of", "?")))
+        return f"ناظر این منبع را خاموش کرد: {rejected} مورد از {of} مورد آخرش رد شد."
+    return f"ناظر این منبع را خاموش کرد ({reason})."

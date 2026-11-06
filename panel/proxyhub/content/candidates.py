@@ -1,16 +1,19 @@
-"""The review queue (``content_candidates``, ``content_media``): storing what sources gave, the owner's
-review (decision D20), and what the publisher takes.
+"""The review queue (``content_candidates``, ``content_media``): storing what sources gave, the
+review (the content supervisor's, decision D52, or the owner's), and what the publisher takes.
 
 **Storing** (:func:`store_items`, from proxyhub/content/engine.py): a post of a source is stored once
 (``source_id`` + ``external_id``); a later read only refreshes its view count. Posts older than
 :data:`MAX_AGE` (by their own time) and posts with neither text nor media are skipped. The text is
-cleaned (proxyhub/content/clean.py) and the caption prefilled from it (or by the caption writer,
-proxyhub/content/writer.py). A post whose cleaned text tells what a candidate of the last
-:data:`MAX_AGE` already tells (any source, :func:`~proxyhub.content.clean.similar`) is stored as
-``duplicate`` of it and never shown in the queue; the original counts it as one more source.
+cleaned (proxyhub/content/clean.py) and the caption prefilled from it; the content supervisor's
+Claude review replaces it when it approves (proxyhub/content/supervisor.py, decision D52). A post
+whose cleaned text tells what a candidate of the last :data:`MAX_AGE` already tells (any source,
+:func:`~proxyhub.content.clean.similar`) is stored as ``duplicate`` of it and never shown in the
+queue; the original counts it as one more source.
 
 **Statuses**: ``pending`` (in the queue) -> ``approved`` (waits for a post) -> ``used`` (posted; set by
-the publisher only). The owner can also reject (``rejected``), and move an item back to the queue.
+the publisher only). The content supervisor (decision D52, proxyhub/content/supervisor.py) approves or
+rejects by itself in its ``auto`` mode (``decided_by = 'qc'``); the owner can still approve, reject
+(``decided_by = 'owner'``) or move an item back to the queue.
 A pending or approved item older than :data:`MAX_AGE` becomes ``expired`` (news goes stale).
 
 **The caption** the owner edits: a title (one line, up to 120 characters; the post shows it bold,
@@ -41,7 +44,6 @@ from proxyhub.content.items import FetchedItem
 from proxyhub.content.media import MediaInfo
 from proxyhub.content.messages import media_error_fa
 from proxyhub.content.sources import Source
-from proxyhub.content.writer import DEFAULT_WRITER, CaptionWriter
 from proxyhub.db.models import Outbox
 from proxyhub.db.models_content import CANDIDATE_STATUSES, ContentCandidate, ContentMedia
 from proxyhub.db.models_posts import Post
@@ -113,6 +115,17 @@ class Candidate:
     created_at: datetime
     reviewed_at: datetime | None
     used_at: datetime | None
+    qc_decision: str | None = None
+    qc_reasons: list[str] | None = None
+    qc_flags: list[str] | None = None
+    qc_checks: list[str] | None = None
+    qc_category: str | None = None
+    qc_error: str | None = None
+    qc_backend: str | None = None
+    qc_model: str | None = None
+    qc_at: datetime | None = None
+    qc_tries: int = 0
+    decided_by: str | None = None
 
     def content_html(self) -> str:
         return caption_html(self.title, self.body)
@@ -140,6 +153,17 @@ _COLS = (
     ContentCandidate.created_at,
     ContentCandidate.reviewed_at,
     ContentCandidate.used_at,
+    ContentCandidate.qc_decision,
+    ContentCandidate.qc_reasons,
+    ContentCandidate.qc_flags,
+    ContentCandidate.qc_checks,
+    ContentCandidate.qc_category,
+    ContentCandidate.qc_error,
+    ContentCandidate.qc_backend,
+    ContentCandidate.qc_model,
+    ContentCandidate.qc_at,
+    ContentCandidate.qc_tries,
+    ContentCandidate.decided_by,
 )
 
 
@@ -162,6 +186,17 @@ def _candidate(r: Any) -> Candidate:
         created_at=r.created_at,
         reviewed_at=r.reviewed_at,
         used_at=r.used_at,
+        qc_decision=r.qc_decision,
+        qc_reasons=list(r.qc_reasons) if isinstance(r.qc_reasons, list) else None,
+        qc_flags=list(r.qc_flags) if isinstance(r.qc_flags, list) else None,
+        qc_checks=list(r.qc_checks) if isinstance(r.qc_checks, list) else None,
+        qc_category=r.qc_category,
+        qc_error=r.qc_error,
+        qc_backend=r.qc_backend,
+        qc_model=r.qc_model,
+        qc_at=r.qc_at,
+        qc_tries=int(r.qc_tries),
+        decided_by=r.decided_by,
     )
 
 
@@ -206,7 +241,6 @@ async def store_items(
     source: Source,
     items: list[FetchedItem],
     now: datetime,
-    writer: CaptionWriter = DEFAULT_WRITER,
 ) -> Stored:
     """Store the new posts of ``source`` (see the module doc)."""
     if not items:
@@ -242,17 +276,8 @@ async def store_items(
             continue
         norm = clean.norm_text(text)
         original = next((cid for cid, other in norms if clean.similar(norm, other)), None)
-        draft = await writer.write(
-            text=text, source_label=source.label, media_kind=item.media.kind if item.media else None
-        )
-        if draft is not None:
-            try:
-                title, body = check_caption(draft.title, draft.body)
-            except CandidateInvalid:
-                draft = None
-        if draft is None:
-            title, body = clean.split_caption(text)
-            title, body = title[:MAX_TITLE_CHARS], body[:MAX_BODY]
+        title, body = clean.split_caption(text)  # Claude's caption replaces it on approval (QC)
+        title, body = title[:MAX_TITLE_CHARS], body[:MAX_BODY]
         media = item.media
         media_state = "none"
         if media is not None:
@@ -582,7 +607,12 @@ async def set_status(
         await db.execute(
             update(ContentCandidate)
             .where(ContentCandidate.id == candidate_id)
-            .values(status=status, reviewed_at=now if status != "pending" else None, updated_at=now)
+            .values(
+                status=status,
+                reviewed_at=now if status != "pending" else None,
+                decided_by="owner" if status != "pending" else None,
+                updated_at=now,
+            )
         )
     return await get(db, candidate_id), current.status
 
@@ -683,6 +713,28 @@ async def prune(db: Db, now: datetime) -> int:
     return len(done)
 
 
+def qc_json(c: Candidate) -> dict[str, Any] | None:
+    """The content supervisor's review of ``c`` for the dashboard (decision D52), or None."""
+    from proxyhub.content.messages import qc_check_fa, qc_outcome_fa
+
+    if c.qc_at is None and c.qc_error is None and not c.qc_tries:
+        return None
+    return {
+        "decision": c.qc_decision,
+        "reasons": c.qc_reasons or [],
+        "category": c.qc_category,
+        "flags": c.qc_flags or [],
+        "checks": c.qc_checks or [],
+        "checks_fa": [qc_check_fa(code) for code in c.qc_checks or []],
+        "error": c.qc_error,
+        "error_fa": qc_outcome_fa(c.qc_error) if c.qc_error else None,
+        "backend": c.qc_backend,
+        "model": c.qc_model,
+        "at": iso(c.qc_at),
+        "tries": c.qc_tries,
+    }
+
+
 def as_json(
     c: Candidate,
     media: dict[str, MediaRow] | None = None,
@@ -709,6 +761,8 @@ def as_json(
         "body": c.body,
         "source_text": c.source_text,
         "also_in": also or [],
+        "decided_by": c.decided_by,
+        "qc": qc_json(c),
         "media": None
         if c.media_kind is None
         else {

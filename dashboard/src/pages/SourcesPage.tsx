@@ -15,6 +15,7 @@ import {
   addSource,
   fetchSourceNow,
   KIND_LABEL,
+  qualityText,
   removeSource,
   sourceHealth,
   sourceInputError,
@@ -180,6 +181,15 @@ function SourceRow({ s, index }: { s: ContentSource; index: number }) {
               </>
             ) : null}
           </p>
+          {qualityText(s.quality) ? (
+            <p className="mt-0.5 text-[0.82rem] leading-6 text-fg-muted">{qualityText(s.quality)}</p>
+          ) : null}
+          {s.disabled_reason_fa ? (
+            <p role="status" className="mt-1.5 rounded-xl bg-warning-soft px-3 py-2 text-[0.82rem] leading-6 text-fg">
+              {s.disabled_reason_fa}
+              {s.disabled_at ? ` (${formatRelative(s.disabled_at)})` : ""} اگر دوباره روشنش کنید، داوری ناظر از نو شروع میشود.
+            </p>
+          ) : null}
           {s.last_error_fa ? (
             <p role="status" className="mt-1.5 rounded-xl bg-danger-soft px-3 py-2 text-[0.82rem] leading-6 text-fg">
               {s.last_error_fa}
