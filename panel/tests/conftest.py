@@ -42,6 +42,47 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             )
 
 
+# A test that talks to the real api.telegram.org starts with `if not telegram_reachable(): skip`.
+# When Telegram stops answering DURING such a test (the client's NetworkError: no HTTP answer at
+# all, e.g. a ReadTimeout), the test could not exercise Telegram's behaviour either: it is the same
+# "Telegram unreachable" case, so it is reported as skipped with the reason, never as passed. Only
+# for those tests and only for that error; any other failure stays a failure. (CI on 2026-11-06:
+# twice, in two different real-Telegram tests, api.telegram.org timed out from the runner.)
+_TELEGRAM_UNANSWERED = ("network error (ReadTimeout", "network error (ConnectTimeout",
+                        "network error (ConnectError", "network error (RemoteProtocolError",
+                        "network error (ReadError", "network error (PoolTimeout")  # fmt: skip
+
+
+def _talks_to_real_telegram(item: pytest.Item) -> bool:
+    import inspect
+
+    function = getattr(item, "function", None)
+    try:
+        return function is not None and "telegram_reachable()" in inspect.getsource(function)
+    except (OSError, TypeError):
+        return False
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> object:
+    report = yield
+    if (
+        isinstance(report, pytest.TestReport)
+        and report.when == "call"
+        and report.failed
+        and _talks_to_real_telegram(item)
+    ):
+        text = report.longreprtext + "\n" + report.caplog
+        if any(marker in text for marker in _TELEGRAM_UNANSWERED):
+            report.outcome = "skipped"
+            report.longrepr = (
+                str(item.path),
+                item.location[1] or 0,
+                "Skipped: api.telegram.org did not answer during the test (network)",
+            )
+    return report
+
+
 @pytest.fixture(autouse=True)
 def _http_library_logs_open() -> Iterator[None]:
     """proxyhub.cli quiets httpx to WARNING in production, and a test that runs the CLI changes
