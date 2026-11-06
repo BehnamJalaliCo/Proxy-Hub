@@ -116,6 +116,7 @@ async def recent(db: AsyncConnection, now: datetime, limit: int = 20) -> list[di
                 Post.last_edit_at,
                 Post.edit_failures,
                 Post.poster,
+                Post.gone_at,
                 ContentItem.title,
                 Outbox.done_at,
                 Outbox.last_error,
@@ -154,13 +155,19 @@ async def recent(db: AsyncConnection, now: datetime, limit: int = 20) -> list[di
     for r in rows:
         username = (channels.get(r.role) or {}).get("username")
         message_url = None
-        if r.message_id is not None and isinstance(username, str) and username.startswith("@"):
+        if (
+            r.gone_at is None
+            and r.message_id is not None
+            and isinstance(username, str)
+            and username.startswith("@")
+        ):
             message_url = f"https://t.me/{username[1:]}/{int(r.message_id)}"
         out.append(
             {
                 "id": int(r.id),
                 "role": r.role,
-                "state": _state(r),
+                # "gone": its message was deleted in the channel; it is no longer edited.
+                "state": "gone" if r.gone_at is not None else _state(r),
                 "created_at": iso(r.created_at),
                 "planned_at": iso(r.planned_at),
                 "title": r.title,
@@ -168,7 +175,7 @@ async def recent(db: AsyncConnection, now: datetime, limit: int = 20) -> list[di
                 "edits": int(r.edits),
                 "last_edit_at": iso(r.last_edit_at) if r.last_edit_at else None,
                 "edits_stopped": int(r.edit_failures) >= publisher.MAX_EDIT_FAILURES,
-                "watching": now - r.created_at < window,
+                "watching": r.gone_at is None and now - r.created_at < window,
                 "message_url": message_url,
                 "poster": r.poster,
             }

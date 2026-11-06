@@ -8,6 +8,7 @@ import {
   parseTags,
   parseTgHtml,
   plainText,
+  POST_STATE,
   postsThatFit,
   sameSettings,
   titleLine,
@@ -116,21 +117,21 @@ describe("Telegram HTML reader", () => {
     expect((parseTgHtml('<pre><code class="language-a b">x</code></pre>')[0] as Extract<TgNode, { type: "el" }>).lang).toBeUndefined();
   });
 
-  it("reads a config's collapsed quote with its labelled inline code (D48)", () => {
+  it("reads each config in its own collapsed quote, its label outside (D48)", () => {
     const html =
-      '🔒 کانفیگ V2Ray — اعتبار تا جمعه ساعت ۰۹:۰۰\n<blockquote expandable>TCP:\n<code>vless://a@b:443?x=1&amp;y=2</code>\n\nXHTTP:\n<code>vless://a@b:2083</code></blockquote>\n\n<blockquote>متن</blockquote>';
-    const nodes = parseTgHtml(html);
-    const quote = nodes[1] as Extract<TgNode, { type: "el" }>;
-    expect(quote.tag).toBe("blockquote");
-    expect(quote.expandable).toBe(true);
-    const codes = quote.children.filter((n): n is Extract<TgNode, { type: "el" }> => n.type === "el");
-    expect(codes.map((c) => [c.tag, plainText(c.children)])).toEqual([
-      ["code", "vless://a@b:443?x=1&y=2"],
-      ["code", "vless://a@b:2083"],
+      '🔒 کانفیگ V2Ray — اعتبار تا جمعه ساعت ۰۹:۰۰\nTCP\n<blockquote expandable><code>vless://a@b:443?x=1&amp;y=2</code></blockquote>\n\nXHTTP\n<blockquote expandable><code>vless://a@b:2083</code></blockquote>\n\n<blockquote>متن</blockquote>';
+    const quotes = parseTgHtml(html).filter((n): n is Extract<TgNode, { type: "el" }> => n.type === "el");
+    expect(quotes.map((q) => [q.tag, q.expandable ?? false])).toEqual([
+      ["blockquote", true],
+      ["blockquote", true],
+      ["blockquote", false],
     ]);
-    expect(plainText(quote.children)).toBe("TCP:\nvless://a@b:443?x=1&y=2\n\nXHTTP:\nvless://a@b:2083");
-    // A plain quote (a post's body) is not collapsed.
-    expect((nodes[3] as Extract<TgNode, { type: "el" }>).expandable).toBeUndefined();
+    // One quote, one config: nothing but its inline code inside (a copy gives exactly one config).
+    expect(quotes.slice(0, 2).map((q) => q.children.map((c) => (c.type === "el" ? [c.tag, plainText(c.children)] : c.text)))).toEqual([
+      [["code", "vless://a@b:443?x=1&y=2"]],
+      [["code", "vless://a@b:2083"]],
+    ]);
+    expect(plainText(parseTgHtml(html))).toContain("TCP\nvless://a@b:443?x=1&y=2\n\nXHTTP\nvless://a@b:2083");
   });
 
   it("drops unsafe links and unknown tags but keeps their text", () => {
@@ -195,5 +196,7 @@ describe("words", () => {
     for (const code of ["disabled", "no_bot", "no_channel", "no_links", "other"]) expect(blockedText(code)).toBeTruthy();
     expect(contentStatusInfo("approved").tone).toBe("success");
     expect(contentStatusInfo("weird").label).toBe("weird");
+    // A post whose message was deleted in the channel: shown, not alerted (the panel never deletes).
+    expect(POST_STATE.gone).toEqual({ label: "در کانال پاک شده", tone: "neutral" });
   });
 });

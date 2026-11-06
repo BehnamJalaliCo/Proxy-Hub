@@ -26,6 +26,12 @@ paces every message per channel (3 s, 429). A failed edit is retried with backof
 :data:`MAX_EDIT_FAILURES` (owner alerted). A link's status in a post never goes back to active, so
 only a REPORTED status (or the link's own expiry) ends a link in a post.
 
+**A post whose message is gone** (someone deleted it in the channel by hand; the edit failed with
+:data:`~proxyhub.telegram.outbox.MESSAGE_GONE`, bot or operator account) is final at once: it is
+marked ``posts.gone_at``, logged once (``posts.message_gone``) and never edited again; no failure is
+counted and the owner gets no alert (the dashboard shows the post as gone). The panel itself never
+deletes a post.
+
 **A new layout reaches recent posts the same way** (the compact layout of decision D48, and the
 layouts before it): there is no layout version to keep. A post is rendered from what it carries,
 never from the text it was sent with, so after a layout change the render of every post younger
@@ -70,6 +76,7 @@ from proxyhub.posts.messages import (
     NO_LINKS_ALERT_FA,
 )
 from proxyhub.posts.poster import BOT, POSTERS, Poster, for_new_post
+from proxyhub.telegram import outbox as tg_outbox
 from proxyhub.telegram import store as tg_store
 from proxyhub.telegram.schedule import quiet_until
 from proxyhub.telegram.templates import (
@@ -360,6 +367,7 @@ class _Sent:
     channel_post_id: int
     live_sha: str
     shown_sha: str | None
+    gone: bool = False  # this round found its message gone from the channel
 
     @property
     def showing(self) -> str:
@@ -392,7 +400,7 @@ async def _sent_posts(db: AsyncConnection, since: datetime) -> list[_Sent]:
                 ChannelPost.text_sha256,
             )
             .join(ChannelPost, ChannelPost.outbox_id == Post.outbox_id)
-            .where(Post.created_at >= since)
+            .where(Post.created_at >= since, Post.gone_at.is_(None))
             .order_by(Post.created_at.desc(), Post.id.desc())
             .with_for_update(of=Post)
         )
@@ -416,19 +424,41 @@ async def _sent_posts(db: AsyncConnection, since: datetime) -> list[_Sent]:
     ]
 
 
+async def _gone(db: AsyncConnection, post: _Sent, job_id: int, now: datetime) -> None:
+    """The post's message no longer exists in the channel: never edit it again (see the module doc)."""
+    post.gone = True
+    post.last_edit_outbox_id = None
+    await db.execute(
+        update(Post)
+        .where(Post.id == post.id)
+        .values(last_edit_outbox_id=None, edit_retry_at=None, gone_at=now)
+    )
+    await log_action(
+        db,
+        actor=ACTOR,
+        action="posts.message_gone",
+        target=f"{post.role}:post:{post.id}",
+        dry_run=False,
+        allowed=False,
+        reasons=["message_gone"],
+        context={"outbox_id": job_id, "poster": post.poster, "channel_post_id": post.channel_post_id},
+    )
+
+
 async def _settle(db: AsyncConnection, post: _Sent, now: datetime) -> bool:
-    """Account for the post's last edit job. Returns True while that job is still waiting."""
-    if post.last_edit_outbox_id is None:
+    """Account for the post's last edit job. Returns True while that job is still waiting. A job
+    that found the message gone marks the post gone (``post.gone``) instead of counting a failure."""
+    job_id = post.last_edit_outbox_id
+    if job_id is None:
         return False
     job = (
-        await db.execute(
-            select(Outbox.done_at, Outbox.last_error, Outbox.payload).where(
-                Outbox.id == post.last_edit_outbox_id
-            )
-        )
+        await db.execute(select(Outbox.done_at, Outbox.last_error, Outbox.payload).where(Outbox.id == job_id))
     ).first()
     if job is not None and job.done_at is None:
         return True
+    if job is not None and tg_outbox.message_gone(job.last_error):
+        await _gone(db, post, job_id, now)
+        return False
     failed = job is not None and job.last_error is not None
     if job is not None and not failed:  # Telegram shows this text now (sent, or "not modified")
         text = job.payload.get("text") if isinstance(job.payload, dict) else None
@@ -565,7 +595,7 @@ async def refresh_posts(
         if await _settle(db, post, now):
             waiting += 1
             continue
-        if post.edit_failures >= MAX_EDIT_FAILURES:
+        if post.gone or post.edit_failures >= MAX_EDIT_FAILURES:
             continue
         if post.edit_retry_at is not None and post.edit_retry_at > now:
             continue

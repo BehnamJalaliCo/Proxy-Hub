@@ -38,6 +38,8 @@ Fail closed:
   after :data:`~proxyhub.telegram.outbox.MAX_ATTEMPTS` (the publisher then backs off and finally tells
   the owner). While the kill switch is ON, or Telegram holds the account (FLOOD_WAIT: no new post goes
   to it meanwhile either), an edit just waits, uncounted. "Message is not modified" counts as done.
+  ``MESSAGE_ID_INVALID`` (the message was deleted in the channel) fails with the bot's
+  :data:`~proxyhub.telegram.outbox.MESSAGE_GONE` reason, so the publisher stops editing that post.
 
 Nothing here deletes anything (CLAUDE.md rule 6): the only requests are the two above.
 """
@@ -82,10 +84,11 @@ ACTOR: Final = "operator_poster"
 PICK_LIMIT: Final = 20
 DEFAULT_LOCK_WAIT_S: Final = 2.0
 KILL_SWITCH_WAIT: Final = timedelta(minutes=5)
-# Telegram's errors on an edit that no retry can fix (the post is gone, not ours, or not editable).
+# Telegram's error on an edit of a message that no longer exists (deleted in the channel).
+_MESSAGE_GONE: Final = frozenset({"MESSAGE_ID_INVALID"})
+# Telegram's errors on an edit that no retry can fix (the post is not ours or not editable).
 _EDIT_FINAL: Final = frozenset(
     {
-        "MESSAGE_ID_INVALID",
         "MESSAGE_EDIT_TIME_EXPIRED",
         "MESSAGE_AUTHOR_REQUIRED",
         "CHAT_ADMIN_REQUIRED",
@@ -491,6 +494,9 @@ async def record(conn: AsyncConnection, job: Job, target: Target, result: Result
         await store.record_sent(conn, target.chat_id, now)
         await bot_outbox.finish_ok(conn, job.id, now)
         return "sent"
+    if error.rpc in _MESSAGE_GONE:
+        await bot_outbox.finish_failed(conn, job.id, now, f"{bot_outbox.MESSAGE_GONE}: {error}")
+        return "failed"
     if error.rpc in _EDIT_FINAL:
         await bot_outbox.finish_failed(conn, job.id, now, f"bad_request: {error}")
         return "failed"

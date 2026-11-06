@@ -327,7 +327,7 @@ async def test_an_edit_reuses_the_channel_reference_and_counts_not_modified_as_d
 @pytest.mark.parametrize(
     ("error", "outcome", "last_error"),
     [
-        (errors.MessageIdInvalidError(None), "failed", "failed: bad_request"),
+        (errors.MessageIdInvalidError(None), "failed", "failed: message_gone"),
         (errors.ChatAdminRequiredError(None), "failed", "failed: bad_request"),
         (errors.ServerError(None, "RPC_CALL_FAIL", 500), "retry", "operator_telegram_unavailable"),
         (TimeoutError(), "retry", "operator_telegram_unavailable"),
@@ -354,6 +354,45 @@ async def test_a_failed_edit_is_retried_or_failed_never_handed_over(
         assert await operator_outbox.process_one(shared) == outcome
     row = {j.id: j for j in await jobs(engine)}[edit]
     assert row.kind == "operator_edit_post" and row.last_error.startswith(last_error)
+
+
+async def test_an_operator_post_deleted_in_the_channel_is_marked_gone_and_left_alone(
+    engine: AsyncEngine, vault: Vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner deleted the operator account's post by hand: Telegram answers the edit with
+    MESSAGE_ID_INVALID (Telethon's MessageIdInvalidError). The job fails as message_gone, the post
+    is marked gone once, never edited again, and the owner gets no alert."""
+    nodes = await fleet(engine, 2)
+    await setup_operator(engine, vault)
+    await no_gap(engine)
+    now = slot_time(2)
+    assert await publish(engine, now) == "queued"
+    shared = deps(engine, vault)
+    with telegram_answers(monkeypatch, channel_answers(message_id=901)):
+        assert await operator_outbox.process_one(shared) == "sent"
+    await set_node(engine, nodes[0], state="burned")
+    assert await refresh(engine, now + timedelta(minutes=1)) == 1
+    [edit] = await jobs(engine, "operator_edit_post")
+    with telegram_answers(monkeypatch, channel_answers(edit_error=errors.MessageIdInvalidError(None))):
+        assert await operator_outbox.process_one(shared) == "failed"
+    [failed] = [j for j in await jobs(engine) if j.id == edit.id]
+    assert failed.last_error.startswith("failed: message_gone") and "MESSAGE_ID_INVALID" in failed.last_error
+    alerts = len(await jobs(engine, "alert"))
+    t = now + timedelta(minutes=2)
+    assert await refresh(engine, t) == 0
+    [post] = await rows(engine, "SELECT id, gone_at, edit_failures, poster FROM posts")
+    assert (post.gone_at, post.edit_failures, post.poster) == (t, 0, "operator")
+    await set_node(engine, nodes[1], state="burned")
+    for hours in (1, 7, 24):
+        assert await refresh(engine, t + timedelta(hours=hours)) == 0
+    assert len(await jobs(engine, "operator_edit_post")) == 1 and len(await jobs(engine, "alert")) == alerts
+    [logged] = await rows(
+        engine, "SELECT reasons::text AS c FROM actions_log WHERE action = 'posts.message_gone'"
+    )
+    assert '"poster": "operator"' in logged.c
+    async with engine.connect() as conn:
+        [shown] = await views.recent(conn, t)
+    assert shown["state"] == "gone" and shown["message_url"] is None
 
 
 @pytest.mark.parametrize(
