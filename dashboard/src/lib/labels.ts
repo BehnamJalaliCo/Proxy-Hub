@@ -310,6 +310,14 @@ const ACTION: Record<string, string> = {
   "posts.own_pack_chosen": "بسته‌ی اختصاصی کانال برای پست‌ها انتخاب شد",
   "posts.operator_not_sent": "پست حساب دوم برای کانال اصلی نرفت (انتشار اصلی خاموش شد)",
   "posts.operator_send_unknown": "معلوم نیست پست حساب دوم رفت یا نه (دوباره فرستاده نمیشود)",
+  // the content engine (D51)
+  "content.source_added": "افزودن منبع محتوا",
+  "content.source_updated": "تغییر منبع محتوا",
+  "content.source_removed": "حذف منبع محتوا",
+  "content.candidate_edited": "ویرایش کپشن در صف بازبینی",
+  "content.candidate_status": "تأیید یا رد در صف بازبینی",
+  "posts.caption_links_dropped": "چند کانفیگ در کپشن پست عکس‌دار جا نشد و نیامد",
+  "posts.media_skipped": "پست بی عکس و ویدیو رفت",
 };
 
 export function actionLabel(code: string): string {

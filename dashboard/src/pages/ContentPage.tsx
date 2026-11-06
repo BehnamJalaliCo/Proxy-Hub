@@ -41,6 +41,7 @@ import { Field, Segmented, TextInput, TimeSelect, Toggle } from "../components/u
 import { PageHeader } from "../components/ui/PageHeader";
 import { errorMessage } from "../lib/api";
 import { cn } from "../lib/browser";
+import { mediaUrl } from "../lib/contentEngine";
 import { formatJalali, formatNumber, formatRelative, toFaDigits } from "../lib/format";
 import {
   blockedText,
@@ -569,12 +570,24 @@ function PreviewCard({ s }: { s: PostsStatus }) {
           <>
             <div className="flex flex-wrap items-center gap-1.5">
               <Badge tone={p.target === "main" ? "success" : "info"}>{ROLE_LABEL[p.target]}</Badge>
-              <Badge tone="neutral">{toFaDigits(p.chars)} از ۴٬۰۹۶ نویسه</Badge>
+              <Badge tone="neutral">
+                {toFaDigits(p.chars)} از {p.media ? "۱٬۰۲۴ نویسه‌ی کپشن" : "۴٬۰۹۶ نویسه"}
+              </Badge>
+              {p.candidate ? <Badge tone="success">از صف بازبینی: {p.candidate.source}</Badge> : null}
+              {p.media ? <Badge tone="brand">{p.media.kind === "video" ? "ویدیو + کپشن" : "عکس + کپشن"}</Badge> : null}
               <Badge tone={p.links.mtproto > 0 ? "brand" : "warning"}>MTProto {toFaDigits(p.links.mtproto)}</Badge>
               <Badge tone={p.links.reality > 0 ? "brand" : "neutral"}>ریلیتی {toFaDigits(p.links.reality)}</Badge>
               {p.content_item?.recycled ? <Badge tone="warning">محتوای تکراری</Badge> : null}
             </div>
             {p.blocked ? <Note tone="warning">{blockedText(p.blocked)}</Note> : null}
+            {p.media?.preview_id ? (
+              <img
+                src={mediaUrl(p.media.preview_id)}
+                alt="رسانه‌ی پست بعدی"
+                loading="lazy"
+                className="max-h-72 w-full max-w-[34rem] rounded-2xl bg-surface-3 object-contain"
+              />
+            ) : null}
             <TelegramBubble html={p.text} channel={s.channel_tag} />
           </>
         ) : null}
