@@ -26,6 +26,15 @@ paces every message per channel (3 s, 429). A failed edit is retried with backof
 :data:`MAX_EDIT_FAILURES` (owner alerted). A link's status in a post never goes back to active, so
 only a REPORTED status (or the link's own expiry) ends a link in a post.
 
+**A new layout reaches recent posts the same way** (the compact layout of decision D48, and the
+layouts before it): there is no layout version to keep. A post is rendered from what it carries,
+never from the text it was sent with, so after a layout change the render of every post younger
+than ``edit_window_hours`` differs ONCE from the text the channel shows, and that post gets one edit,
+within the same bounds as any edit (at most :data:`MAX_EDITS_PER_RUN` a round,
+:data:`MAX_PENDING_EDITS` waiting, the outbox's pacing); after it the render equals the shown text
+and nothing more is queued. Posts older than the window keep the layout they were sent with. A
+post's content is kept as it was posted (``posts.content_html``): only the links part changes.
+
 **A link that is merely missing is not dead.** Both providers keep an ended link listed with its
 status (for days, longer than the edit window), but leave a live one out for a while when its node
 restarts Xray, reports an error or its secret cannot be read. Such a link is remembered as missing

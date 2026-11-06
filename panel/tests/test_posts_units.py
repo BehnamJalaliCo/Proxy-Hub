@@ -19,6 +19,7 @@ from proxyhub.posts import content, links, plan
 from proxyhub.posts import settings as posting
 from proxyhub.posts.content import ContentInvalid
 from proxyhub.posts.entities import parse_html
+from proxyhub.posts.messages import FALLBACK_TITLE_FA
 from proxyhub.posts.publisher import (
     MISSING_GRACE,
     _Carried,
@@ -34,12 +35,13 @@ from proxyhub.telegram.templates import (
     MAX_MESSAGE_CHARS,
     NBSP,
     PAUSED_LINE,
-    WORD_GAP,
+    TITLE_MARK,
+    WORD_SEPARATOR,
     PostLink,
     PostTooLong,
     StatusTexts,
     compose_content,
-    config_block,
+    config_code,
     fa_digits,
     fits,
     mtproto_url,
@@ -77,53 +79,61 @@ def rl(
 
 
 def word(n: int) -> str:
-    """The visible connect word of the n-th MTProto link (no-break space before the number)."""
-    return f"اتصال{NBSP}{fa_digits(n)}"
+    """The visible proxy word of the n-th MTProto link (no-break space before the number)."""
+    return f"پروکسی{NBSP}{fa_digits(n)}"
+
+
+def code(link: PostLink) -> str:
+    return f"<code>{html.escape(link.url or '', quote=False)}</code>"
 
 
 CONTENT = compose_content("💡 عنوان <آزمایشی>", "متن <b>پررنگ</b> و <i>کج</i>\nخط دوم")
 EXP = datetime(2026, 11, 5, 15, 0, tzinfo=UTC)  # Thursday 18:30 Tehran
+LINE = "🔒 کانفیگ V2Ray — اعتبار تا پنجشنبه ساعت ۱۸:۳۰"
+QUOTE = "<blockquote expandable>"
 
 
-# --- layout --------------------------------------------------------------------------------------
+# --- layout (decision D48) -----------------------------------------------------------------------
 
 
-def test_post_has_content_links_and_tag_in_that_order() -> None:
+def test_post_is_title_body_proxy_grid_config_and_tag_in_that_order() -> None:
     sec = secret()
-    one = rl(1, expires=EXP)
-    post = render_post(CONTENT, [mt(1, sec=sec), mt(2), one], "@ipoxxo").text
+    tcp, xhttp = rl(1, expires=EXP, variant="TCP"), rl(1, expires=EXP, variant="XHTTP", companion=True)
+    post = render_post(CONTENT, [mt(1, sec=sec), mt(2), mt(3), tcp, xhttp], "@ipoxxo").text
     assert post.startswith("<b>💡 عنوان &lt;آزمایشی&gt;</b>\n\n<blockquote>متن <b>پررنگ</b>")
+    # Right under the body: the proxy words, two to a row with a bullet between them; no header,
+    # no mark, the whole word is the link.
     assert (
-        post.index("</blockquote>") < post.index("📡 <b>پروکسی تلگرام</b>") < post.index("🔐 <b>کانفیگ VLESS")
+        '</blockquote>\n\n<a href="https://t.me/proxy?server=slot1.example.com'
+        f'&amp;port=8443&amp;secret={sec}">{word(1)}</a>{WORD_SEPARATOR}<a href="' in post
     )
-    assert post.endswith("\n\n🔗 ‎@ipoxxo")
-    # An MTProto link is a connect word; the mark stays outside the link.
+    assert f">{word(2)}</a>\n<a href=" in post and f">{word(3)}</a>\n\n🔒 " in post
+    # The config: ONE line with its end time, then ONE collapsed quote with the pair, each a tiny
+    # label and the config as inline code (a tap copies it).
     assert (
-        f'📡 <b>پروکسی تلگرام</b> — روی هر کدام بزنید\n⚡{NBSP}<a href="https://t.me/proxy?server=slot1.example.com'
-        f'&amp;port=8443&amp;secret={sec}">{word(1)}</a>{WORD_GAP}⚡{NBSP}<a href="' in post
-    )
-    # A config: its end time, then the config itself in a code block (Telegram's copy button).
-    assert (
-        f"🔐 <b>کانفیگ VLESS</b> — برای کپی روی متن بزنید\n⏳ اعتبار تا پنجشنبه ساعت ۱۸:۳۰\n"
-        f"<pre>{html.escape(one.url or '', quote=False)}</pre>\n\n🔗" in post
-    )
+        f"\n\n{LINE}\n{QUOTE}TCP:\n{code(tcp)}\n\nXHTTP:\n{code(xhttp)}</blockquote>\n\n🔗 ‎@ipoxxo"
+    ) in post
+    assert post.endswith("</blockquote>\n\n🔗 ‎@ipoxxo")
     assert "#%40ipoxxo%201" in post  # the config's own name (D41) stays inside it
-    # The owner (2026-11-05): no «کانفیگ N» / «پروکسی N» next to a link, no raw proxy URL as text.
-    assert "کانفیگ ۱" not in post and "پروکسی ۱" not in post and "<code>" not in post
+    # No section headers, no ⚡, no <pre> (Telegram nests no pre in a quote), no «کانفیگ ۱».
+    for gone in ("<pre", "⚡", "📡", "🔐", "⏳", "پروکسی‌ها", "کانفیگ ۱", "اتصال"):
+        assert gone not in post, gone
+    assert post.count("<blockquote") == 2  # the body's and the config's
     assert visible_text(post).count("https://") == 0
     assert ALL_DEAD_LINE not in post
     assert fits(post)
     assert "·" not in post  # a middle dot next to Persian digits reads as a zero
 
 
-def test_connect_words_are_numbered_by_place_three_to_a_row() -> None:
+def test_proxy_words_are_numbered_by_place_two_to_a_row() -> None:
     post = render_post(None, [mt(i) for i in range(1, 8)], "@ipoxxo").text
-    rows = post.split("\n\n")[0].split("\n")[1:]
-    assert len(rows) == 3
-    assert [r.count("<a href=") for r in rows] == [3, 3, 1]
-    shown = re.findall(r"⚡ <a href=\"[^\"]+\">([^<]+)</a>", post)
+    rows = post.split("\n\n")[0].split("\n")
+    assert [r.count("<a href=") for r in rows] == [2, 2, 2, 1]
+    assert [r.count(WORD_SEPARATOR) for r in rows] == [1, 1, 1, 0]
+    shown = re.findall(r"<a href=\"[^\"]+\">([^<]+)</a>", post)
     assert shown == [word(n) for n in range(1, 8)]  # ۱ to ۷, whatever slots the links come from
-    assert word(7) == "اتصال ۷"
+    assert word(7) == "پروکسی ۷"  # a no-break space: a word never wraps
+    assert visible_text(rows[0]) == f"{word(1)} • {word(2)}"
 
 
 def test_rendering_is_deterministic() -> None:
@@ -144,44 +154,54 @@ def test_dead_links_keep_their_place_lose_their_link_and_get_marks() -> None:
         PostLink(kind="reality", status="burned"),
     ]
     post = render_post(CONTENT, items, "@ipoxxo").text
-    assert f"🚫{NBSP}<s>{word(1)}</s>{WORD_GAP}⚡{NBSP}<a href=" in post  # number 1 stays number 1
-    assert f">{word(2)}</a>{WORD_GAP}⌛️{NBSP}<s>{word(3)}</s>\n🔴{NBSP}<s>{word(4)}</s>\n\n" in post
+    assert f"🚫{NBSP}<s>{word(1)}</s>{WORD_SEPARATOR}<a href=" in post  # number 1 stays number 1
+    assert f">{word(2)}</a>\n⌛️{NBSP}<s>{word(3)}</s>{WORD_SEPARATOR}🔴{NBSP}<s>{word(4)}</s>\n\n" in post
     assert post.count("<a href=") == 1 and sec in post
+    # A config with nothing left is ONE status line in its place: no lock line, no quote.
     assert (
-        "🔐 <b>کانفیگ VLESS</b> — برای کپی روی متن بزنید\n⌛️ زمان این کانفیگ تمام شد\n\n"
+        f"<s>{word(4)}</s>\n\n⌛️ زمان این کانفیگ تمام شد\n\n"
         "🔴 ظرفیت این کانفیگ پر شد\n\n🚫 این کانفیگ از دسترس خارج شد\n\n🔗" in post
     )
-    assert "<pre>" not in post and "<code" not in post and "vless://" not in post
+    assert "🔒" not in post and QUOTE not in post and "<code" not in post and "vless://" not in post
     assert ALL_DEAD_LINE not in post  # one link still works
 
 
-def test_a_config_with_its_xhttp_link_shows_two_marked_blocks_under_one_end_time() -> None:
+def test_a_config_and_its_xhttp_link_share_one_line_and_one_quote() -> None:
     later = EXP + timedelta(hours=2)
     tcp, xhttp = rl(1, expires=EXP, variant="TCP"), rl(1, expires=EXP, variant="XHTTP", companion=True)
     alone = rl(2, expires=later)
     post = render_post(None, [tcp, xhttp, alone], "@ipoxxo").text
-    assert (
-        "⏳ اعتبار تا پنجشنبه ساعت ۱۸:۳۰\n"
-        f'<pre><code class="language-TCP">{html.escape(tcp.url or "", quote=False)}</code></pre>\n'
-        f'<pre><code class="language-XHTTP">{html.escape(xhttp.url or "", quote=False)}</code></pre>\n\n'
-        f"⏳ اعتبار تا پنجشنبه ساعت ۲۰:۳۰\n<pre>{html.escape(alone.url or '', quote=False)}</pre>"
-    ) in post
-    assert post.count("⏳") == 2  # the companion does not repeat its config's end time
-    # The config ends: one status line per link in its place, with the marker, nothing to copy.
-    ended = render_post(
-        None,
-        [
-            PostLink(kind="reality", status="full", variant="TCP"),
-            PostLink(kind="reality", status="full", variant="XHTTP", companion=True),
-            alone,
-        ],
-        "@ipoxxo",
+    assert post == (
+        f"{LINE}\n{QUOTE}TCP:\n{code(tcp)}\n\nXHTTP:\n{code(xhttp)}</blockquote>\n\n"
+        f"🔒 کانفیگ V2Ray — اعتبار تا پنجشنبه ساعت ۲۰:۳۰\n{QUOTE}{code(alone)}</blockquote>\n\n🔗 ‎@ipoxxo"
+    )  # a config without its XHTTP link: no label (an older post may carry several configs)
+    # Half of the pair is not live: its status line takes its place under its label, and the line
+    # shows the end of the link that still works.
+    paused_xhttp = PostLink(kind="reality", status="paused", variant="XHTTP", companion=True)
+    half = render_post(None, [tcp, paused_xhttp], "@ipoxxo").text
+    assert f"{LINE}\n{QUOTE}TCP:\n{code(tcp)}\n\nXHTTP:\n{PAUSED_LINE}</blockquote>\n\n🔗" in half
+    full_tcp = PostLink(kind="reality", status="full", variant="TCP")
+    other = render_post(
+        None, [full_tcp, rl(1, expires=later, variant="XHTTP", companion=True)], "@ipoxxo"
     ).text
-    assert "🔴 ظرفیت این کانفیگ پر شد — TCP\n🔴 ظرفیت این کانفیگ پر شد — XHTTP\n\n⏳ اعتبار تا" in ended
-    assert ended.count("<pre") == 1 and alone.url and html.escape(alone.url, quote=False) in ended
-    # A companion that does not share its config's end time keeps its own line.
+    assert f"۲۰:۳۰\n{QUOTE}TCP:\n🔴 ظرفیت این کانفیگ پر شد\n\nXHTTP:\n<code>" in other
+    # Both end: ONE status line for the pair, no quote; the pause line only when both are paused.
+    for statuses, line in [
+        (("full", "full"), "🔴 ظرفیت این کانفیگ پر شد"),
+        (("paused", "expired"), "⌛️ زمان این کانفیگ تمام شد"),
+        (("paused", "paused"), PAUSED_LINE),
+    ]:
+        pair = [
+            PostLink(kind="reality", status=statuses[0], variant="TCP"),  # type: ignore[arg-type]
+            PostLink(kind="reality", status=statuses[1], variant="XHTTP", companion=True),  # type: ignore[arg-type]
+        ]
+        ended = render_post(None, [*pair, alone], "@ipoxxo").text
+        later_line = "🔒 کانفیگ V2Ray — اعتبار تا پنجشنبه ساعت ۲۰:۳۰"
+        assert ended.startswith(f"{line}\n\n{later_line}\n{QUOTE}"), statuses
+        assert ended.count(QUOTE) == 1 and " — TCP" not in ended and "XHTTP" not in ended
+    # Two ends in one pair (never expected): the line names the earlier one.
     apart = render_post(None, [tcp, rl(1, expires=later, variant="XHTTP", companion=True)], "@ipoxxo").text
-    assert apart.count("⏳") == 2
+    assert apart.count("🔒") == 1 and apart.startswith(LINE + "\n")
 
 
 def test_all_dead_gets_the_closing_line_and_owner_texts() -> None:
@@ -190,14 +210,14 @@ def test_all_dead_gets_the_closing_line_and_owner_texts() -> None:
              PostLink(kind="reality", status="expired", variant="XHTTP")]  # fmt: skip
     post = render_post(CONTENT, items, "@ipoxxo", texts).text
     assert ALL_DEAD_LINE in post
-    assert "⌛️ تمام شد &lt;b&gt; — XHTTP" in post  # owner text is escaped
+    assert f"⌛️ تمام شد &lt;b&gt;\n\n{ALL_DEAD_LINE}" in post  # owner text is escaped
     assert post.index(ALL_DEAD_LINE) < post.index("🔗 ‎@ipoxxo")
 
 
 def test_expiry_names_the_tehran_weekday() -> None:
     # 23:00 UTC on Thursday is 02:30 on Friday in Tehran: the weekday follows Tehran, not UTC.
     late = render_post(None, [rl(1, expires=datetime(2026, 11, 5, 23, 0, tzinfo=UTC))], "@ipoxxo").text
-    assert "اعتبار تا جمعه ساعت ۰۲:۳۰" in late
+    assert late.startswith("🔒 کانفیگ V2Ray — اعتبار تا جمعه ساعت ۰۲:۳۰\n")
     days = {
         render_post(None, [rl(1, expires=datetime(2026, 11, d, 9, 0, tzinfo=UTC))], "@ipoxxo")
         .text.split("اعتبار تا ", 1)[1]
@@ -205,6 +225,8 @@ def test_expiry_names_the_tehran_weekday() -> None:
         for d in range(2, 9)
     }
     assert days == {"دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه"}
+    # A config that never ends: the line without an end time.
+    assert render_post(None, [rl(1)], "@ipoxxo").text.startswith(f"🔒 کانفیگ V2Ray\n{QUOTE}<code>")
 
 
 def test_paused_links_keep_their_place_without_a_link_and_are_not_dead() -> None:
@@ -214,12 +236,20 @@ def test_paused_links_keep_their_place_without_a_link_and_are_not_dead() -> None
         PostLink(kind="reality", status="paused", url=rl(1).url, variant="TCP"),
     ]
     post = render_post(None, items, "@ipoxxo").text
-    assert f"\n⏸{NBSP}{word(1)}\n\n" in post and "<s>" not in post
-    assert f"\n{PAUSED_LINE} — TCP\n\n" in post
-    assert "<a " not in post and "<pre" not in post and sec not in post and "vless://" not in post
+    assert post == f"⏸{NBSP}{word(1)}\n\n{PAUSED_LINE}\n\n🔗 ‎@ipoxxo"
+    assert sec not in post and "vless://" not in post
     assert ALL_DEAD_LINE not in post  # paused is not dead: it may come back
     dead_and_paused = [PostLink(kind="mtproto", status="burned"), items[0]]
     assert ALL_DEAD_LINE not in render_post(None, dead_and_paused, "@ipoxxo").text
+
+
+def test_the_title_line_has_one_emoji() -> None:
+    assert compose_content("عنوان بی ایموجی", None) == f"<b>{TITLE_MARK} عنوان بی ایموجی</b>"
+    assert compose_content("💡 ترفند امروز", None) == "<b>💡 ترفند امروز</b>"
+    assert compose_content("خبر مهم 🔥", None) == "<b>خبر مهم 🔥</b>"  # its own emoji, wherever it is
+    assert compose_content(FALLBACK_TITLE_FA, None) == f"<b>{FALLBACK_TITLE_FA}</b>"
+    assert compose_content("  a <b>  ", None) == f"<b>{TITLE_MARK} a &lt;b&gt;</b>"
+    assert compose_content("۱۲ نکته", "متن").startswith(f"<b>{TITLE_MARK} ۱۲ نکته</b>")  # digits: no emoji
 
 
 def test_body_tags_have_no_custom_emoji_for_the_bot() -> None:
@@ -232,7 +262,7 @@ def test_active_link_without_url_is_never_a_link() -> None:
     post = render_post(None, [PostLink(kind="mtproto", status="active")], "@ipoxxo").text
     assert "<a " not in post and f"🚫{NBSP}<s>{word(1)}</s>" in post
     config = render_post(None, [PostLink(kind="reality", status="active")], "@ipoxxo").text
-    assert "<pre" not in config and "🚫 این کانفیگ از دسترس خارج شد" in config
+    assert "<code" not in config and QUOTE not in config and "🚫 این کانفیگ از دسترس خارج شد" in config
 
 
 def test_a_dead_link_never_shows_its_url_even_if_it_still_has_one() -> None:
@@ -240,20 +270,27 @@ def test_a_dead_link_never_shows_its_url_even_if_it_still_has_one() -> None:
     dead = [
         PostLink(kind="mtproto", status="burned", url=mt(1, sec=sec).url),
         PostLink(kind="reality", status="expired", url=rl(1).url),
+        PostLink(kind="reality", status="paused", url=rl(2).url, variant="TCP"),
+        PostLink(kind="reality", status="full", url=rl(2).url, variant="XHTTP", companion=True),
     ]
     post = render_post(None, dead, "@ipoxxo").text
-    assert "<a " not in post and "<pre" not in post and sec not in post and "vless://" not in post
+    assert "<a " not in post and "<code" not in post and sec not in post and "vless://" not in post
 
 
 def test_a_marker_is_only_ever_a_plain_word() -> None:
-    for bad in ('"><b>x</b>', "a b", "x" * 17, ""):
+    for bad in ('"><b>x</b>', "a b", "x" * 17, "", None):
         live = render_post(None, [rl(1, variant=bad)], "@ipoxxo").text
-        assert "<pre>vless://" in live and "language-" not in live and "<b>x" not in live
+        assert f"{QUOTE}<code>vless://" in live and ":\n<code>" not in live and "<b>x" not in live
         ended = render_post(None, [PostLink(kind="reality", status="full", variant=bad)], "@ipoxxo").text
-        assert ended.split("\n")[1] == "🔴 ظرفیت این کانفیگ پر شد"
-    assert config_block("vless://a@b:1?x=1&y=<2>", "XHTTP") == (
-        '<pre><code class="language-XHTTP">vless://a@b:1?x=1&amp;y=&lt;2&gt;</code></pre>'
+        assert ended.split("\n")[0] == "🔴 ظرفیت این کانفیگ پر شد"
+        half = render_post(None, [rl(1, variant="TCP"), PostLink(kind="reality", status="full", variant=bad,
+                                                                companion=True)], "@ipoxxo").text  # fmt: skip
+        assert "</code>\n\n🔴 ظرفیت این کانفیگ پر شد</blockquote>" in half
+    assert (
+        config_code("vless://a@b:1?x=1&y=<2>", "XHTTP")
+        == "XHTTP:\n<code>vless://a@b:1?x=1&amp;y=&lt;2&gt;</code>"
     )
+    assert config_code("vless://a@b:1", '"><b>') == "<code>vless://a@b:1</code>"
 
 
 def test_content_is_shortened_but_links_and_tag_never() -> None:
@@ -261,10 +298,31 @@ def test_content_is_shortened_but_links_and_tag_never() -> None:
     many = [mt(i) for i in range(1, 13)] + [rl(i) for i in range(1, 4)]
     post = render_post(compose_content("عنوان", long_body[:2900]), many, "@ipoxxo")
     assert fits(post.text)
-    assert post.text.count("<a href=") == 12 and post.text.count("<pre>") == 3
+    assert post.text.count("<a href=") == 12 and post.text.count("<code>") == 3
+    assert post.text.count(QUOTE) == 3
     assert post.text.endswith("🔗 ‎@ipoxxo")
     assert post.content_html.endswith("…</blockquote>")
     assert len(post.text) <= MAX_MESSAGE_CHARS and utf16_len(visible_text(post.text)) <= MAX_MESSAGE_CHARS
+
+
+def test_inline_code_counts_toward_both_limits() -> None:
+    def config(n: int, **over: Any) -> PostLink:
+        url = vless_url(f"vless://{'a' * n}@b.example.com:443")
+        return PostLink(kind="reality", status="active", url=url, **over)
+
+    pair = [config(1900, variant="TCP"), config(1900, variant="XHTTP", companion=True)]
+    tail = render_post(None, pair, "@ipoxxo").text
+    assert fits(tail) and utf16_len(visible_text(tail)) > 3800  # the configs are visible text
+    with pytest.raises(PostTooLong):
+        render_post(None, [*pair, config(300)], "@ipoxxo")
+    # "&" is one character to read but five in the HTML: the HTML limit counts the escaped config.
+    amps_url = vless_url("vless://a@b.example.com:443?" + "&x" * 900)
+    amps = PostLink(kind="reality", status="active", url=amps_url)
+    with pytest.raises(PostTooLong):
+        render_post(None, [amps], "@ipoxxo")
+    # With content, the content (and only the content) gives way to the configs.
+    post = render_post(compose_content("عنوان", "کلمه " * 300), pair, "@ipoxxo")
+    assert fits(post.text) and post.text.endswith(tail) and "…" in post.content_html
 
 
 def test_the_link_blocks_use_few_entities() -> None:
@@ -693,7 +751,7 @@ def test_settings_defaults_match_the_contract() -> None:
         "08:00",
         "00:00",
     )
-    assert (d.max_mtproto, d.max_reality, d.edit_window_hours) == (12, 3, 48)
+    assert (d.max_mtproto, d.max_reality, d.edit_window_hours) == (6, 1, 48)  # D48
     assert d.target_role == "test"
     assert d.texts() == StatusTexts()
 

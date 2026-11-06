@@ -9,8 +9,9 @@ field                      default     meaning
 ``posts_per_day``          10          new posts per day (0 to 48), spread over the posting hours
 ``day_start``/``day_end``  08:00/00:00 posting hours, Tehran time (``00:00`` as end = midnight; an end
                                        before the start runs past midnight)
-``max_mtproto``            12          MTProto link words per post (0 to 20)
-``max_reality``            3           Reality configs per post (0 to 5)
+``max_mtproto``            6           MTProto link words per post (0 to 20; D48: three rows of two)
+``max_reality``            1           Reality configs per post (0 to 5), each with its XHTTP link when
+                                       it has one (D48: one pair per post)
 ``edit_window_hours``      48          status/host edits only for posts younger than this (1 to 720)
 ``recycle_after_days``     14          once every approved item was used, an item may come again after
                                        this many days (1 to 365)
@@ -20,7 +21,8 @@ field                      default     meaning
 The no-post windows and the least gap between two posts are the Telegram team's
 ``telegram.posting`` (decision D21; default gap 60 minutes); the publisher obeys them for both
 channels. A stored value that no longer validates gives the defaults (posting to the test channel
-only), never an error loop.
+only), never an error loop. Migration 0023_posting_compact moved a stored ``max_mtproto`` and
+``max_reality`` to the D48 values once (the owner's decision, 2026-11-06).
 """
 
 from __future__ import annotations
@@ -66,8 +68,8 @@ class PostingConfig(BaseModel):
     posts_per_day: int = Field(default=10, ge=0, le=48)
     day_start: HHMM = "08:00"
     day_end: HHMM = "00:00"
-    max_mtproto: int = Field(default=12, ge=0, le=20)
-    max_reality: int = Field(default=3, ge=0, le=5)
+    max_mtproto: int = Field(default=6, ge=0, le=20)
+    max_reality: int = Field(default=1, ge=0, le=5)
     edit_window_hours: int = Field(default=48, ge=1, le=720)
     recycle_after_days: int = Field(default=14, ge=1, le=365)
     status_texts: StatusTextsIn = Field(default_factory=StatusTextsIn)

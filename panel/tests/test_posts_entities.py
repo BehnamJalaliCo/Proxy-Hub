@@ -30,7 +30,15 @@ from proxyhub.posts.entities import (
     utf16_slice,
     with_custom_emoji,
 )
-from proxyhub.telegram.templates import PostLink, StatusTexts, compose_content, render_post
+from proxyhub.telegram.templates import (
+    NBSP,
+    REALITY_MARK,
+    TITLE_MARK,
+    PostLink,
+    StatusTexts,
+    compose_content,
+    render_post,
+)
 
 PACK = pack_map(
     [
@@ -46,6 +54,7 @@ PACK = pack_map(
         (5_010, "📡"),  # a second animation of the same emoji: the first one wins
         (5_011, "🔑"),
         (5_012, "⚡"),
+        (5_013, "🔒"),
     ]
 )
 
@@ -196,13 +205,25 @@ def test_the_real_template_matches_telethons_own_html_parser() -> None:
     ]
     for e in ours.entities:  # every entity covers whole characters
         assert covered(ours, e).encode("utf-16-le").decode("utf-16-le")
-    # Each config is one pre entity over exactly the config; its marker is the block's language.
-    pres = [(covered(ours, e), e.language) for e in ours.entities if e.kind == "pre"]
-    assert [lang for _, lang in pres] == ["TCP", "XHTTP", None]
-    assert all(text.startswith("vless://") and "\n" not in text for text, _ in pres)
-    # The connect words are the links' whole text; the mark before each stays outside the link.
+    assert [e.collapsed for e in ours.entities if e.kind == "blockquote"] == [
+        bool(getattr(t, "collapsed", False))
+        for t in sorted(theirs, key=lambda t: (t.offset, -t.length))
+        if type(t).__name__ == "MessageEntityBlockquote"
+    ]
+    assert [e.collapsed for e in ours.entities if e.kind == "blockquote"] == [False, True, True]
+    # The body's quote, then one collapsed quote per config (D48). Each config is one inline code
+    # entity over exactly the config, inside its quote; no pre anywhere (Telegram nests none in a
+    # quote).
+    quotes = [e for e in ours.entities if e.kind == "blockquote" and e.collapsed]
+    configs = [e for e in ours.entities if e.kind == "code" and covered(ours, e).startswith("vless://")]
+    assert len(configs) == 3 and not any(e.kind == "pre" for e in ours.entities)
+    assert all("\n" not in covered(ours, e) for e in configs)
+    assert [sum(q.offset <= c.offset and c.end <= q.end for c in configs) for q in quotes] == [2, 1]
+    pair = covered(ours, quotes[0])
+    assert pair.startswith("TCP:\nvless://") and "\n\nXHTTP:\nvless://" in pair
+    # The proxy words are the links' whole text, with no mark (D48).
     words = [covered(ours, e) for e in ours.entities if e.kind == "text_url"]
-    assert words == ["اتصال ۱", "اتصال ۴"]
+    assert words == [f"پروکسی{NBSP}۱", f"پروکسی{NBSP}۴"]
 
 
 _KIND = {
@@ -242,13 +263,13 @@ def test_the_owners_emoji_become_custom_emoji_over_exactly_their_units() -> None
     got = customs(m)
     assert ("💡", 0) not in got  # not in the pack: stays a plain emoji
     assert got[:3] == [("🇮🇷", 5_004), ("👨‍👩‍👧", 5_005), ("♻️", 5_009)]
-    assert ("📡", 5_001) in got and ("⌛️", 5_002) in got and ("🔗", 5_003) in got
+    assert ("⌛️", 5_002) in got and ("🔗", 5_003) in got  # an ended proxy's mark, the signature
+    assert got.count(("🔒", 5_013)) == 2  # the line above each config's quote
     assert all(doc != 5_011 for _, doc in got)  # 🔑 is inside <code>: Telegram draws code plain
-    assert ("🔐", 5_007) in got  # the Reality header's 🔐 is outside code
-    assert got.count(("⚡", 5_012)) == 2  # the mark of each live connect word, outside its link
-    # No custom emoji inside a code block, a config's pre block or a link (Telegram's nesting rules).
+    assert "⚡" not in m.text and "🔐" not in m.text  # no mark on a proxy word, no Reality header
+    # No custom emoji inside inline code (a config or the body's) or a link (Telegram's nesting rules).
     closed = [(e.offset, e.end) for e in m.entities if e.kind in ("code", "pre", "text_url")]
-    assert len(closed) == 6  # the body's code, three configs, two connect words
+    assert len(closed) == 6  # the body's code, three configs, two proxy words
     for e in m.entities:
         if e.kind == "custom_emoji":
             assert not any(e.offset < end and start < e.end for start, end in closed)
@@ -289,6 +310,38 @@ def test_an_emoji_inside_a_link_or_a_config_block_stays_plain() -> None:
     assert [e.offset for e in m.entities if e.kind == "custom_emoji"] == [0, utf16_len(m.text) - 1]
 
 
+def test_a_quote_takes_custom_emoji_but_its_inline_code_does_not() -> None:
+    """D48: a config sits as inline code in a collapsed quote. A quote may hold a custom emoji (a
+    status line in a config's place gets its animated twin); the code inside it stays plain."""
+    pair = [
+        PostLink(
+            kind="reality",
+            status="active",
+            url="vless://11111111-2222-3333-4444-555555555555@203.0.113.10:443?type=tcp#%40ipoxxo%20⌛",
+            expires_at=datetime(2026, 11, 6, 6, 0, tzinfo=UTC),
+            variant="TCP",
+        ),
+        PostLink(kind="reality", status="expired", variant="XHTTP", companion=True),
+    ]
+    m = operator_message(render_post(None, pair, "@ipoxxo").text, PACK)
+    [quote] = [e for e in m.entities if e.kind == "blockquote"]
+    [code] = [e for e in m.entities if e.kind == "code"]
+    assert quote.collapsed and quote.offset < code.offset and code.end < quote.end
+    got = [(covered(m, e), e.offset) for e in m.entities if e.kind == "custom_emoji"]
+    assert [emoji for emoji, _ in got] == ["🔒", "⌛️", "🔗"]  # the "⌛" inside the config stays plain
+    status = m.text.index("⌛️ زمان این کانفیگ تمام شد")
+    assert got[1][1] == utf16_len(m.text[:status]) and quote.offset < got[1][1] < quote.end
+
+
+def test_a_quote_and_its_only_code_are_ordered_outer_first() -> None:
+    """A config alone in its quote: both entities cover the same units. The quote comes first, as
+    the Bot API and Telethon order them (the outer one opens first)."""
+    m = parse_html("🔒 x\n<blockquote expandable><code>vless://a@b:1</code></blockquote>")
+    assert [(e.kind, e.offset, e.length) for e in m.entities] == [("blockquote", 5, 13), ("code", 5, 13)]
+    nested = parse_html("<b><i><u>x</u></i></b>")
+    assert [e.kind for e in nested.entities] == ["bold", "italic", "underline"]
+
+
 def test_no_pack_or_no_match_leaves_the_message_as_it_is() -> None:
     m = parse_html("<b>سلام</b> 💡")
     assert with_custom_emoji(m, {}) is m
@@ -310,10 +363,10 @@ def test_the_bot_path_keeps_plain_emoji() -> None:
 
 def test_the_preview_report() -> None:
     report = dict(emoji_report(_post_html(), PACK))
-    assert report["📡"] is True and report["⌛️"] is True and report["🔗"] is True
+    assert report["🔒"] is True and report["⌛️"] is True and report["🔗"] is True
     assert report["💡"] is False  # not in the pack
     assert report["🔑"] is False  # only inside code
-    assert report["🔐"] is True  # the Reality header
+    assert "🔐" not in report and "⚡" not in report and "📡" not in report  # gone with D48
     assert emoji_report(_post_html(), {}) == [(e, False) for e, _ in emoji_report(_post_html(), PACK)]
 
 
@@ -375,6 +428,37 @@ def test_each_emoji_kind_after_mixed_text(emoji: str) -> None:
     [e] = m.entities
     assert (e.offset, e.length) == (utf16_len(prefix), utf16_len(emoji))
     assert covered(m, e) == emoji
+
+
+def test_the_compact_layouts_emoji_sit_on_exact_utf16_offsets() -> None:
+    """D48: the title line's emoji (the panel's own when a title has none), the lock above a config
+    and the signature; each custom emoji covers exactly its two units after Persian text, no-break
+    spaces and bullets."""
+    six = [
+        PostLink(
+            kind="mtproto",
+            status="active",
+            url=f"https://t.me/proxy?server=203.0.113.{i}&port=443&secret=" + "c3" * 16,
+        )
+        for i in range(1, 7)
+    ]
+    config = PostLink(kind="reality", status="active", url="vless://a@203.0.113.9:443#x", expires_at=None)
+    post = render_post(compose_content("عنوان خبر", "متن خبر"), [*six, config], "@ipoxxo").text
+    m = operator_message(post, PACK)
+    title = f"{TITLE_MARK} عنوان خبر"
+    grid = "\n".join(f"پروکسی{NBSP}{a} • پروکسی{NBSP}{b}" for a, b in (("۱", "۲"), ("۳", "۴"), ("۵", "۶")))
+    lock = f"{REALITY_MARK} کانفیگ V2Ray"
+    tag = "🔗 \u200e@ipoxxo"
+    assert m.text == f"{title}\n\nمتن خبر\n\n{grid}\n\n{lock}\nvless://a@203.0.113.9:443#x\n\n{tag}"
+    got = [(covered(m, e), e.offset, e.length, e.document_id) for e in m.entities if e.kind == "custom_emoji"]
+    assert got == [
+        ("📡", 0, 2, 5_001),
+        ("🔒", utf16_len(f"{title}\n\nمتن خبر\n\n{grid}\n\n"), 2, 5_013),
+        ("🔗", utf16_len(m.text) - utf16_len(tag), 2, 5_003),
+    ]
+    links = [(covered(m, e), e.offset) for e in m.entities if e.kind == "text_url"]
+    assert [w for w, _ in links] == [f"پروکسی{NBSP}{d}" for d in "۱۲۳۴۵۶"]
+    assert links[1][1] - links[0][1] == utf16_len(f"پروکسی{NBSP}۱ • ")  # the bullet and its spaces
 
 
 def test_module_has_no_telethon_import() -> None:

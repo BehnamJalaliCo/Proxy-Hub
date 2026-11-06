@@ -66,7 +66,8 @@ def persian_number(n: int) -> str:
 
 def label_for(slot: int | None, is_test: bool) -> str:
     """Short Persian label for the owner (dashboard, logs): "پروکسی ۳" for slot 3. A channel post
-    shows connect words numbered by place instead (proxyhub/telegram/templates.py)."""
+    numbers its «پروکسی N» words by their place in that post instead, whatever the slot
+    (proxyhub/telegram/templates.py, decision D48)."""
     if slot is not None:
         return f"پروکسی {persian_number(slot)}"
     return "پروکسی آزمایشی" if is_test else "پروکسی"

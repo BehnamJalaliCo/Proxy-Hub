@@ -10,6 +10,8 @@ takes the text and its entities separately, with offsets and lengths counted in 
   ``u``/``ins``, ``s``/``strike``/``del``, ``tg-spoiler`` and ``span class="tg-spoiler"``, ``code``,
   ``pre`` (with ``code class="language-x"`` inside), ``a href``, ``blockquote`` (``expandable``) and
   ``tg-emoji``. Any other tag keeps its text and loses the tag; character references are decoded.
+  Entities are in offset order, an outer one before an inner one over the same units (a config
+  alone in its collapsed quote, decision D48: the quote, then its inline code).
 * :func:`with_custom_emoji` marks every plain emoji of that text which the owner's emoji pack has an
   animated twin for (same ``alt`` emoji, variation selectors ignored) with a custom-emoji entity over
   exactly that emoji's UTF-16 range. An emoji inside ``code``/``pre`` stays plain (Telegram draws
@@ -112,6 +114,7 @@ def utf16_slice(text: str, offset: int, length: int) -> str:
 class _Open:
     kind: EntityKind
     start: int
+    seq: int = 0  # the order the tags were opened in: an outer entity before an inner one
     url: str | None = None
     language: str | None = None
     document_id: int | None = None
@@ -135,7 +138,8 @@ class _Parser(HTMLParser):
         self.parts: list[str] = []
         self.pos = 0  # UTF-16 code units written so far
         self.stack: list[tuple[str, _Open | None]] = []
-        self.done: list[TextEntity] = []
+        self.done: list[tuple[int, TextEntity]] = []
+        self.opened = 0
 
     def _innermost_pre(self) -> _Open | None:
         for _, opened in reversed(self.stack):
@@ -173,7 +177,11 @@ class _Parser(HTMLParser):
         if tag == "br":
             self.handle_data("\n")
             return
-        self.stack.append((tag, self._open(tag, {k.lower(): v for k, v in attrs})))
+        opened = self._open(tag, {k.lower(): v for k, v in attrs})
+        if opened is not None:
+            opened.seq = self.opened
+            self.opened += 1
+        self.stack.append((tag, opened))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag.lower() == "br":
@@ -191,7 +199,7 @@ class _Parser(HTMLParser):
 
     def _finish(self, opened: _Open | None) -> None:
         if opened is not None and self.pos > opened.start:
-            self.done.append(opened.close(self.pos))
+            self.done.append((opened.seq, opened.close(self.pos)))
 
     def handle_data(self, data: str) -> None:
         if data:
@@ -201,11 +209,13 @@ class _Parser(HTMLParser):
     def result(self) -> MessageText:
         while self.stack:
             self._finish(self.stack.pop()[1])
-        return _stripped("".join(self.parts), self.done)
+        in_open_order = [e for _, e in sorted(self.done, key=lambda d: d[0])]
+        return _stripped("".join(self.parts), in_open_order)
 
 
 def _ordered(entities: list[TextEntity]) -> tuple[TextEntity, ...]:
-    """By offset; at the same offset the longer (outer) entity first."""
+    """By offset; at the same offset the longer (outer) entity first, and over the same units the
+    order they come in (a stable sort; :func:`parse_html` gives them in the order they opened)."""
     return tuple(sorted(entities, key=lambda e: (e.offset, -e.length)))
 
 
