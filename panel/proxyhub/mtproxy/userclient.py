@@ -791,8 +791,6 @@ TELEGRAM_DCS: Final = range(1, 6)
 
 
 def _source_history(request: Any, scope: ChannelScope) -> None:
-    if _channel_id(request.peer) not in scope.source_ids:
-        raise RequestNotAllowed("messages.getHistory: only the owner's content sources")
     kind = functions.messages.GetHistoryRequest
     extra = [
         name
@@ -860,7 +858,10 @@ def check_request(
     if kind in UPLOAD_REQUESTS:
         _check_upload(request, scope)
         return
-    if kind is functions.messages.GetHistoryRequest and _channel_id(getattr(request, "peer", None)):
+    # D55: a source channel's history; any other peer goes on to the bot chat's check (refused).
+    if kind is functions.messages.GetHistoryRequest and _channel_id(getattr(request, "peer", None)) in (
+        scope.source_ids
+    ):
         _source_history(request, scope)
         return
     if kind in SOURCE_READ_REQUESTS:
