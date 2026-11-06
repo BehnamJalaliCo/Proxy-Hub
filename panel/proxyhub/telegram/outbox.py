@@ -33,6 +33,9 @@ Retries: 429 waits exactly ``retry_after`` (not counted as an attempt); a revoke
 whole outbox for 5 minutes (not counted); other errors back off exponentially (10 s doubling, at
 most 30 min) and after 8 attempts the job fails. Telegram's 400 (bad HTML, message not found, ...)
 fails at once. Failed = ``done_at`` set with ``last_error`` not NULL (see proxyhub/telegram/store.py).
+An edit whose message no longer exists in the channel (someone deleted it by hand) fails with the
+reason :data:`MESSAGE_GONE` (:func:`message_gone`), which the publisher takes as final: it stops
+editing that post (proxyhub/posts/publisher.py). Nothing here ever deletes a message (rule 6).
 """
 
 from __future__ import annotations
@@ -63,6 +66,15 @@ from proxyhub.telegram.schedule import CHANNEL_GAP, OWNER_GAP, backoff, next_pos
 from proxyhub.vault import SecretValue, Vault
 
 log = logging.getLogger(__name__)
+
+# The reason an edit fails with when its message is gone from the channel (bot or operator account).
+MESSAGE_GONE: Final = "message_gone"
+
+
+def message_gone(last_error: str | None) -> bool:
+    """A finished job that failed because its message no longer exists in the channel."""
+    return last_error is not None and last_error.startswith(f"failed: {MESSAGE_GONE}")
+
 
 KINDS: Final = ("send_post", "edit_post", "alert")
 MAX_ATTEMPTS: Final = 8
@@ -306,6 +318,9 @@ async def record_failure(
         return await retry_at(conn, job, now + UNAUTHORIZED_PAUSE, "bot_unauthorized", counted=False, now=now)
     if job.kind == "send_post" and _ambiguous(exc):
         await finish_failed(conn, job.id, now, f"ambiguous_send: {error}")
+        return "failed"
+    if isinstance(exc, BadRequest) and exc.message_gone and job.kind == "edit_post":
+        await finish_failed(conn, job.id, now, f"{MESSAGE_GONE}: {error}")
         return "failed"
     if isinstance(exc, BadRequest):
         await finish_failed(conn, job.id, now, f"bad_request: {error}")

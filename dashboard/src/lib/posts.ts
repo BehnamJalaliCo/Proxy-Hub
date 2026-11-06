@@ -14,7 +14,8 @@ export type PostRole = "main" | "test";
 export type ContentStatus = "draft" | "approved" | "used" | "retired";
 export type LinkKind = "mtproto" | "reality";
 export type LinkStatus = "active" | "expired" | "full" | "burned";
-export type PostState = "queued" | "sent" | "failed" | "unknown";
+/** ``gone``: its message was deleted in the channel by hand; the panel no longer edits it. */
+export type PostState = "queued" | "sent" | "failed" | "unknown" | "gone";
 
 export interface StatusTexts {
   expired: string;
@@ -149,6 +150,7 @@ export const POST_STATE: Record<PostState, { label: string; tone: Tone }> = {
   sent: { label: "فرستاده شد", tone: "success" },
   failed: { label: "نرفت", tone: "danger" },
   unknown: { label: "نامعلوم", tone: "neutral" },
+  gone: { label: "در کانال پاک شده", tone: "neutral" },
 };
 
 export const LINK_STATUS: Record<LinkStatus, { label: string; mark: string; tone: Tone }> = {

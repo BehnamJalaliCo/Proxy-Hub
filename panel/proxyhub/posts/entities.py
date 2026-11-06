@@ -18,6 +18,13 @@ takes the text and its entities separately, with offsets and lengths counted in 
   nothing inside code), as does one inside a link (Telegram's nesting rules let no entity but bold,
   italic, underline, strike and spoiler sit inside a link), and every emoji after
   :data:`MAX_CUSTOM_EMOJI`.
+* **The message's first character stays a plain emoji** (no custom emoji at offset 0). On iPhone a
+  custom emoji at the very start of the message, the first character of the bold title line of a
+  right-to-left post, is not drawn at all (owner, 2026-11-06: «🔄 به‌روزرسانی‌ها را عقب نیندازید»
+  showed no 🔄), while the same pack's emoji at the start of the later lines (🔒, 🔗) are. The
+  entity itself is well formed (offset 0, the emoji's 2 units, or 3 with U+FE0F; inside the bold
+  that also starts at 0), and the drawing is fully visible from its first frame, so the title's
+  emoji is simply left to the font there.
 
 The bot path never uses this module: it keeps sending the HTML with plain emoji. Nothing here imports
 Telethon or touches the database; proxyhub/mtproxy/userclient.py builds the TL objects from
@@ -340,7 +347,7 @@ def with_custom_emoji(
     message: MessageText, pack: Mapping[str, int], limit: int = MAX_CUSTOM_EMOJI
 ) -> MessageText:
     """``message`` with a custom-emoji entity over every plain emoji the pack has an animated twin
-    for (see the module doc). The text itself never changes."""
+    for (see the module doc), except one at offset 0. The text itself never changes."""
     if not pack:
         return message
     blocked = [
@@ -355,6 +362,10 @@ def with_custom_emoji(
         if document_id is None:
             continue
         if any(e.offset < end and start < e.offset + e.length for start, end in blocked):
+            continue
+        if e.offset == 0:
+            # iOS draws no custom emoji at the very start of a message (the title's emoji): it stays
+            # the plain font emoji, which every client shows (see the module doc).
             continue
         added.append(TextEntity("custom_emoji", e.offset, e.length, document_id=document_id))
     if not added:

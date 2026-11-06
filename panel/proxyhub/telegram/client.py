@@ -196,6 +196,13 @@ class BadRequest(ApiError):
         return "chat not found" in self.description.lower()
 
     @property
+    def message_gone(self) -> bool:
+        """editMessageText of a message that no longer exists (someone deleted it in the channel):
+        ``Bad Request: message to edit not found`` or ``Bad Request: MESSAGE_ID_INVALID``."""
+        description = self.description.lower()
+        return "message to edit not found" in description or "message_id_invalid" in description
+
+    @property
     def sticker_set_missing(self) -> bool:
         """getStickerSet of a name nobody created: ``Bad Request: STICKERSET_INVALID``."""
         return "stickerset_invalid" in self.description.lower()

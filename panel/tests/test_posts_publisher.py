@@ -39,7 +39,7 @@ from test_posts_support import (
 )
 
 from proxyhub.links.contract import ProxyLink
-from proxyhub.posts import content, links, plan, publisher
+from proxyhub.posts import content, links, plan, publisher, views
 from proxyhub.posts import settings as posting
 from proxyhub.posts.poster import BotPoster
 from proxyhub.reconcilers.publisher import PublisherReconciler
@@ -606,12 +606,12 @@ async def test_a_config_and_its_xhttp_link_are_marked_in_the_post_and_its_edits(
     job = (await jobs(engine, "send_post"))[-1]
     await deliver(engine, job.id, message_id=100, at=now + timedelta(seconds=5))
     body = job.payload["text"]
-    # D48: ONE pair a post (node 1's config and its XHTTP link): one line, one collapsed quote, each
-    # link as a tiny label and inline code.
+    # D48: ONE pair a post (node 1's config and its XHTTP link): one line, then each link under its
+    # label in its OWN collapsed quote holding only the config (one tap, one config).
     assert body.count(node_vless_id(nodes[0])) == 2 and node_vless_id(nodes[1]) not in body
-    assert body.count(LOCK) == 1 and body.count(QUOTE) == 1 and "<pre" not in body
-    assert f"{QUOTE}TCP:\n<code>vless://{node_vless_id(nodes[0])}@" in body
-    assert f"</code>\n\nXHTTP:\n<code>vless://{node_vless_id(nodes[0])}@" in body
+    assert body.count(LOCK) == 1 and body.count(QUOTE) == 2 and "<pre" not in body
+    assert f"\nTCP\n{QUOTE}<code>vless://{node_vless_id(nodes[0])}@" in body
+    assert f"</code></blockquote>\n\nXHTTP\n{QUOTE}<code>vless://{node_vless_id(nodes[0])}@" in body
     assert body.count("</code></blockquote>\n\n🔗") == 1  # the pair stays together, then the tag
     carried = await rows(engine, "SELECT key, label FROM post_links WHERE kind = 'reality' ORDER BY position")
     assert [c.key.endswith(":xhttp") for c in carried] == [False, True]
@@ -646,14 +646,14 @@ async def test_an_older_post_with_two_pairs_keeps_each_in_its_own_quote(
     await deliver(engine, job.id, message_id=100, at=now + timedelta(seconds=5))
     body = job.payload["text"]
     assert all(body.count(node_vless_id(n)) == 2 for n in nodes)
-    assert body.count(LOCK) == body.count(QUOTE) == 2 and body.count("TCP:\n<code>") == 2
+    assert body.count(LOCK) == 2 and body.count(QUOTE) == 4 and body.count(f"TCP\n{QUOTE}<code>") == 2
     # Node 1 burns: its pair is one status line, node 2's pair keeps its line and quote.
     await set_node(engine, nodes[0], state="burned")
     assert await refresh(engine, now + timedelta(minutes=1), providers) == 1
     edited = await edit_text(engine)
     assert f"\n\n🚫 این کانفیگ از دسترس خارج شد\n\n{LOCK}" in edited
     assert node_vless_id(nodes[0]) not in edited and edited.count(node_vless_id(nodes[1])) == 2
-    assert edited.count(QUOTE) == 1 and edited.count("XHTTP:\n<code>") == 1
+    assert edited.count(QUOTE) == 2 and edited.count(f"XHTTP\n{QUOTE}<code>") == 1
 
 
 async def test_everything_dead_gets_the_closing_line(engine: AsyncEngine, vault: Vault) -> None:
@@ -777,6 +777,107 @@ async def test_posts_sent_in_the_old_layout_are_edited_once_into_the_new_one(
     assert {j.kind for j in await jobs(engine)} <= {"send_post", "edit_post", "alert"}  # rule 6
     edited = await rows(engine, "SELECT edits FROM posts WHERE id <> :p", p=oldest.id)
     assert [r.edits for r in edited] == [1] * 6
+
+
+async def message_gone(engine: AsyncEngine, job_id: int, description: str) -> str:
+    """Telegram's real answer to editMessageText of a message someone deleted in the channel, recorded
+    by the real outbox code."""
+    from proxyhub.telegram import outbox
+    from proxyhub.telegram.client import BadRequest
+
+    async with engine.begin() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT kind, payload, attempts FROM outbox WHERE id = :i"), {"i": job_id}
+            )
+        ).one()
+        cp = (
+            await conn.execute(
+                text("SELECT chat_id, message_id FROM channel_posts WHERE id = :i"),
+                {"i": row.payload["post_id"]},
+            )
+        ).one()
+        job = outbox.Job(
+            id=job_id, kind=row.kind, payload=dict(row.payload), attempts=row.attempts, last_error=None
+        )
+        target = outbox.Target(chat_id=cp.chat_id, post_id=row.payload["post_id"], message_id=cp.message_id)
+        exc = BadRequest("editMessageText", 400, description)
+        assert exc.message_gone
+        outcome = await outbox.record_failure(conn, job, target, exc, datetime.now(UTC))
+    last = (await rows(engine, "SELECT last_error FROM outbox WHERE id = :i", i=job_id))[0].last_error
+    assert outbox.message_gone(last)
+    return outcome
+
+
+@pytest.mark.parametrize(
+    "description", ["Bad Request: message to edit not found", "Bad Request: MESSAGE_ID_INVALID"]
+)
+async def test_a_post_deleted_in_the_channel_is_marked_gone_once_and_never_edited_again(
+    engine: AsyncEngine, vault: Vault, description: str
+) -> None:
+    """The owner deleted a post by hand. Its next edit finds the message gone: final at once, no
+    failure counted, no retry, no owner alert, one actions_log line, and the dashboard shows it gone.
+    The panel itself never deletes anything (rule 6)."""
+    nodes = await ready_fleet(engine, 3)
+    await setup_telegram(engine, vault)
+    now = slot_time(2)
+    post_id, _ = await posted(engine, vault, now)
+    await set_node(engine, nodes[0], state="burned")
+    assert await refresh(engine, now + timedelta(minutes=1)) == 1
+    [edit] = await jobs(engine, "edit_post")
+    assert await message_gone(engine, edit.id, description) == "failed"
+    alerts_before = len(await jobs(engine, "alert"))
+    t = now + timedelta(minutes=2)
+    assert await refresh(engine, t) == 0
+    [p] = await rows(engine, "SELECT gone_at, edit_failures, edit_retry_at, last_edit_outbox_id, edits "
+                             "FROM posts WHERE id = :p", p=post_id)  # fmt: skip
+    assert (p.gone_at, p.edit_failures, p.edit_retry_at, p.last_edit_outbox_id, p.edits) == (
+        t,
+        0,
+        None,
+        None,
+        1,
+    )
+    # Later rounds, with more to change and every gap and backoff long past: nothing more.
+    await set_node(engine, nodes[1], state="burned")
+    for hours in (1, 7, 24):
+        assert await refresh(engine, t + timedelta(hours=hours)) == 0
+    assert len(await jobs(engine, "edit_post")) == 1
+    assert len(await jobs(engine, "alert")) == alerts_before  # the owner is not alerted
+    gone = await rows(engine, "SELECT target, allowed, reasons::text AS r FROM actions_log "
+                              "WHERE action = 'posts.message_gone'")  # fmt: skip
+    assert [(g.target, g.allowed) for g in gone] == [(f"test:post:{post_id}", False)]
+    assert "message_gone" in gone[0].r
+    assert {j.kind for j in await jobs(engine)} <= {"send_post", "edit_post", "alert"}  # rule 6
+    # The dashboard shows it as gone (no link to a message that is not there, not watched).
+    async with engine.connect() as conn:
+        [shown] = [x for x in await views.recent(conn, t) if x["id"] == post_id]
+    assert (shown["state"], shown["message_url"], shown["watching"], shown["edits_stopped"]) == (
+        "gone",
+        None,
+        False,
+        False,
+    )
+
+
+async def test_a_gone_post_does_not_stop_the_others(engine: AsyncEngine, vault: Vault) -> None:
+    nodes = await ready_fleet(engine, 2)
+    await setup_telegram(engine, vault)
+    await quiet(engine, [], interval=0)
+    gone_post, _ = await posted(engine, vault, slot_time(1), message_id=301)
+    live_post, live_cp = await posted(engine, vault, slot_time(2), message_id=302)
+    await set_node(engine, nodes[0], state="burned")
+    t = slot_time(2) + timedelta(minutes=1)
+    assert await refresh(engine, t) == 2
+    by_post = {e.payload["post_id"]: e for e in await jobs(engine, "edit_post")}
+    gone_edit = next(e for cp, e in by_post.items() if cp != live_cp)
+    await message_gone(engine, gone_edit.id, "Bad Request: message to edit not found")
+    await deliver(engine, by_post[live_cp].id, message_id=0, at=t)
+    await set_node(engine, nodes[1], state="burned")
+    assert await refresh(engine, t + publisher.EDIT_MIN_GAP + timedelta(minutes=1)) == 1  # the live one
+    assert (await jobs(engine, "edit_post"))[-1].payload["post_id"] == live_cp
+    states = {r.id: r.gone_at is not None for r in await rows(engine, "SELECT id, gone_at FROM posts")}
+    assert states == {gone_post: True, live_post: False}
 
 
 # --- the loop ------------------------------------------------------------------------------------
