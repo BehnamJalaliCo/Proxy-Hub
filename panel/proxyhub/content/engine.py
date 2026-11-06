@@ -145,7 +145,7 @@ class Engine:
             fetched = await http.get(
                 url, limit=limit[task.role], accept=_ACCEPT[task.role], deadline_s=MEDIA_DEADLINE_S
             )
-            info = media.check_for(task.role, fetched.body)
+            info = media.check_download(task.role, fetched.content_type, fetched.body)
         except FetchError as exc:
             await self._failed(task, exc.code, final=exc.code in _FINAL)
             return exc.code, 0

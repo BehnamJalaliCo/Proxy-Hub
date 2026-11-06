@@ -203,5 +203,23 @@ def check_for(kind: Literal["photo", "thumb", "video"], data: bytes) -> MediaInf
     return info
 
 
+_GENERIC_TYPES: Final = frozenset({"", "application/octet-stream", "binary/octet-stream"})
+
+
+def declared_type_ok(kind: Literal["photo", "thumb", "video"], content_type: str) -> bool:
+    """The server's own Content-Type must not contradict the role (an image for a photo or a
+    thumbnail, a video for a video); a generic or missing type is left to :func:`sniff`."""
+    if content_type in _GENERIC_TYPES:
+        return True
+    return content_type.startswith("video/" if kind == "video" else "image/")
+
+
+def check_download(kind: Literal["photo", "thumb", "video"], content_type: str, data: bytes) -> MediaInfo:
+    """A downloaded file: its declared type, then its real bytes (:func:`check_for`)."""
+    if not declared_type_ok(kind, content_type):
+        raise MediaRefused("wrong_type")
+    return check_for(kind, data)
+
+
 def file_name(info: MediaInfo) -> str:
     return {"image/jpeg": "photo.jpg", "image/png": "photo.png", "video/mp4": "video.mp4"}[info.mime]

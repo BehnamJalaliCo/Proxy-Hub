@@ -493,5 +493,17 @@ def test_each_role_has_its_type_and_size() -> None:
         media.check_for("thumb", png() + b"\x00" * media.THUMB_MAX_BYTES)
     with pytest.raises(media.MediaRefused, match="empty"):
         media.check_for("photo", b"")
+    # the declared type may not contradict the role, and never replaces the real bytes
+    assert media.check_download("photo", "image/png", png()).mime == "image/png"
+    assert media.check_download("video", "application/octet-stream", mp4()).mime == "video/mp4"
+    for kind, declared, data in (
+        ("photo", "text/html", png()),
+        ("video", "image/png", mp4()),
+        ("thumb", "video/mp4", png()),
+    ):
+        with pytest.raises(media.MediaRefused, match="wrong_type"):
+            media.check_download(kind, declared, data)  # type: ignore[arg-type]
+    with pytest.raises(media.MediaRefused, match="unknown_type"):
+        media.check_download("photo", "image/jpeg", b"<svg/>")
     # the panel's limits stay under Telegram's (bot: 10 MB photo, 50 MB file)
     assert media.PHOTO_MAX_BYTES < media.TG_BOT_PHOTO_MAX and media.VIDEO_MAX_BYTES < media.TG_BOT_FILE_MAX
