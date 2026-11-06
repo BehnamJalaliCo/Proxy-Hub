@@ -21,10 +21,10 @@ the link part stays short so news can sit above it):
 * a bold title line with one emoji (:data:`TITLE_MARK` when the title has none), and the body in a
   blockquote (:func:`compose_content`);
 * the MTProto links as words, two to a row with " • " between them, and no header (the words say
-  what they are). A link's word is «پروکسی», or an operator's name («همراه اول», «رایتل»,
-  «ایرانسل») when the post was made with the panel's own fresh probe from that operator's network
-  (decision D50, proxyhub/posts/operators.py; stored with the post, so an edit never renames a
-  link). Operator-named links come first (MCI, Rightel, Irancell), then «پروکسی». A word that shows
+  what they are). A link's word is «پروکسی», or an operator's name («همراه اول», «رایتل»; never
+  «ایرانسل», the owner's choice) when the post was made with the panel's own fresh probe from that
+  operator's network (decision D50, proxyhub/posts/operators.py; stored with the post, so an edit
+  never renames a link). Operator-named links come first (MCI, then Rightel), then «پروکسی». A word that shows
   once has no number; a word that repeats is numbered by its place among the same words
   («همراه اول ۱», «همراه اول ۲», «پروکسی ۱» …), Persian digits, no-break spaces inside;
 * each VLESS config as ONE short line, «🔒 کانفیگ V2Ray — اعتبار تا جمعه ساعت ۰۹:۰۰», and under it

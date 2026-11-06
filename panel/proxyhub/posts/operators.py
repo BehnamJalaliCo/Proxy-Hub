@@ -15,15 +15,15 @@ operator's network, on the link's own port (the MTProto port), recently. Otherwi
   normally minutes old and decides; the window only bounds how old a result may be when probing
   stalls (Globalping's hourly allowance running short, an outage): twelve normal rounds, still the
   same part of the day. Nothing older gives a name.
-* **Operators' own networks only:** MCI (AS197207), Rightel (AS57218), Irancell (AS44244).
-  Data-centre probes never give a name. Globalping has no Irancell probe today, so «ایرانسل» never
-  shows yet; once a probe exists the same code names it.
+* **Operators' own networks only:** MCI (AS197207) and Rightel (AS57218). Data-centre probes never
+  give a name, and neither does Irancell (AS44244): the owner wants its links named «پروکسی».
 * **Up to two per operator (owner, 2026-11-06: «ایرانسل هم باشه و تا دو تا هم هر کدوم باشه»).**
   Our nodes are usually open from every operator, so a post names at most
   :data:`MAX_PER_OPERATOR` links after each operator, in the order of :data:`OPERATOR_ASNS` (MCI,
-  then Irancell, then Rightel), each time from the links still unnamed that were seen open from
-  that operator, in the post's own order. A link gets one name at most; the rest stay «پروکسی».
-  A link never measured open from an operator never gets its name.
+  then Rightel), each time from the links still unnamed that were seen open from that operator, in
+  the post's own order. Irancell is never named (owner): its links stay «پروکسی». A link gets one
+  name at most; the rest stay «پروکسی». A link never measured open from an operator never gets its
+  name.
 
 The names are decided once, when a post is made, and stored with its links (``post_links.operator``):
 a later status edit never renames a link. Nothing here is about end users (rule 7): only our nodes,
@@ -50,7 +50,9 @@ from proxyhub.probes.verdict import TLS_SOURCE
 WINDOW: Final = timedelta(hours=6)
 IRANCELL_ASN: Final = 44244  # no Globalping probe on it today (docs/10 F9)
 # Operator code (post_links.operator) -> its own network, in the order a post shows them.
-OPERATOR_ASNS: Final[dict[str, int]] = {"mci": MCI_ASN, "irancell": IRANCELL_ASN, "rightel": RIGHTEL_ASN}
+# Irancell is not here (owner, 2026-11-06: «ایرانسل را همون پروکسی بزنید، نیازی نیست»): a link is
+# never named «ایرانسل», even once a probe measures Irancell; it stays «پروکسی».
+OPERATOR_ASNS: Final[dict[str, int]] = {"mci": MCI_ASN, "rightel": RIGHTEL_ASN}
 MAX_PER_OPERATOR: Final = 2
 MAX_ROUNDS_PER_NODE: Final = 48  # 6 h of rounds every 30 min, twice over: a bound, never reached
 
