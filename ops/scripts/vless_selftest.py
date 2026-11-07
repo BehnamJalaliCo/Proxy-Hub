@@ -13,10 +13,11 @@ A link that works here and not from Iran is blocked or throttled in Iran (the co
 right); a link that fails here too is broken on our side (key, user, inbound, DNS name).
 
 Input: JSON lines ``{"key": ..., "slot": ..., "url": "vless://..."}`` on stdin (P29 prints them from
-the panel's own link provider). Output: one line per link with the slot, transport, port, server
-name and the three results, and the last Xray warning with every IPv4 shortened to its last two
-parts and every uuid removed. No uuid, key, short id or full address is printed; the client
-configs live in a private temporary directory that is removed at the end.
+the panel's own link provider). Output: one line per link with its name as the user's app shows it
+(channel, flag, number), the slot, the host kind (``slot``, a test node's ``t…``, or ``ip``), the
+transport, port, server name and the three results, and the last Xray warning with every IPv4
+shortened to its last two parts and every uuid removed. No uuid, key, short id or full address is
+printed; the client configs live in a private temporary directory that is removed at the end.
 
     python3 ops/scripts/vless_selftest.py --xray DIR/xray < links.jsonl
     python3 ops/scripts/vless_selftest.py --dry < links.jsonl   # only parse; print masked configs
@@ -66,6 +67,8 @@ def parse_vless(url: str) -> dict[str, Any]:
         "mode": q.get("mode", "auto"),
         "ws_host": q.get("host", ""),
         "alpn": [a for a in q.get("alpn", "").split(",") if a],
+        "name": unquote(parts.fragment),  # what the user's app shows, e.g. "@ipoxxo 🇫🇮 12"
+        "host_kind": "ip" if _IPV4.fullmatch(parts.hostname) else parts.hostname.split(".", 1)[0][:4],
     }
 
 
@@ -150,7 +153,10 @@ def run_one(xray: str, work: str, row: dict[str, Any], upfile: str) -> str:
     with open(os.open(cfg, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
         json.dump(client_config(link, port), f)
     log = os.path.join(work, f"c{port}.log")
-    head = f"slot={row.get('slot')} {link['type']}:{link['port']} sec={link['security']} sni={link['sni']}"
+    head = (
+        f"[{link['name']}] slot={row.get('slot')} host={link['host_kind']} {link['type']}:{link['port']} "
+        f"sec={link['security']} sni={link['sni']}"
+    )
     with open(log, "w") as lf:
         proc = subprocess.Popen([xray, "run", "-c", cfg], stdout=lf, stderr=subprocess.STDOUT)  # noqa: S603
     try:
