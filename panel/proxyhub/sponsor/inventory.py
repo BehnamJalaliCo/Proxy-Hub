@@ -66,6 +66,7 @@ from proxyhub.sponsor.conversation import MESSAGES_NEEDED, PromoteJob, RegisterJ
 from proxyhub.sponsor.messages import cleanup_stuck_alert, list_reason
 from proxyhub.sponsor.provider import node_of
 from proxyhub.sponsor.service import NOT_COUNTED, Deps, _log, with_bot_chat
+from proxyhub.telegram import store as tg_store
 from proxyhub.telegram.store import enqueue_owner_alert
 
 log = logging.getLogger(__name__)
@@ -656,6 +657,10 @@ async def _record_menu(
     if isinstance(result, MenuSeen):
         channels = result.channels
         note = "shown" if len(channels) == 1 else ("several" if channels else "not_shown")
+        if not channels and result.promoted_title:
+            # The bot names the sponsor by its title (P26): kept, compared with the wanted
+            # channel's title when the owner's view is built (:func:`_promotion`).
+            note = f"title:{replies.title_key(result.promoted_title)}"
         await update_entry(
             db,
             entry.id,
@@ -930,10 +935,11 @@ async def set_removal(engine: AsyncEngine, enabled: bool, *, actor: str, now: da
 # --- the owner's view ------------------------------------------------------------------------------------
 
 
-def _promotion(entry: Entry, mapped: Mapped, wanted: str) -> str | None:
-    """For a live proxy: ``ok`` (its screen names the wanted channel), ``other`` (another one),
-    ``not_shown`` (its screen names no channel), ``several``, ``stuck`` (its screen could not be
-    read) or ``unread``. None for a proxy that is not live."""
+def _promotion(entry: Entry, mapped: Mapped, wanted: str, wanted_title: str | None = None) -> str | None:
+    """For a live proxy: ``ok`` (its screen names the wanted channel, by @name or, as the bot does,
+    by the title our stored channel has), ``other`` (another one), ``not_shown`` (its screen names
+    no channel), ``several``, ``stuck`` (its screen could not be read) or ``unread``. None for a
+    proxy that is not live."""
     if mapped.status != LIVE:
         return None
     if entry.menu_read_at is None:
@@ -941,10 +947,24 @@ def _promotion(entry: Entry, mapped: Mapped, wanted: str) -> str | None:
     if entry.menu_channel is not None:
         return "ok" if entry.menu_channel == wanted else "other"
     note = entry.menu_note or ""
+    if note.startswith("title:"):
+        if wanted_title and note[len("title:") :] == replies.title_key(wanted_title):
+            return "ok"
+        # The stored title may be older than the channel's (the owner renamed @ipoxxo, P26): a
+        # sponsor shown by title on a proxy our flow promoted to the wanted channel counts too.
+        reg = mapped.regs[0] if mapped.regs else None
+        set_to = ((reg.sponsor_channel if reg is not None else None) or "").lstrip("@").lower()
+        return "ok" if set_to and set_to == wanted.lstrip("@").lower() else "other"
     return "stuck" if note.startswith("stuck:") else (note if note in ("not_shown", "several") else "unread")
 
 
-def _entry_view(entry: Entry, mapped: Mapped, nodes: dict[uuid.UUID, str], wanted: str) -> dict[str, Any]:
+def _entry_view(
+    entry: Entry,
+    mapped: Mapped,
+    nodes: dict[uuid.UUID, str],
+    wanted: str,
+    wanted_title: str | None = None,
+) -> dict[str, Any]:
     reg = mapped.regs[0] if mapped.regs else None
     node = node_of(reg.proxy_key) if reg is not None else None
     return {
@@ -969,7 +989,7 @@ def _entry_view(entry: Entry, mapped: Mapped, nodes: dict[uuid.UUID, str], wante
         },
         "sponsor_channel": entry.menu_channel,
         "menu_read_at": iso(entry.menu_read_at),
-        "promotion": _promotion(entry, mapped, wanted),
+        "promotion": _promotion(entry, mapped, wanted, wanted_title),
         "removal_state": entry.removal_state,
         "removal_reason": entry.removal_reason,
         "removal_reason_fa": list_reason(entry.removal_reason)
@@ -990,13 +1010,25 @@ def _job_view(job: Job | None) -> dict[str, Any] | None:
     }
 
 
+async def _channel_title(db: AsyncConnection, username: str) -> str | None:
+    """The title the panel stored for one of OUR channels with this @name (the bot shows a sponsor
+    by its title); None for a channel that is not ours (a campaign's)."""
+    name = username.lstrip("@").lower()
+    for channel in (await tg_store.channels(db)).values():
+        if str(channel.get("username") or "").lstrip("@").lower() == name:
+            title = channel.get("title")
+            return str(title) if isinstance(title, str) and title.strip() else None
+    return None
+
+
 async def overview(engine: AsyncEngine, *, wanted: str) -> dict[str, Any]:
     """The «فهرست ‎@MTProxybot‎» section of GET /api/sponsor. No secret: addresses, label shapes,
     states, the public sponsor channel each live proxy's screen names, and screen shapes."""
     async with engine.connect() as db:
         state = await load_state(db)
         _, nodes, entries, mapped = await _context(db)
-    views = [_entry_view(e, m, nodes, wanted) for e, m in zip(entries, mapped, strict=True)]
+        wanted_title = await _channel_title(db, wanted)
+    views = [_entry_view(e, m, nodes, wanted, wanted_title) for e, m in zip(entries, mapped, strict=True)]
     counts: dict[str, int] = {"live": 0, "gone": 0, "retired": 0, "unknown": 0}
     for view in views:
         counts[view["status"]] = counts.get(view["status"], 0) + 1
