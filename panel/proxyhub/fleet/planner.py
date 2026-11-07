@@ -12,6 +12,11 @@ Model (docs/10_IMPLEMENTATION_PLAN.md section 3.11):
   past its repair window, the replacement is built FIRST, in another location, and the old node is
   retired only after the replacement has been ready for a short settle time (the slot's DNS name
   follows the ready node by itself). The fleet never plans more than ``target_slots + 1`` live nodes.
+* **Exception (the owner, 2026-11-07, P26):** when every active account is full (its server limit,
+  learned from Hetzner's ``resource_limit_exceeded``, is reached on a fresh observation), no
+  replacement can ever be built while the burned nodes hold the room. A slot with no serving node
+  then lets its BURNED nodes go first (``making_room``): blocked from Iran they serve nobody. Its
+  replacement is built by a later plan, once the room is free. Unhealthy nodes keep the D14 order.
 * A slot whose last request was refused by the executor waits a little before asking again; a
   server that got a burned IP (proxyhub/fleet/ip_history.py) is retried in another location.
 * Locations (P15): only the owner's allowed ones (fleet settings), preferring those whose recent TLS
@@ -304,6 +309,19 @@ class _Planner:
         limit = view.learned_server_limit
         return view.guard_ok and (limit is None or view.servers_in_account + 1 <= limit)
 
+    def _no_room(self) -> bool:
+        """Every active account is full: its server limit is known and reached, on a fresh
+        observation. An account with an unknown limit or a stale observation is not "full"."""
+        active = [a for a in self.snap.accounts if a.state == "active"]
+        if not active:
+            return False
+        for a in active:
+            view = self._account_view(a)
+            limit = view.learned_server_limit
+            if not view.guard_ok or limit is None or view.servers_in_account < limit:
+                return False
+        return True
+
     def _cheapest(self, account_id: str, location: str) -> LiveOffer | None:
         lst = self.offers.get(account_id, {}).get(location)
         return lst[0] if lst else None
@@ -563,6 +581,12 @@ class _Planner:
                 deletes.extend((n, "unhealthy") for n in sick if n.ready_at is None)
                 if self._backing_off(slot):
                     actions.append(self._none(target, "request_backoff", slot=slot))
+                    continue
+                if blocked and self._no_room():
+                    # D14 exception: every account is full, so the burned nodes leave first.
+                    # (``why`` stays "burned": it is the node's retire_reason, a checked column.)
+                    deletes.extend((n, "burned") for n in blocked)
+                    actions.append(self._none(target, "making_room", slot=slot))
                     continue
                 avoid = {n.location for n in blocked + sick}
                 prefer_not = {n.location for n in leaving} | self._burned_ip_locations(slot)
