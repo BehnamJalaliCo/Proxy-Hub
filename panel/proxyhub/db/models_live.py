@@ -21,6 +21,8 @@ from proxyhub.db.models import Base
 RETIRE_REASONS: tuple[str, ...] = ("owner", "unhealthy_test_node", "create_failed")
 # Round 3, the live fleet (proxyhub/fleet/live.py, proxyhub/nodes/executor.py; migration 0013_fleetlive).
 RETIRE_REASONS += ("burned", "unhealthy", "duplicate", "excess", "burned_ip")
+# D60 (migration 0031_location_removed): the slot moved off a location the owner removed.
+RETIRE_REASONS += ("location_removed",)
 
 
 class NodeOperation(Base):

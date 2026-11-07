@@ -17,6 +17,14 @@ Model (docs/10_IMPLEMENTATION_PLAN.md section 3.11):
   replacement can ever be built while the burned nodes hold the room. A slot with no serving node
   then lets its BURNED nodes go first (``making_room``): blocked from Iran they serve nobody. Its
   replacement is built by a later plan, once the room is free. Unhealthy nodes keep the D14 order.
+* **A location the owner removed** (D60, 2026-11-07: Reality on the Finland server failed on MCI
+  while the US ones worked): a slot whose serving nodes are all in a location no longer in the
+  owner's list moves. Its replacement is built first in an allowed location, and the old node
+  leaves once that one has settled (D14), as ``location_removed``. With every account full, the
+  old node leaves first (``making_room_location``) and the slot is built again by a later plan, but
+  only ONE slot at a time and only while no other node is starting or leaving
+  (``location_move_waiting``): a removed location may hold several working nodes, and they must
+  not all go at once.
 * A slot whose last request was refused by the executor waits a little before asking again; a
   server that got a burned IP (proxyhub/fleet/ip_history.py) is retried in another location.
 * Locations (P15): only the owner's allowed ones (fleet settings), preferring those whose recent TLS
@@ -309,6 +317,10 @@ class _Planner:
         limit = view.learned_server_limit
         return view.guard_ok and (limit is None or view.servers_in_account + 1 <= limit)
 
+    def _location_removed(self, n: NodeSnapshot) -> bool:
+        """D60: the node's location is no longer in the owner's list (an empty list removes none)."""
+        return bool(self.s.locations) and n.location not in self.s.locations
+
     def _no_room(self) -> bool:
         """Every active account is full: its server limit is known and reached, on a fresh
         observation. An account with an unknown limit or a stale observation is not "full"."""
@@ -548,6 +560,10 @@ class _Planner:
             else:
                 excess.append(n)
 
+        # D60: at most one slot leaves a removed location per plan, and none while the fleet is
+        # already moving (a node starting or leaving).
+        moving = any(n.state in STARTING or n.state in (S.DRAINING, S.RETIRING) for n in self.fleet_nodes)
+        moved = False
         for slot in range(1, self.s.target_slots + 1):
             nodes = by_slot.get(slot, [])
             blocked = [n for n in nodes if n.state == S.BURNED or verdict_blocked(n, self.now)]
@@ -556,16 +572,46 @@ class _Planner:
             sick = [n for n in nodes if n.state in SICK]
             leaving = [n for n in nodes if n.state in (S.DRAINING, S.RETIRING)]
             target = f"slot-{slot}"
-            if serving:
-                # The slot's DNS name points at the newest ready node; every other node of the slot
-                # (burned, unhealthy, an older ready one) leaves once that node has settled.
-                keep = max(serving, key=lambda n: (n.ready_at or n.created_at, n.created_at, n.id))
+            away = [n for n in serving if self._location_removed(n)]
+            staying = [n for n in serving if n not in away]
+            if serving and not staying:
+                # D60: every serving node is in a location the owner removed; it serves until the
+                # slot has moved.
+                if starting:
+                    actions.append(self._none(target, "replacement_in_progress", slot=slot))
+                elif self._backing_off(slot):
+                    actions.append(self._none(target, "request_backoff", slot=slot))
+                elif self._no_room():
+                    if moving or moved:
+                        actions.append(self._none(target, "location_move_waiting", slot=slot))
+                    else:
+                        deletes.extend((n, "location_removed") for n in away)
+                        actions.append(self._none(target, "making_room_location", slot=slot))
+                        moved = True
+                else:
+                    avoid = {n.location for n in away + blocked + sick}
+                    actions.append(
+                        self._create(slot, "replace", avoid=avoid, prefer_not=self._burned_ip_locations(slot))
+                    )
+            elif serving:
+                # The slot's DNS name points at the newest ready node in an allowed location; every
+                # other node of the slot (burned, unhealthy, an older ready one, one in a removed
+                # location) leaves once that node has settled.
+                keep = max(staying, key=lambda n: (n.ready_at or n.created_at, n.created_at, n.id))
                 others = [*blocked, *sick, *(n for n in serving if n is not keep)]
                 if not others:
                     actions.append(self._none(target, "slot_healthy", slot=slot))
                 elif (keep.ready_at or keep.created_at) <= self.now - REPLACEMENT_SETTLE:
                     for n in others:
-                        why = "burned" if n in blocked else "unhealthy" if n in sick else "duplicate"
+                        why = (
+                            "burned"
+                            if n in blocked
+                            else "unhealthy"
+                            if n in sick
+                            else "location_removed"
+                            if n in away
+                            else "duplicate"
+                        )
                         deletes.append((n, why))
                     actions.append(self._none(target, "slot_healthy", slot=slot))
                 else:

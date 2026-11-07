@@ -12,7 +12,10 @@ not involved; the owner's own switch is ``RealitySettings.enabled``.
   longer work: an IP link whose server left service, a name link whose domain is no longer the
   active one, a scope no server serves any more, a target that failed and was replaced, or a
   config of the other transport after the owner switched it: a node serves one inbound on 443).
-  The node also enforces cap and time by itself.
+  The node also enforces cap and time by itself. **A slot that is moving** off a location the owner
+  removed (D60, proxyhub/fleet/planner.py; its old node retired as ``location_removed`` within
+  :data:`MOVE_GRACE`) counts as served: its name links come back on the new server with the same
+  key and users, so links already posted keep working after the move.
 * Transport ``ws_tls`` (default): a config is made only on a node whose scope has its DNS name in
   Cloudflare pointing at that node, while a valid certificate for the active domain exists, and
   after the node's agent checked its own TLS inbound for that name (a TLS handshake with the
@@ -57,6 +60,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from proxyhub.cloudflare.rotation import current_active_domain
 from proxyhub.cloudflare.service import NodeNames, node_dns_name, node_names
 from proxyhub.db.models import Node
+from proxyhub.db.models_live import NodeOperation
 from proxyhub.db.models_reality import RealityConfig, RealityKey
 from proxyhub.fleet.lifecycle import NodeState
 from proxyhub.reality.keys import new_key_pair, new_short_id, new_ws_path
@@ -344,6 +348,25 @@ async def renew_configs(conn: AsyncConnection, settings: RealitySettings, now: d
     return renewed
 
 
+MOVE_GRACE: Final = timedelta(minutes=45)
+
+
+async def moving_slots(conn: AsyncConnection, now: datetime) -> set[int]:
+    """Slots whose node left a removed location within :data:`MOVE_GRACE` (D60)."""
+    rows = (
+        await conn.execute(
+            select(Node.slot)
+            .join(NodeOperation, NodeOperation.node_id == Node.id)
+            .where(
+                Node.slot.is_not(None),
+                NodeOperation.retire_reason == "location_removed",
+                NodeOperation.retire_requested_at >= now - MOVE_GRACE,
+            )
+        )
+    ).all()
+    return {int(r.slot) for r in rows}
+
+
 async def end_configs(conn: AsyncConnection, now: datetime, transport: Transport) -> dict[int, EndStatus]:
     """End every active config that no longer works (``transport``: the one the nodes serve now).
     Returns config id -> new status."""
@@ -356,6 +379,7 @@ async def end_configs(conn: AsyncConnection, now: datetime, transport: Transport
         for k in (await conn.execute(select(RealityKey.id, RealityKey.slot, RealityKey.node_id))).all()
     }
     serving_slots = {n.slot for n in nodes.values() if n.slot is not None and S(n.state) in SERVE_STATES}
+    serving_slots |= await moving_slots(conn, now)  # D60: the same links come back on the new server
     serving_nodes = {n.id for n in nodes.values() if S(n.state) in SERVE_STATES}
     domain = await current_active_domain(conn)
     ended: dict[int, EndStatus] = {}
