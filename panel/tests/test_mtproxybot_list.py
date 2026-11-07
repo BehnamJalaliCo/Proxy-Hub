@@ -45,6 +45,17 @@ REAL_LABEL = "t7aae9f0c.ipoxxo.online 4f1c9a0b"  # P13: "<host> <hex>"
 REAL_IP_LABEL = "91.107.189.145 9e8d7c6b"
 REAL_SET_PROMOTION = "Set promotion"
 
+# The confirmation after "Delete proxy", as the bot really shows it (the owner's screenshot, 2026-11-07;
+# the address and the tag's hex are this file's own).
+REAL_CONFIRM = "Yes, I'm 100% sure, delete my proxy."
+REAL_BACK_TO_PROXY = "« Back to proxy"
+REAL_BACK_TO_LIST = "« Back to list"
+REAL_CONFIRM_TEXT = (
+    "Are you sure you want to de-register the proxy ...4f1c9a0bwith address t7aae9f0c.ipoxxo.online:8443?\n"
+    "It will continue working for users until you disable it on your servers, but it will be hidden "
+    "from your list and channel promotion will be disabled."
+)
+
 # --- never seen (assumed): only the strict matching is checked here ----------------------------------------
 ASSUMED_NEXT = "»"
 ASSUMED_BACK = "« Back"
@@ -141,7 +152,19 @@ def test_the_removal_button_shapes(label: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "label", ["Yes", "yes", "Yes, delete", "Yes delete", "Yes, delete it", "Yes, remove", "Confirm", "✅ Yes"]
+    "label",
+    [
+        "Yes",
+        "yes",
+        "Yes, delete",
+        "Yes delete",
+        "Yes, delete it",
+        "Yes, remove",
+        "Confirm",
+        "✅ Yes",
+        REAL_CONFIRM,
+        "Yes, I’m 100% sure, delete my proxy",
+    ],
 )
 def test_the_confirmation_button_shapes(label: str) -> None:
     assert replies.is_confirm_button(label) and not replies.is_remove_button(label)
@@ -156,6 +179,10 @@ def test_the_confirmation_button_shapes(label: str) -> None:
         "Delete 1.2.3.4",
         "❌ Delete",
         "Yes, I'm sure",
+        "Yes, I'm 100% sure, delete all my proxies.",
+        "Yes, I'm 90% sure, delete my proxy.",
+        REAL_BACK_TO_PROXY,
+        REAL_BACK_TO_LIST,
         "Yes, delete all",
         "Delete?",
         "No",
@@ -470,6 +497,32 @@ def test_removal_never_confirms_an_unexpected_confirmation(screen: Observation, 
     walk.next(Step.PRESSED_PROXY, menu())
     result = walk.next(Step.PRESSED_REMOVE, screen)
     assert isinstance(result, WalkStuck) and result.reason == reason and result.step is Step.PRESSED_REMOVE
+
+
+def test_the_real_confirmation_is_pressed_and_success_ends_it() -> None:
+    walk = removal_walk()
+    walk.next(Step.PRESSED_PROXY, menu())
+    screen = seen(
+        msg(REAL_CONFIRM_TEXT, (btn(REAL_CONFIRM),), (btn(REAL_BACK_TO_PROXY), btn(REAL_BACK_TO_LIST)))
+    )
+    confirm = walk.next(Step.PRESSED_REMOVE, screen)
+    assert confirm == Press(
+        message_id=300, data=f"cb:{REAL_CONFIRM}".encode(), label=REAL_CONFIRM, then=Step.PRESSED_CONFIRM
+    )
+    done = walk.next(Step.PRESSED_CONFIRM, seen(msg("Success!")))
+    assert isinstance(done, Removed) and done.confirmed
+    # The same screen naming another address is never confirmed.
+    other = removal_walk()
+    other.next(Step.PRESSED_PROXY, menu())
+    elsewhere = seen(msg(REAL_CONFIRM_TEXT.replace(HOST, "5.6.7.8"), (btn(REAL_CONFIRM),)))
+    assert isinstance(other.next(Step.PRESSED_REMOVE, elsewhere), WalkStuck)
+
+
+def test_success_counts_only_without_doubt() -> None:
+    assert replies.removal_confirmed("Success!") and replies.removal_confirmed(ASSUMED_DELETED)
+    for text in ("Success? Are you sure?", "Error: no success", "Done.", "Sorry, not successful"):
+        assert not replies.removal_confirmed(text), text
+    assert not replies.removal_done("Success!")  # before the confirmation it is not a removal
 
 
 @pytest.mark.parametrize(

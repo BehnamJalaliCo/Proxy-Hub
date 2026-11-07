@@ -498,8 +498,12 @@ def _check_bot_chat_request(request: Any, bot_id: int | None) -> None:
 # names one of the permitted proxy addresses. Any other button whose words take something away
 # (delete, revoke, reset, cancel, ...) never passes, on any connection.
 REMOVE_BUTTON: Final = re.compile(r"(?:🗑\ufe0f?\s*)?(?:delete|remove)(?:\s+proxy)?", re.IGNORECASE)
+# The confirmation the bot really shows (seen 2026-11-07, the owner's screenshot): "Are you sure you want
+# to de-register the proxy ...<hex> with address <host:port>? ..." with [Yes, I'm 100% sure, delete my
+# proxy.] and [« Back to proxy, « Back to list].
 CONFIRM_BUTTON: Final = re.compile(
-    r"(?:✅\s*)?(?:yes|yes,?\s+(?:delete|remove)(?:\s+it)?|confirm)[.!]?", re.IGNORECASE
+    r"(?:✅\s*)?(?:yes|yes,?\s+(?:delete|remove)(?:\s+it)?|yes,?\s+i['’]?m\s+100\s?%\s+sure,?\s+(?:delete|remove)\s+my\s+proxy|confirm)[.!]?",
+    re.IGNORECASE,
 )
 _TAKES_AWAY: Final = re.compile(
     r"\b(?:delet|remov|revok|disabl|reset|clear|eras|destroy|unregist|wipe|cancel|stop|transfer|ban|block"
