@@ -33,6 +33,7 @@ from proxyhub.api.deps import require_admin
 from proxyhub.reality.keys import public_from_private
 from proxyhub.reality.links import provide_links
 from proxyhub.reality.policy import (
+    MOVE_GRACE,
     create_configs,
     end_configs,
     ensure_keys,
@@ -242,6 +243,30 @@ async def test_ip_links_burn_with_their_server_and_scopes_without_servers(world:
     [slot_made] = await _create(world, T0)
     await world.rows("UPDATE nodes SET state = 'deleted' WHERE id = :n", n=gone)
     assert await _end(world, T0 + timedelta(minutes=1)) == {slot_made.config_id: "burned"}
+
+
+async def test_a_slot_moving_off_a_removed_location_keeps_its_links(world: World) -> None:
+    """D60: while a slot moves off a location the owner removed, its name links count as served for
+    MOVE_GRACE: the new server comes with the same key and users, so posted links keep working."""
+    zone = await world.zone("m")
+    old = await world.node(slot=6, ipv4="203.0.113.60")
+    await world.report(old, now=T0)
+    [made] = await _create(world, T0)
+    assert made.host == f"slot6.{zone}"
+    moved_at = T0 + timedelta(minutes=1)
+    await world.rows("UPDATE nodes SET state = 'retiring' WHERE id = :n", n=old)
+    await world.rows(
+        "INSERT INTO node_operations (node_id, requested_by, requested_at, state_since, create_attempts, "
+        "delete_attempts, retire_requested_at, retire_reason) VALUES (:n, 'fleet', :at, :at, 1, 0, :at, "
+        "'location_removed') ON CONFLICT (node_id) DO UPDATE SET retire_requested_at = :at, "
+        "retire_reason = 'location_removed'",
+        n=old,
+        at=moved_at,
+    )
+    assert await _end(world, moved_at + timedelta(minutes=5)) == {}
+    await world.rows("UPDATE nodes SET state = 'deleted' WHERE id = :n", n=old)
+    assert await _end(world, moved_at + timedelta(minutes=30)) == {}
+    assert await _end(world, moved_at + MOVE_GRACE + timedelta(minutes=1)) == {made.config_id: "burned"}
 
 
 async def test_the_private_key_of_a_deleted_slotless_node_is_forgotten(world: World) -> None:

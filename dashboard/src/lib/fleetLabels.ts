@@ -22,6 +22,8 @@ export const FLEET_REASON: Record<string, string> = {
   slot_unhealthy: "جایگاه ناسالم است؛ مهلت ترمیم (۱۵ دقیقه) در جریان است",
   replacement_settling: "سرور جایگزین تازه آماده شد؛ چند دقیقه صبر تا جابه‌جایی DNS",
   making_room: "حساب هتزنر پر است؛ سرور سوخته اول حذف میشود تا جا برای جایگزین باز شود",
+  making_room_location: "حساب هتزنر پر است؛ سرورِ مکانی که از فهرست برداشتید اول حذف میشود و جایگاه در مکان مجاز دوباره ساخته میشود",
+  location_move_waiting: "این جایگاه در مکانی است که از فهرست برداشتید؛ در نوبت جابه‌جایی است (یکی‌یکی)",
   replacement_in_progress: "سرور جایگزین در راه است",
   request_backoff: "درخواست قبلی این جایگاه رد شد؛ ۱۵ دقیقه صبر",
   orphan_server_not_in_db: "سروری با برچسب ما که در پنل ثبت نیست (هرگز حذف نمیشود)",
@@ -30,6 +32,7 @@ export const FLEET_REASON: Record<string, string> = {
   unhealthy: "ناسالم ماند و جایگزین شد",
   duplicate: "سرور تازه‌تر جای آن را گرفت",
   excess: "بیرون از جایگاه‌های تعیین‌شده",
+  location_removed: "مکانش را از فهرست مکان‌های مجاز برداشتید؛ جایگاه به مکان مجاز رفت",
   burned_ip: "IP سوخته یا IP از رنج /24 سوخته گرفت",
   burned_prefix24: "IP در رنج /24 سوخته بود",
   verdict_blocked: "هر دو منبع سنجش: از ایران بسته است",
@@ -64,6 +67,7 @@ export const FLEET_TRANSITION: Record<string, string> = {
   fleet_unhealthy: "ناوگان: ناسالم ماند و جایگزین شد",
   fleet_duplicate: "ناوگان: سرور تازه‌تر جایش را گرفت",
   fleet_excess: "ناوگان: بیرون از جایگاه‌های تعیین‌شده",
+  fleet_location_removed: "ناوگان: مکانش از فهرست مجاز بیرون رفت؛ جایگاه جابه‌جا شد",
   burned_ip: "IP سوخته گرفت",
 };
 

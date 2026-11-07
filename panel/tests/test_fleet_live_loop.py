@@ -8,6 +8,7 @@ retires nodes as ROWS; the node executor does the Hetzner part through the gates
 from __future__ import annotations
 
 import ipaddress
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -264,6 +265,35 @@ async def test_a_node_that_never_served_is_retired_with_its_replacement(world: L
     node = await world.node(broken)
     assert node["state"] == "retiring" and node["retire_reason"] == "unhealthy"
     assert [r.state for r in await slot_rows(world) if r.id != broken] == ["requested"]
+
+
+async def test_a_removed_location_moves_its_slot_replacement_first(world: LiveWorld) -> None:
+    """D60: the owner removes hel1; slot 3 gets a server in an allowed location, then the hel1 node
+    leaves as ``location_removed`` (the database's own check accepts the new reason)."""
+    await world.settings(live_settings(target_slots=3, locations=["fsn1", "nbg1"]))
+    nodes = await full_fleet(world, slots=3)
+    await run_fleet(world)
+    rows = {r.id: r for r in await slot_rows(world)}
+    assert rows[nodes[3]].state == "ready"  # it serves until its replacement has settled
+    (new,) = [r for r in rows.values() if r.slot == 3 and r.id != nodes[3]]
+    assert new.state == "requested" and new.location in ("fsn1", "nbg1")
+    await world.rows(
+        "UPDATE nodes SET state = 'ready', ready_at = :at, created_at = :at, hetzner_id = 5100, "
+        "ipv4 = CAST('49.12.30.40' AS inet) WHERE id = :n",
+        at=ago(hours=1),
+        n=new.id,
+    )
+    await world.rows(
+        "INSERT INTO hetzner_account_servers (account_id, hetzner_id, name, labels, delete_protected, "
+        "seen_at) VALUES (:acc, 5100, :name, CAST(:labels AS jsonb), false, now())",
+        acc=world.account_id,
+        name=new.name,
+        labels=json.dumps({"managed-by": "proxy-hub", "role": "node", "node-id": str(new.id)}),
+    )
+    await run_fleet(world)
+    old = await world.node(nodes[3])
+    assert old["state"] == "retiring" and old["retire_reason"] == "location_removed"
+    assert (await world.node(nodes[1]))["state"] == (await world.node(nodes[2]))["state"] == "ready"
 
 
 async def test_lowering_the_target_retires_the_excess_slots(world: LiveWorld) -> None:

@@ -530,3 +530,63 @@ def test_a_full_account_alert_names_the_limit_and_the_test_node_and_repeats_week
     )
     (f,) = [f for f in findings(build_plan(snap), snap) if f.code == "account_server_limit_reached"]
     assert "node آزمایشی" not in f.text and "(سقف: ۳ سرور)" in f.text
+
+
+def test_a_slot_moves_off_a_location_the_owner_removed() -> None:
+    """D60 (the owner, 2026-11-07): Reality on the Finland server failed on MCI while the others
+    worked; removing hel1 from the list moves its slot. A replacement first when there is room."""
+    s1 = node(1, slot=1, location="fsn1")
+    s2 = node(2, slot=2, location="nbg1")
+    s3 = node(3, slot=3, location="hel1")
+    nodes = (s1, s2, s3)
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in range(1, 4)}
+    moved = open_settings(target_slots=3, locations=["fsn1", "nbg1"])
+    plan = plan_for(moved, nodes=nodes, servers=servers, accounts=(account(servers_total=3),))
+    (c,) = creates(plan)
+    assert c.allowed and c.context["slot"] == 3 and c.context["kind"] == "replace"
+    assert c.context["location"] in ("fsn1", "nbg1") and "hel1" in c.context["avoid"]
+    assert not [a for a in plan.actions if a.action == "delete"]  # it serves until the move is done
+    # With hel1 still allowed nothing happens.
+    plan = plan_for(open_settings(target_slots=3), nodes=nodes, servers=servers)
+    assert not creates(plan) and not [a for a in plan.actions if a.action == "delete"]
+
+    # The replacement is starting: wait. Ready and settled: the old one leaves as location_removed.
+    new = node(4, slot=3, location="fsn1", state=NodeState.BOOTING, created_min_ago=3, ready_min_ago=None)
+    plan = plan_for(moved, nodes=(*nodes, new), servers=servers)
+    assert {a.target: a.reasons for a in plan.actions if a.action == "none"}["slot-3"] == (
+        "replacement_in_progress",
+    )
+    settled = node(4, slot=3, location="fsn1", created_min_ago=60, ready_min_ago=50)
+    servers4 = {**servers, ("acc-a", 1004): server(1004)}
+    plan = plan_for(moved, nodes=(*nodes, settled), servers=servers4)
+    (d,) = [a for a in plan.actions if a.action == "delete"]
+    assert d.target == "n3" and d.allowed and d.context["why"] == "location_removed"
+
+
+def test_a_full_account_moves_one_removed_location_slot_at_a_time() -> None:
+    """With every account full the old node leaves first (``making_room_location``), one slot at a
+    time and never while another node is starting or leaving."""
+    s1 = node(1, slot=1, location="hel1")
+    s2 = node(2, slot=2, location="hel1")
+    s3 = node(3, slot=3, location="fsn1")
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in range(1, 4)}
+    full = (account(limit=3, servers_total=3),)
+    moved = open_settings(target_slots=3, locations=["fsn1", "nbg1"])
+    plan = plan_for(moved, nodes=(s1, s2, s3), servers=servers, accounts=full)
+    deletes = [a for a in plan.actions if a.action == "delete"]
+    assert [(a.target, a.context["why"], a.allowed) for a in deletes] == [("n1", "location_removed", True)]
+    reasons = {a.target: a.reasons for a in plan.actions if a.action == "none"}
+    assert reasons["slot-1"] == ("making_room_location",) and reasons["slot-2"] == ("location_move_waiting",)
+    assert reasons["slot-3"] == ("slot_healthy",)
+    # While n1 is on its way out, n2 waits; slot 1 asks for its new server (refused: still full).
+    leaving = node(1, slot=1, location="hel1", state=NodeState.RETIRING)
+    plan = plan_for(moved, nodes=(leaving, s2, s3), servers=servers, accounts=full)
+    assert {a.target: a.reasons for a in plan.actions if a.action == "none"}["slot-2"] == (
+        "location_move_waiting",
+    )
+    assert [a.target for a in plan.actions if a.action == "delete"] == ["n1"]  # retiring: finished
+    # An empty list removes nothing (and builds nothing: no_location_configured).
+    plan = plan_for(
+        open_settings(target_slots=3, locations=[]), nodes=(s1, s2, s3), servers=servers, accounts=full
+    )
+    assert not [a for a in plan.actions if a.action == "delete"]
