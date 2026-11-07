@@ -306,6 +306,30 @@ async def test_a_source_removed_takes_only_its_unreviewed_candidates(engine: Asy
         ].source_label == source.label
 
 
+async def test_a_proxy_advert_is_never_stored_and_news_keeps_none_of_its_proxies(engine: AsyncEngine) -> None:
+    """The owner (2026-11-07): a proxy channel's news is used, its proxies are not; an advert never
+    reaches a review, so it cannot count against its source."""
+    source = await add(engine, "https://news.example/proxy.xml")
+    items = [
+        FetchedItem("1", None, T0, "پروکسی ۱ • پروکسی ۲ • پروکسی ۳\n🔥 پروکسی‌های جدید پرسرعت"),
+        FetchedItem("2", None, T0, "اتصال • اتصال • اتصال", hidden_proxy_links=3),
+        FetchedItem(
+            "3",
+            None,
+            T0,
+            "پرسپولیس در دیدار امشب لیگ برتر با دو گل از سد استقلال گذشت و صدرنشین شد.\n"
+            "پروکسی ۱ • پروکسی ۲\nvless://00000000-0000-0000-0000-000000000000@198.51.100.7:443#de",
+            hidden_proxy_links=2,
+        ),
+    ]
+    async with engine.begin() as conn:
+        stored = await candidates.store_items(conn, source, items, T0)
+        assert (stored.new, stored.skipped, stored.proxy_posts) == (1, 2, 2)
+        (row,) = (await conn.execute(text("SELECT external_id, source_text FROM content_candidates"))).all()
+    assert row.external_id == "3"
+    assert row.source_text == "پرسپولیس در دیدار امشب لیگ برتر با دو گل از سد استقلال گذشت و صدرنشین شد."
+
+
 # --- the review -----------------------------------------------------------------------------------
 
 

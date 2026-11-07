@@ -2,3 +2,10 @@
 # The @MTProxybot example secret quoted from the public issue the sponsor parser follows
 # (panel/tests/test_sponsor_replies.py REAL_SECRET); it belongs to no proxy of ours.
 9616b8c65edf41c199f22b8df194a98c944f1d63:panel/tests/test_sponsor_replies.py:generic-api-key:44
+# Fake MTProto secrets in content test fixtures of commit 32a659e (counting sequences with a dd/ee
+# prefix, belonging to no proxy); the next commit replaced them with the allowlisted fixtures.
+32a659e44e52340c4256b9d92c31c9252ed9ef7f:panel/tests/test_content_telegram_account.py:generic-api-key:275
+32a659e44e52340c4256b9d92c31c9252ed9ef7f:panel/tests/test_content_telegram_account.py:generic-api-key:276
+32a659e44e52340c4256b9d92c31c9252ed9ef7f:panel/tests/test_content_units.py:generic-api-key:431
+32a659e44e52340c4256b9d92c31c9252ed9ef7f:panel/tests/test_content_units.py:generic-api-key:460
+32a659e44e52340c4256b9d92c31c9252ed9ef7f:panel/tests/test_content_units.py:generic-api-key:461

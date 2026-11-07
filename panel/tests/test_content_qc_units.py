@@ -359,7 +359,7 @@ def test_settings_are_strict_and_default_to_auto() -> None:
         "auto",
         "sonnet",
         "claude-sonnet-5-5",
-        3,
+        6,
     )
     assert d.categories == list(qc_settings.CATEGORIES) and d.block.blocking() == frozenset(FLAGS)
     config = qc_settings.parse(

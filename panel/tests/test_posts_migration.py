@@ -51,7 +51,8 @@ async def test_migration_0014_round_trip_seed_and_no_drift(migrated_db: str) -> 
                 .all()
             )
         assert len(seeds) >= 30
-        assert {(s.status, s.origin, s.used_count) for s in seeds} == {("approved", "seed", 0)}
+        # 0030 (D58, the owner: not good enough for the channel) retires every seeded item.
+        assert {(s.status, s.origin, s.used_count) for s in seeds} == {("retired", "seed", 0)}
         assert len({s.title for s in seeds}) == len(seeds)  # no item twice
         for s in seeds:  # every seed passes the owner's own checks unchanged (tags, length, HTML)
             assert content.check_input(s.title, s.body, list(s.tags)) == content.ContentIn(

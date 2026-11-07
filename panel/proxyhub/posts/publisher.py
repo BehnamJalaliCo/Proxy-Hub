@@ -16,7 +16,9 @@ account and it cannot take the post now, the post goes to the bot and the reason
 (``posts.poster_fallback``, shown on the Content page).
 
 **The content** (decision D51): the oldest candidate the owner approved in the review queue
-(proxyhub/content/candidates.py), else the old content bank (proxyhub/posts/content.py). A candidate
+(proxyhub/content/candidates.py), else the content bank (proxyhub/posts/content.py: only items the
+owner wrote, since the seeded ones were retired, D58), else the links alone under
+:data:`~proxyhub.posts.messages.FALLBACK_TITLE_FA`. A candidate
 with a downloaded photo or video makes a MEDIA post: the file with the content and the links as its
 caption, within :data:`~proxyhub.telegram.templates.CAPTION_LIMIT` (1024) for both posters
 (:func:`fit_caption`). The links must fit now and in every later state; links that cannot are
@@ -117,7 +119,7 @@ MAX_EDIT_FAILURES: Final = 5
 # How long a link may be missing from every provider before a post shows it as paused.
 MISSING_GRACE: Final = timedelta(minutes=30)
 NO_LINKS_REPEAT: Final = timedelta(days=1)
-NO_CONTENT_REPEAT: Final = timedelta(days=1)
+NO_CONTENT_REPEAT: Final = timedelta(days=7)  # D58: a links-only post is expected now and then
 RECYCLED_REPEAT: Final = timedelta(days=7)
 
 HarvestFn = Callable[[], Awaitable[links.Harvest]]
@@ -330,7 +332,8 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
         if not await _kill_switch_on(db):
             await _alert_once(db, now, "no_links_alert_at", NO_LINKS_REPEAT, NO_LINKS_ALERT_FA)
         return "no_links"
-    # The owner's approved candidate first (decision D51), else the content bank.
+    # The approved candidate first (decision D51), else the owner's own content bank item (D58),
+    # else the links alone under the panel's title (content_for(None)).
     candidate = await candidates.next_for_post(db, now)
     item, recycled = (
         (None, False) if candidate is not None else await content.next_item(db, now, cfg.recycle_after_days)

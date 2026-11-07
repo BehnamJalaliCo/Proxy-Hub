@@ -268,6 +268,28 @@ def test_items_keep_the_previews_ids_and_one_item_per_album() -> None:
         assert parse_media_ref(bad) is None
 
 
+def test_proxies_hidden_behind_a_posts_words_are_counted() -> None:
+    """A proxy channel hides its proxies behind words (text links); their URLs come out of the
+    message's entities as plain strings and only their number reaches the item."""
+    urls = (
+        "https://t.me/proxy?server=198.51.100.7&port=443&secret=0123456789abcdef0123456789abcdef",
+        "tg://proxy?server=198.51.100.8&port=443&secret=fedcba9876543210fedcba9876543210",
+        "https://example.com/news",
+    )
+    entities = [types.MessageEntityTextUrl(offset=0, length=5, url=u) for u in urls]
+    entities.append(types.MessageEntityBold(offset=0, length=5))
+    assert userclient._hidden_urls(entities) == urls
+    assert userclient._hidden_urls(None) == ()
+    many = [types.MessageEntityTextUrl(offset=0, length=1, url="https://e.example/" + "x" * 3000)] * 80
+    hidden = userclient._hidden_urls(many)
+    assert len(hidden) == userclient.MAX_SOURCE_LINKS and len(hidden[0]) == userclient.MAX_SOURCE_LINK_CHARS
+    advert = SourcePost(
+        id=9, date=T0, text="اتصال • اتصال", views=1, grouped_id=None, media=None, link_urls=urls
+    )
+    (item,) = items_from("imtproto", [advert, post(8, "خبر")])[:1]
+    assert item.external_id == "9" and item.hidden_proxy_links == 2
+
+
 # --- a session: the methods go through the allowlist, then to a real refusal -------------------------
 
 

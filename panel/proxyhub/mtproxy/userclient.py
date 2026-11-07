@@ -1392,6 +1392,7 @@ class OperatorSession:
             views=int(views) if isinstance(views, int) and views >= 0 else None,
             grouped_id=int(grouped) if isinstance(grouped, int) else None,
             media=found.media if found is not None else None,
+            link_urls=_hidden_urls(message.entities),
         )
 
     async def download_source_media(
@@ -1443,6 +1444,24 @@ class SourcePost:
     views: int | None
     grouped_id: int | None
     media: SourceMedia | None
+    # The URLs of the text's hidden links (MessageEntityTextUrl), at most MAX_SOURCE_LINKS: a proxy
+    # channel hides its proxies behind words (proxyhub/content/clean.py, proxy posts).
+    link_urls: tuple[str, ...] = ()
+
+
+MAX_SOURCE_LINKS: Final = 50
+MAX_SOURCE_LINK_CHARS: Final = 2048
+
+
+def _hidden_urls(entities: Any) -> tuple[str, ...]:
+    """The URLs behind a source post's text links, as plain strings (never opened here)."""
+    out: list[str] = []
+    for e in entities if isinstance(entities, list) else []:
+        if isinstance(e, types.MessageEntityTextUrl) and isinstance(e.url, str):
+            out.append(e.url[:MAX_SOURCE_LINK_CHARS])
+            if len(out) >= MAX_SOURCE_LINKS:
+                break
+    return tuple(out)
 
 
 def _photo_sizes(sizes: Any) -> list[tuple[str, int, int, int]]:

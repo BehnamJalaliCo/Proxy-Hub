@@ -421,6 +421,54 @@ def test_links_mentions_tags_and_the_signature_go() -> None:
     assert clean.clean_source_text("‮متن‏ معکوس​") == "متن معکوس"
 
 
+def test_proxies_are_not_content_but_a_proxy_channels_news_is() -> None:
+    """The owner (2026-11-07): proxy channels' news is good, their proxies are not ours to repost."""
+    news = (
+        "🔴 حمله‌ی پهپادی به پایگاه آمریکا در عراق؛ سه نفر زخمی شدند و پنتاگون واکنش نشان داد.\n"
+        "پروکسی ۱ • پروکسی ۲ • پروکسی ۳\n"
+        "🔥 پروکسی‌های جدید پرسرعت همراه اول\n"
+        "vless://00000000-0000-0000-0000-000000000000@198.51.100.7:443?security=reality#de\n"
+        "tg://proxy?server=198.51.100.7&port=443&secret=0123456789abcdef0123456789abcdef\n"
+        "🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت\n"
+        "@imtproto"
+    )
+    cleaned = clean.clean_source_text(news, ["imtproto"])
+    assert cleaned == "🔴 حمله‌ی پهپادی به پایگاه آمریکا در عراق؛ سه نفر زخمی شدند و پنتاگون واکنش نشان داد."
+    assert clean.proxy_signal(news) >= 4 and not clean.is_proxy_post(cleaned, clean.proxy_signal(news))
+    advert = (
+        "پروکسی ۱ • پروکسی ۲ • پروکسی ۳ • پروکسی ۴\n🔥 پروکسی‌های پرسرعت مخصوص همه اپراتورها\n@mtpproxyirani"
+    )
+    cleaned = clean.clean_source_text(advert, ["mtpproxyirani"])
+    assert cleaned == "" and clean.is_proxy_post(cleaned, clean.proxy_signal(advert))
+    # Proxies hidden behind words (a text link): the words alone look harmless, the URLs decide.
+    assert clean.is_proxy_post("اتصال سریع و پایدار", 3)
+    # News ABOUT proxies stays: a word outside the proxy filler keeps the line.
+    for line in ("پروکسی تلگرام در ایران قطع شد", "استفاده از پروکسی سه برابر شد"):
+        assert not clean.is_proxy_line(line) and clean.clean_source_text(line) == line
+        assert not clean.is_proxy_post(line, clean.proxy_signal(line))
+    assert clean.proxy_signal("خبر بی پروکسی") == 0 and not clean.is_proxy_post("کوتاه", 0)
+    assert clean.PROXY_LINK.search("https://t.me/proxy?server=a&port=1&secret=dd00")
+    assert not clean.PROXY_LINK.search("https://t.me/bbcpersian/101")
+
+
+def test_the_preview_counts_proxy_links_hidden_behind_words() -> None:
+    page = (
+        '<html><body><div class="tgme_channel_info"></div><section class="tgme_channel_history">'
+        + _message(
+            201,
+            '<div class="tgme_widget_message_text"><a href="https://t.me/proxy?server=198.51.100.7&amp;port=443'
+            '&amp;secret=0123456789abcdef0123456789abcdef">اتصال</a> • <a href="tg://proxy?server=x&amp;port=1'
+            '&amp;secret=fedcba9876543210fedcba9876543210">اتصال</a></div>',
+        )
+        + _message(
+            202, '<div class="tgme_widget_message_text">خبر با <a href="https://example.com/x">لینک</a></div>'
+        )
+        + "</section></body></html>"
+    )
+    items, _ = parse_page(page, "imtproto")
+    assert [(i.external_id, i.hidden_proxy_links) for i in items] == [("201", 2), ("202", 0)]
+
+
 def test_the_caption_is_a_title_and_a_short_body() -> None:
     assert clean.split_caption("🔻عنوان کوتاه\n\nمتن اول.\nمتن دوم.") == (
         "🔻عنوان کوتاه",

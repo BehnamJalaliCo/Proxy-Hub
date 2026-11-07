@@ -16,7 +16,17 @@
     two or more platforms (``اینستاگرام | تلگرام``; one platform name alone is news, not a
     signature), and every line left with no letter or digit after the steps above (``➖➖➖``);
   - direction marks and invisible characters are removed (the zero-width non-joiner of Persian
-    words stays); spaces and empty lines are collapsed.
+    words stays); spaces and empty lines are collapsed;
+  - **proxies are not content** (the owner, 2026-11-07: proxy channels' news is good, their proxies
+    are not ours to repost): every proxy link or config (``tg://proxy``, ``t.me/proxy``,
+    ``vless://`` …) is removed, and so is every *proxy line*, a line that names proxies or configs
+    and says nothing else (``پروکسی • پروکسی``, ``🔥 پروکسی‌های جدید همراه اول``; a word outside
+    :data:`PROXY_FILLER` keeps the line, so news about proxies stays).
+
+* :func:`proxy_signal` / :func:`is_proxy_post`: a post that carries proxies (links, configs, or
+  proxy lines) and leaves fewer than :data:`PROXY_POST_MIN_WORDS` words of anything else is a proxy
+  advert, not news: it is never stored (proxyhub/content/candidates.py), so it reaches no review and
+  does not count against its source.
 
 * :func:`split_caption`: the cleaned text as a title (first line or first sentence) and a short
   body; the publisher shortens the content further when the post's links need the room (never the
@@ -56,6 +66,37 @@ _PLATFORMS = re.compile(
     r"aparat|آپارات|whatsapp|واتساپ|website|وبسایت|وب‌سایت"
 )
 _SENTENCE_END = re.compile(r"[.!?؟؛…](?=\s)")
+# A proxy link or config: MTProto (tg:// and t.me / telegram.me), the Xray/V2Ray family and its kin,
+# and a bare MTProto secret parameter.
+PROXY_LINK: Final = re.compile(
+    r"(?i)\btg://(?:proxy|socks)\?[^\s<>\"']*|"
+    r"\b(?:https?://)?(?:t\.me|telegram\.me|telegram\.dog)/(?:proxy|socks)\?[^\s<>\"']*|"
+    r"\b(?:vless|vmess|trojan|ss|ssr|hy2|hysteria2?|tuic|wireguard|wg|socks5?)://[^\s<>\"']+|"
+    r"[?&]secret=[0-9a-z_=-]{16,}"
+)
+# Words that name a proxy or a config. A line with one of them and nothing but PROXY_FILLER is a
+# proxy line.
+PROXY_WORDS: Final = frozenset(
+    {
+        "پروکسی", "پراکسی", "پروکسى", "proxy", "proxies", "mtproto", "mtproxy", "کانفیگ", "کانفیگها",
+        "config", "configs", "v2ray", "vless", "vmess", "trojan", "shadowsocks", "socks", "socks5",
+    }
+)  # fmt: skip
+PROXY_FILLER: Final = frozenset(
+    {
+        "ها", "های", "ی", "جدید", "جدیدترین", "تازه", "پرسرعت", "سرعت", "بالا", "قوی", "رایگان",
+        "اختصاصی", "تست", "شده", "متصل", "وصل", "اتصال", "سرور", "سرورهای", "لینک", "لینکها", "همراه",
+        "اول", "ایرانسل", "رایتل", "مخابرات", "شاتل", "وای", "فای", "وایفای", "نت", "اینترنت", "همه",
+        "اپراتور", "اپراتورها", "برای", "با", "و", "به", "از", "ضد", "فیلتر", "آپدیت", "بروز", "روی",
+        "بزنید", "کلیک", "کنید", "بزن", "کن", "شو", "شوید", "تلگرام", "مخصوص", "کاملا", "دائمی",
+        "پایدار", "ساعت", "امروز", "سری", "شماره", "ویژه", "تضمینی", "ایران", "خارج", "اعتبار", "تا",
+        "new", "fast", "free", "all", "for", "and", "the", "server", "servers", "link", "links",
+        "connect", "ping", "tested", "speed", "high", "update", "updated", "telegram", "wifi", "mci",
+        "irancell", "rightel", "tci", "premium", "vip", "best", "top", "online",
+    }
+)  # fmt: skip
+PROXY_POST_MIN_WORDS: Final = 8
+_WORD = re.compile(r"[^\W_]+")
 SIGNATURE_LINES: Final = 3
 SIGNATURE_MAX_CHARS: Final = 80
 
@@ -149,14 +190,44 @@ def _is_signature(line: str, names: list[str]) -> bool:
     return len(_PLATFORMS.findall(line)) >= 2  # "اینستاگرام | تلگرام | یوتیوب": a list of pages
 
 
+def _words(text: str) -> list[str]:
+    """The words of ``text``, lower case: runs of letters and digits (``V2Ray`` is one word), a number
+    alone is not a word, nor are emoji and marks. The zero-width non-joiner splits a Persian word
+    (``پروکسی‌های`` -> ``پروکسی``, ``های``)."""
+    return [w.lower() for w in _WORD.findall(text) if not w.isdigit()]
+
+
+def is_proxy_line(line: str) -> bool:
+    """A line that names proxies or configs and says nothing else (see the module doc)."""
+    words = _words(PROXY_LINK.sub(" ", _URL.sub(" ", line)))
+    return any(w in PROXY_WORDS for w in words) and all(w in PROXY_WORDS or w in PROXY_FILLER for w in words)
+
+
+def proxy_signal(*texts: str) -> int:
+    """How many proxy links, configs and proxy lines ``texts`` carry (a post's text, and the URLs
+    hidden behind its words)."""
+    n = 0
+    for text in texts:
+        n += len(PROXY_LINK.findall(text))
+        n += sum(1 for line in text.split("\n") if is_proxy_line(line))
+    return n
+
+
+def is_proxy_post(cleaned: str, signal: int) -> bool:
+    """A proxy advert: it carries proxies and its cleaned text has too few words to be news."""
+    return signal > 0 and len(_words(cleaned)) < PROXY_POST_MIN_WORDS
+
+
 def clean_source_text(text: str, source_names: Iterable[str] = ()) -> str:
-    """The source's text without links, mentions, tag lines and signature (see the module doc)."""
+    """The source's text without links, proxies, mentions, tag lines and signature (see the module
+    doc)."""
     names = _names(source_names)
     kept: list[str] = []
     for raw in tidy(text).split("\n"):
-        if _only_hashtags(raw):
+        if _only_hashtags(raw) or is_proxy_line(raw):
             continue
-        line = _URL.sub(" ", raw)
+        line = PROXY_LINK.sub(" ", raw)
+        line = _URL.sub(" ", line)
         line = _MENTION.sub(" ", line)
         line = _HASHTAG.sub(lambda m: _hashtag_word(m, names), line)
         line = _SPACES.sub(" ", line).strip(" -–—|:•،,")

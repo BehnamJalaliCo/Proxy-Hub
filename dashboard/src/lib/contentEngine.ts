@@ -282,7 +282,7 @@ export const STATUS_INFO: Record<CandidateStatus, { label: string; tone: Tone; h
   approved: {
     label: "تأییدشده",
     tone: "success",
-    hint: "با تأیید ناظر یا شما، به ترتیب محتوای پست‌های بعدی میشوند؛ پیش از بانک محتوا.",
+    hint: "با تأیید ناظر یا شما، به ترتیب محتوای پست‌های بعدی میشوند؛ پیش از کتابخانه‌ی محتوا.",
   },
   rejected: { label: "ردشده", tone: "neutral", hint: "به کانال نمیرود. دلیل ناظر روی هر مورد است؛ میتوانید به صف برگردانید." },
   used: { label: "رفته", tone: "brand", hint: "در یک پست رفته است." },

@@ -10,7 +10,8 @@
 
 Which item goes next: approved items the owner wrote first, then the seeded ones, oldest first.
 When none is left, the ``used`` item used longest ago comes again, but only after
-``recycle_after_days``.
+``recycle_after_days``. The 36 seeded items were retired by migration 0030 (the owner, 2026-11-07,
+D58: not good enough for the channel); a seeded item goes out again only if the owner approves it.
 """
 
 from __future__ import annotations

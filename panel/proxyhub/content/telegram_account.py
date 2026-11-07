@@ -39,7 +39,7 @@ from typing import Any, Final, Literal
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from proxyhub.content import media
-from proxyhub.content.clean import tidy
+from proxyhub.content.clean import PROXY_LINK, tidy
 from proxyhub.content.items import MAX_TEXT_CHARS, FetchedItem, MediaRef
 from proxyhub.content.net import FetchError
 from proxyhub.fleet.actions import iso
@@ -119,6 +119,7 @@ def _pick(group: list[SourcePost]) -> SourcePost:
                 views=chosen.views,
                 grouped_id=chosen.grouped_id,
                 media=first.media,
+                link_urls=chosen.link_urls,
             )
     return chosen
 
@@ -159,6 +160,7 @@ def items_from(name: str, posts: list[SourcePost]) -> list[FetchedItem]:
                 text=text,
                 views=post.views,
                 media=ref,
+                hidden_proxy_links=sum(1 for u in post.link_urls if PROXY_LINK.search(u)),
             )
         )
     return items

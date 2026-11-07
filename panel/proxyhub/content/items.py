@@ -39,3 +39,6 @@ class FetchedItem:
     text: str  # plain text, no markup; line breaks kept
     views: int | None = None
     media: MediaRef | None = None
+    # Proxy links hidden behind the post's words (a Telegram text link's URL, a preview's href):
+    # not in ``text``, but they make a post a proxy advert (proxyhub/content/clean.py).
+    hidden_proxy_links: int = 0
