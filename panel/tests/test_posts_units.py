@@ -40,13 +40,13 @@ from proxyhub.telegram.templates import (
     NBSP,
     PAUSED_LINE,
     TITLE_MARK,
+    WORD_MARK,
     WORD_SEPARATOR,
     PostLink,
     PostTooLong,
     StatusTexts,
     compose_content,
     config_quote,
-    fa_digits,
     fits,
     mtproto_url,
     render_post,
@@ -83,8 +83,9 @@ def rl(
 
 
 def word(n: int) -> str:
-    """The visible proxy word of the n-th MTProto link (no-break space before the number)."""
-    return f"پروکسی{NBSP}{fa_digits(n)}"
+    """The visible proxy word of the n-th MTProto link: the same word in every cell, no number (the
+    owner, 2026-11-07, after the competitor's grid); ``n`` only names the link in a test."""
+    return "پروکسی"
 
 
 def code(link: PostLink) -> str:
@@ -123,7 +124,7 @@ def test_post_is_title_body_proxy_grid_config_and_tag_in_that_order() -> None:
         'خط دوم\n\n<a href="https://t.me/proxy?server=slot1.example.com'
         f'&amp;port=8443&amp;secret={sec}">{word(1)}</a>{WORD_SEPARATOR}<a href="' in post
     )
-    assert f">{word(2)}</a>\n<a href=" in post and f">{word(3)}</a>\n\n🔒 " in post
+    assert f">{word(2)}</a>{WORD_MARK}\n<a href=" in post and f">{word(3)}</a>{WORD_MARK}\n\n🔒 " in post
     # The config: ONE line with its end time, then each link under a tiny label line in its OWN
     # collapsed quote that holds nothing but the config as inline code (one tap, one config).
     assert (f"\n\n{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{quoted(xhttp)}\n\n—\n🔗 ‎@ipoxxo") in post
@@ -140,15 +141,15 @@ def test_post_is_title_body_proxy_grid_config_and_tag_in_that_order() -> None:
     assert "·" not in post  # a middle dot next to Persian digits reads as a zero
 
 
-def test_proxy_words_are_numbered_by_place_two_to_a_row() -> None:
+def test_proxy_words_are_the_same_word_two_to_a_row_each_followed_by_a_bullet() -> None:
     post = render_post(None, [mt(i) for i in range(1, 8)], "@ipoxxo").text
     rows = post.split("\n\n")[0].split("\n")
     assert [r.count("<a href=") for r in rows] == [2, 2, 2, 1]
-    assert [r.count(WORD_SEPARATOR) for r in rows] == [1, 1, 1, 0]
-    shown = re.findall(r"<a href=\"[^\"]+\">([^<]+)</a>", post)
-    assert shown == [word(n) for n in range(1, 8)]  # ۱ to ۷, whatever slots the links come from
-    assert word(7) == "پروکسی ۷"  # a no-break space: a word never wraps
-    assert visible_text(rows[0]) == f"{word(1)} • {word(2)}"
+    assert [r.count(WORD_MARK) for r in rows] == [2, 2, 2, 1]  # every word, the last one too
+    shown = re.findall(r'<a href="[^"]+">([^<]+)</a>', post)
+    assert shown == ["پروکسی"] * 7  # no number: the rows line up
+    assert visible_text(rows[0]) == f"پروکسی{NBSP}• پروکسی{NBSP}•"
+    assert not any(visible_text(r).startswith("•") for r in rows)
 
 
 def test_rendering_is_deterministic() -> None:
@@ -169,12 +170,15 @@ def test_dead_links_keep_their_place_lose_their_link_and_get_marks() -> None:
         PostLink(kind="reality", status="burned"),
     ]
     post = render_post(CONTENT, items, "@ipoxxo").text
-    assert f"🚫{NBSP}<s>{word(1)}</s>{WORD_SEPARATOR}<a href=" in post  # number 1 stays number 1
-    assert f">{word(2)}</a>\n⌛️{NBSP}<s>{word(3)}</s>{WORD_SEPARATOR}🔴{NBSP}<s>{word(4)}</s>\n\n" in post
+    assert f"🚫{NBSP}<s>{word(1)}</s>{WORD_SEPARATOR}<a href=" in post  # the first stays first
+    assert (
+        f">{word(2)}</a>{WORD_MARK}\n⌛️{NBSP}<s>{word(3)}</s>{WORD_SEPARATOR}🔴{NBSP}<s>{word(4)}</s>{WORD_MARK}\n\n"
+        in post
+    )
     assert post.count("<a href=") == 1 and sec in post
     # A config with nothing left is ONE status line in its place: no lock line, no quote.
     assert (
-        f"<s>{word(4)}</s>\n\n⌛️ زمان این کانفیگ تمام شد\n\n"
+        f"<s>{word(4)}</s>{WORD_MARK}\n\n⌛️ زمان این کانفیگ تمام شد\n\n"
         "🔴 ظرفیت این کانفیگ پر شد\n\n🚫 این کانفیگ از دسترس خارج شد\n\n—\n🔗" in post
     )
     assert "🔒" not in post and QUOTE not in post and "<code" not in post and "vless://" not in post
@@ -248,7 +252,7 @@ def test_paused_links_keep_their_place_without_a_link_and_are_not_dead() -> None
     ]
     post = render_post(None, items, "@ipoxxo").text
     # One proxy word in the post: no number (D50).
-    assert post == f"⏸{NBSP}پروکسی\n\n{PAUSED_LINE}\n\n—\n🔗 ‎@ipoxxo"
+    assert post == f"⏸{NBSP}پروکسی{WORD_MARK}\n\n{PAUSED_LINE}\n\n—\n🔗 ‎@ipoxxo"
     assert sec not in post and "vless://" not in post
     assert ALL_DEAD_LINE not in post  # paused is not dead: it may come back
     dead_and_paused = [PostLink(kind="mtproto", status="burned"), items[0]]
@@ -412,7 +416,7 @@ def grid(post: str) -> list[str]:
     return visible_text(post.split("\n\n")[0]).split("\n")
 
 
-def test_operator_names_come_first_and_a_repeated_word_is_numbered_by_its_place() -> None:
+def test_operator_names_come_first_each_group_on_its_own_rows() -> None:
     links = [
         named(1, None),
         named(2, "mci"),
@@ -422,34 +426,36 @@ def test_operator_names_come_first_and_a_repeated_word_is_numbered_by_its_place(
         named(6, None),
     ]
     post = render_post(None, links, "@ipoxxo").text
+    mci = f"همراه{NBSP}اول"
     assert grid(post) == [
-        f"همراه{NBSP}اول{NBSP}۱ • همراه{NBSP}اول{NBSP}۲",
-        f"رایتل • پروکسی{NBSP}۱",  # a word that shows once has no number
-        f"پروکسی{NBSP}۲ • پروکسی{NBSP}۳",
+        f"{mci}{NBSP}• {mci}{NBSP}•",
+        f"رایتل{NBSP}•",  # a group starts its own row
+        f"پروکسی{NBSP}• پروکسی{NBSP}•",
+        f"پروکسی{NBSP}•",
     ]
     # Within a word the posted order stays: the first «همراه اول» is link 2, the first «پروکسی» link 1.
     hrefs = re.findall(r'<a href="([^"]+)">', post)
     order = [links[i].url for i in (1, 4, 3, 0, 2, 5)]
     assert hrefs == [html.escape(u or "", quote=True) for u in order]
-    assert not any(row.startswith("•") for row in grid(post))  # no leading bullet (see the report)
+    assert not any(row.startswith("•") for row in grid(post))  # no leading bullet
     assert render_post(None, links, "@ipoxxo") == render_post(None, links, "@ipoxxo")
 
 
 def test_a_named_link_keeps_its_name_when_it_ends_or_pauses() -> None:
     links = [named(1, "mci", "burned"), named(2, "mci"), named(3, "rightel", "paused"), named(4, None)]
     post = render_post(None, links, "@ipoxxo").text
-    assert f"🚫{NBSP}<s>همراه{NBSP}اول{NBSP}۱</s> • <a href=" in post
-    assert f">همراه{NBSP}اول{NBSP}۲</a>\n⏸{NBSP}رایتل • <a href=" in post
+    assert f"🚫{NBSP}<s>همراه{NBSP}اول</s>{WORD_SEPARATOR}<a href=" in post
+    assert f">همراه{NBSP}اول</a>{WORD_MARK}\n⏸{NBSP}رایتل{WORD_MARK}\n<a href=" in post
     assert post.count("<a href=") == 2  # a dead or paused word has no link, named or not
 
 
 def test_posts_without_names_keep_their_words_and_get_the_sign_off() -> None:
-    """A post made before D50 has no stored names: the same «پروکسی N» words as before."""
+    """A post made before D50 has no stored names: «پروکسی» in every cell."""
     post = render_post(None, [mt(i) for i in range(1, 5)], "@ipoxxo").text
-    assert grid(post) == [f"پروکسی{NBSP}۱ • پروکسی{NBSP}۲", f"پروکسی{NBSP}۳ • پروکسی{NBSP}۴"]
+    assert grid(post) == [f"پروکسی{NBSP}• پروکسی{NBSP}•"] * 2
     assert post.endswith("\n\n—\n🔗 \u200e@ipoxxo")
     unknown = render_post(None, [named(1, "tci"), named(2, None)], "@ipoxxo").text
-    assert grid(unknown) == [f"پروکسی{NBSP}۱ • پروکسی{NBSP}۲"]  # an unknown code is no name
+    assert grid(unknown) == [f"پروکسی{NBSP}• پروکسی{NBSP}•"]  # an unknown code is no name
     assert "همراه" not in unknown
 
 

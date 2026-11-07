@@ -9,7 +9,8 @@ units after entity parsing), so it always fits one message.
   attribute is escaped again, and links may only be http(s) or tg links. If the post would be too
   long, the content (and only the content) is shortened at a word boundary with an ellipsis and every
   open tag is closed.
-* Each proxy is the short Persian word «پروکسی ۱» (decision D48: two to a row, " • " between them)
+* Each proxy is the short Persian word «پروکسی» (decision D48; two to a row, each word followed by " •",
+  no number: the owner, 2026-11-07)
   whose target is ``https://t.me/proxy?server=..&port=..&secret=..``
   (core.telegram.org/api/links#mtproxy-links), with each value URL-encoded and the whole href
   HTML-escaped (docs/10 section 3.12: links hide behind words so the post stays short).
@@ -20,13 +21,14 @@ the link part stays short so news can sit above it):
 
 * a bold title line with one emoji (:data:`TITLE_MARK` when the title has none), and the body as
   plain text under it (:func:`compose_content`; the owner, 2026-11-07: "معمولی و تمیز", no quote);
-* the MTProto links as words, two to a row with " • " between them, and no header (the words say
+* the MTProto links as words, two to a row, each followed by " •", and no header (the words say
   what they are). A link's word is «پروکسی», or an operator's name («همراه اول», «رایتل»; never
   «ایرانسل», the owner's choice) when the post was made with the panel's own fresh probe from that
   operator's network (decision D50, proxyhub/posts/operators.py; stored with the post, so an edit
-  never renames a link). Operator-named links come first (MCI, then Rightel), then «پروکسی». A word that shows
-  once has no number; a word that repeats is numbered by its place among the same words
-  («همراه اول ۱», «همراه اول ۲», «پروکسی ۱» …), Persian digits, no-break spaces inside;
+  never renames a link). Operator-named links come first (MCI, then Rightel), then «پروکسی». Each group
+  starts its own row and every cell shows the same word with NO number (the owner, 2026-11-07, after
+  the competitor's grid: «همراه اول • همراه اول •», «پروکسی • پروکسی •»), so the rows line up;
+  no-break spaces inside a word;
 * each VLESS config as ONE short line, «🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت» (the owner, 2026-11-07: the
   period, not a day and a clock; :data:`CONFIG_VALIDITY_HOURS`), and under it
   each of its links (the config and, for a REALITY config, its XHTTP link) as a tiny label line
@@ -83,7 +85,11 @@ MAX_CAPTION_HTML: Final = 8192
 # to a row with a bullet between them (a grid on a phone).
 PROXY_WORD: Final = "پروکسی"
 NBSP: Final = "\u00a0"
-WORD_SEPARATOR: Final = " • "
+# The proxy grid (the owner, 2026-11-07, after the competitor's channel): every word is followed by
+# a bullet ("پروکسی • پروکسی •"), two words to a row, the same word in every cell of a group, so the
+# rows line up. The bullet is glued to its word with a no-break space and never starts a line.
+WORD_MARK: Final = f"{NBSP}•"
+WORD_SEPARATOR: Final = f"{WORD_MARK} "
 WORDS_PER_ROW: Final = 2
 TAG_PREFIX: Final = "🔗 "
 ELLIPSIS: Final = "…"
@@ -195,17 +201,23 @@ def live_word(url: str, n: int) -> str:
 
 
 def word_rows(words: Sequence[str]) -> str:
-    """The proxy words, :data:`WORDS_PER_ROW` to a row, :data:`WORD_SEPARATOR` between two."""
+    """The proxy words, :data:`WORDS_PER_ROW` to a row, each followed by :data:`WORD_MARK`."""
     return "\n".join(
-        WORD_SEPARATOR.join(words[i : i + WORDS_PER_ROW]) for i in range(0, len(words), WORDS_PER_ROW)
+        " ".join(f"{w}{WORD_MARK}" for w in words[i : i + WORDS_PER_ROW])
+        for i in range(0, len(words), WORDS_PER_ROW)
     )
+
+
+def plain_word(word: str) -> str:
+    """A grid word as the post shows it: no number (the owner, 2026-11-07: the same word in every
+    cell, like the competitor's grid), no-break spaces inside so it never wraps."""
+    return word.replace(" ", NBSP)
 
 
 def proxy_block(proxies: Sequence[tuple[str, int, str]]) -> str:
     """The proxy words alone: they say «پروکسی» themselves, so no header (D48)."""
     links = [proxy_link(server, port, secret) for server, port, secret in proxies]
-    words = numbered([PROXY_WORD] * len(links))
-    return word_rows([link_word(url, text) for url, text in zip(links, words, strict=True)])
+    return word_rows([link_word(url, plain_word(PROXY_WORD)) for url in links])
 
 
 def render_proxy_post(
@@ -562,10 +574,16 @@ def _word_rank(link: PostLink) -> int:
 def _mtproto_block(links: Sequence[PostLink]) -> str:
     """The proxy grid (D50): operator-named links first (MCI, Rightel, Irancell), then «پروکسی»,
     each group in the order the links were posted, which never changes (an edit renders a post's
-    links in that order, with the names stored with them). No header: the words say what they are."""
+    links in that order, with the names stored with them). No header: the words say what they are.
+    Each group starts its own row and every cell of a group shows the same word with no number
+    (the owner, 2026-11-07), so the rows line up like the competitor's grid."""
     ordered = sorted(links, key=_word_rank)  # stable: the posted order within a word
-    words = numbered([_word_of(link) for link in ordered])
-    return word_rows([_mtproto_word(link, text) for link, text in zip(ordered, words, strict=True)])
+    groups: dict[str, list[PostLink]] = {}
+    for link in ordered:
+        groups.setdefault(_word_of(link), []).append(link)
+    return "\n".join(
+        word_rows([_mtproto_word(link, plain_word(word)) for link in group]) for word, group in groups.items()
+    )
 
 
 def _marker(variant: str | None) -> str | None:

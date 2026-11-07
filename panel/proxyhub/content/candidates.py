@@ -80,9 +80,19 @@ def check_caption(title: Any, body: Any) -> tuple[str, str]:
     return title, body
 
 
+_BOLD = re.compile(r"\*\*([^*\n]{1,200}?)\*\*")
+
+
+def body_html(body: str) -> str:
+    """A caption body as post HTML: escaped, its line breaks kept, and a phrase wrapped in double
+    asterisks (``**...**``, Claude's or the owner's) made bold; a stray asterisk pair is dropped."""
+    escaped = html.escape(body, quote=False)
+    return _BOLD.sub(r"<b>\1</b>", escaped).replace("**", "")
+
+
 def caption_html(title: str, body: str) -> str:
-    """The content part of a post: the bold title line and the body (escaped) in a quote."""
-    return compose_content(title or None, html.escape(body, quote=False) if body else None)
+    """The content part of a post: the bold title line and the body as plain text under it."""
+    return compose_content(title or None, body_html(body) if body else None)
 
 
 @dataclass(frozen=True)

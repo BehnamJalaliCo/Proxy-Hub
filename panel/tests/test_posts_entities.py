@@ -223,7 +223,7 @@ def test_the_real_template_matches_telethons_own_html_parser() -> None:
     assert "\nTCP\nvless://" in ours.text and "\n\nXHTTP\nvless://" in ours.text  # labels outside
     # The proxy words are the links' whole text, with no mark (D48).
     words = [covered(ours, e) for e in ours.entities if e.kind == "text_url"]
-    assert words == [f"پروکسی{NBSP}۱", f"پروکسی{NBSP}۴"]
+    assert words == ["پروکسی", "پروکسی"]  # the same word in every cell (2026-11-07)
 
 
 _KIND = {
@@ -475,7 +475,7 @@ def test_the_compact_layouts_emoji_sit_on_exact_utf16_offsets() -> None:
     post = render_post(compose_content("عنوان خبر", "متن خبر"), [*six, config], "@ipoxxo").text
     m = operator_message(post, PACK)
     title = f"{TITLE_MARK} عنوان خبر"
-    grid = "\n".join(f"پروکسی{NBSP}{a} • پروکسی{NBSP}{b}" for a, b in (("۱", "۲"), ("۳", "۴"), ("۵", "۶")))
+    grid = "\n".join([f"پروکسی{NBSP}• پروکسی{NBSP}•"] * 3)
     lock = f"{REALITY_MARK} کانفیگ V2Ray"
     tag = "🔗 \u200e@ipoxxo"
     assert m.text == f"{title}\n\nمتن خبر\n\n{grid}\n\n{lock}\nvless://a@203.0.113.9:443#x\n\n—\n{tag}"
@@ -486,8 +486,8 @@ def test_the_compact_layouts_emoji_sit_on_exact_utf16_offsets() -> None:
         ("🔗", utf16_len(m.text) - utf16_len(tag), 2, 5_003),
     ]
     links = [(covered(m, e), e.offset) for e in m.entities if e.kind == "text_url"]
-    assert [w for w, _ in links] == [f"پروکسی{NBSP}{d}" for d in "۱۲۳۴۵۶"]
-    assert links[1][1] - links[0][1] == utf16_len(f"پروکسی{NBSP}۱ • ")  # the bullet and its spaces
+    assert [w for w, _ in links] == ["پروکسی"] * 6
+    assert links[1][1] - links[0][1] == utf16_len(f"پروکسی{NBSP}• ")  # the word's bullet and a space
 
 
 def test_module_has_no_telethon_import() -> None:

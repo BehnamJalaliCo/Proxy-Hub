@@ -93,8 +93,8 @@ def test_post_has_content_proxy_words_and_channel_tag_last() -> None:
     assert post.startswith("<b>خبر مهم</b>\nمتن کوتاه\n\n<a href=")  # no header (D48)
     assert post.splitlines()[-1] == "🔗 @ipoxxo"
     words = re.findall(r'<a href="([^"]+)">([^<]+)</a>', post)
-    assert [w for _, w in words] == ["پروکسی\u00a0۱", "پروکسی\u00a0۲"]  # proxy words, by place
-    assert "</a> • <a href=" in post and "⚡" not in post and "📡" not in post
+    assert [w for _, w in words] == ["پروکسی", "پروکسی"]  # the same word in every cell
+    assert "</a>\u00a0• <a href=" in post and "⚡" not in post and "📡" not in post
     first = urlsplit(html.unescape(words[0][0]))
     assert (first.scheme, first.netloc, first.path) == ("https", "t.me", "/proxy")
     assert parse_qs(first.query) == {"server": ["203.0.113.10"], "port": ["443"], "secret": [SECRET]}

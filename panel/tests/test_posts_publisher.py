@@ -49,8 +49,8 @@ from proxyhub.telegram.templates import (
     ALL_DEAD_LINE,
     NBSP,
     PAUSED_LINE,
+    WORD_MARK,
     WORD_SEPARATOR,
-    proxy_word,
     visible_text,
 )
 from proxyhub.vault import Vault
@@ -130,10 +130,12 @@ async def edit_text(engine: AsyncEngine) -> str:
 
 
 def word(n: int) -> str:
-    return proxy_word(n)
+    """The n-th proxy link's word: the same word in every cell, no number (2026-11-07)."""
+    return "پروکسی"
 
 
 SEP = WORD_SEPARATOR
+MARK = WORD_MARK
 LOCK = "🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت"
 QUOTE = "<blockquote expandable>"
 # A post made before D48 carried up to three configs; these tests use that to see several configs
@@ -182,7 +184,7 @@ async def test_due_post_carries_content_links_and_tag(engine: AsyncEngine, vault
     # D48: one config a post (the first post starts at slot 1), as one line over a collapsed quote.
     assert f"{QUOTE}<code>vless://{node_vless_id(nodes[0])}@slot1.proxyhub-posts.example:443" in body
     assert body.count(LOCK) == 1 and body.count("vless://") == 1 and "<pre" not in body
-    assert f">{word(2)}</a>\n<a href=" in body and f">{word(3)}</a>\n\n{LOCK}" in body
+    assert f">{word(2)}</a>{MARK}\n<a href=" in body and f">{word(3)}</a>{MARK}\n\n{LOCK}" in body
     assert body.endswith("</blockquote>\n\n—\n🔗 \u200e@ipoxxo")
     [post] = await rows(engine, "SELECT * FROM posts")
     assert (post.role, post.plan_slot, post.outbox_id, post.poster) == ("test", 1, job.id, "bot")
@@ -394,7 +396,7 @@ async def test_burned_node_is_marked_by_an_edit_and_never_comes_back(
     assert edit.payload["post_id"] == cp_id
     body = edit.payload["text"]
     # The dead link keeps its place (and its number) with its mark; its link and config are gone.
-    assert f">{word(1)}</a>{SEP}🚫{NBSP}<s>{word(2)}</s>\n<a href=" in body
+    assert f">{word(1)}</a>{SEP}🚫{NBSP}<s>{word(2)}</s>{MARK}\n<a href=" in body
     assert node_secret(nodes[1]) not in body
     assert node_secret(nodes[0]) in body and node_secret(nodes[2]) in body
     # The middle config: one status line in its place, between the other two lines and quotes.
@@ -491,7 +493,7 @@ async def test_expired_and_gone_links(engine: AsyncEngine, vault: Vault) -> None
     # Missing for the whole grace: the post shows them as paused (not dead) with its other changes.
     assert await refresh(engine, t + publisher.MISSING_GRACE) == 1
     body = await edit_text(engine)
-    assert f"</a>{SEP}⏸{NBSP}{word(2)}\n\n⌛️ زمان این کانفیگ تمام شد\n\n{PAUSED_LINE}\n\n—\n🔗" in body
+    assert f"</a>{SEP}⏸{NBSP}{word(2)}{MARK}\n\n⌛️ زمان این کانفیگ تمام شد\n\n{PAUSED_LINE}\n\n—\n🔗" in body
     assert "<s>" not in body and "<code" not in body and "🔒" not in body
     assert node_secret(nodes[1]) not in body and node_vless_id(nodes[1]) not in body
     assert node_secret(nodes[0]) in body  # node 1's MTProto link still works
@@ -555,7 +557,7 @@ async def test_a_missing_config_past_its_own_expiry_is_marked_expired(
     # Its provider no longer lists the config at all, and the config's own end has passed.
     assert await refresh(engine, later, [mtproto_provider]) == 1
     body = await edit_text(engine)
-    assert "</a>\n\n⌛️ زمان این کانفیگ تمام شد\n\n—\n🔗" in body and node_secret(nodes[0]) in body
+    assert f"</a>{MARK}\n\n⌛️ زمان این کانفیگ تمام شد\n\n—\n🔗" in body and node_secret(nodes[0]) in body
     got = {label: status for label, (status, _) in (await carried_links(engine, post_id)).items()}
     assert got == {"پروکسی ۱": "active", "ریلیتی ۱": "expired"}
 
@@ -630,7 +632,7 @@ async def test_a_config_and_its_xhttp_link_are_marked_in_the_post_and_its_edits(
     await set_node(engine, nodes[0], state="burned")
     assert await refresh(engine, now + timedelta(minutes=1), providers) == 1
     edited = await edit_text(engine)
-    assert f">{word(2)}</a>\n\n🚫 این کانفیگ از دسترس خارج شد\n\n—\n🔗" in edited
+    assert f">{word(2)}</a>{MARK}\n\n🚫 این کانفیگ از دسترس خارج شد\n\n—\n🔗" in edited
     assert node_vless_id(nodes[0]) not in edited and "🔒" not in edited and QUOTE not in edited
     assert "TCP" not in edited and "XHTTP" not in edited
     assert f"🚫{NBSP}<s>{word(1)}</s>{SEP}<a href=" in edited
@@ -948,9 +950,9 @@ async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep
         body = (await jobs(engine, "send_post"))[-1].payload["text"]
         mci = f"همراه{NBSP}اول"
         assert grid_rows(body) == [
-            f"{mci}{NBSP}۱ • {mci}{NBSP}۲",
-            "پروکسی",
-        ]  # named first; a lone word: no number
+            f"{mci}{NBSP}• {mci}{NBSP}•",
+            f"پروکسی{NBSP}•",
+        ]  # named first, each group on its own rows, no number
         assert "—\n🔗 \u200e@ipoxxo" in body
         sql = (
             "SELECT slot, operator FROM post_links WHERE post_id = :p AND kind = 'mtproto' ORDER BY position"
@@ -969,8 +971,8 @@ async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep
         await set_node(engine, nodes[1], state="burned")
         assert await refresh(engine, later + timedelta(minutes=1)) == 1
         edited = await edit_text(engine)
-        assert grid_rows(edited) == [f"{mci}{NBSP}۱ • 🚫{NBSP}{mci}{NBSP}۲", "پروکسی"]
-        assert f"🚫{NBSP}<s>{mci}{NBSP}۲</s>" in edited
+        assert grid_rows(edited) == [f"{mci}{NBSP}• 🚫{NBSP}{mci}{NBSP}•", f"پروکسی{NBSP}•"]
+        assert f"🚫{NBSP}<s>{mci}</s>{MARK}" in edited
         # A new post now reads the new probes: node 3 is Rightel's, node 1 is a plain proxy again.
         await deliver(engine, (await jobs(engine, "edit_post"))[-1].id, message_id=0)
         await quiet(engine, [], interval=0)
@@ -978,7 +980,7 @@ async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep
         await probed(engine, nodes[2], second - timedelta(minutes=10), {"8443": {RIGHTEL_KEY: "up"}})
         assert await publish(engine, second) == "queued"
         body2 = (await jobs(engine, "send_post"))[-1].payload["text"]
-        assert grid_rows(body2)[0].startswith("رایتل • ")
+        assert grid_rows(body2)[0].startswith(f"رایتل{NBSP}•")
         assert not any("همراه" in row for row in grid_rows(body2))
     finally:
         async with engine.begin() as conn:
