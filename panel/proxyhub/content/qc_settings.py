@@ -9,12 +9,15 @@ field                      default      meaning
                                         reasons, caption) and nothing goes without the owner's approval
 ``backend``                ``auto``     ``auto``: the bridge (the owner's subscription, D19), and the API
                                         key only when the bridge cannot answer; ``bridge``; ``api``;
-                                        ``off`` (no Claude: posts use the content bank)
+                                        ``off`` (no Claude: posts carry the owner's own content bank
+                                        items, else only the links)
 ``bridge_model``           ``sonnet``   Claude Code's ``--model`` (an alias follows the newest model)
 ``api_model``              Sonnet 5.5   the Messages API model (Sonnet 5.5, or Haiku 5.5 to save)
 ``bridge_daily_cap``       80           reviews through the bridge in any 24 hours (0 = none)
 ``api_daily_cap``          40           reviews through the API in any 24 hours (0 = none)
-``per_slot``               3            candidates sent to Claude for one posting slot at most
+``per_slot``               6            candidates sent to Claude for one posting slot at most (6
+                                        since 2026-11-07, D58: with no seeded fallback left, more
+                                        tries before a slot goes with links only)
 ``lead_minutes``           45           how long before a slot the supervisor starts choosing for it
 ``timeout_s``              150          one review's time limit
 ``categories``             all          the categories that may go out (news of every kind, politics
@@ -108,7 +111,7 @@ class QcConfig(BaseModel):
     api_model: Literal["claude-sonnet-5-5", "claude-haiku-5-5"] = "claude-sonnet-5-5"
     bridge_daily_cap: int = Field(default=80, ge=0, le=500)
     api_daily_cap: int = Field(default=40, ge=0, le=500)
-    per_slot: int = Field(default=3, ge=1, le=10)
+    per_slot: int = Field(default=6, ge=1, le=10)
     lead_minutes: int = Field(default=45, ge=10, le=180)
     timeout_s: int = Field(default=150, ge=30, le=300)
     categories: list[str] = Field(default_factory=lambda: list(CATEGORIES), max_length=len(CATEGORIES))

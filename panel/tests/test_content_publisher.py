@@ -201,7 +201,8 @@ async def test_text_fallbacks_without_media(engine: AsyncEngine, vault: Vault) -
         failed,
     }
     assert {r.media_kind for r in await rows(engine, "SELECT media_kind FROM posts")} == {None}
-    # with no approved candidate left, the old content bank is the fallback, as before
+    # with no approved candidate left, an approved content-bank item is the fallback (the test
+    # cleanup re-approves the seeded items as fixtures; in production 0030 retired them, D58)
     assert await publish(engine, slot_time(3)) == "queued"
     assert await seeds_used(engine) == 1
 

@@ -83,7 +83,7 @@ function Status({ view }: { view: QcView }) {
       {view.unavailable_since ? (
         <p className="rounded-2xl bg-warning-soft p-3.5 text-sm leading-7 text-fg">
           Claude از {formatRelative(view.unavailable_since)} در دسترس نیست: {view.unavailable_reason_fa}
-          {" "}پست‌ها بی‌وقفه با بانک محتوای همیشگی میروند و چیزی بی بررسی منتشر نمیشود.
+          {" "}پست‌ها بی‌وقفه میروند، فقط با پروکسی‌ها (یا نوشته‌ی تأییدشده‌ی خودتان)، و چیزی بی بررسی منتشر نمیشود.
         </p>
       ) : null}
       <p className="text-[0.82rem] leading-6 text-fg-faint">
@@ -301,7 +301,7 @@ export function QcSupervisorCard() {
       <CardHeader
         icon={<ShieldCheck className="size-5" />}
         title="ناظر محتوا (Claude)"
-        subtitle="هر خبر پیش از رفتن به کانال با Claude و قاعده‌های قطعی بررسی میشود. اگر چیزی آماده نباشد، پست با بانک محتوا میرود؛ پستی جا نمیافتد."
+        subtitle="هر خبر پیش از رفتن به کانال با Claude و قاعده‌های قطعی بررسی میشود. اگر چیزی آماده نباشد، پست فقط با پروکسی‌ها میرود؛ پستی جا نمیافتد."
       />
       <div className="flex flex-col gap-3 p-4 sm:p-5">
         {query.isPending ? (

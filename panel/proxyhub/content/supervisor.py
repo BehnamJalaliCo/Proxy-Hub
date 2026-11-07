@@ -37,8 +37,9 @@ transaction open while Claude answers:
    ``source_max_reject_pct`` or more (with at least ``source_min`` of them) is turned off, with a
    Persian reason on the sources page (:func:`judge_source`).
 7. **Never a skipped post**: when nothing is approved in time (Claude down, over its cap, every
-   candidate rejected, no source works) the publisher takes the evergreen content bank as before
-   (proxyhub/posts/publisher.py). Nothing here can stop a post.
+   candidate rejected, no source works) the publisher takes an approved item the owner wrote in the
+   content bank, else posts the links alone under the panel's title (proxyhub/posts/publisher.py;
+   the seeded evergreen items were retired, D58). Nothing here can stop a post.
 8. **Owner alerts**, only for what code cannot fix, each at most once per episode and then once a day
    (:func:`alert_due`): Claude unreachable for ``alert_after_hours`` (bridge gone, login expired,
    subscription limit, API key refused), and every source failing for as long.
