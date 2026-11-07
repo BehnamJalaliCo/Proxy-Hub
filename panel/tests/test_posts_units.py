@@ -30,10 +30,12 @@ from proxyhub.posts.publisher import (
     views_for_new_post,
     with_marks,
 )
+from proxyhub.reality.settings import RealitySettings
 from proxyhub.telegram.schedule import TEHRAN, QuietWindow
 from proxyhub.telegram.templates import (
     ALL_DEAD_LINE,
     BODY_TAGS,
+    CONFIG_VALIDITY_HOURS,
     MAX_MESSAGE_CHARS,
     NBSP,
     PAUSED_LINE,
@@ -103,7 +105,7 @@ def one_config_per_quote(post: str) -> bool:
 
 CONTENT = compose_content("💡 عنوان <آزمایشی>", "متن <b>پررنگ</b> و <i>کج</i>\nخط دوم")
 EXP = datetime(2026, 11, 5, 15, 0, tzinfo=UTC)  # Thursday 18:30 Tehran
-LINE = "🔒 کانفیگ V2Ray — اعتبار تا پنجشنبه ساعت ۱۸:۳۰"
+LINE = "🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت"  # the period, not the end (the owner, 2026-11-07)
 QUOTE = "<blockquote expandable>"
 
 
@@ -114,11 +116,11 @@ def test_post_is_title_body_proxy_grid_config_and_tag_in_that_order() -> None:
     sec = secret()
     tcp, xhttp = rl(1, expires=EXP, variant="TCP"), rl(1, expires=EXP, variant="XHTTP", companion=True)
     post = render_post(CONTENT, [mt(1, sec=sec), mt(2), mt(3), tcp, xhttp], "@ipoxxo").text
-    assert post.startswith("<b>💡 عنوان &lt;آزمایشی&gt;</b>\n\n<blockquote>متن <b>پررنگ</b>")
+    assert post.startswith("<b>💡 عنوان &lt;آزمایشی&gt;</b>\n\nمتن <b>پررنگ</b>")  # plain text, no quote
     # Right under the body: the proxy words, two to a row with a bullet between them; no header,
     # no mark, the whole word is the link.
     assert (
-        '</blockquote>\n\n<a href="https://t.me/proxy?server=slot1.example.com'
+        'خط دوم\n\n<a href="https://t.me/proxy?server=slot1.example.com'
         f'&amp;port=8443&amp;secret={sec}">{word(1)}</a>{WORD_SEPARATOR}<a href="' in post
     )
     assert f">{word(2)}</a>\n<a href=" in post and f">{word(3)}</a>\n\n🔒 " in post
@@ -131,7 +133,7 @@ def test_post_is_title_body_proxy_grid_config_and_tag_in_that_order() -> None:
     # No section headers, no ⚡, no <pre> (Telegram nests no pre in a quote), no «کانفیگ ۱».
     for gone in ("<pre", "⚡", "📡", "🔐", "⏳", "پروکسی‌ها", "کانفیگ ۱", "اتصال"):
         assert gone not in post, gone
-    assert post.count("<blockquote") == 3  # the body's, then one per config link
+    assert post.count("<blockquote") == 2  # one per config link; the body is plain text
     assert visible_text(post).count("https://") == 0
     assert ALL_DEAD_LINE not in post
     assert fits(post)
@@ -185,8 +187,7 @@ def test_a_config_and_its_xhttp_link_share_one_line_each_in_its_own_quote() -> N
     alone = rl(2, expires=later)
     post = render_post(None, [tcp, xhttp, alone], "@ipoxxo").text
     assert post == (
-        f"{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{quoted(xhttp)}\n\n"
-        f"🔒 کانفیگ V2Ray — اعتبار تا پنجشنبه ساعت ۲۰:۳۰\n{quoted(alone)}\n\n—\n🔗 ‎@ipoxxo"
+        f"{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{quoted(xhttp)}\n\n{LINE}\n{quoted(alone)}\n\n—\n🔗 ‎@ipoxxo"
     )  # a config without its XHTTP link: no label (an older post may carry several configs)
     assert one_config_per_quote(post) and post.count(QUOTE) == 3
     # Half of the pair is not live: its status line takes its place under its label, OUTSIDE any
@@ -198,7 +199,7 @@ def test_a_config_and_its_xhttp_link_share_one_line_each_in_its_own_quote() -> N
     other = render_post(
         None, [full_tcp, rl(1, expires=later, variant="XHTTP", companion=True)], "@ipoxxo"
     ).text
-    assert f"۲۰:۳۰\nTCP\n🔴 ظرفیت این کانفیگ پر شد\n\nXHTTP\n{QUOTE}<code>" in other
+    assert f"{LINE}\nTCP\n🔴 ظرفیت این کانفیگ پر شد\n\nXHTTP\n{QUOTE}<code>" in other
     assert one_config_per_quote(other) and other.count(QUOTE) == 1
     # Both end: ONE status line for the pair, no quote; the pause line only when both are paused.
     for statuses, line in [
@@ -211,7 +212,7 @@ def test_a_config_and_its_xhttp_link_share_one_line_each_in_its_own_quote() -> N
             PostLink(kind="reality", status=statuses[1], variant="XHTTP", companion=True),  # type: ignore[arg-type]
         ]
         ended = render_post(None, [*pair, alone], "@ipoxxo").text
-        later_line = "🔒 کانفیگ V2Ray — اعتبار تا پنجشنبه ساعت ۲۰:۳۰"
+        later_line = LINE
         assert ended.startswith(f"{line}\n\n{later_line}\n{QUOTE}"), statuses
         assert ended.count(QUOTE) == 1 and " — TCP" not in ended and "XHTTP" not in ended
     # Two ends in one pair (never expected): the line names the earlier one.
@@ -229,18 +230,13 @@ def test_all_dead_gets_the_closing_line_and_owner_texts() -> None:
     assert post.index(ALL_DEAD_LINE) < post.index("🔗 ‎@ipoxxo")
 
 
-def test_expiry_names_the_tehran_weekday() -> None:
-    # 23:00 UTC on Thursday is 02:30 on Friday in Tehran: the weekday follows Tehran, not UTC.
-    late = render_post(None, [rl(1, expires=datetime(2026, 11, 5, 23, 0, tzinfo=UTC))], "@ipoxxo").text
-    assert late.startswith("🔒 کانفیگ V2Ray — اعتبار تا جمعه ساعت ۰۲:۳۰\n")
-    days = {
-        render_post(None, [rl(1, expires=datetime(2026, 11, d, 9, 0, tzinfo=UTC))], "@ipoxxo")
-        .text.split("اعتبار تا ", 1)[1]
-        .split(" ساعت", 1)[0]
-        for d in range(2, 9)
-    }
-    assert days == {"دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه"}
-    # A config that never ends: the line without an end time.
+def test_a_config_line_states_its_period_not_its_end() -> None:
+    # The owner (2026-11-07): «اعتبار ۴۸ ساعت», never a weekday and a clock.
+    for end in (datetime(2026, 11, 5, 23, 0, tzinfo=UTC), datetime(2026, 11, 8, 9, 0, tzinfo=UTC)):
+        text = render_post(None, [rl(1, expires=end)], "@ipoxxo").text
+        assert text.startswith(f"{LINE}\n") and "ساعت ۰" not in text.split("\n", 1)[0]
+    assert CONFIG_VALIDITY_HOURS == RealitySettings().cap_hours  # the line tells the configs' real period
+    # A config that never ends: the line without a period.
     assert render_post(None, [rl(1)], "@ipoxxo").text.startswith(f"🔒 کانفیگ V2Ray\n{QUOTE}<code>")
 
 
@@ -320,7 +316,7 @@ def test_content_is_shortened_but_links_and_tag_never() -> None:
     assert post.text.count("<a href=") == 12 and post.text.count("<code>") == 3
     assert post.text.count(QUOTE) == 3
     assert post.text.endswith("🔗 ‎@ipoxxo")
-    assert post.content_html.endswith("…</blockquote>")
+    assert post.content_html.endswith("…")
     assert len(post.text) <= MAX_MESSAGE_CHARS and utf16_len(visible_text(post.text)) <= MAX_MESSAGE_CHARS
 
 
@@ -387,12 +383,12 @@ def test_too_many_links_raise_and_fit_drops_from_the_end() -> None:
     assert fits(rendered.text)
 
 
-def test_body_keeps_only_body_tags_and_never_nests_blockquotes() -> None:
+def test_body_keeps_only_body_tags_and_is_plain_text() -> None:
     html_in = (
         '<blockquote>نقل</blockquote><pre>کد</pre><script>x</script><a href="javascript:alert(1)">بد</a>'
     )
     out = compose_content("t", html_in)
-    assert out.count("<blockquote>") == 1 and "<pre>" not in out and "<script>" not in out
+    assert "<blockquote>" not in out and "<pre>" not in out and "<script>" not in out
     assert "javascript" not in out and "نقل" in out and "کد" in out and "بد" in out
 
 

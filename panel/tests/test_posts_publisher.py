@@ -134,7 +134,7 @@ def word(n: int) -> str:
 
 
 SEP = WORD_SEPARATOR
-LOCK = "🔒 کانفیگ V2Ray — اعتبار تا "
+LOCK = "🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت"
 QUOTE = "<blockquote expandable>"
 # A post made before D48 carried up to three configs; these tests use that to see several configs
 # of one post end (each is still drawn in the compact layout).
@@ -174,7 +174,9 @@ async def test_due_post_carries_content_links_and_tag(engine: AsyncEngine, vault
     first = (
         await rows(engine, "SELECT id, title FROM content_items WHERE origin = 'seed' ORDER BY id LIMIT 1")
     )[0]
-    assert body.startswith(f"<b>{first.title}</b>\n\n<blockquote>")
+    assert body.startswith(f"<b>{first.title}</b>\n\n") and not body.startswith(
+        f"<b>{first.title}</b>\n\n<blockquote>"
+    )  # the body is plain text (2026-11-07)
     for i, node in enumerate(nodes, start=1):
         assert f"server=slot{i}.proxyhub-posts.example&amp;port=8443&amp;secret={node_secret(node)}" in body
     # D48: one config a post (the first post starts at slot 1), as one line over a collapsed quote.
@@ -919,9 +921,11 @@ async def probed(engine: AsyncEngine, node: Any, at: datetime, cells: dict[str, 
 
 
 def grid_rows(body: str) -> list[str]:
-    """The visible rows of the proxy grid: the block right after the content's quote."""
-    after = body.split("</blockquote>\n\n", 1)[1]
-    return visible_text(after.split("\n\n", 1)[0]).split("\n")
+    """The visible rows of the proxy grid: the block that holds the first proxy link."""
+    i = body.index('<a href="https://t.me/proxy')
+    start = body.rfind("\n\n", 0, i) + 2
+    end = body.find("\n\n", i)
+    return visible_text(body[start:end]).split("\n")
 
 
 async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep_the_name(
@@ -975,7 +979,7 @@ async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep
         assert await publish(engine, second) == "queued"
         body2 = (await jobs(engine, "send_post"))[-1].payload["text"]
         assert grid_rows(body2)[0].startswith("رایتل • ")
-        assert "همراه" not in visible_text(body2.split("—")[0].split("</blockquote>", 1)[1])
+        assert not any("همراه" in row for row in grid_rows(body2))
     finally:
         async with engine.begin() as conn:
             await conn.execute(text("DELETE FROM probe_cycles"))
