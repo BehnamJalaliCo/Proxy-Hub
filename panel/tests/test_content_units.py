@@ -428,7 +428,7 @@ def test_proxies_are_not_content_but_a_proxy_channels_news_is() -> None:
         "پروکسی ۱ • پروکسی ۲ • پروکسی ۳\n"
         "🔥 پروکسی‌های جدید پرسرعت همراه اول\n"
         "vless://00000000-0000-0000-0000-000000000000@198.51.100.7:443?security=reality#de\n"
-        "tg://proxy?server=198.51.100.7&port=443&secret=ee0123456789abcdef0123456789abcdef\n"
+        "tg://proxy?server=198.51.100.7&port=443&secret=0123456789abcdef0123456789abcdef\n"
         "🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت\n"
         "@imtproto"
     )
@@ -457,8 +457,8 @@ def test_the_preview_counts_proxy_links_hidden_behind_words() -> None:
         + _message(
             201,
             '<div class="tgme_widget_message_text"><a href="https://t.me/proxy?server=198.51.100.7&amp;port=443'
-            '&amp;secret=ee0123456789abcdef0123456789abcdef">اتصال</a> • <a href="tg://proxy?server=x&amp;port=1'
-            '&amp;secret=dd0123456789abcdef0123456789abcdef">اتصال</a></div>',
+            '&amp;secret=0123456789abcdef0123456789abcdef">اتصال</a> • <a href="tg://proxy?server=x&amp;port=1'
+            '&amp;secret=fedcba9876543210fedcba9876543210">اتصال</a></div>',
         )
         + _message(
             202, '<div class="tgme_widget_message_text">خبر با <a href="https://example.com/x">لینک</a></div>'

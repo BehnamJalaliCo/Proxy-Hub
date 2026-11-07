@@ -272,8 +272,8 @@ def test_proxies_hidden_behind_a_posts_words_are_counted() -> None:
     """A proxy channel hides its proxies behind words (text links); their URLs come out of the
     message's entities as plain strings and only their number reaches the item."""
     urls = (
-        "https://t.me/proxy?server=198.51.100.7&port=443&secret=ee0123456789abcdef0123456789abcdef",
-        "tg://proxy?server=198.51.100.8&port=443&secret=dd0123456789abcdef0123456789abcdef",
+        "https://t.me/proxy?server=198.51.100.7&port=443&secret=0123456789abcdef0123456789abcdef",
+        "tg://proxy?server=198.51.100.8&port=443&secret=fedcba9876543210fedcba9876543210",
         "https://example.com/news",
     )
     entities = [types.MessageEntityTextUrl(offset=0, length=5, url=u) for u in urls]
