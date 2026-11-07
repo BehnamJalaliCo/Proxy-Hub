@@ -507,3 +507,15 @@ def test_each_role_has_its_type_and_size() -> None:
         media.check_download("photo", "image/jpeg", b"<svg/>")
     # the panel's limits stay under Telegram's (bot: 10 MB photo, 50 MB file)
     assert media.PHOTO_MAX_BYTES < media.TG_BOT_PHOTO_MAX and media.VIDEO_MAX_BYTES < media.TG_BOT_FILE_MAX
+
+
+def test_a_caption_body_keeps_its_lines_and_one_bold_phrase() -> None:
+    """The owner (2026-11-07, after the competitor's channel): short lines, the key phrase bold."""
+    from proxyhub.content.candidates import body_html, caption_html
+
+    assert body_html("خط اول\n**این مهم است**\nخط سوم") == "خط اول\n<b>این مهم است</b>\nخط سوم"
+    assert body_html("<i>x</i> **a<b>c**") == "&lt;i&gt;x&lt;/i&gt; <b>a&lt;b&gt;c</b>"  # escaped first
+    assert body_html("ستاره‌ی تنها ** بی جفت") == "ستاره‌ی تنها  بی جفت"  # a stray pair goes
+    assert body_html("**دو\nخط**") == "دو\nخط"  # bold never spans a line
+    html_out = caption_html("🔻 عنوان", "خط یک\n**مهم**")
+    assert html_out == "<b>🔻 عنوان</b>\n\nخط یک\n<b>مهم</b>" and "<blockquote" not in html_out

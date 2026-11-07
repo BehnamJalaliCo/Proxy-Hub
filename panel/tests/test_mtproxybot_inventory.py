@@ -173,7 +173,9 @@ SCREEN = Screen(
 )
 
 
-def seen_menu(*channels: str, remove_buttons: int = 1, names_proxy: bool = True) -> WalkResult:
+def seen_menu(
+    *channels: str, remove_buttons: int = 1, names_proxy: bool = True, title: str | None = None
+) -> WalkResult:
     return WalkResult(
         result=MenuSeen(
             channels=channels,
@@ -181,6 +183,7 @@ def seen_menu(*channels: str, remove_buttons: int = 1, names_proxy: bool = True)
             remove_buttons=remove_buttons,
             remove_named=remove_buttons == 1 and names_proxy,
             screens=(SCREEN,),
+            promoted_title=title,
         ),
         last_step=Step.PRESSED_PROXY,
         messages_sent=2,
@@ -834,3 +837,47 @@ async def test_a_message_telegram_refused_still_counts_as_tried(engine: AsyncEng
         0,
     )
     assert lines == ["line:/myproxies"]
+
+
+async def test_the_bot_names_the_sponsor_by_its_title(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """P26: «Promoted channel: VPN & MTProxy | پروکسی.» names the channel by its TITLE, not @name."""
+    from sqlalchemy import text
+
+    from proxyhub.telegram import store as tg_store
+
+    await seed(engine, seal_key)
+    async with engine.begin() as db:
+        await tg_store.save_channel(db, "main", {"username": "@ipoxxo", "title": "VPN & MTProxy | پروکسی"})
+    await inventory.request_job(engine, inventory.INVENTORY, actor="admin:owner", now=datetime.now(UTC))
+    await read_the_list(engine, vault, *ALL_LABELS)
+    await record(engine, await prepare(engine, vault), seen_menu(title="VPN  &  MTProxy | پروکسی"))
+    v = await view(engine)
+    assert by_address(v)[LIVE_HOST]["promotion"] == "ok" and v["counts"]["promotion_problem"] == 0
+    async with engine.connect() as db:
+        (live,) = [e for e in await inventory.load_entries(db) if e.host == LIVE_HOST]
+    assert live.menu_note == "title:vpn & mtproxy | پروکسی"
+    # A stored title older than the channel's: our flow promoted this proxy to @ipoxxo, so still ok.
+    async with engine.begin() as db:
+        await tg_store.save_channel(db, "main", {"username": "@ipoxxo", "title": "IPOXXO | VPN & Proxy"})
+    assert by_address(await view(engine))[LIVE_HOST]["promotion"] == "ok"
+    # Neither the title nor our own record says @ipoxxo: another channel.
+    async with engine.begin() as db:
+        await db.execute(text("UPDATE mtproxy_registrations SET sponsor_channel = NULL"))
+    assert by_address(await view(engine))[LIVE_HOST]["promotion"] == "other"
+
+
+def test_the_promoted_title_is_read_from_the_real_screen() -> None:
+    from proxyhub.sponsor import replies
+
+    real = (
+        "Proxy slot3.example.online:8443 with the tag 0123abcd.\n"
+        "Promoted channel: VPN & MTProxy | پروکسی.\nHow can I help?"
+    )
+    assert replies.promoted_title(real) == "VPN & MTProxy | پروکسی"
+    assert (
+        replies.promoted_title("Proxy a:1 with the tag x.\nPromoted channel: n/a.\nHow can I help?") is None
+    )
+    assert replies.promoted_title("Proxy a:1 with the tag x.\nHow can I help?") is None
+    assert replies.title_key("  VPN  &  MTProxy ") == "vpn & mtproxy"

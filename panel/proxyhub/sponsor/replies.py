@@ -416,6 +416,29 @@ def shown_channels(text: str) -> list[str]:
     return found
 
 
+_PROMOTED: Final = re.compile(r"promoted channel:[ \t]*([^\n]*)", re.IGNORECASE)
+_NO_PROMOTION: Final = frozenset({"", "n/a", "na", "none", "-", "—"})
+TITLE_KEEP: Final = 54  # what menu_note keeps of a title (the column holds 60 with "title:")
+
+
+def promoted_title(text: str) -> str | None:
+    """What a proxy's screen shows after "Promoted channel:", when it is a channel's TITLE (P26:
+    «Promoted channel: VPN & MTProxy | پروکسی.»): the line without its final dot, or None when
+    the screen has no such line or says "n/a" (no sponsor set)."""
+    m = _PROMOTED.search(text)
+    if m is None:
+        return None
+    value = m.group(1).strip()
+    if value.endswith("."):
+        value = value[:-1].rstrip()
+    return None if value.lower() in _NO_PROMOTION else value
+
+
+def title_key(title: str) -> str:
+    """A title for comparison: case folded, spaces collapsed, at most :data:`TITLE_KEEP` long."""
+    return " ".join(title.casefold().split())[:TITLE_KEEP]
+
+
 def removal_done(text: str) -> bool:
     """The bot says the proxy is gone: "deleted"/"removed", and no question, refusal or doubt."""
     return bool(REMOVAL_DONE.search(text)) and not REFUSAL.search(text) and not _NOT_DONE.search(text)

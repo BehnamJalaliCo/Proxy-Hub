@@ -205,7 +205,7 @@ def system_prompt(
     else:
         image_line = "The candidate has no image; it will be posted as text."
     body_rule = (
-        f"- body: at most {limits.body_max} characters, one to three short sentences with the key facts; no emoji."
+        f"- body: at most {limits.body_max} characters, two to four short lines with the key facts, one sentence a line (a line break between them), in a natural, readable style; you may make the ONE most important phrase bold by wrapping it in double asterisks, like **this**; no other formatting and no emoji."
         if limits.body_max >= BODY_MIN_USEFUL
         else f'- body: at most {limits.body_max} characters; an empty string "" is fine. No emoji.'
     )

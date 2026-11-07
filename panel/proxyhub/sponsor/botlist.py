@@ -285,6 +285,9 @@ class MenuSeen:
     remove_buttons: int
     remove_named: bool
     screens: tuple[Screen, ...]
+    # P26: the bot names the sponsor by the channel's TITLE («Promoted channel: VPN & MTProxy |
+    # پروکسی.»), not by its @name; None when the screen shows none ("n/a").
+    promoted_title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -340,6 +343,7 @@ class MenuWalk:
             if not self.remove:
                 count = len(_distinct(removes))
                 return MenuSeen(
+                    promoted_title=replies.promoted_title(text),
                     channels=tuple(replies.shown_channels(text)),
                     names_proxy=replies.names_proxy(text, words),
                     remove_buttons=count,
