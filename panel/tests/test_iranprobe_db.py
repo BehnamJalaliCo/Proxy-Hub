@@ -192,3 +192,24 @@ async def test_every_location_closed_is_told_once_a_day(engine: AsyncEngine) -> 
         assert await raise_alerts(conn, [], now + timedelta(hours=26)) == []
         assert await raise_alerts(conn, found, now + timedelta(hours=27)) == []
         assert await raise_alerts(conn, found, now + timedelta(hours=27, minutes=10)) == []
+
+
+async def test_a_full_hetzner_account_is_told_once_a_week(engine: AsyncEngine) -> None:
+    """The owner (2026-11-07) cannot raise the limit: not every 12 hours, at most weekly."""
+    now = datetime.now(UTC)
+    found = [Finding("account_server_limit_reached", "⚠️ ناوگان: حساب هتزنر پر است.", {"slots": [4]})]
+    async with engine.begin() as conn:
+        await set_owner_chat(conn, 424242, now)
+    sent: list[list[str]] = []
+    for at in (
+        now,
+        now + timedelta(minutes=10),
+        now + timedelta(hours=13),
+        now + timedelta(days=3),
+        now + timedelta(days=7, minutes=11),
+    ):
+        async with engine.begin() as conn:
+            sent.append(await raise_alerts(conn, found, at))
+            if at == now:  # it has lasted long enough
+                await conn.execute(text("UPDATE fleet_alerts SET since = since - interval '6 minutes'"))
+    assert sent == [[], ["account_server_limit_reached"], [], [], ["account_server_limit_reached"]]

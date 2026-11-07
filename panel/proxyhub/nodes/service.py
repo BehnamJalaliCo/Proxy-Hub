@@ -591,22 +591,24 @@ async def live_servers(
     reader_factory: ReaderFactory = HetznerReader,
 ) -> list[dict[str, Any]]:
     """Read-only look, LIVE, at every observed node account: our servers (label managed-by) by id,
-    name and labels, and only a COUNT of any other server (CLAUDE.md rule 4). For the runbook's
-    "nothing of ours is left" check; changes nothing anywhere."""
-    from proxyhub.accounts.hetzner_io import observe_servers
+    name and labels, and only a COUNT of any other server (CLAUDE.md rule 4); the server limit the
+    fleet learned; and the project's Primary IPs (counts by type, and the ones no server holds, by
+    id and name, never an address). For the runbook's "nothing of ours is left" and "is the account
+    really full" checks; changes nothing anywhere."""
+    from proxyhub.accounts.hetzner_io import observe_primary_ips, observe_servers
     from proxyhub.accounts.state import OBSERVED_STATES
     from proxyhub.db.models import HetznerAccount
 
     accounts = (
         await db.execute(
-            select(HetznerAccount.id, HetznerAccount.name).where(
+            select(HetznerAccount.id, HetznerAccount.name, HetznerAccount.learned_server_limit).where(
                 HetznerAccount.state.in_([s.value for s in OBSERVED_STATES])
             )
         )
     ).all()
     vault = vault_factory()
     out: list[dict[str, Any]] = []
-    for account_id, name in accounts:
+    for account_id, name, learned in accounts:
         reader = await account_reader(db, vault, account_id, reader_factory)
         if reader is None:
             out.append({"account": name, "error": "token_missing"})
@@ -616,14 +618,26 @@ async def live_servers(
         except HetznerFailure as failure:
             out.append({"account": name, "error": f"{failure.kind}:{failure.code}"})
             continue
-        out.append(
-            {
-                "account": name,
-                "ours": [
-                    {"hetzner_id": s.hetzner_id, "name": s.name, "labels": dict(s.labels)}
-                    for s in obs.managed
+        entry: dict[str, Any] = {
+            "account": name,
+            "ours": [
+                {"hetzner_id": s.hetzner_id, "name": s.name, "labels": dict(s.labels)} for s in obs.managed
+            ],
+            "others": obs.foreign_count,
+            "learned_server_limit": learned,
+        }
+        try:
+            ips = await call_hetzner(lambda r=reader: observe_primary_ips(r))  # type: ignore[misc]
+        except HetznerFailure as failure:
+            entry["primary_ips"] = {"error": f"{failure.kind}:{failure.code}"}
+        else:
+            entry["primary_ips"] = {
+                "ipv4": ips.ipv4,
+                "ipv6": ips.ipv6,
+                "unassigned": [
+                    {"id": u.id, "type": u.type, "name": u.name, "auto_delete": u.auto_delete}
+                    for u in ips.unassigned
                 ],
-                "others": obs.foreign_count,
             }
-        )
+        out.append(entry)
     return out

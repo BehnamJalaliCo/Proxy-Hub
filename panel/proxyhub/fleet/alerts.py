@@ -8,7 +8,9 @@ out burned IPs again and again.
 Each kind is one row in ``fleet_alerts``: an alert goes out when the condition has lasted a short
 while (transient blocks stay quiet), is repeated at most every 12 hours while it lasts, and once it
 cleared, a new occurrence is told again (at most hourly). "Every allowed location is closed from
-Iran" is told at most once a day (:data:`DAILY`). Every alert is also in ``actions_log``.
+Iran" is told at most once a day (:data:`DAILY`). "The Hetzner account is full" is told at most once
+a week (:data:`WEEKLY`; the owner, 2026-11-07: the limit cannot be raised, so a twice-daily reminder
+is only noise). Every alert is also in ``actions_log``.
 Nothing secret is ever part of an alert.
 """
 
@@ -29,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from proxyhub.db.models_fleet import FleetAlert
 from proxyhub.fleet.actions import iso, log_action
 from proxyhub.fleet.costs import money
-from proxyhub.fleet.lifecycle import NodeState
+from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
 from proxyhub.fleet.planner import FleetPlan, FleetSnapshot
 from proxyhub.telegram.store import enqueue_owner_alert
 from proxyhub.telegram.templates import fa_digits
@@ -64,6 +66,8 @@ CREATE_BLOCKS: dict[str, timedelta] = {
 # for a daily note when every allowed location is closed from Iran).
 DAILY = frozenset({"all_locations_closed"})
 DAY = timedelta(days=1)
+WEEKLY = frozenset({"account_server_limit_reached"})
+WEEK = timedelta(days=7)
 # can_delete refusals the code cannot fix (server_not_observed and the kill switch clear by themselves).
 DELETE_BLOCKS = frozenset(
     {
@@ -94,6 +98,27 @@ def _slots_fa(slots: list[int]) -> str:
     return f"جایگاه {nums}" if len(set(slots)) == 1 else f"جایگاه‌های {nums}"
 
 
+def _account_full_text(snap: FleetSnapshot) -> str:
+    """Every account is full. Burned servers already leave first (D57), so say that the room is
+    held by working servers, how big the account is, and what the owner can still do."""
+    active = [a for a in snap.accounts if a.state == "active"]
+    limit = active[0].learned_server_limit if len(active) == 1 else None
+    size = f" (سقف: {fa_digits(limit)} سرور)" if limit is not None else ""
+    text = (
+        f"حساب هتزنر پر است{size}. سرورهای سوخته خودکار حذف میشوند و جایگزین میگیرند، "
+        "ولی برای جایگاه‌های خالی جا نیست."
+    )
+    if any(n.is_test and n.state in LIVE_STATES for n in snap.nodes):
+        text += (
+            " node آزمایشی هم یک جا گرفته است؛ اگر لازمش ندارید، در صفحه‌ی nodeها بازنشسته‌اش کنید "
+            "تا یک جایگاه دیگر ساخته شود."
+        )
+    return text + (
+        " برای جای بیشتر: افزایش سقف از هتزنر، یا یک حساب هتزنر تازه در صفحه‌ی «حساب‌های هتزنر». "
+        "تا وقتی وضع همین است، این پیام هفته‌ای یک بار تکرار میشود."
+    )
+
+
 def _create_text(code: str, slots: list[int], plan: FleetPlan, snap: FleetSnapshot) -> str:
     need = f"⚠️ ناوگان: {_slots_fa(slots)} به سرور تازه نیاز دارد، ولی "
     s = snap.settings
@@ -114,10 +139,7 @@ def _create_text(code: str, slots: list[int], plan: FleetPlan, snap: FleetSnapsh
         "node_cap_not_set": (
             "سقف تعداد node در «تنظیمات» داشبورد تعیین نشده است؛ بی آن هیچ سروری ساخته نمیشود."
         ),
-        "account_server_limit_reached": (
-            "حساب هتزنر به سقف تعداد سرورش رسیده است. یک حساب هتزنر تازه در صفحه‌ی «حساب‌های هتزنر» "
-            "اضافه کنید، یا از هتزنر افزایش سقف بخواهید."
-        ),
+        "account_server_limit_reached": _account_full_text(snap),
         "no_active_account": (
             "هیچ حساب هتزنر فعالی نیست. یک حساب تازه در صفحه‌ی «حساب‌های هتزنر» داشبورد اضافه کنید."
         ),
@@ -238,6 +260,8 @@ async def raise_alerts(db: Db, found: list[Finding], now: datetime) -> list[str]
             due = True
         elif f.code in DAILY:
             due = now - last_sent >= DAY
+        elif f.code in WEEKLY:
+            due = now - last_sent >= WEEK
         elif last_sent < since:  # a new streak after the condition had cleared
             due = now - last_sent >= RENOTIFY_GAP
         else:

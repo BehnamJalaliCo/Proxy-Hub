@@ -97,6 +97,50 @@ def observe_servers(reader: HetznerReader) -> ServersObservation:
     return summarize_servers(reader.all_servers())
 
 
+# --- primary IPs (read-only; for the runbook) -------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UnassignedIp:
+    id: int
+    type: str
+    name: str
+    auto_delete: bool
+
+
+@dataclass(frozen=True)
+class PrimaryIpsObservation:
+    """How many Primary IPs the project holds, and the ones no server holds (they still count
+    against the account's Primary IP limit, which Hetzner sets at twice the server limit). Never an
+    address."""
+
+    ipv4: int
+    ipv6: int
+    unassigned: tuple[UnassignedIp, ...]
+
+
+def summarize_primary_ips(ips: Iterable[Any]) -> PrimaryIpsObservation:
+    ips = list(ips)
+    return PrimaryIpsObservation(
+        ipv4=sum(1 for ip in ips if getattr(ip, "type", None) == "ipv4"),
+        ipv6=sum(1 for ip in ips if getattr(ip, "type", None) == "ipv6"),
+        unassigned=tuple(
+            UnassignedIp(
+                id=int(getattr(ip, "id", 0) or 0),
+                type=str(getattr(ip, "type", "") or ""),
+                name=str(getattr(ip, "name", "") or ""),
+                auto_delete=bool(getattr(ip, "auto_delete", False)),
+            )
+            for ip in ips
+            if getattr(ip, "assignee_id", None) is None
+        ),
+    )
+
+
+def observe_primary_ips(reader: HetznerReader) -> PrimaryIpsObservation:
+    return summarize_primary_ips(reader.raw.primary_ips.get_all())
+
+
 # --- live prices ------------------------------------------------------------------------------
 
 
