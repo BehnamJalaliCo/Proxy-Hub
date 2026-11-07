@@ -68,6 +68,12 @@ class PublisherReconciler(Reconciler):
         except Exception as exc:
             _log_failure("status edits", exc)
             self.last["edits"] = "error"
+        try:  # D56: a breaking-news post first; the day plan's slot waits behind it
+            async with conn.begin_nested():
+                self.last["breaking"] = await publisher.publish_breaking(conn, now, harvest, poster)
+        except Exception as exc:
+            _log_failure("breaking post", exc)
+            self.last["breaking"] = "error"
         try:
             async with conn.begin_nested():
                 self.last["post"] = await publisher.publish_due(conn, now, harvest, poster)

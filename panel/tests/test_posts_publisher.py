@@ -1000,14 +1000,14 @@ async def test_reconciler_runs_both_steps_and_one_failure_does_not_block_the_oth
     first = slot_time(1)
     loop = PublisherReconciler(now=lambda: first, providers=PROVIDERS)
     assert await loop.try_run_once(engine)
-    assert loop.last == {"edits": 0, "post": "queued"}
+    assert loop.last == {"edits": 0, "breaking": "none", "post": "queued"}
     await deliver(engine, (await jobs(engine, "send_post"))[0].id, message_id=1)
     await set_node(engine, nodes[0], state="burned")
     second = slot_time(2)
     broken = PublisherReconciler(now=lambda: second, providers=PROVIDERS, poster=_EditBreaks())
     with caplog.at_level(logging.DEBUG):
         assert await broken.try_run_once(engine)
-    assert broken.last == {"edits": "error", "post": "queued"}
+    assert broken.last == {"edits": "error", "breaking": "none", "post": "queued"}
     assert len(await jobs(engine, "send_post")) == 2 and await jobs(engine, "edit_post") == []
     assert "RuntimeError" in caplog.text and "edit step breaks; text was" not in caplog.text.replace(
         "edit step breaks; text was {text_html}", ""

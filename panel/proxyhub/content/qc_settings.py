@@ -12,7 +12,7 @@ field                      default      meaning
                                         ``off`` (no Claude: posts use the content bank)
 ``bridge_model``           ``sonnet``   Claude Code's ``--model`` (an alias follows the newest model)
 ``api_model``              Sonnet 5.5   the Messages API model (Sonnet 5.5, or Haiku 5.5 to save)
-``bridge_daily_cap``       40           reviews through the bridge in any 24 hours (0 = none)
+``bridge_daily_cap``       80           reviews through the bridge in any 24 hours (0 = none)
 ``api_daily_cap``          40           reviews through the API in any 24 hours (0 = none)
 ``per_slot``               3            candidates sent to Claude for one posting slot at most
 ``lead_minutes``           45           how long before a slot the supervisor starts choosing for it
@@ -26,6 +26,12 @@ field                      default      meaning
 ``source_min``             10           ... once it has at least this many
 ``source_max_reject_pct``  80           ... and it is turned off when this share or more was rejected
 ``alert_after_hours``      6            the owner hears of Claude or every source being down after this
+``breaking_enabled``       on           D56: breaking news goes out at once, out of the day plan and in
+                                        no-post hours too (proxyhub/content/breaking.py)
+``breaking_per_day``       5            ... at most this many breaking posts in any 24 hours (0 = none)
+``breaking_gap_minutes``   20           ... at least this long between two of them
+``breaking_max_age_min``   30           ... only for a story younger than this (by its first post)
+``breaking_min_sources``   2            ... carried by at least this many different sources
 =========================  ===========  ==============================================================
 
 A stored value that no longer validates gives the defaults, never an error loop. No legal opinion is
@@ -100,7 +106,7 @@ class QcConfig(BaseModel):
     backend: Literal["auto", "bridge", "api", "off"] = "auto"
     bridge_model: str = "sonnet"
     api_model: Literal["claude-sonnet-5-5", "claude-haiku-5-5"] = "claude-sonnet-5-5"
-    bridge_daily_cap: int = Field(default=40, ge=0, le=500)
+    bridge_daily_cap: int = Field(default=80, ge=0, le=500)
     api_daily_cap: int = Field(default=40, ge=0, le=500)
     per_slot: int = Field(default=3, ge=1, le=10)
     lead_minutes: int = Field(default=45, ge=10, le=180)
@@ -112,6 +118,12 @@ class QcConfig(BaseModel):
     source_min: int = Field(default=10, ge=3, le=100)
     source_max_reject_pct: int = Field(default=80, ge=50, le=100)
     alert_after_hours: int = Field(default=6, ge=1, le=48)
+    # D56: breaking news (proxyhub/content/breaking.py).
+    breaking_enabled: bool = True
+    breaking_per_day: int = Field(default=5, ge=0, le=20)
+    breaking_gap_minutes: int = Field(default=20, ge=5, le=240)
+    breaking_max_age_min: int = Field(default=30, ge=10, le=120)
+    breaking_min_sources: int = Field(default=2, ge=2, le=5)
 
     @field_validator("bridge_model")
     @classmethod

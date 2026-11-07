@@ -19,7 +19,10 @@ with exactly these keys, and nothing else, else it is unparsable and the candida
 * ``reasons``: 1 to 5 short strings (Persian), shown to the owner;
 * ``category``: one of :data:`~proxyhub.content.qc_settings.CATEGORIES`;
 * ``flags``: an object of exactly the eight safety flags, each true or false;
-* ``title`` and ``body``: strings (empty when rejected).
+* ``title`` and ``body``: strings (empty when rejected);
+* ``breaking``: true or false (decision D56): whether the item is breaking news. Only a hint: the
+  item goes out at once only when code also finds the story young and carried by several sources
+  (proxyhub/content/breaking.py).
 
 **A video** is judged as a whole: Claude is told how many frames it sees, that they are in order
 from the first second to the last, and that any frame that breaks a rule rejects the item. A video
@@ -48,7 +51,7 @@ MAX_REASONS: Final = 5
 MAX_REASON_CHARS: Final = 240
 MAX_ANSWER_CHARS: Final = 12_000
 DECISIONS: Final = ("approve", "reject")
-KEYS: Final = frozenset({"decision", "reasons", "category", "flags", "title", "body"})
+KEYS: Final = frozenset({"decision", "reasons", "category", "flags", "title", "body", "breaking"})
 
 CATEGORY_TEXT: Final[dict[str, str]] = {
     "politics": "politics",
@@ -126,8 +129,9 @@ def output_schema() -> dict[str, Any]:
             },
             "title": {"type": "string"},
             "body": {"type": "string"},
+            "breaking": {"type": "boolean"},
         },
-        "required": ["decision", "reasons", "category", "flags", "title", "body"],
+        "required": ["decision", "reasons", "category", "flags", "title", "body", "breaking"],
         "additionalProperties": False,
     }
 
@@ -229,9 +233,12 @@ Report each of these flags as true or false; reject the item when any of them is
 - Never write: links or web addresses, @usernames, hashtags, phone numbers, the name of the source or of any channel, invitations to join or follow, or a signature.
 - Only facts that are in the candidate. Do not add, guess or change facts, names, numbers or dates.
 
+# Breaking news
+Set "breaking" to true only when you approve AND the item reports a major event that has just happened or was just announced, that a large share of a general Iranian audience would want to know right now: for example a military attack, a strike or an escalation in a war, the death or fall of a leader, a major disaster, a sudden large move of the dollar or of gold prices, or the unveiling of a very popular product (for example a new iPhone). Set it to false for analysis, opinion, background, a minor update or follow-up of an older story, a routine statement, sport (except a historic result), entertainment, an advertisement, and for any claim that is unconfirmed, a rumour or attributed only to anonymous sources. When in doubt, false.
+
 # Output
 Answer with exactly one JSON object and nothing else: no text before or after it and no code fence. The keys and nothing more:
-{{"decision": "approve" or "reject", "reasons": [one to three short Persian sentences giving the reasons for your decision], "category": one of {json.dumps(list(CATEGORIES))}, "flags": {{{flags_json}}}, "title": "...", "body": "..."}}
+{{"decision": "approve" or "reject", "reasons": [one to three short Persian sentences giving the reasons for your decision], "category": one of {json.dumps(list(CATEGORIES))}, "flags": {{{flags_json}}}, "title": "...", "body": "...", "breaking": true or false}}
 """
 
 
@@ -250,6 +257,7 @@ class Verdict:
     flags: frozenset[str]  # the flags reported true
     title: str
     body: str
+    breaking: bool = False
 
 
 _FENCE = re.compile(r"^```(?:json)?\s*\n(.*)\n```$", re.DOTALL)
@@ -296,6 +304,9 @@ def parse_verdict(text: str | None) -> Verdict:
         raise VerdictInvalid("flags")
     if not isinstance(title, str) or not isinstance(body, str) or len(title) > 400 or len(body) > 4000:
         raise VerdictInvalid("title or body")
+    breaking = data["breaking"]
+    if not isinstance(breaking, bool):
+        raise VerdictInvalid("breaking")
     return Verdict(
         decision=decision,
         reasons=tuple(" ".join(r.split()) for r in reasons),
@@ -303,4 +314,5 @@ def parse_verdict(text: str | None) -> Verdict:
         flags=frozenset(name for name, on in flags.items() if on),
         title=title,
         body=body,
+        breaking=breaking and decision == "approve",
     )

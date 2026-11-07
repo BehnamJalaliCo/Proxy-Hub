@@ -236,7 +236,7 @@ async def _target(conn: AsyncConnection, job: Job, now: datetime) -> Target | st
         chat_id = channel.get("chat_id") if channel else None
         if not isinstance(chat_id, int):
             return await _retry(conn, job, now, "channel_not_set")
-        if role == "main":
+        if role == "main" and job.payload.get("breaking") is not True:  # D56: breaking news goes now
             posting_settings = await store.posting_settings(conn)
             later = next_post_time(
                 now,

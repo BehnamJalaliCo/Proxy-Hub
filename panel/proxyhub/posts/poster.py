@@ -55,10 +55,16 @@ class MediaPayload:
         }
 
 
-def post_payload(role: str, text_html: str, media: MediaPayload | None) -> dict[str, Any]:
+def post_payload(
+    role: str, text_html: str, media: MediaPayload | None, breaking: bool = False
+) -> dict[str, Any]:
+    """``breaking``: a breaking-news post (D56): the outbox sends it in no-post hours too and does
+    not hold it for the gap between two posts (the publisher keeps its own budget)."""
     payload: dict[str, Any] = {"role": role, "text": text_html, "post_kind": POST_KIND}
     if media is not None:
         payload["media"] = media.as_json()
+    if breaking:
+        payload["breaking"] = True
     return payload
 
 
@@ -78,7 +84,13 @@ class Poster(Protocol):
         ...
 
     async def queue_post(
-        self, db: AsyncConnection, *, role: str, text_html: str, media: MediaPayload | None = None
+        self,
+        db: AsyncConnection,
+        *,
+        role: str,
+        text_html: str,
+        media: MediaPayload | None = None,
+        breaking: bool = False,
     ) -> int:
         """Queue a new post for the channel of ``role`` in the caller's transaction; returns the
         outbox job id (``channel_posts.outbox_id`` once it is sent). With ``media`` the post is
@@ -102,9 +114,15 @@ class BotPoster:
         return None  # the bot's own conditions (a bot, a channel) are the publisher's checks
 
     async def queue_post(
-        self, db: AsyncConnection, *, role: str, text_html: str, media: MediaPayload | None = None
+        self,
+        db: AsyncConnection,
+        *,
+        role: str,
+        text_html: str,
+        media: MediaPayload | None = None,
+        breaking: bool = False,
     ) -> int:
-        return await tg_store.enqueue(db, "send_post", post_payload(role, text_html, media))
+        return await tg_store.enqueue(db, "send_post", post_payload(role, text_html, media, breaking))
 
     async def queue_edit(
         self, db: AsyncConnection, *, channel_post_id: int, text_html: str, caption: bool = False
@@ -122,9 +140,15 @@ class OperatorPoster:
         return await operator.unavailable(db, role=role, now=now)
 
     async def queue_post(
-        self, db: AsyncConnection, *, role: str, text_html: str, media: MediaPayload | None = None
+        self,
+        db: AsyncConnection,
+        *,
+        role: str,
+        text_html: str,
+        media: MediaPayload | None = None,
+        breaking: bool = False,
     ) -> int:
-        return await tg_store.enqueue(db, operator.SEND, post_payload(role, text_html, media))
+        return await tg_store.enqueue(db, operator.SEND, post_payload(role, text_html, media, breaking))
 
     async def queue_edit(
         self, db: AsyncConnection, *, channel_post_id: int, text_html: str, caption: bool = False
