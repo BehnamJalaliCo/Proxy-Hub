@@ -18,8 +18,8 @@ units after entity parsing), so it always fits one message.
 ``render_post`` is the publisher's compact layout (posts team, M3.2-M3.4; decision D48, 2026-11-06:
 the link part stays short so news can sit above it):
 
-* a bold title line with one emoji (:data:`TITLE_MARK` when the title has none), and the body in a
-  blockquote (:func:`compose_content`);
+* a bold title line with one emoji (:data:`TITLE_MARK` when the title has none), and the body as
+  plain text under it (:func:`compose_content`; the owner, 2026-11-07: "معمولی و تمیز", no quote);
 * the MTProto links as words, two to a row with " • " between them, and no header (the words say
   what they are). A link's word is «پروکسی», or an operator's name («همراه اول», «رایتل»; never
   «ایرانسل», the owner's choice) when the post was made with the panel's own fresh probe from that
@@ -27,7 +27,8 @@ the link part stays short so news can sit above it):
   never renames a link). Operator-named links come first (MCI, then Rightel), then «پروکسی». A word that shows
   once has no number; a word that repeats is numbered by its place among the same words
   («همراه اول ۱», «همراه اول ۲», «پروکسی ۱» …), Persian digits, no-break spaces inside;
-* each VLESS config as ONE short line, «🔒 کانفیگ V2Ray — اعتبار تا جمعه ساعت ۰۹:۰۰», and under it
+* each VLESS config as ONE short line, «🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت» (the owner, 2026-11-07: the
+  period, not a day and a clock; :data:`CONFIG_VALIDITY_HOURS`), and under it
   each of its links (the config and, for a REALITY config, its XHTTP link) as a tiny label line
   ("TCP" / "XHTTP") over its OWN collapsed quote (``<blockquote expandable>``) that holds nothing but
   that link as inline code. One quote, one config: a tap on the code, or copying the quote, gives
@@ -368,9 +369,12 @@ ShownStatus = Literal["active", "paused", "expired", "full", "burned"]
 
 # The one emoji of the title line when the title brings none (D48); the fallback title has it too.
 TITLE_MARK: Final = "📡"
-# The one line above a config's quote (D48): «🔒 کانفیگ V2Ray — اعتبار تا …».
+# The one line above a config's quote (D48): «🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت».
 REALITY_MARK: Final = "🔒"
 REALITY_NAME: Final = "کانفیگ V2Ray"
+# A config's lifetime as the post states it: the default of proxyhub/reality/settings.py ``cap_hours``
+# (tests/test_posts_units.py keeps the two equal). A config that ends sooner shows its status mark.
+CONFIG_VALIDITY_HOURS: Final = 48
 # The line over the channel tag, under the link part (decision D50).
 SIGN_OFF: Final = "—"
 # An MTProto link's word when the post names it after an operator (decision D50), in the order a
@@ -388,8 +392,8 @@ LRM: Final = "\u200e"
 MAX_LABEL_CHARS: Final = 32
 MAX_TITLE_CHARS: Final = 120
 MAX_VLESS_CHARS: Final = 2048
-# Tags an owner may use in a content body. A blockquote or pre would nest inside the post's own
-# blockquote, which Telegram does not allow, so their text is kept and the tag dropped. No
+# Tags an owner may use in a content body. No blockquote or pre: the body is plain text under the
+# title (and Telegram nests neither inside a quote), so their text is kept and the tag dropped. No
 # tg-emoji: a bot may only send custom emoji in some cases (core.telegram.org/bots/api#html-style),
 # and a post the bot cannot send is never sent again (at most once); a later operator-account
 # poster (proxyhub/posts/poster.py) may allow it for its own posts.
@@ -507,14 +511,14 @@ def title_line(title: str) -> str:
 
 
 def compose_content(title: str | None, body_html: str | None) -> str:
-    """Bold title line, then the body in a blockquote (the content part of a post)."""
+    """Bold title line, then the body as plain text under it (the content part of a post)."""
     parts: list[str] = []
     if title and title.strip():
         parts.append(title_line(title))
     if body_html and body_html.strip():
         body = sanitize_body(body_html, max_html=MAX_MESSAGE_CHARS, max_visible=MAX_MESSAGE_CHARS)
         if visible_text(body).strip():
-            parts.append(f"<blockquote>{body}</blockquote>")
+            parts.append(body)
     return "\n\n".join(parts)
 
 
@@ -570,9 +574,10 @@ def _marker(variant: str | None) -> str | None:
 
 
 def reality_line(until: datetime | None) -> str:
-    """The one line above a config's quote: «🔒 کانفیگ V2Ray — اعتبار تا جمعه ساعت ۰۹:۰۰»."""
+    """The one line above a config's quote: «🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت» for a config with an
+    end (the period, not the end's day and clock: the owner, 2026-11-07)."""
     head = f"{REALITY_MARK} {REALITY_NAME}"
-    return f"{head} — اعتبار تا {tehran_until(until)}" if until is not None else head
+    return f"{head} — اعتبار {fa_digits(CONFIG_VALIDITY_HOURS)} ساعت" if until is not None else head
 
 
 def _labelled(variant: str | None, body: str) -> str:

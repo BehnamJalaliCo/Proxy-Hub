@@ -210,8 +210,9 @@ def test_the_real_template_matches_telethons_own_html_parser() -> None:
         for t in sorted(theirs, key=lambda t: (t.offset, -t.length))
         if type(t).__name__ == "MessageEntityBlockquote"
     ]
-    assert [e.collapsed for e in ours.entities if e.kind == "blockquote"] == [False, True, True, True]
-    # The body's quote, then one collapsed quote per config LINK (TCP, XHTTP, the WS config): each
+    assert [e.collapsed for e in ours.entities if e.kind == "blockquote"] == [True, True, True]
+    # No quote for the body (plain text since 2026-11-07); one collapsed quote per config LINK
+    # (TCP, XHTTP, the WS config): each
     # quote covers exactly its one inline-code config and nothing else, so copying it gives one
     # config; no pre anywhere (Telegram nests none in a quote).
     quotes = [e for e in ours.entities if e.kind == "blockquote" and e.collapsed]

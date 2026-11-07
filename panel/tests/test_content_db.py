@@ -327,10 +327,7 @@ async def test_the_owner_edits_approves_rejects_and_the_publisher_takes_in_order
         first = by_new[-1].id  # the oldest
         edited = await candidates.edit(conn, first, " 🔻 عنوان\nتازه ", "متن <b>کوتاه</b>", T0)
         assert edited is not None and edited.title == "🔻 عنوان تازه" and edited.body == "متن <b>کوتاه</b>"
-        assert (
-            edited.content_html()
-            == "<b>🔻 عنوان تازه</b>\n\n<blockquote>متن &lt;b&gt;کوتاه&lt;/b&gt;</blockquote>"
-        )
+        assert edited.content_html() == "<b>🔻 عنوان تازه</b>\n\nمتن &lt;b&gt;کوتاه&lt;/b&gt;"
         for title, body in (("x" * 121, ""), ("", ""), ("a", "b" * 1001)):
             with pytest.raises(CandidateInvalid, match="caption_invalid"):
                 await candidates.edit(conn, first, title, body, T0)

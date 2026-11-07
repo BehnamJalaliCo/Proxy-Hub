@@ -125,7 +125,7 @@ async def test_an_approved_photo_goes_first_with_its_caption_and_edits_change_th
         "duration": None,
     }
     caption = job.payload["text"]
-    assert caption.startswith("<b>🔻 هشدار عراق درباره درگیری</b>\n\n<blockquote>وزیر خارجه عراق")
+    assert caption.startswith("<b>🔻 هشدار عراق درباره درگیری</b>\n\nوزیر خارجه عراق")
     assert visible(caption) <= CAPTION_LIMIT
     assert caption.count("https://t.me/proxy?") == 3 and "vless://" in caption and caption.endswith("@ipoxxo")
     (post,) = await rows(engine, "SELECT id, media_kind, content_candidate_id, content_item_id FROM posts")
@@ -170,8 +170,8 @@ async def test_the_links_always_fit_the_caption_and_the_content_gives_way(
         assert context["caption_limit"] == CAPTION_LIMIT
         assert [d["kind"] for d in context["dropped"]] == ["reality"] * (5 - kept)
     assert caption.count("vless://") == kept >= 1
-    content = caption.split("\n\n", 1)[1].split("</blockquote>")[0]
-    assert content.endswith("…")  # the body was shortened, not a link
+    content = caption[: caption.index('<a href="https://t.me/proxy')]  # the title and the body
+    assert visible_text(content).rstrip().endswith("…")  # the content was shortened, not a link
 
 
 async def test_text_fallbacks_without_media(engine: AsyncEngine, vault: Vault) -> None:
