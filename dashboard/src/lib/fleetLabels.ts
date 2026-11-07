@@ -21,6 +21,7 @@ export const FLEET_REASON: Record<string, string> = {
   slot_starting: "سرور این جایگاه در راه است",
   slot_unhealthy: "جایگاه ناسالم است؛ مهلت ترمیم (۱۵ دقیقه) در جریان است",
   replacement_settling: "سرور جایگزین تازه آماده شد؛ چند دقیقه صبر تا جابه‌جایی DNS",
+  making_room: "حساب هتزنر پر است؛ سرور سوخته اول حذف میشود تا جا برای جایگزین باز شود",
   replacement_in_progress: "سرور جایگزین در راه است",
   request_backoff: "درخواست قبلی این جایگاه رد شد؛ ۱۵ دقیقه صبر",
   orphan_server_not_in_db: "سروری با برچسب ما که در پنل ثبت نیست (هرگز حذف نمیشود)",

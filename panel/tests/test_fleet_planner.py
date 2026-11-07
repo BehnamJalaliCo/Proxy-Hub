@@ -455,3 +455,37 @@ def test_property_test_really_exercised_allowed_creations() -> None:
     if PROPERTY_STATS["examples"] == 0:
         pytest.skip("the open-fleet property test did not run in this session")
     assert PROPERTY_STATS["with_allowed"] * 20 >= PROPERTY_STATS["examples"], PROPERTY_STATS
+
+
+def test_a_full_account_lets_burned_nodes_go_first() -> None:
+    """D14 exception (the owner, 2026-11-07, P26): with every account at its learned server limit no
+    replacement can be built while burned nodes hold the room, so they leave first."""
+    s1 = node(1, slot=1, state=NodeState.BURNED, location="fsn1")
+    s2 = node(2, slot=2, state=NodeState.BURNED, location="nbg1")
+    s3 = node(3, slot=3, location="hel1")
+    test_node = node(4, slot=None, location="hel1", is_test=True)
+    nodes = (s1, s2, s3, test_node)
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in range(1, 5)}
+    full = (account(limit=4, servers_total=4),)
+    plan = plan_for(open_settings(), nodes=nodes, servers=servers, accounts=full)
+    deletes = {a.target: a for a in plan.actions if a.action == "delete"}
+    assert set(deletes) == {"n1", "n2"} and all(a.allowed for a in deletes.values())
+    assert {a.context["why"] for a in deletes.values()} == {"burned"}
+    by_target = {a.target: a for a in plan.actions if a.action == "none"}
+    assert by_target["slot-1"].reasons == ("making_room",) and by_target["slot-2"].reasons == ("making_room",)
+    assert not any(a.allowed for a in creates(plan))  # the room is used by a later plan
+
+    # With room (no known limit, or below it), D14 holds: the replacement first, the burned node stays.
+    for roomy in (account(limit=None, servers_total=4), account(limit=6, servers_total=4)):
+        plan = plan_for(open_settings(), nodes=nodes, servers=servers, accounts=(roomy,))
+        assert not [a for a in plan.actions if a.action == "delete"]
+        assert any(a.allowed and a.context["kind"] == "replace" for a in creates(plan))
+    # A stale observation is not proof of a full account: nothing is deleted.
+    stale = (
+        account(limit=4, servers_total=4, observed_min_ago=OBSERVATION_MAX_AGE.total_seconds() / 60 + 5),
+    )
+    plan = plan_for(open_settings(), nodes=nodes, servers=servers, accounts=stale)
+    assert not [a for a in plan.actions if a.action == "delete"]
+    # The kill switch still stops the deletion.
+    plan = plan_for(open_settings(kill_switch=True), nodes=nodes, servers=servers, accounts=full)
+    assert all(not a.allowed for a in plan.actions if a.action == "delete")
