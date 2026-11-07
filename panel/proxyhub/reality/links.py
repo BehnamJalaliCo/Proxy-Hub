@@ -19,7 +19,11 @@ Two shapes, by the transport the config was made for (the links contract kind st
   (with the config's status), so posts that carry it are marked.
 
 The host was fixed when the config was made. The name every user's app shows starts with the
-channel's @name (D41), e.g. ``@ipoxxo 🇩🇪 12``. The label «کانفیگ N» is the owner's (dashboard,
+channel's @name (D41), e.g. ``@ipoxxo 🇩🇪 12``; its flag is the location of the server that serves
+the link NOW (the owner, 2026-11-07, after slot 3 moved from Finland to the US, D60): a slot name
+link follows the slot's newest ready node (where its DNS name points), an IP link stays with its own
+server (:func:`serving_location`). An app that imported the link earlier keeps the old name; posts
+and the dashboard show the new one. The label «کانفیگ N» is the owner's (dashboard,
 logs): a channel post never shows it, only each link as inline code in its own collapsed quote,
 with "TCP" / "XHTTP" as a tiny label line over it when both links come (decision D48;
 proxyhub/posts/links.py :func:`transport_marks`).
@@ -48,6 +52,7 @@ from proxyhub.reality.store import (
     NodeView,
     StatusView,
     all_statuses,
+    is_ip_host,
     live_nodes,
     recent_and_active_configs,
     target_verdict,
@@ -208,6 +213,18 @@ def config_name(prefix: str, location: str, config_id: int) -> str:
     return f"{prefix} {flag(location)} {config_id}"
 
 
+def serving_location(row: Any, nodes: list[NodeView]) -> str:
+    """Where an active config's link leads now: a slot name link to the slot's newest ready node
+    (its DNS name follows that node), else the config's own server's location."""
+    if row.status != "active" or row.slot is None or is_ip_host(row.host):
+        return str(row.location)
+    ready = [n for n in nodes if n.slot == row.slot and NodeState(n.state) == NodeState.READY]
+    if not ready:
+        return str(row.location)
+    newest = max(ready, key=lambda n: (n.ready_at or datetime.min.replace(tzinfo=UTC), str(n.id)))
+    return newest.location
+
+
 def _xhttp_confirmed(row: Any, scope_nodes: list[NodeView], statuses: dict[uuid.UUID, StatusView]) -> bool:
     """A serving node of the scope runs the XHTTP inbound now (and serves the config, see
     :func:`_confirmed`)."""
@@ -239,7 +256,7 @@ async def links_for(db: Db, now: datetime) -> list[tuple[ProxyLink, Any]]:
                 continue
             with_xhttp = r.transport == "reality" and xhttp_on and _xhttp_confirmed(r, scope_nodes, statuses)
         status: LinkStatus = r.status
-        key, name = f"reality:{r.id}", config_name(prefix, r.location, r.id)
+        key, name = f"reality:{r.id}", config_name(prefix, serving_location(r, nodes), r.id)
         out.append(
             (
                 ProxyLink(

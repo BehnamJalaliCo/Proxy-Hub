@@ -24,6 +24,7 @@ from proxyhub.reality.links import (
     config_url,
     link_prefix,
     links_for,
+    serving_location,
     xhttp_key,
     xhttp_url,
 )
@@ -122,7 +123,8 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
     for r in rows:
         active = r.status == "active"
         link_key = f"reality:{r.id}"
-        name = config_name(prefix, r.location, r.id)
+        location = serving_location(r, nodes)  # the flag follows the server serving it now
+        name = config_name(prefix, location, r.id)
         xhttp = (
             {
                 "key": xhttp_key(link_key),
@@ -139,7 +141,7 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
                 "name": name,
                 "slot": r.slot,
                 "node_name": r.node_name,
-                "location": r.location,
+                "location": location,
                 "host": r.host,
                 "transport": r.transport,
                 "status": r.status,
