@@ -179,6 +179,7 @@ async def test_executor_creates_and_retires_one_real_test_server(
             async with world.sessions() as s:
                 look = await live_servers(s, vault_factory=lambda: world.vault)
             assert look[0]["others"] == 0
+            assert look[0]["primary_ips"]["ipv4"] >= 1  # the test server's own (counted, never shown)
             assert [o["hetzner_id"] for o in look[0]["ours"] if o["labels"].get("purpose") == "test"] == [
                 hetzner_id
             ]

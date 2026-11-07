@@ -489,3 +489,44 @@ def test_a_full_account_lets_burned_nodes_go_first() -> None:
     # The kill switch still stops the deletion.
     plan = plan_for(open_settings(kill_switch=True), nodes=nodes, servers=servers, accounts=full)
     assert all(not a.allowed for a in plan.actions if a.action == "delete")
+
+
+def test_a_full_account_alert_names_the_limit_and_the_test_node_and_repeats_weekly() -> None:
+    """The owner (2026-11-07) cannot raise the limit: the alert says the room is held by working
+    servers (burned ones already go first), how big the account is, that the test node holds a
+    place, and it is repeated at most once a week."""
+    from proxyhub.fleet.alerts import WEEKLY, findings
+
+    s1 = node(1, slot=1, location="hel1")
+    s2 = node(2, slot=2, location="nbg1")
+    s3 = node(3, slot=3, location="fsn1")
+    test_node = node(4, slot=None, location="hel1", is_test=True)
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in range(1, 5)}
+    full = (account(limit=4, servers_total=4),)
+    snap = FleetSnapshot(
+        now=NOW,
+        settings=open_settings(target_slots=5),
+        accounts=full,
+        nodes=(s1, s2, s3, test_node),
+        offers=offers_for("acc-a"),
+        servers=servers,
+    )
+    plan = build_plan(snap)
+    assert not [a for a in plan.actions if a.action == "delete"]  # nothing burned: nothing to free
+    (f,) = [f for f in findings(plan, snap) if f.code == "account_server_limit_reached"]
+    assert f.detail == {"slots": [4, 5]}
+    assert "جایگاه‌های ۴، ۵" in f.text and "(سقف: ۴ سرور)" in f.text
+    assert "سوخته خودکار حذف میشوند" in f.text and "node آزمایشی" in f.text and "هفته‌ای" in f.text
+    assert "account_server_limit_reached" in WEEKLY
+
+    # Without a test node the hint is left out.
+    snap = FleetSnapshot(
+        now=NOW,
+        settings=open_settings(target_slots=5),
+        accounts=(account(limit=3, servers_total=3),),
+        nodes=(s1, s2, s3),
+        offers=offers_for("acc-a"),
+        servers={k: v for k, v in servers.items() if k[1] != 1004},
+    )
+    (f,) = [f for f in findings(build_plan(snap), snap) if f.code == "account_server_limit_reached"]
+    assert "node آزمایشی" not in f.text and "(سقف: ۳ سرور)" in f.text

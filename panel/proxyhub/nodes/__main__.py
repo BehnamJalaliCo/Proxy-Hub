@@ -9,7 +9,9 @@ master key). Exactly the same service functions and safety gates as the API; act
     wait NODE_ID STATE [--timeout SECONDS]
                                  poll until the node is in STATE (exit 1 on timeout or deleted)
     servers                      read-only, LIVE from Hetzner: our servers (managed-by=proxy-hub)
-                                 in each node account, and how many others there are (rule 4)
+                                 in each node account, how many others there are (rule 4), the
+                                 server limit the fleet learned, and the project's Primary IPs
+                                 (counts by type; unassigned ones by id and name, never an address)
 
 Prints JSON only: ids, states and reason codes, never a token or any other secret.
 """

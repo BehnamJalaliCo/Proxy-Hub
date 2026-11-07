@@ -33,6 +33,7 @@ from proxyhub.accounts.hetzner_io import (
     Verification,
     classify_api_exception,
     classify_write_probe,
+    summarize_primary_ips,
     summarize_servers,
 )
 from proxyhub.accounts.limits import learned_server_limit, parse_resource_limit, record_resource_limit
@@ -189,6 +190,21 @@ def test_guard_counts_foreign_servers_without_keeping_them() -> None:
     obs = summarize_servers([server(1), server(2, managed=False), server(3, role="builder")])
     assert not obs.guard.allowed and obs.foreign_count == 1 and obs.total == 3
     assert {s.hetzner_id for s in obs.managed} == {1, 3}
+
+
+def test_primary_ips_are_counted_by_type_and_unassigned_ones_named_without_address() -> None:
+    from types import SimpleNamespace as NS
+
+    ips = [
+        NS(id=1, type="ipv4", ip="198.51.100.7", name="primary_ip-1", assignee_id=11, auto_delete=True),
+        NS(id=2, type="ipv6", ip="2001:db8::/64", name="primary_ip-2", assignee_id=11, auto_delete=True),
+        NS(id=3, type="ipv4", ip="198.51.100.9", name="left-over", assignee_id=None, auto_delete=False),
+    ]
+    obs = summarize_primary_ips(ips)
+    assert (obs.ipv4, obs.ipv6) == (2, 1)
+    (u,) = obs.unassigned
+    assert (u.id, u.type, u.name, u.auto_delete) == (3, "ipv4", "left-over", False)
+    assert "198.51.100" not in repr(obs)
 
 
 def test_name_and_token_cleaning() -> None:
