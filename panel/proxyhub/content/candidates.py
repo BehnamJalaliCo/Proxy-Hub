@@ -3,8 +3,12 @@ review (the content supervisor's, decision D52, or the owner's), and what the pu
 
 **Storing** (:func:`store_items`, from proxyhub/content/engine.py): a post of a source is stored once
 (``source_id`` + ``external_id``); a later read only refreshes its view count. Posts older than
-:data:`MAX_AGE` (by their own time) and posts with neither text nor media are skipped. The text is
-cleaned (proxyhub/content/clean.py) and the caption prefilled from it; the content supervisor's
+:data:`MAX_AGE` (by their own time) and posts with neither text nor media are skipped, and so is a
+**proxy advert** (the owner, 2026-11-07: a proxy channel's news is welcome, its proxies are not):
+proxy links, configs or proxy lines and too few other words (:func:`~proxyhub.content.clean.
+is_proxy_post`). It reaches no review and does not count against its source. The text is
+cleaned (proxyhub/content/clean.py; proxies are removed from news that carries them too) and the
+caption prefilled from it; the content supervisor's
 Claude review replaces it when it approves (proxyhub/content/supervisor.py, decision D52). A post
 whose cleaned text tells what a candidate of the last :data:`MAX_AGE` already tells (any source,
 :func:`~proxyhub.content.clean.similar`) is stored as ``duplicate`` of it and never shown in the
@@ -22,8 +26,8 @@ with one emoji, proxyhub/telegram/templates.py :func:`title_line`) and a body (p
 post's links need the room (docs/04): a caption never pushes a link out.
 
 **What the publisher takes** (:func:`next_for_post`): the oldest approved candidate whose media is
-ready (or which has none, or whose media failed: then the post goes as text), before the old
-content bank (proxyhub/posts/content.py).
+ready (or which has none, or whose media failed: then the post goes as text), before the content
+bank (proxyhub/posts/content.py).
 """
 
 from __future__ import annotations
@@ -227,6 +231,7 @@ class Stored:
     duplicates: int = 0
     seen: int = 0
     skipped: int = 0
+    proxy_posts: int = 0  # of ``skipped``: proxy adverts
 
 
 def _when(item: FetchedItem, now: datetime) -> datetime:
@@ -267,7 +272,7 @@ async def store_items(
         ).all()
     }
     norms = await _recent_norms(db, now)
-    new = dups = seen = skipped = 0
+    new = dups = seen = skipped = proxy_posts = 0
     for item in items:
         if item.external_id in known:
             seen += 1
@@ -281,6 +286,10 @@ async def store_items(
             skipped += 1
             continue
         text = clean.clean_source_text(item.text, (source.ref, source.label))
+        if clean.is_proxy_post(text, item.hidden_proxy_links + clean.proxy_signal(item.text)):
+            skipped += 1
+            proxy_posts += 1
+            continue
         if not text and (item.media is None or (item.media.url is None and item.media.thumb_url is None)):
             skipped += 1
             continue
@@ -330,7 +339,7 @@ async def store_items(
             new += 1
             if norm:
                 norms.append((int(inserted.id), norm))
-    return Stored(new=new, duplicates=dups, seen=seen, skipped=skipped)
+    return Stored(new=new, duplicates=dups, seen=seen, skipped=skipped, proxy_posts=proxy_posts)
 
 
 # --- media ---------------------------------------------------------------------------------------------

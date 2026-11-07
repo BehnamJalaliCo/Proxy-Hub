@@ -12,7 +12,10 @@ tokenizer, by the classes Telegram's own widget uses:
   a video: the first ``video.tgme_widget_message_video`` that is not the blurred background copy,
   its thumbnail ``i.tgme_widget_message_video_thumb`` and duration ``time.message_video_duration``
   (a link preview's image is not the post's media);
-* views: ``span.tgme_widget_message_views`` (``6.79K`` -> 6790); time: the ``time[datetime]``.
+* views: ``span.tgme_widget_message_views`` (``6.79K`` -> 6790); time: the ``time[datetime]``;
+* the text's links: only COUNTED, when their ``href`` is a proxy link or config
+  (:data:`~proxyhub.content.clean.PROXY_LINK`): a proxy channel hides its proxies behind words, and
+  such a post is a proxy advert, not news (proxyhub/content/clean.py).
 
 A channel whose preview is off (or a name that is not a public channel) redirects to
 ``https://t.me/<name>``; that is the error ``not_public``. Every URL found is checked with
@@ -28,7 +31,7 @@ from html.parser import HTMLParser
 from typing import Final
 from urllib.parse import urlsplit
 
-from proxyhub.content.clean import tidy
+from proxyhub.content.clean import PROXY_LINK, tidy
 from proxyhub.content.items import MAX_TEXT_CHARS, FetchedItem, MediaRef, SourceInvalid
 from proxyhub.content.net import FetchError, SafeHttp, check_url, decode_text
 
@@ -110,6 +113,7 @@ class _Post:
     views: int | None = None
     published_at: datetime | None = None
     service: bool = False
+    proxy_links: int = 0  # hrefs of the text's links that are proxy links or configs
 
 
 class _Page(HTMLParser):
@@ -148,6 +152,8 @@ class _Page(HTMLParser):
         if tag == "div" and "tgme_widget_message_text" in classes and not post.text_done:
             if not self._inside("tgme_widget_message_reply") and self.text_depth is None:
                 self.text_depth = len(self.stack)
+        elif tag == "a" and self.text_depth is not None and PROXY_LINK.search(values.get("href", "")):
+            post.proxy_links += 1
         elif tag == "a" and "tgme_widget_message_photo_wrap" in classes and post.photo is None:
             if not self._inside("tgme_widget_message_link_preview"):
                 post.photo = _bg_url(values.get("style"))
@@ -253,6 +259,7 @@ def parse_page(page: str, name: str) -> tuple[list[FetchedItem], bool]:
                 text=tidy("".join(post.text_parts))[:MAX_TEXT_CHARS],
                 views=post.views,
                 media=media,
+                hidden_proxy_links=post.proxy_links,
             )
         )
     return items, parser.channel_seen or bool(parser.posts)
