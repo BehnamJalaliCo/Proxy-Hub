@@ -27,10 +27,12 @@ replaced; no secret):
   the proxy and no other address and have exactly ONE button of the shape
   ``^(🗑\\s*)?(Delete|Remove)( proxy)?$`` (:data:`~proxyhub.mtproxy.userclient.REMOVE_BUTTON`). It is
   pressed. The screen after it must name the proxy and no other address and have exactly ONE
-  button of the shape ``^(✅\\s*)?(Yes|Yes, delete( it)?|Yes, remove( it)?|Confirm)[.!]?$``
-  (:data:`~proxyhub.mtproxy.userclient.CONFIRM_BUTTON`); it is pressed, and the answer must say
-  "deleted" or "removed" without a question, refusal or doubt. A bot that removes at once (no
-  confirmation button, and the screen already says "deleted"/"removed") is accepted too.
+  button of the shape ``^(✅\\s*)?(Yes|Yes, delete( it)?|Yes, remove( it)?|Yes, I'm 100% sure,
+  delete my proxy|Confirm)[.!]?$`` (:data:`~proxyhub.mtproxy.userclient.CONFIRM_BUTTON`); it is
+  pressed, and the answer must say "deleted", "removed" or the bot's bare "Success!" without a
+  question, refusal or doubt (:func:`~proxyhub.sponsor.replies.removal_confirmed`). A bot that
+  removes at once (no confirmation button, and the screen already says "deleted"/"removed") is
+  accepted too.
 
 The operator client's allowlist enforces the same: a removal or confirmation button passes only
 with the connection's removal permit and under a message that names the permitted address
@@ -49,8 +51,11 @@ of one of our live registrations.
 P18 saw the real list and screens: 10 buttons on 2 pages, two to a row, "»" under page 1 and "«"
 under page 2; a proxy's screen "Proxy <host:port> with the tag <hex>.\nPromoted channel: n/a.\nHow
 can I help?" with [Set promotion, Stats] and [Delete proxy, « Back to list]. The confirmation after
-"Delete proxy" has not been seen yet.
-"""
+"Delete proxy" (the owner's screenshot, 2026-11-07): "Are you sure you want to de-register the proxy
+...<last 8 hex of its tag>with address <host:port>?\nIt will continue working for users until you
+disable it on your servers, but it will be hidden from your list and channel promotion will be
+disabled." with [Yes, I'm 100% sure, delete my proxy.] and [« Back to proxy, « Back to list]. The
+answer after the confirmation has not been seen yet."""
 
 from __future__ import annotations
 
@@ -362,7 +367,7 @@ class MenuWalk:
             )
         if step is Step.PRESSED_CONFIRM and self.remove:
             self.screens.append(screen_of("after_confirm", seen))
-            if replies.removal_done(text) and not replies.names_other_proxy(text, words):
+            if replies.removal_confirmed(text) and not replies.names_other_proxy(text, words):
                 return Removed(confirmed=True, screens=tuple(self.screens))
             return self._stuck(step, "removal_not_confirmed")
         return self._stuck(step, "wrong_step")

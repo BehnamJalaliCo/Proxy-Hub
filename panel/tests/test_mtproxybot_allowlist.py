@@ -74,7 +74,10 @@ def allowed(request: Any, buttons: ReadButtons | None, removal: frozenset[str] =
 def test_the_removal_shapes_are_exactly_the_documented_ones() -> None:
     """A change of these patterns must be a visible decision (docs: proxyhub/sponsor/botlist.py)."""
     assert REMOVE_BUTTON.pattern == r"(?:🗑\ufe0f?\s*)?(?:delete|remove)(?:\s+proxy)?"
-    assert CONFIRM_BUTTON.pattern == r"(?:✅\s*)?(?:yes|yes,?\s+(?:delete|remove)(?:\s+it)?|confirm)[.!]?"
+    assert CONFIRM_BUTTON.pattern == (
+        r"(?:✅\s*)?(?:yes|yes,?\s+(?:delete|remove)(?:\s+it)?"
+        r"|yes,?\s+i['’]?m\s+100\s?%\s+sure,?\s+(?:delete|remove)\s+my\s+proxy|confirm)[.!]?"
+    )
     assert REMOVE_BUTTON.flags & re.IGNORECASE and CONFIRM_BUTTON.flags & re.IGNORECASE
 
 
@@ -119,7 +122,16 @@ def test_a_connection_remembers_a_bounded_number_of_messages() -> None:
 
 
 @pytest.mark.parametrize(
-    "label", ["🗑 Delete proxy", "Delete", "Remove proxy", "Yes, delete", "Yes", "Confirm"]
+    "label",
+    [
+        "🗑 Delete proxy",
+        "Delete",
+        "Remove proxy",
+        "Yes, delete",
+        "Yes",
+        "Confirm",
+        "Yes, I'm 100% sure, delete my proxy.",  # the bot's real confirmation (2026-11-07)
+    ],
 )
 def test_a_removal_button_needs_the_permit_and_a_message_naming_that_proxy(label: str) -> None:
     menu = read(label)

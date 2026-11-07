@@ -421,6 +421,18 @@ def removal_done(text: str) -> bool:
     return bool(REMOVAL_DONE.search(text)) and not REFUSAL.search(text) and not _NOT_DONE.search(text)
 
 
+_SUCCESS: Final = re.compile(r"\bsuccess(?:fully)?\b", re.IGNORECASE)
+
+
+def removal_confirmed(text: str) -> bool:
+    """The answer right after the confirmation button was pressed: :func:`removal_done`, or the
+    bot's own bare "Success!" (what it answers after a change it was asked to confirm, P18 and the
+    owner's screenshot), still with no question, refusal or doubt."""
+    if removal_done(text):
+        return True
+    return bool(_SUCCESS.search(text)) and not REFUSAL.search(text) and not _NOT_DONE.search(text)
+
+
 def _link_shape(match: re.Match[str]) -> str:
     """A link to a public channel stays (lower case); any other link (a proxy link with its
     parameters, ...) becomes ``<link>``, up to the next space."""
