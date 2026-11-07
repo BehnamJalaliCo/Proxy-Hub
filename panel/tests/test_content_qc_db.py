@@ -89,6 +89,7 @@ def answer(**over: Any) -> str:
         "flags": dict.fromkeys(FLAGS, False),
         "title": "🔻 هشدار عراق درباره‌ی درگیری",
         "body": "وزیر خارجه‌ی عراق گفت ورود گروه‌های مسلح به درگیری، عراق را به تونلی تاریک میکشاند.",
+        "breaking": False,
     }
     data.update(over)
     return json.dumps(data, ensure_ascii=False)
@@ -947,3 +948,46 @@ async def test_migration_0028_round_trip_checks_and_backfill(migrated_db: str) -
         await asyncio.to_thread(migrate, "head")
         await clean_content_tables(engine)
         await engine.dispose()
+
+
+async def test_a_young_story_two_sources_carry_is_reviewed_at_once_and_promoted(
+    engine: AsyncEngine, sockdir: Path
+) -> None:
+    """D56: out of the slots' timing, one review at once; Claude's word and the gates promote it."""
+    now = slot_time(1)
+    a = await source(engine, "newsfa", now - timedelta(hours=3))
+    b = await source(engine, "newsfb", now - timedelta(hours=3))
+    lone = await candidate(engine, a, NEWS[1], when=now - timedelta(minutes=8), views=90_000)
+    first = await candidate(engine, a, NEWS[0], when=now - timedelta(minutes=10))
+    await candidate(engine, b, NEWS[0], when=now - timedelta(minutes=4))  # the same story elsewhere
+    clock = Clock(now)
+    async with StubBridge(sockdir / "bridge.sock") as bridge:
+        bridge.says(answer(breaking=True))
+        out = await make(engine, sockdir, clock).run_round()
+        assert out.breaking_review and (out.candidate_id, out.decision) == (first, "approve")
+        assert out.promoted == [first]
+        assert len(bridge.reviews()) == 1
+    found = await rows(
+        engine, "SELECT status, qc_breaking, breaking_at FROM content_candidates WHERE id = :i", i=first
+    )
+    assert (found[0].status, found[0].qc_breaking) == ("approved", True) and found[0].breaking_at == now
+    assert (await one(engine, lone)).status == "pending"  # one source: not breaking, however viewed
+    async with engine.connect() as conn:
+        state = await qc_settings.load_state(conn)
+    assert int(state.get("slot_calls") or 0) == 0 and len(state["breaking_reviews"]) == 1
+
+
+async def test_claude_saying_breaking_is_not_enough_for_one_source(
+    engine: AsyncEngine, sockdir: Path
+) -> None:
+    now = slot_time(1)
+    a = await source(engine, "newsfa", now - timedelta(hours=3))
+    only = await candidate(engine, a, NEWS[0], when=now - timedelta(minutes=5), views=50_000)
+    async with StubBridge(sockdir / "bridge.sock") as bridge:
+        bridge.says(answer(breaking=True))
+        out = await make(engine, sockdir, Clock(now)).run_round()
+    assert not out.breaking_review and out.candidate_id == only and out.promoted == []
+    found = await rows(
+        engine, "SELECT qc_breaking, breaking_at FROM content_candidates WHERE id = :i", i=only
+    )
+    assert found[0].qc_breaking is True and found[0].breaking_at is None

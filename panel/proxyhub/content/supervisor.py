@@ -61,7 +61,7 @@ from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from sqlalchemy.orm import aliased
 
-from proxyhub.content import candidates, frames, media, qc_checks, qc_prompt, qc_settings, sources
+from proxyhub.content import breaking, candidates, frames, media, qc_checks, qc_prompt, qc_settings, sources
 from proxyhub.content import engine as content_engine
 from proxyhub.content.claude_backends import (
     API_URL,
@@ -322,6 +322,9 @@ class Outcome:
     rule_rejected: list[int] = field(default_factory=list)
     disabled_sources: list[int] = field(default_factory=list)
     alerts: list[str] = field(default_factory=list)
+    # D56: candidates promoted to breaking news this round, and whether the review was out of slot.
+    promoted: list[int] = field(default_factory=list)
+    breaking_review: bool = False
 
 
 async def calls_24h(db: AsyncConnection, backend: str, now: datetime) -> int:
@@ -470,6 +473,10 @@ class Supervisor:
         return at is None or now - at >= HEALTH_EVERY
 
     async def _work(self, config: QcConfig, state: dict[str, Any], now: datetime, out: Outcome) -> None:
+        async with self.engine.begin() as conn:  # D56: a story whose next source came after its review
+            out.promoted += await breaking.promote(conn, config, now)
+        if await self._breaking(config, state, now, out):
+            return
         async with self.engine.begin() as conn:
             why = await self._not_needed(conn, config, state, now)
             if why is not None:
@@ -524,6 +531,53 @@ class Supervisor:
         review = await ClaudeWriter(backends).review(prepared.request)
         async with self.engine.begin() as conn:
             await self._apply(conn, config, state, prepared, review, now, out)
+
+    async def _breaking(self, config: QcConfig, state: dict[str, Any], now: datetime, out: Outcome) -> bool:
+        """D56: review at once, out of the posting slots, the best young story several sources carry
+        (proxyhub/content/breaking.py). True when a review was made (one per round)."""
+        if not breaking.enabled(config) or config.backend == "off" or not breaking.review_allowed(state, now):
+            return False
+        async with self.engine.begin() as conn:
+            posting = await posting_settings.load(conn)
+            if not posting.enabled or posting.posts_per_day == 0:
+                return False
+            if await breaking.budget_left(conn, config, now) in ("off", "day_full"):
+                return False
+            ids = await breaking.stories(conn, config, now)
+            if not ids:
+                return False
+            order = {cid: i for i, cid in enumerate(ids)}
+            picks = sorted(
+                (p for p in await eligible(conn, now) if p.id in order and pre_gate(p) is None),
+                key=lambda p: order[p.id],
+            )
+            if any(p.needs_download for p in picks):
+                stored = await candidates.media_bytes_total(conn)
+                if stored + media.VIDEO_MAX_BYTES > content_engine.MEDIA_STORE_MAX:
+                    picks = [p for p in picks if not p.needs_download]
+            if not picks:
+                return False
+            backends, _ = await self._backends(conn, config, state, now)
+            if not backends:
+                return False
+        pick = picks[0]
+        sampled: frames.Sampled | None = None
+        if pick.media_kind == "video":
+            got = await self._video(pick)
+            if isinstance(got, str):
+                await self._video_failed(config, pick, got, now, out)
+                return True
+            sampled = got
+        async with self.engine.begin() as conn:
+            prepared = await self._prepare(conn, config, pick, now, sampled)
+        if prepared is None:
+            return False
+        breaking.note_review(state, now)
+        out.breaking_review = True
+        review = await ClaudeWriter(backends).review(prepared.request)
+        async with self.engine.begin() as conn:
+            await self._apply(conn, config, state, prepared, review, now, out, slot=False)
+        return True
 
     # -- a video, before its review --
 
@@ -744,6 +798,8 @@ class Supervisor:
         review: Review,
         now: datetime,
         out: Outcome,
+        *,
+        slot: bool = True,
     ) -> None:
         pick = prepared.pick
         out.candidate_id, out.review = pick.id, review.outcome
@@ -768,7 +824,8 @@ class Supervisor:
             out.action = "unavailable"
             self._unavailable(state, now, review.outcome)
             return
-        state["slot_calls"] = int(state.get("slot_calls") or 0) + 1
+        if slot:  # a breaking-news review (D56) is not one of the slot's
+            state["slot_calls"] = int(state.get("slot_calls") or 0) + 1
         state["last_ok_at"] = iso(now)
         for key in ("unavailable_since", "unavailable_last", "unavailable_reason"):
             state.pop(key, None)
@@ -826,7 +883,10 @@ class Supervisor:
                     category=verdict.category,
                     caption=caption if decision == "approve" else None,
                     claude_decision=verdict.decision,
+                    qc_breaking=verdict.breaking,
                 )
+                if decision == "approve" and verdict.breaking:
+                    out.promoted += await breaking.promote(conn, config, now)
         if await judge_source(conn, config, pick.source_id, now):
             out.disabled_sources.append(pick.source_id)
 
@@ -871,6 +931,7 @@ class Supervisor:
         caption: qc_checks.Caption | None = None,
         error: str | None = None,
         claude_decision: str | None = None,
+        qc_breaking: bool | None = None,
     ) -> None:
         """Record the review on the candidate and, in ``auto`` mode, act on it (see the module doc).
         The status changes only if the candidate is still pending and unreviewed (the owner may have
@@ -886,6 +947,7 @@ class Supervisor:
             "qc_model": (model or "")[:64] or None,
             "qc_at": now,
             "qc_tries": ContentCandidate.qc_tries + 1,
+            "qc_breaking": qc_breaking,
             "updated_at": now,
         }
         act: dict[str, Any] = {}

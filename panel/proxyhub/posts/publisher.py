@@ -74,7 +74,7 @@ from typing import Any, Final, cast
 from sqlalchemy import and_, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from proxyhub.content import candidates
+from proxyhub.content import breaking, candidates, qc_settings
 from proxyhub.db.models import Outbox
 from proxyhub.db.models_posts import Post, PostLink
 from proxyhub.db.models_telegram import ChannelPost
@@ -92,7 +92,7 @@ from proxyhub.posts.messages import (
 from proxyhub.posts.poster import BOT, POSTERS, MediaPayload, Poster, for_new_post
 from proxyhub.telegram import outbox as tg_outbox
 from proxyhub.telegram import store as tg_store
-from proxyhub.telegram.schedule import quiet_until
+from proxyhub.telegram.schedule import TEHRAN, quiet_until
 from proxyhub.telegram.templates import (
     CAPTION_LIMIT,
     LinkKind,
@@ -213,10 +213,13 @@ async def slot_taken(db: AsyncConnection, role: str, slot: plan.Slot) -> bool:
 
 
 async def posts_on(db: AsyncConnection, role: str, day: date) -> int:
+    """The day plan's posts of ``day`` (a breaking-news post, D56, is not one of them)."""
     return int(
         (
             await db.execute(
-                select(func.count()).select_from(Post).where(Post.role == role, Post.plan_day == day)
+                select(func.count())
+                .select_from(Post)
+                .where(Post.role == role, Post.plan_day == day, Post.breaking.is_(False))
             )
         ).scalar_one()
     )
@@ -332,7 +335,42 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
     item, recycled = (
         (None, False) if candidate is not None else await content.next_item(db, now, cfg.recycle_after_days)
     )
-    content_html = candidate.content_html() if candidate is not None else content_for(item)
+    return await _queue(
+        db,
+        now,
+        cfg,
+        where,
+        chosen,
+        candidate,
+        item,
+        recycled,
+        slot=slot,
+        reason="slot_due",
+        poster=poster,
+    )
+
+
+async def _queue(
+    db: AsyncConnection,
+    now: datetime,
+    cfg: settings.PostingConfig,
+    where: Target,
+    chosen: list[ProxyLink],
+    candidate: candidates.Candidate | None,
+    item: content.Item | None,
+    recycled: bool,
+    *,
+    slot: plan.Slot,
+    reason: str,
+    poster: Poster,
+    breaking_post: bool = False,
+) -> str:
+    """Render and queue one post (a day-plan slot's, or a breaking-news one, D56) with its links."""
+    if candidate is not None:
+        title = breaking.title(candidate.title) if breaking_post else candidate.title
+        content_html = candidates.caption_html(title, candidate.body)
+    else:
+        content_html = content_for(item)
     names = await operators.operator_labels(db, chosen, now)  # D50: decided once, stored below
     media_row = await candidates.post_media(db, candidate) if candidate is not None else None
     offered = list(chosen)
@@ -360,7 +398,9 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
         else None
     )
     poster, fallback = await for_new_post(db, poster, role=where.role, now=now)
-    job = await poster.queue_post(db, role=where.role, text_html=rendered.text, media=media)
+    job = await poster.queue_post(
+        db, role=where.role, text_html=rendered.text, media=media, breaking=breaking_post
+    )
     post_id = (
         await db.execute(
             insert(Post)
@@ -377,6 +417,7 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
                 plan_slot=slot.index,
                 planned_at=slot.at,
                 created_at=now,
+                breaking=breaking_post,
             )
             .returning(Post.id)
         )
@@ -443,7 +484,7 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
         target=f"{where.role}:post:{post_id}",
         dry_run=False,
         allowed=True,
-        reasons=["slot_due"],
+        reasons=[reason],
         context={
             "outbox_id": job,
             "plan_day": slot.day.isoformat(),
@@ -457,9 +498,67 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
             "operator_names": sorted(names[x.key] for x in chosen if x.key in names),
             "reality": sum(1 for x in chosen if x.kind == "reality"),
             "poster": poster.name,
+            "breaking": breaking_post,
         },
     )
     return "queued"
+
+
+# --- breaking news (decision D56) ------------------------------------------------------------------
+
+BREAKING_SLOT_BASE: Final = 1000
+
+
+async def publish_breaking(
+    db: AsyncConnection, now: datetime, harvest: HarvestFn, poster: Poster = BOT
+) -> str:
+    """Queue a breaking-news post at once when the content supervisor promoted a candidate
+    (proxyhub/content/breaking.py): out of the day plan, in no-post hours too, not counted against
+    ``posts_per_day``. Returns what happened."""
+    qc = await qc_settings.load(db)
+    if not breaking.enabled(qc):
+        return "off"
+    cfg = await settings.load(db)
+    where = await target(db, cfg)
+    if isinstance(where, str):
+        return where
+    candidate = await breaking.next_to_post(db, now)
+    if candidate is None:
+        return "none"
+    why = await breaking.budget_left(db, qc, now)
+    if why is not None:
+        return why
+    if await post_waiting(db):
+        return "waiting"
+    h = await harvest()
+    chosen = await choose_links(db, h, now, cfg, where.role)
+    if not chosen:
+        return "no_links"
+    day = now.astimezone(TEHRAN).date()
+    made = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(Post)
+                .where(Post.role == where.role, Post.plan_day == day, Post.breaking.is_(True))
+            )
+        ).scalar_one()
+    )
+    slot = plan.Slot(day=day, index=BREAKING_SLOT_BASE + made, at=now)
+    return await _queue(
+        db,
+        now,
+        cfg,
+        where,
+        chosen,
+        candidate,
+        None,
+        False,
+        slot=slot,
+        reason="breaking",
+        poster=poster,
+        breaking_post=True,
+    )
 
 
 # --- status edits --------------------------------------------------------------------------------

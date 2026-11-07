@@ -285,7 +285,7 @@ async def _resolve(conn: AsyncConnection, job: Job, now: datetime) -> Target | s
             return await retry_at(
                 conn, job, now + backoff(job.attempts + 1), "channel_not_set", counted=True, now=now
             )
-        if role == "main":
+        if role == "main" and job.payload.get("breaking") is not True:  # D56: breaking news goes now
             posting = await store.posting_settings(conn)
             later = next_post_time(
                 now,

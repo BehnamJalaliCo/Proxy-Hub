@@ -159,6 +159,10 @@ class ContentCandidate(Base):
     qc_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     qc_tries: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     decided_by: Mapped[str | None] = mapped_column(String(8))
+    # D56: Claude's hint that the item is breaking news, and when the supervisor found the approved
+    # candidate to be breaking news (young, several sources): the publisher posts it out of plan.
+    qc_breaking: Mapped[bool | None] = mapped_column(Boolean)
+    breaking_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ContentMedia(Base):

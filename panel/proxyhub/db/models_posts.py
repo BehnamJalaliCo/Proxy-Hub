@@ -24,6 +24,7 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -130,6 +131,8 @@ class Post(Base):
         BigInteger, ForeignKey("content_candidates.id", ondelete="SET NULL")
     )
     media_kind: Mapped[str | None] = mapped_column(String(8))
+    # D56: an out-of-plan breaking-news post (not counted against posts_per_day).
+    breaking: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
 
 class PostLink(Base):

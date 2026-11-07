@@ -58,6 +58,7 @@ def answer(**over: Any) -> str:
         "flags": dict.fromkeys(FLAGS, False),
         "title": "🌍 زلزله‌ی ۵ ریشتری کرمان را لرزاند",
         "body": "زمین‌لرزه‌ای به بزرگی ۵ ریشتر بامداد امروز کرمان را لرزاند و تاکنون خسارتی گزارش نشده است.",
+        "breaking": False,
     }
     data.update(over)
     return json.dumps(data, ensure_ascii=False)
