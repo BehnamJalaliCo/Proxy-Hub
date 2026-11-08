@@ -31,7 +31,9 @@ Model (docs/10_IMPLEMENTATION_PLAN.md section 3.11):
   record from Iran is open on MCI and Rightel and skipping those closed on both
   (proxyhub/fleet/locations.py). When every allowed location is closed, nothing is built
   (``all_locations_closed``) and the owner is told once a day.
-* Accounts: youngest active account first, the next one when it is full (section 3.8).
+* Accounts: youngest active account first, the next one when it is full (section 3.8). An account's
+  learned server limit counts for :data:`LIMIT_RECHECK` after it was learned; then the next creation
+  tries again (a refusal teaches it again at once), so a limit Hetzner raised is used.
 * Intended creations are evaluated cumulatively, in slot order: an allowed creation counts
   against the node cap, the hourly creation cap, the account and the month budget of the next one.
 """
@@ -69,6 +71,8 @@ OBSERVATION_MAX_AGE = timedelta(minutes=30)  # account_guard checks every 10 min
 # prices twice in 2026), so budget projections built on them could let a creation exceed the cap.
 OFFER_MAX_AGE = timedelta(hours=6)
 REPLACEMENT_SETTLE = timedelta(minutes=2)  # DNS TTL 60 s + margin (section 3.11 step 4)
+# A learned server limit older than this is tried again (Hetzner may have raised it).
+LIMIT_RECHECK = timedelta(hours=6)
 CREATION_WINDOW = timedelta(hours=1)
 # An unhealthy node (agent silent, Telemt down) gets this long to recover by itself (the agent and
 # Telemt restart under systemd) before a replacement is built.
@@ -93,6 +97,7 @@ class AccountSnapshot:
     state: str
     created_at: datetime
     learned_server_limit: int | None = None
+    learned_limit_at: datetime | None = None  # when it was learned (None: before migration 0032)
     observed_at: datetime | None = None  # last SUCCESSFUL live observation
     guard_ok: bool | None = None
     servers_total: int | None = None
@@ -303,12 +308,20 @@ class _Planner:
     def _fresh(self, a: AccountSnapshot) -> bool:
         return a.observed_at is not None and self.now - a.observed_at <= OBSERVATION_MAX_AGE
 
+    def _limit(self, a: AccountSnapshot) -> int | None:
+        """The learned server limit while it is recent; an older one (or one with no time) is
+        unknown, so the next creation tries again: Hetzner may have raised it (2026-11-08). A refusal
+        teaches it again at once (proxyhub/accounts/limits.py)."""
+        if a.learned_limit_at is None or self.now - a.learned_limit_at >= LIMIT_RECHECK:
+            return None
+        return a.learned_server_limit
+
     def _account_view(self, a: AccountSnapshot) -> AccountView:
         return AccountView(
             id=a.id,
             state=a.state,
             guard_ok=self._fresh(a) and a.guard_ok is True,
-            learned_server_limit=a.learned_server_limit,
+            learned_server_limit=self._limit(a),
             servers_in_account=self.run.per_account.get(a.id, 0),
         )
 

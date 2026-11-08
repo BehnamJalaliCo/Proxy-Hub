@@ -17,6 +17,7 @@ from test_fleet_support import LOCATIONS, live_offers, server
 
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
 from proxyhub.fleet.planner import (
+    LIMIT_RECHECK,
     OBSERVATION_MAX_AGE,
     REPLACEMENT_SETTLE,
     SPARE_SLOTS,
@@ -45,6 +46,7 @@ def account(
     guard_ok: bool | None = True,
     servers_total: int | None = 0,
     limit: int | None = None,
+    limit_age: timedelta | None = timedelta(minutes=10),
     now: datetime = NOW,
 ) -> AccountSnapshot:
     return AccountSnapshot(
@@ -53,6 +55,7 @@ def account(
         state=state,
         created_at=now - timedelta(days=age_days),
         learned_server_limit=limit,
+        learned_limit_at=None if limit_age is None else now - limit_age,
         observed_at=None if observed_min_ago is None else now - timedelta(minutes=observed_min_ago),
         guard_ok=guard_ok,
         servers_total=servers_total,
@@ -590,3 +593,20 @@ def test_a_full_account_moves_one_removed_location_slot_at_a_time() -> None:
         open_settings(target_slots=3, locations=[]), nodes=(s1, s2, s3), servers=servers, accounts=full
     )
     assert not [a for a in plan.actions if a.action == "delete"]
+
+
+def test_a_learned_limit_is_tried_again_after_a_while() -> None:
+    """2026-11-08: the owner asks Hetzner for 9 servers; a limit learned long ago (or before its time
+    was kept) is unknown again, so the next creation tries and a refusal teaches it once more."""
+    nodes = tuple(node(i, slot=i) for i in range(1, 5))
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in range(1, 5)}
+    settings_ = open_settings(target_slots=6)
+    fresh = plan_for(settings_, nodes=nodes, servers=servers, accounts=(account(limit=4, servers_total=4),))
+    assert creates(fresh) and all("account_server_limit_reached" in c.reasons for c in creates(fresh))
+    for old in (
+        account(limit=4, servers_total=4, limit_age=LIMIT_RECHECK),
+        account(limit=4, servers_total=4, limit_age=None),
+    ):
+        plan = plan_for(settings_, nodes=nodes, servers=servers, accounts=(old,))
+        assert [c.allowed for c in creates(plan)] == [True, True]  # slots 5 and 6 try again
+        assert not [a for a in plan.actions if a.reasons == ("making_room",)]
