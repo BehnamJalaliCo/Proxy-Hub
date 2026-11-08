@@ -32,7 +32,13 @@ from proxyhub.db.models_live import NodeOperation
 from proxyhub.fleet.actions import iso, log_action
 from proxyhub.fleet.costs import money, node_cost_items
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
-from proxyhub.fleet.planner import OBSERVATION_MAX_AGE, OFFER_MAX_AGE, AccountSnapshot, counts_as_creation
+from proxyhub.fleet.planner import (
+    OBSERVATION_MAX_AGE,
+    OFFER_MAX_AGE,
+    AccountSnapshot,
+    counts_as_creation,
+    effective_server_limit,
+)
 from proxyhub.fleet.settings_store import SettingsCorrupt, load_fleet_settings
 from proxyhub.fleet.snapshot import load_accounts, load_nodes, load_offers
 from proxyhub.hetzner.client import HetznerReader, _delete_protected
@@ -283,7 +289,7 @@ async def evaluate_create(
             id=chosen.id,
             state=chosen.state,
             guard_ok=guard_ok,
-            learned_server_limit=chosen.learned_server_limit,
+            learned_server_limit=effective_server_limit(chosen, now),
             servers_in_account=servers,
         )
     else:
