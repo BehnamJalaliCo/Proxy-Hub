@@ -3,7 +3,11 @@ proxies whose node was deleted (docs/11 section 2, decisions D25 and D37). The w
 machines in proxyhub/sponsor/botlist.py; this module keeps the job, the entries and the owner's view.
 
 One job at a time (settings row :data:`KEY`), started by the owner's button or the CLI
-(``python -m proxyhub.sponsor``):
+(``python -m proxyhub.sponsor``), or **by the panel itself** (P30, 2026-11-07: the owner should not
+have to press anything when a node goes): with removal on, a ``cleanup`` is queued when a
+registration was retired as ``node_gone`` at least :data:`AUTO_AFTER` ago and after the last job
+(:func:`auto_cleanup_due`), at most once per :data:`AUTO_GAP`, never after a job that got stuck
+(the owner looks at those first):
 
 * ``inventory`` (mode ``look``): read every page of /myproxies; the read replaces the entries
   (table ``mtproxybot_entries``). Then open the screen of each LIVE proxy of ours, one per pass,
@@ -39,12 +43,12 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Final
 
-from sqlalchemy import delete, insert, select, text, update
+from sqlalchemy import delete, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from proxyhub.cloudflare.service import node_dns_name
-from proxyhub.db.models import Setting
+from proxyhub.db.models import MtproxyRegistration, Setting
 from proxyhub.db.models_sponsor import MtproxybotEntry
 from proxyhub.fleet.actions import iso
 from proxyhub.mtproxy import state as account_state
@@ -95,6 +99,10 @@ REMOVAL_STEPS: Final = frozenset({Step.PRESSED_REMOVE, Step.PRESSED_CONFIRM})
 # The observation that allows turning removal on: the dead proxy's screen named it and had exactly
 # one button of the removal shape.
 OBSERVED_OK: Final = "remove_button_found"
+# The cleanup the panel queues by itself (module doc).
+AUTO_ACTOR: Final = "sponsor:auto"
+AUTO_AFTER: Final = timedelta(minutes=10)
+AUTO_GAP: Final = timedelta(hours=1)
 
 
 class InventoryError(Exception):
@@ -898,6 +906,28 @@ async def request_job(engine: AsyncEngine, kind: str, *, actor: str, now: dateti
         await save_state(db, replace(state, job=job))
         await _log(db, "sponsor.mtproxybot_requested", "@MTProxybot", reasons=[kind, mode], actor=actor)
     return job
+
+
+async def auto_cleanup_due(db: AsyncConnection, now: datetime) -> bool:
+    """Whether the panel should queue a ``cleanup`` by itself now (see the module doc)."""
+    state = await load_state(db)
+    if not state.removal_enabled:
+        return False
+    last: datetime | None = None
+    if state.job is not None:
+        if state.job.open or state.job.state == STUCK:
+            return False
+        last = state.job.finished_at or state.job.requested_at
+        if last is not None and now - last < AUTO_GAP:
+            return False
+    gone = select(func.count()).where(
+        MtproxyRegistration.state == "retired",
+        MtproxyRegistration.state_reason == "node_gone",
+        MtproxyRegistration.updated_at <= now - AUTO_AFTER,
+    )
+    if last is not None:
+        gone = gone.where(MtproxyRegistration.updated_at > last)
+    return bool((await db.execute(gone)).scalar_one())
 
 
 async def stop_job(engine: AsyncEngine, *, actor: str, now: datetime) -> None:

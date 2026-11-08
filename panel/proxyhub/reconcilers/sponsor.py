@@ -11,13 +11,16 @@ keeps the campaign states up to date.
 
 A pass with nothing to do for a live proxy (``idle``, or ``paused``) runs one step of the owner's
 job on @MTProxybot's own list instead (:func:`proxyhub.sponsor.inventory.step`): the inventory, the
-promotion check, or the cleanup of proxies whose node was deleted.
+promotion check, or the cleanup of proxies whose node was deleted. With no job and removal on, an
+idle pass queues that cleanup by itself once a deleted node's registration waits
+(:func:`proxyhub.sponsor.inventory.auto_cleanup_due`).
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -72,4 +75,20 @@ class SponsorReconciler(Reconciler):
         # Nothing for a live proxy this pass: one step of the owner's job on @MTProxybot's own list
         # (inventory, promotion check, cleanup), if any. A removal waits while conversations pause.
         listed = await inventory.step(deps, paused=outcome == "paused")
+        if listed == "idle" and outcome == "idle":
+            return await self._auto_cleanup(engine)
         return outcome if listed == "idle" else listed
+
+    async def _auto_cleanup(self, engine: AsyncEngine) -> str:
+        """Queue the cleanup of deleted nodes' proxies when one waits (no owner button needed)."""
+        now = datetime.now(UTC)
+        async with engine.connect() as db:
+            due = await inventory.auto_cleanup_due(db, now)
+        if not due:
+            return "idle"
+        try:
+            await inventory.request_job(engine, inventory.CLEANUP, actor=inventory.AUTO_ACTOR, now=now)
+        except inventory.InventoryError as exc:
+            log.info("sponsor: automatic cleanup not queued (%s)", exc.code)
+            return "idle"
+        return "cleanup_queued"

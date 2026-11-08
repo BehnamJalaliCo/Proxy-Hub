@@ -680,6 +680,68 @@ async def test_the_sponsor_loop_runs_a_step_only_when_it_has_nothing_else_to_do(
     assert await loop.step(engine) == "kill_switch"
 
 
+async def test_the_panel_queues_the_cleanup_by_itself_after_a_node_is_gone(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """P30 (2026-11-07): with removal on, a deleted node's proxy is cleaned up with no owner button:
+    once its registration has waited AUTO_AFTER, at most once per AUTO_GAP, never after a stuck job."""
+    from dataclasses import replace
+
+    from test_sponsor_support import TelemtUsersProvider
+
+    from proxyhub.reconcilers.sponsor import SponsorReconciler
+
+    ids = await seed(engine, seal_key)
+    await seed_connected(engine, vault, port=closed_port(), mtproxybot_id=BOT_ID)
+    now = datetime.now(UTC)
+    later = now + inventory.AUTO_AFTER + timedelta(minutes=1)
+    async with engine.connect() as db:
+        assert not await inventory.auto_cleanup_due(db, later)  # removal is off
+    await enable_removal(engine)
+    async with engine.connect() as db:
+        assert not await inventory.auto_cleanup_due(db, now)  # gone only just now
+        assert await inventory.auto_cleanup_due(db, later)
+
+    async with engine.begin() as db:
+        await db.execute(
+            text("UPDATE mtproxy_registrations SET updated_at = now() - interval '20 minutes' WHERE id = :i"),
+            {"i": ids["dead"]},
+        )
+    loop = SponsorReconciler(
+        vault_factory=lambda: vault,
+        provider=lambda: TelemtUsersProvider(seal_key),
+        options=ClientOptions(endpoint=Endpoint("127.0.0.1", closed_port()), deadline_s=3),
+    )
+    assert await loop.step(engine) == "cleanup_queued"
+    queued = await job(engine)
+    assert (queued.kind, queued.mode, queued.requested_by) == ("cleanup", "remove", inventory.AUTO_ACTOR)
+    async with engine.connect() as db:
+        assert not await inventory.auto_cleanup_due(db, later)  # a job is open
+
+    async def finish(state: str, at: datetime) -> None:
+        async with engine.begin() as db:
+            current = await inventory._locked_state(db)
+            assert current.job is not None
+            await inventory.save_state(
+                db, replace(current, job=replace(current.job, state=state, finished_at=at))
+            )
+
+    await finish(inventory.DONE, now)
+    async with engine.connect() as db:
+        # The registration is older than that job: nothing new to clean up, even after the gap.
+        assert not await inventory.auto_cleanup_due(db, now + inventory.AUTO_GAP + timedelta(hours=1))
+    async with engine.begin() as db:
+        await db.execute(
+            text("UPDATE mtproxy_registrations SET updated_at = now() WHERE id = :i"), {"i": ids["dead"]}
+        )
+    async with engine.connect() as db:
+        assert not await inventory.auto_cleanup_due(db, later)  # gone after it, but within the gap
+        assert await inventory.auto_cleanup_due(db, now + inventory.AUTO_GAP + timedelta(minutes=1))
+    await finish(inventory.STUCK, now)
+    async with engine.connect() as db:
+        assert not await inventory.auto_cleanup_due(db, now + timedelta(days=1))  # the owner looks first
+
+
 # --- the API and the CLI ----------------------------------------------------------------------------------
 
 

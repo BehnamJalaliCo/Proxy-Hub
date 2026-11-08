@@ -269,6 +269,33 @@ async def test_a_slot_moving_off_a_removed_location_keeps_its_links(world: World
     assert await _end(world, moved_at + MOVE_GRACE + timedelta(minutes=1)) == {made.config_id: "burned"}
 
 
+async def test_a_slot_links_flag_follows_the_server_that_serves_it_now(world: World) -> None:
+    """The owner (2026-11-07): after slot 3 moved from Finland to the US, its links must show 🇺🇸.
+    A slot name link takes the flag of the slot's newest ready node; an IP link keeps its own."""
+    zone = await world.zone("f")
+    old = await world.node(slot=3, ipv4="203.0.113.30", location="hel1", ready_at=T0 - timedelta(days=1))
+    await world.report(old, now=T0)
+    [made] = await _create(world, T0)
+    assert made.host == f"slot3.{zone}"
+    await world.report(old, now=datetime.now(UTC))
+
+    async def flags() -> set[str]:
+        async with world.engine.connect() as conn:
+            return {link.url.rsplit("#", 1)[1] for link in await provide_links(conn) if link.slot == 3}
+
+    assert flags_of(await flags()) == {"🇫🇮"}
+    new = await world.node(slot=3, ipv4="203.0.113.31", location="hil", ready_at=datetime.now(UTC))
+    await world.report(new, now=datetime.now(UTC))
+    await world.rows("UPDATE nodes SET state = 'deleted' WHERE id = :n", n=old)
+    assert flags_of(await flags()) == {"🇺🇸"}
+
+
+def flags_of(fragments: set[str]) -> set[str]:
+    from urllib.parse import unquote
+
+    return {unquote(f).split(" ")[1] for f in fragments}
+
+
 async def test_the_private_key_of_a_deleted_slotless_node_is_forgotten(world: World) -> None:
     test_node = await world.node(slot=None, ipv4="198.51.100.6")
     slot_node = await world.node(slot=7, ipv4="198.51.100.7")
