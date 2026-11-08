@@ -38,6 +38,7 @@ from proxyhub.db.models import Node
 from proxyhub.db.models_agent import AgentNode, TelemtNodeConfig
 from proxyhub.db.models_reality import RealityConfig, RealityKey, RealityNodeStatus, RealityUsage
 from proxyhub.fleet.lifecycle import NodeState
+from proxyhub.reality.download import record_traffic
 from proxyhub.reality.settings import PORT, XHTTP_PORT, load_reality_settings
 from proxyhub.vault import Vault, VaultError
 
@@ -440,14 +441,16 @@ async def store_xray_report(
     now: datetime,
     checked: tuple[str, str] | None = None,
     xhttp_port: int | None = None,
+    traffic: tuple[int, int] | None = None,
 ) -> int:
     """Store one report's Xray section: node status, and per config the bytes this node counted.
 
     The agent sends cumulative totals; a total below the last one means the agent started counting
     again (its state was reset), so the new total is added rather than lost. Only configs of the
     node's own scope are accepted. ``checked`` is the (target, server name) the node's last target
-    check was about, given exactly when ``target_ok`` is. Returns how many configs got usage. The
-    caller commits.
+    check was about, given exactly when ``target_ok`` is. ``traffic``: the node's (up, down) totals
+    over its Reality users (agent 0.5.0, D61; proxyhub/reality/download.py). Returns how many configs
+    got usage. The caller commits.
     """
     if (target_ok is None) != (checked is None):
         raise ValueError("a target check result comes with the target it was about")
@@ -469,6 +472,8 @@ async def store_xray_report(
         .values(node_id=node_id, **status_values)
         .on_conflict_do_update(index_elements=[RealityNodeStatus.node_id], set_=status_values)
     )
+    if traffic is not None:  # D61, agent 0.5.0 on: the node's (up, down) totals
+        await record_traffic(db, node_id, traffic[0], traffic[1], now)
     node = await get_node(db, node_id)
     if node is None or not users:
         return 0

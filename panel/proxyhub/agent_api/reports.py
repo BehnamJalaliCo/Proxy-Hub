@@ -207,5 +207,8 @@ async def store_report(session: AsyncSession, node_id: uuid.UUID, report: AgentR
             users=[XrayUserTotal(u.email, u.total_octets) for u in x.users],
             now=now,
             xhttp_port=x.xhttp_port,
+            traffic=(x.uplink_octets, x.downlink_octets)
+            if x.uplink_octets is not None and x.downlink_octets is not None
+            else None,
         )
     return stats_rows

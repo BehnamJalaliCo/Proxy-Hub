@@ -51,8 +51,13 @@ type xrayRuntime struct {
 	checkOwnTLS func(ctx context.Context, port int, serverName string, roots *x509.CertPool) error
 	roots       *x509.CertPool
 
-	up       bool
-	uptimeS  *float64
+	up      bool
+	uptimeS *float64
+	// uplink / downlink: the node's totals over our users since Xray started (D61: the panel's
+	// download check); split says they come from the last scrape that worked.
+	uplink   uint64
+	downlink uint64
+	split    bool
 	applyErr string
 	targetOK *bool
 	// targetChecked / sniChecked: what targetOK is about (the report says so). REALITY: the target
@@ -122,16 +127,18 @@ func (a *Agent) ScrapeXray(ctx context.Context) {
 		return
 	}
 	uptime, err := a.xr.api.Uptime(ctx)
-	var traffic map[string]uint64
+	var counted xray.Traffic
 	if err == nil {
-		traffic, err = a.xr.api.UserTraffic(ctx)
+		counted, err = a.xr.api.Traffic(ctx)
 	}
 	if err != nil {
-		a.xr.up, a.xr.uptimeS = false, nil
+		a.xr.up, a.xr.uptimeS, a.xr.split = false, nil, false
 		return
 	}
+	traffic := counted.Users
 	up := float64(uptime)
 	a.xr.up, a.xr.uptimeS = true, &up
+	a.xr.uplink, a.xr.downlink, a.xr.split = counted.Uplink, counted.Downlink, true
 	if a.doc == nil || a.doc.Xray == nil {
 		return
 	}
@@ -428,5 +435,8 @@ func (a *Agent) xrayReport() *report.Xray {
 		ApplyError:        a.xr.applyErr,
 		XHTTPPort:         a.xr.xhttpPort,
 		Totals:            totals,
+		Split:             a.xr.split,
+		Uplink:            a.xr.uplink,
+		Downlink:          a.xr.downlink,
 	})
 }

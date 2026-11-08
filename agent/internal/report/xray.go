@@ -30,8 +30,13 @@ type Xray struct {
 	// XHTTPPort: the port of the VLESS + XHTTP + REALITY inbound Xray runs now (agent 0.4.0 on);
 	// left out while Xray is down or serves no XHTTP inbound (so only a panel that asked for
 	// XHTTP ever sees the key).
-	XHTTPPort *int       `json:"xhttp_port,omitempty"`
-	Users     []XrayUser `json:"users"`
+	XHTTPPort *int `json:"xhttp_port,omitempty"`
+	// UplinkOctets / DownlinkOctets: the node's totals over its Reality users since Xray started,
+	// each direction (agent 0.5.0, decision D61: the panel's download check). Two numbers for the
+	// whole node, never per person; left out while Xray is down.
+	UplinkOctets   *uint64    `json:"uplink_octets,omitempty"`
+	DownlinkOctets *uint64    `json:"downlink_octets,omitempty"`
+	Users          []XrayUser `json:"users"`
 }
 
 // XrayUser is one Reality user's total traffic (uplink + downlink) as counted on this node.
@@ -53,6 +58,10 @@ type XrayInput struct {
 	ApplyError        string
 	XHTTPPort         int               // 0: no XHTTP inbound in the applied config
 	Totals            map[string]uint64 // label -> cumulative octets
+	// Split: Uplink / Downlink come from a stats read that worked (the node's totals, D61).
+	Split    bool
+	Uplink   uint64
+	Downlink uint64
 }
 
 // BuildXray assembles the Xray section; only valid labels are reported, sorted. A target check is
@@ -72,6 +81,10 @@ func BuildXray(in XrayInput) *Xray {
 		if in.XHTTPPort >= 1 && in.XHTTPPort <= 65535 {
 			port := in.XHTTPPort
 			x.XHTTPPort = &port
+		}
+		if in.Split {
+			uplink, downlink := in.Uplink, in.Downlink
+			x.UplinkOctets, x.DownlinkOctets = &uplink, &downlink
 		}
 	}
 	if in.ApplyError != "" {

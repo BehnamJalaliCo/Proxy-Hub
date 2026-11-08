@@ -238,6 +238,7 @@ EXPECTED_REMOVED = {
     "mtproto_proxies": 1,
     "node_operations": 1,
     "reality_node_status": 1,
+    "reality_traffic_hours": 1,
     "reality_keys": 1,
     "node_events": 2,
     "nodes": 2,

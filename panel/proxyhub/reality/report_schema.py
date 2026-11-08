@@ -1,6 +1,7 @@
 """The ``xray`` section of an agent report (strict, like the rest of proxyhub/agent_api/reports.py).
 
-Per Reality user only its label and cumulative byte total; for Xray only up/version/uptime, the
+Per Reality user only its label and cumulative byte total, and for the whole node its totals of each
+direction (agent 0.5.0, D61); for Xray only up/version/uptime, the
 target check (with the target and server name it was about: both come from the panel's own desired
 state, DNS names only), an apply error code and the port of the XHTTP inbound it runs. Nothing can
 carry an address (rule 7): every string has a narrow pattern and the whole report is scanned for
@@ -47,12 +48,18 @@ class XrayCounters(_Strict):
     users: Annotated[list[XrayUserCounters], Field(max_length=MAX_XRAY_USERS)]
     # The port of the VLESS + XHTTP + REALITY inbound Xray runs (agent 0.4.0 on; absent: none).
     xhttp_port: Annotated[int, Field(ge=1, le=65535)] | None = None
+    # D61 (agent 0.5.0 on): the node's totals of each direction over its Reality users since Xray
+    # started; both or neither (absent: an older agent, or Xray down).
+    uplink_octets: Annotated[int, Field(ge=0, le=INT64_MAX)] | None = None
+    downlink_octets: Annotated[int, Field(ge=0, le=INT64_MAX)] | None = None
 
     @model_validator(mode="after")
     def _unique(self) -> XrayCounters:
         emails = [u.email for u in self.users]
         if len(emails) != len(set(emails)):
             raise ValueError("duplicate xray user")
+        if (self.uplink_octets is None) != (self.downlink_octets is None):
+            raise ValueError("uplink_octets and downlink_octets come together")
         checked = (self.target_ok, self.checked_target, self.checked_server_name)
         if any(v is None for v in checked) != all(v is None for v in checked):
             raise ValueError("target_ok, checked_target and checked_server_name come together")

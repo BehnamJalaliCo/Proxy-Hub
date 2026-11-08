@@ -58,6 +58,7 @@ const GROUPS: readonly { key: string; label: string; tables: readonly string[] }
       "telemt_users",
       "node_operations",
       "reality_node_status",
+      "reality_traffic_hours",
       "reality_keys",
       "reality_usage",
     ],

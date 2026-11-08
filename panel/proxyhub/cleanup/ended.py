@@ -85,6 +85,7 @@ ALLOWED_TABLES: Final = (
     "mtproto_proxies",
     "node_operations",
     "reality_node_status",
+    "reality_traffic_hours",
     "reality_keys",
     "node_events",
     "nodes",
@@ -138,6 +139,7 @@ REFERENCES: Final[dict[str, str]] = {
     "mtproto_proxies.node_id -> nodes": DELETED_FIRST,
     "node_operations.node_id -> nodes": DELETED_FIRST,
     "reality_node_status.node_id -> nodes": DELETED_FIRST,
+    "reality_traffic_hours.node_id -> nodes": DELETED_FIRST,
     "reality_keys.node_id -> nodes": DELETED_FIRST,
     "node_events.node_id -> nodes": DELETED_FIRST,
     "cost_ledger.node_id -> nodes": GUARD,
@@ -309,6 +311,7 @@ _NODE_CHILDREN: Final = (
     ("mtproto_proxies", "node_id = ANY(:ids)"),
     ("node_operations", "node_id = ANY(:ids)"),
     ("reality_node_status", "node_id = ANY(:ids)"),
+    ("reality_traffic_hours", "node_id = ANY(:ids)"),
     (
         "reality_keys",
         "node_id = ANY(:ids) "

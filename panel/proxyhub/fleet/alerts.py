@@ -2,8 +2,9 @@
 
 Decision D1: the owner is told only what the code cannot solve by itself. Here that is a NEEDED
 action the safety gates block (a slot needs a server, but the budget cap, the node cap, the
-account's server limit ... say no), a server the delete gate will not delete, and Hetzner handing
-out burned IPs again and again.
+account's server limit ... say no), a server the delete gate will not delete, Hetzner handing
+out burned IPs again and again, and (D61, observe first) a server whose Reality users send but
+hardly get anything back.
 
 Each kind is one row in ``fleet_alerts``: an alert goes out when the condition has lasted a short
 while (transient blocks stay quiet), is repeated at most every 12 hours while it lasts, and once it
@@ -33,6 +34,7 @@ from proxyhub.fleet.actions import iso, log_action
 from proxyhub.fleet.costs import money
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
 from proxyhub.fleet.planner import FleetPlan, FleetSnapshot
+from proxyhub.reality.download import suspect_detail as download_detail
 from proxyhub.telegram.store import enqueue_owner_alert
 from proxyhub.telegram.templates import fa_digits
 
@@ -83,6 +85,7 @@ DELAY: dict[str, timedelta] = {
     **CREATE_BLOCKS,
     "delete_blocked": timedelta(minutes=30),
     "burned_ip_streak": timedelta(0),
+    "download_suspect": timedelta(0),  # already two hours of evidence (proxyhub/reality/download.py)
 }
 
 
@@ -213,6 +216,8 @@ def findings(plan: FleetPlan, snap: FleetSnapshot) -> list[Finding]:
         and n.state in (NodeState.RETIRING, NodeState.DELETED)
         and n.created_at >= since
     ]
+    if snap.download_suspects:
+        out.append(_download_finding(snap))
     if len(burned_ip) >= BURNED_IP_STREAK:
         out.append(
             Finding(
@@ -224,6 +229,34 @@ def findings(plan: FleetPlan, snap: FleetSnapshot) -> list[Finding]:
             )
         )
     return out
+
+
+def _download_finding(snap: FleetSnapshot) -> Finding:
+    """D61, observe first: nodes whose Reality users get back far less than they send."""
+    by_id = {n.id: n for n in snap.nodes}
+    lines: list[str] = []
+    for s in snap.download_suspects:
+        n = by_id.get(s.node_id)
+        where = (
+            f"جایگاه {fa_digits(n.slot)} ({html.escape(n.location)})"
+            if n is not None and n.slot is not None
+            else html.escape(n.location if n is not None else "؟")
+        )
+        line = (
+            f"• {where}: کاربرانش {fa_digits(round(s.up / 1_000_000))} مگ فرستادند و فقط "
+            f"{fa_digits(round(s.down / 1_000_000))} مگ گرفتند"
+        )
+        if s.peers_ratio is not None:
+            line += f"؛ کاربران سرورهای دیگر حدود {fa_digits(round(s.peers_ratio))} برابرِ فرستاده‌شان میگیرند"
+        lines.append(line + ".")
+    text = (
+        "⚠️ ناوگان: دانلود این سرورها در ۲ ساعت گذشته مشکوک است (مثل فنلاند روی همراه اول: "
+        "آپلود هست، دانلود نه):\n"
+        + "\n".join(lines)
+        + "\nاگر کانفیگ‌هایش روی همراه اول کار نمیکند، مکانش را از «تنظیمات ناوگان» بردارید تا جایگاه "
+        "به مکان دیگری برود. سیستم فعلاً خودش جایگزین نمیکند."
+    )
+    return Finding("download_suspect", text, {"nodes": [download_detail(s) for s in snap.download_suspects]})
 
 
 async def raise_alerts(db: Db, found: list[Finding], now: datetime) -> list[str]:

@@ -120,6 +120,8 @@ async def clean_reality(engine: AsyncEngine) -> None:
             await conn.execute(text(f"DELETE FROM {table}"))  # noqa: S608 - fixed table names
         await conn.execute(text("DELETE FROM secrets WHERE name LIKE 'reality:%'"))
         await conn.execute(text("DELETE FROM settings WHERE key IN ('reality', 'reality.state')"))
+        # A test that names the main channel (the link prefix) must not leave it for the next file.
+        await conn.execute(text("DELETE FROM settings WHERE key = 'telegram.channels'"))
         await conn.execute(text("DELETE FROM actions_log WHERE actor = 'reality' OR target = 'reality'"))
         await conn.execute(
             text(

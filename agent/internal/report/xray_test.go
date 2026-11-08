@@ -38,6 +38,16 @@ func TestBuildXray(t *testing.T) {
 			t.Fatalf("got %s", data)
 		}
 	}
+	// D61: the node's totals of each direction, only from a stats read that worked and while up.
+	data, _ = json.Marshal(BuildXray(XrayInput{Enabled: true, Up: true, Split: true, Uplink: 300, Downlink: 9000}))
+	if !strings.Contains(string(data), `"apply_error":null,"uplink_octets":300,"downlink_octets":9000,"users":[]`) {
+		t.Fatalf("got %s", data)
+	}
+	for _, in := range []XrayInput{{Enabled: true, Up: true, Uplink: 1}, {Enabled: true, Split: true, Uplink: 1}} {
+		if data, _ := json.Marshal(BuildXray(in)); strings.Contains(string(data), "link_octets") {
+			t.Fatalf("got %s", data)
+		}
+	}
 	// A node without Xray still says so (the panel learns this agent understands Xray).
 	data, _ = json.Marshal(BuildXray(XrayInput{}))
 	if string(data) != `{"enabled":false,"up":false,"version":null,"uptime_s":null,"target_ok":null,`+
