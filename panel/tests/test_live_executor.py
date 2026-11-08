@@ -147,7 +147,10 @@ async def _unpriced_live_node(world: LiveWorld) -> None:
 
 async def _server_limit(world: LiveWorld) -> None:
     await _sql(
-        world, "UPDATE hetzner_accounts SET learned_server_limit = 2 WHERE id = :a", a=world.account_id
+        world,
+        # learned just now: a limit counts for LIMIT_RECHECK after it was learned (2026-11-08)
+        "UPDATE hetzner_accounts SET learned_server_limit = 2, learned_server_limit_at = now() WHERE id = :a",
+        a=world.account_id,
     )
     await _sql(
         world,
@@ -228,6 +231,28 @@ async def test_api_refuses_with_the_gate_reasons(world: LiveWorld, reason: str, 
     log = await world.rows("SELECT allowed, reasons FROM actions_log WHERE action = 'test_node_request'")
     assert len(log) == 1 and log[0][0] is False and reason in log[0][1]["reasons"]
     assert world.no_hetzner.calls == 0
+
+
+async def test_an_old_server_limit_does_not_block_the_gate(world: LiveWorld) -> None:
+    """P31 (2026-11-08): the planner tried again on a limit learned long ago (or with no time), but
+    this gate still refused on it before any Hetzner call, so the limit was never learned again and
+    every round made and closed a request. Both now read the same effective limit."""
+    from proxyhub.nodes.service import evaluate_create
+
+    await world.settings(good_settings())
+    await _server_limit(world)
+    async with world.sessions() as s:
+        fresh = await evaluate_create(s, datetime.now(UTC), location="fsn1")
+    assert "account_server_limit_reached" in fresh.reasons
+    for learned_at in ("NULL", "now() - interval '7 hours'"):
+        await _sql(
+            world,
+            f"UPDATE hetzner_accounts SET learned_server_limit_at = {learned_at} WHERE id = :a",  # noqa: S608
+            a=world.account_id,
+        )
+        async with world.sessions() as s:
+            old = await evaluate_create(s, datetime.now(UTC), location="fsn1")
+        assert "account_server_limit_reached" not in old.reasons, learned_at
 
 
 @pytest.mark.parametrize(("reason", "setup"), REFUSALS, ids=[r for r, _ in REFUSALS])

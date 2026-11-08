@@ -121,6 +121,17 @@ class NodeSnapshot(NodeCostInput):
     create_attempted: bool = True
 
 
+def effective_server_limit(a: AccountSnapshot, now: datetime) -> int | None:
+    """The learned server limit while it is recent; an older one (or one with no time) is unknown,
+    so the next creation tries again: Hetzner may have raised it (2026-11-08). A refusal teaches it
+    again at once (proxyhub/accounts/limits.py). The planner AND the executor's own gate
+    (proxyhub/nodes/service.py ``evaluate_create``) use this: P31 found the executor still refusing
+    on the old limit before any Hetzner call, so the limit was never learned again."""
+    if a.learned_limit_at is None or now - a.learned_limit_at >= LIMIT_RECHECK:
+        return None
+    return a.learned_server_limit
+
+
 def counts_as_creation(n: NodeSnapshot, now: datetime) -> bool:
     """A server creation within the last hour (the hourly creation cap). A request the executor
     closed before any create call made no server and does not count."""
@@ -313,12 +324,7 @@ class _Planner:
         return a.observed_at is not None and self.now - a.observed_at <= OBSERVATION_MAX_AGE
 
     def _limit(self, a: AccountSnapshot) -> int | None:
-        """The learned server limit while it is recent; an older one (or one with no time) is
-        unknown, so the next creation tries again: Hetzner may have raised it (2026-11-08). A refusal
-        teaches it again at once (proxyhub/accounts/limits.py)."""
-        if a.learned_limit_at is None or self.now - a.learned_limit_at >= LIMIT_RECHECK:
-            return None
-        return a.learned_server_limit
+        return effective_server_limit(a, self.now)
 
     def _account_view(self, a: AccountSnapshot) -> AccountView:
         return AccountView(
