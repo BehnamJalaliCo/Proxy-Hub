@@ -112,7 +112,10 @@ async def record_resource_limit(
         return None
     learned = learned_server_limit(parsed, servers_in_account)
     await db.execute(
-        text("UPDATE hetzner_accounts SET learned_server_limit = :n, updated_at = now() WHERE id = :id"),
+        text(
+            "UPDATE hetzner_accounts SET learned_server_limit = :n, learned_server_limit_at = now(), "
+            "updated_at = now() WHERE id = :id"
+        ),
         {"n": learned, "id": account_id},
     )
     await log_action(

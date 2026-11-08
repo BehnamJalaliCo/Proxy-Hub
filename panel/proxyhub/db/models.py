@@ -77,6 +77,9 @@ class HetznerAccount(Base):
     state: Mapped[str] = mapped_column(String(20), nullable=False, default="verifying")
     state_reason: Mapped[str | None] = mapped_column(Text)
     learned_server_limit: Mapped[int | None] = mapped_column(Integer)
+    # When it was learned (migration 0032): a limit older than the planner's LIMIT_RECHECK is tried
+    # again, so a limit Hetzner raised is used (proxyhub/fleet/planner.py).
+    learned_server_limit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _now_col()
     updated_at: Mapped[datetime] = _now_col()
 

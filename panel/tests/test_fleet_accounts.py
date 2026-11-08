@@ -452,6 +452,12 @@ async def test_record_resource_limit_updates_account(
         == 5
     )
     assert await scalar(engine, "SELECT count(*) FROM actions_log WHERE action = 'learned_server_limit'") == 1
+    # When it was learned is kept, so the planner tries again once it is old (Hetzner may raise it).
+    assert await scalar(
+        engine,
+        "SELECT learned_server_limit_at > now() - interval '1 minute' FROM hetzner_accounts WHERE id = :a",
+        a=account_id,
+    )
 
 
 @pytest.mark.db
