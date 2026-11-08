@@ -267,6 +267,12 @@ class World:
             n=node_id,
             t=self.old,
         )
+        await self.run(  # D61: the node's Reality bytes of an hour
+            "INSERT INTO reality_traffic_hours (node_id, hour, up, down) "
+            "VALUES (:n, date_trunc('hour', CAST(:t AS timestamptz)), 1, 2)",
+            n=node_id,
+            t=self.old,
+        )
         await self.run(
             "INSERT INTO ip_history (ip, prefix24, node_id, account_id, location, first_seen_at) "
             "VALUES (CAST(:ip AS inet), CAST(:p AS cidr), :n, :a, 'hel1', :t)",
