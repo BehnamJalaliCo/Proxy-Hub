@@ -168,3 +168,22 @@ class RealityNodeStatus(Base):
     reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     # The port the agent's VLESS + XHTTP + REALITY inbound runs on (NULL: none, or agent < 0.4.0).
     xhttp_port: Mapped[int | None] = mapped_column(Integer)
+    # D61 (agent 0.5.0 on): the node's last cumulative totals of each direction over its Reality
+    # users, since Xray started (NULL: an older agent, or not seen yet). Deltas go to
+    # reality_traffic_hours.
+    traffic_up: Mapped[int | None] = mapped_column(BigInteger)
+    traffic_down: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class RealityTrafficHour(Base):
+    """D61: per node and hour, the bytes its Reality users sent (up) and got (down): two numbers for
+    the whole node, never per person (rule 7). Kept 8 days (proxyhub/reality/download.py)."""
+
+    __tablename__ = "reality_traffic_hours"
+    __table_args__ = (CheckConstraint("up >= 0 AND down >= 0", name="bytes"),)
+    node_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("nodes.id", ondelete="CASCADE"), primary_key=True
+    )
+    hour: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    up: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    down: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")

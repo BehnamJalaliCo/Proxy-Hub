@@ -106,34 +106,57 @@ func (c *API) call(ctx context.Context, method string, msg []byte) ([]byte, erro
 // reset; the agent's tracker turns them into totals across restarts). Only names of the shape
 // "user>>><label>>>>traffic>>>uplink|downlink" with a valid label are kept.
 func (c *API) UserTraffic(ctx context.Context) (map[string]uint64, error) {
-	resp, err := c.call(ctx, methodQueryStats, encodeQueryStats(userStatPrefix, false))
+	t, err := c.Traffic(ctx)
 	if err != nil {
 		return nil, err
+	}
+	return t.Users, nil
+}
+
+// Traffic is what one stats query tells: per user label its uplink + downlink, and the node's
+// totals of each direction over those users (agent 0.5.0: the panel's download check, decision
+// D61; two numbers for the whole node, nothing per person).
+type Traffic struct {
+	Users    map[string]uint64
+	Uplink   uint64 // from the users to this node
+	Downlink uint64 // from this node to the users
+}
+
+// Traffic reads Xray's user counters once (see UserTraffic for which names count).
+func (c *API) Traffic(ctx context.Context) (Traffic, error) {
+	resp, err := c.call(ctx, methodQueryStats, encodeQueryStats(userStatPrefix, false))
+	if err != nil {
+		return Traffic{}, err
 	}
 	stats, err := decodeQueryStats(resp)
 	if err != nil {
-		return nil, err
+		return Traffic{}, err
 	}
-	out := map[string]uint64{}
+	out := Traffic{Users: map[string]uint64{}}
 	for name, value := range stats {
-		email, ok := parseUserStat(name)
+		email, direction, ok := parseUserStat(name)
 		if !ok || value < 0 {
 			continue
 		}
-		out[email] += uint64(value)
+		out.Users[email] += uint64(value)
+		if direction == "uplink" {
+			out.Uplink += uint64(value)
+		} else {
+			out.Downlink += uint64(value)
+		}
 	}
 	return out, nil
 }
 
-func parseUserStat(name string) (string, bool) {
+func parseUserStat(name string) (string, string, bool) {
 	parts := strings.Split(name, ">>>")
 	if len(parts) != 4 || parts[0] != "user" || parts[2] != "traffic" || (parts[3] != "uplink" && parts[3] != "downlink") {
-		return "", false
+		return "", "", false
 	}
 	if !desired.ValidXrayEmail(parts[1]) {
-		return "", false
+		return "", "", false
 	}
-	return parts[1], true
+	return parts[1], parts[3], true
 }
 
 // Uptime returns how long the running Xray has been up (seconds).

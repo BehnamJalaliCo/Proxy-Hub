@@ -53,6 +53,7 @@ from proxyhub.accounts.hetzner_io import LiveOffer
 from proxyhub.fleet.costs import NodeCostInput, PriceKey, money, node_cost_items
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
 from proxyhub.fleet.locations import CLASS_RANK
+from proxyhub.reality.download import Suspect
 from proxyhub.safety.budget import Price, projected_month_total, rest_of_month_cost
 from proxyhub.safety.gates import (
     DELETABLE_ROLES,
@@ -163,6 +164,9 @@ class FleetSnapshot:
     # Location -> good / mixed / unknown / bad from the TLS probes of the last 7 days
     # (proxyhub/fleet/locations.py). A location missing here is "unknown".
     location_classes: Mapping[str, str] = field(default_factory=dict)
+    # D61: nodes whose Reality users get back far less than they send (proxyhub/reality/download.py);
+    # told to the owner, nothing is planned from them yet (observe first).
+    download_suspects: tuple[Suspect, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -61,9 +62,12 @@ func TestUserStatNames(t *testing.T) {
 		"user>>>1.2.3.4>>>traffic>>>uplink":          "",
 		"user>>>a>>>b>>>traffic>>>uplink":            "",
 	} {
-		got, ok := parseUserStat(name)
+		got, direction, ok := parseUserStat(name)
 		if (want == "") == ok || got != want {
 			t.Errorf("%q -> %q %v", name, got, ok)
+		}
+		if ok && !strings.HasSuffix(name, ">>>"+direction) {
+			t.Errorf("%q -> direction %q", name, direction)
 		}
 	}
 }

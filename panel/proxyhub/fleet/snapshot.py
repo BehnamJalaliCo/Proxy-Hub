@@ -20,6 +20,7 @@ from proxyhub.fleet.planner import CREATION_WINDOW, AccountOffer, AccountSnapsho
 from proxyhub.fleet.settings_store import SettingsCorrupt, load_fleet_settings
 from proxyhub.nodes.settings import get_live_settings
 from proxyhub.probes.settings import load_probe_settings
+from proxyhub.reality.download import suspects as download_suspects
 from proxyhub.safety.budget import Price, month_bounds
 from proxyhub.safety.gates import ServerView
 from proxyhub.settings_schema import FleetSettings
@@ -178,4 +179,5 @@ async def load_snapshot(db: Db, now: datetime) -> FleetSnapshot:
         settings_problem=problem,
         blockers=() if get_live_settings().checked_agent_domain() else ("agent_domain_not_set",),
         location_classes=classes,
+        download_suspects=tuple(await download_suspects(db, now)),
     )
