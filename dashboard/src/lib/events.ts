@@ -40,6 +40,24 @@ export function bucketByDay(events: AuditEvent[], days: number, now: Date = new 
   return buckets;
 }
 
+/** How many of the last `days` Tehran days the loaded events fully cover. A full page (`limit`
+ * events, the newest ones) is cut somewhere in its oldest day, and the days before that have
+ * nothing loaded: drawing them would show busy days as quiet. At least today is drawn. */
+export function coveredDays(events: Pick<AuditEvent, "at">[], limit: number, days: number, now: Date = new Date()): number {
+  if (events.length < limit) return days;
+  let oldest = Number.POSITIVE_INFINITY;
+  for (const e of events) {
+    const t = Date.parse(e.at);
+    if (!Number.isNaN(t) && t < oldest) oldest = t;
+  }
+  if (!Number.isFinite(oldest)) return days;
+  const cut = tehranDayKey(new Date(oldest));
+  for (let i = 0; i < days; i++) {
+    if (tehranDayKey(new Date(now.getTime() - i * 86_400_000)) === cut) return Math.max(1, i);
+  }
+  return days;
+}
+
 export interface EventFilter {
   text: string;
   verdict: "all" | Verdict;

@@ -104,12 +104,15 @@ export const useFleetSettings = () =>
     refetchOnWindowFocus: false,
   });
 
-export const useRecentEvents = (limit: number) =>
+export const useRecentEvents = (limit: number, refetchMs = 20_000) =>
   useQuery({
     queryKey: keys.events(`recent-${String(limit)}`),
     queryFn: ({ signal }) => api.getEvents(limit, undefined, signal),
-    refetchInterval: 20_000,
+    refetchInterval: refetchMs,
   });
+
+/** The most events one request returns (GET /api/events, limit le=500). */
+export const EVENTS_MAX = 500;
 
 export const EVENTS_PAGE = 100;
 

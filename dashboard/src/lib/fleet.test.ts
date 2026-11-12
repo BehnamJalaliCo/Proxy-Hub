@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { modeInfo, planNote, shownNode, slotCounts, slotStatusInfo, spareText, type FleetSlot, type SlotNode } from "./fleet";
+import { modeInfo, planNote, shownNode, slotCounts, slotSquares, slotStatusInfo, spareText, type FleetSlot, type SlotNode } from "./fleet";
 import { FLEET_ACTION, FLEET_REASON, FLEET_TRANSITION } from "./fleetLabels";
 import { actionLabel, nodeEventLabel, reasonLabel, transitionReasonLabel } from "./labels";
 
@@ -97,6 +97,25 @@ describe("slot helpers", () => {
     expect(spareText({ spare: { in_use: false, slots: [] }, slots: [] }, fa)).toContain("آزاد");
     expect(spareText({ spare: { in_use: true, slots: [3] }, slots: [] }, fa)).toBe("در کار جایگاه 3.");
     expect(spareText({ spare: { in_use: true, slots: [] }, slots: [] }, fa)).toBe("در کار است.");
+  });
+});
+
+describe("the overview's slot squares", () => {
+  it("shows each slot's own state, not one filled square per live node", () => {
+    // 9 live nodes, but slot 7 is unhealthy, slot 8 burned with a replacement booting, slot 9 empty.
+    const slots = [1, 2, 3, 4, 5, 6].map((n) => ({ slot: n, status: "healthy" }));
+    slots.push({ slot: 7, status: "unhealthy" }, { slot: 8, status: "replacing" }, { slot: 9, status: "empty" });
+    const squares = slotSquares(9, slots);
+    expect(squares.map((s) => s.status)).toEqual([...Array<string>(6).fill("healthy"), "unhealthy", "replacing", "empty"]);
+    expect(squares[6]).toMatchObject({ slot: 7, label: "ناسالم", tone: "danger" });
+    expect(squares[8]).toMatchObject({ slot: 9, label: "خالی" });
+  });
+
+  it("marks a slot the API does not list as empty, and every slot unknown before loading", () => {
+    expect(slotSquares(3, [{ slot: 1, status: "healthy" }]).map((s) => s.status)).toEqual(["healthy", "empty", "empty"]);
+    expect(slotSquares(2, null).map((s) => s.status)).toEqual(["unknown", "unknown"]);
+    expect(slotSquares(50, null, 40)).toHaveLength(40);
+    expect(slotSquares(0, [])).toEqual([]);
   });
 });
 
