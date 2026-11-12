@@ -273,6 +273,7 @@ const ACTION: Record<string, string> = {
   "telegram.pairing_cancelled": "باطل شدن کد اتصال تلگرام",
   "telegram.owner_paired": "وصل شدن چت مالک به ربات",
   "telegram.channel_set": "ثبت کانال تلگرام",
+  "telegram.channel_refreshed": "نام، عنوان یا اجازه‌های ربات در کانال عوض شده بود و به‌روز شد",
   "telegram.settings_set": "تغییر زمان‌بندی پست",
   "telegram.test_alert": "هشدار آزمایشی",
   "telegram.test_post": "پست آزمایشی",

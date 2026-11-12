@@ -51,3 +51,18 @@ API_DOWN_FA: Final = (
     "داشبورد و دریافت هشدارهای Alertmanager ممکن است کار نکنند."
 )
 API_BACK_FA: Final = f"{RLM}✅ <b>API پنل دوباره در دسترس است.</b>"
+# The daily read of our channels (proxyhub/reconcilers/telegram.py). {role}: «اصلی» or «آزمایشی»;
+# {old} and {new}: @names, wrapped in LRM so the "@" stays in front.
+CHANNEL_ROLE_FA: Final = {"main": "اصلی", "test": "آزمایشی"}
+CHANNEL_RENAMED_FA: Final = (
+    "⚠️ <b>نام کانال {role} در تلگرام عوض شده است</b>\n"
+    "نام قبلی: \u200e{old}\u200e — نام تازه: \u200e{new}\u200e\n"
+    "پنل از این پس نام تازه را زیر پست‌های تازه و در نام کانفیگ‌ها میگذارد. "
+    "اگر کانال اصلی است، کانال حامی را هم در صفحه‌ی اسپانسر با نام تازه دوباره ثبت کنید."
+)
+CHANNEL_RIGHTS_LOST_FA: Final = (
+    "⚠️ <b>ربات در کانال {role} دیگر اجازه‌ی {what} ندارد</b>\n"
+    "در تنظیمات ادمین کانال، این اجازه را برای ربات دوباره روشن کنید؛ تا آن وقت پست‌ها و ویرایش‌های ربات "
+    "در این کانال نمیروند."
+)
+CHANNEL_RIGHT_FA: Final = {"can_post": "ارسال پیام", "can_edit": "ویرایش پیام"}
