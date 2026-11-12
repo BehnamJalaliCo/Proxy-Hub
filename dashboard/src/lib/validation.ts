@@ -175,6 +175,26 @@ export function isSetupLinkDead(err: unknown): err is ApiError {
   return isApiError(err) && (err.code === "setup_token_invalid" || err.status === 422);
 }
 
+/** The body of POST /api/auth/totp/finish: exactly one proof besides the password (the old
+ * Authenticator's code, or a recovery code when the phone is gone). */
+export type TotpReenrollInput =
+  | { pending: string; new_code: string; password: string; totp_code: string }
+  | { pending: string; new_code: string; password: string; recovery_code: string };
+
+/** The re-enrolment body, or null while a field is not ready (the button stays off). */
+export function totpReenrollInput(
+  pending: string,
+  newCode: string,
+  password: string,
+  proof: { kind: "totp" | "recovery"; value: string },
+): TotpReenrollInput | null {
+  if (pending === "" || !isTotp(newCode) || password === "") return null;
+  const base = { pending, new_code: newCode, password };
+  if (proof.kind === "totp") return isTotp(proof.value) ? { ...base, totp_code: proof.value } : null;
+  const code = normalizeDigits(proof.value.trim());
+  return code.length >= 6 ? { ...base, recovery_code: code } : null;
+}
+
 /** Server rule (auth team): 3-32 chars of a-z 0-9 . _ - */
 export const USERNAME = /^[a-z0-9._-]{3,32}$/;
 export const PASSWORD_MIN = 12;

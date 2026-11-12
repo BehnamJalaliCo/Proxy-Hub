@@ -28,6 +28,14 @@ export interface RecoveryCodes {
   recovery_codes: string[];
 }
 
+/** POST /api/auth/totp/begin: a new Authenticator secret (nothing stored yet) and its sealed
+ * `pending` blob, valid one hour. Kept only in the dialog's state, never in a cache. */
+export interface TotpBegin {
+  pending: string;
+  totp_uri: string;
+  totp_secret: string;
+}
+
 export interface LoginResult {
   username: string;
 }

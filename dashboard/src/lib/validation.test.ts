@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ApiError } from "./api";
+import { actionLabel, reasonLabel } from "./labels";
 import type { FleetSettings } from "./types";
 import {
   draftFromSettings,
@@ -20,6 +21,7 @@ import {
   SERVER_TYPE,
   settingsFromDraft,
   settingsPutBody,
+  totpReenrollInput,
   usernameError,
   withKillSwitch,
 } from "./validation";
@@ -156,6 +158,34 @@ describe("a save over a newer change (lost update)", () => {
     });
     expect(withKillSwitch(READ, { kill_switch: false })?.updated_at).toBe(READ.updated_at);
     expect(withKillSwitch(undefined, { kill_switch: true })).toBeUndefined();
+  });
+});
+
+describe("a new Authenticator after a lost phone", () => {
+  it("sends exactly one proof, and only when every field is ready", () => {
+    expect(totpReenrollInput("p", "123456", "pw", { kind: "recovery", value: " ۱۲۳۴-۵۶۷۸ " })).toEqual({
+      pending: "p",
+      new_code: "123456",
+      password: "pw",
+      recovery_code: "1234-5678",
+    });
+    expect(totpReenrollInput("p", "123456", "pw", { kind: "totp", value: "654321" })).toEqual({
+      pending: "p",
+      new_code: "123456",
+      password: "pw",
+      totp_code: "654321",
+    });
+    expect(totpReenrollInput("", "123456", "pw", { kind: "totp", value: "654321" })).toBeNull();
+    expect(totpReenrollInput("p", "12345", "pw", { kind: "totp", value: "654321" })).toBeNull();
+    expect(totpReenrollInput("p", "123456", "", { kind: "totp", value: "654321" })).toBeNull();
+    expect(totpReenrollInput("p", "123456", "pw", { kind: "totp", value: "65432" })).toBeNull();
+    expect(totpReenrollInput("p", "123456", "pw", { kind: "recovery", value: "  12 " })).toBeNull();
+  });
+
+  it("names the audit actions in Persian", () => {
+    expect(actionLabel("totp_reenrolled")).toMatch(/[آ-ی]/);
+    expect(actionLabel("totp_reenroll_failed")).toMatch(/[آ-ی]/);
+    expect(reasonLabel("factor:new_code")).toMatch(/[آ-ی]/);
   });
 });
 

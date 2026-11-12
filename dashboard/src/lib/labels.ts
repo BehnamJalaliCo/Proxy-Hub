@@ -402,6 +402,9 @@ export function isOwnerActor(actor: string): boolean {
 
 /** Persian text of the round-2 error codes, used when a response carries no message_fa. */
 const ERROR_FA: Record<string, string> = {
+  // a new Authenticator (the server sends its own sentence; this is a spare)
+  reenroll_invalid:
+    "رمز، کد Authenticator فعلی (یا کد بازیابی) یا کد برنامه‌ی تازه درست نیست. اگر بیش از یک ساعت از شروع گذشته است، ثبت Authenticator تازه را از اول شروع کنید.",
   // fleet settings: saved meanwhile on another device or tab (the form keeps what was typed)
   settings_changed: "تنظیمات در این میان در جای دیگری ذخیره شده است؛ صفحه را تازه کنید و تغییر خود را دوباره بزنید.",
   // nodes
