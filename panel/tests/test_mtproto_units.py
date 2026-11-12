@@ -10,20 +10,23 @@ src/api/users/links.rs: ``secret=ee{secret}{hex(domain)}``).
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 from pydantic import ValidationError
 
-from proxyhub.agent_api.validation import valid_user_name
+from proxyhub.agent_api.validation import RESERVED_PORTS, valid_user_name
 from proxyhub.cloudflare.service import NodeNames
 from proxyhub.mtproto.links import to_link
 from proxyhub.mtproto.service import ProxyView, pick_host, proxy_status
 from proxyhub.mtproto.settings import (
     DEFAULT_PORT,
     DEFAULT_TLS_DOMAIN,
+    FORBIDDEN_PORTS,
     MtprotoSettings,
     SettingsCorrupt,
     link_mode,
@@ -149,6 +152,7 @@ def test_settings_defaults_follow_the_contract() -> None:
         {"port": 22},
         {"port": 9090},
         {"port": 9091},
+        {"port": 10085},  # Xray's API: dropped by the node firewall, and Xray would be switched off
         {"port": 0},
         {"port": 65536},
         {"port": "8443"},  # strict: no coercion
@@ -167,6 +171,19 @@ def test_settings_defaults_follow_the_contract() -> None:
 def test_settings_refuse(bad: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         MtprotoSettings.model_validate({**MtprotoSettings().model_dump(), **bad})
+
+
+def test_every_port_the_node_firewall_drops_is_refused_for_proxies() -> None:
+    """agent-telemt-nodefiles:3. The setting and the node firewall must not drift apart: a port the
+    firewall drops from outside can never be a proxy port, in the setting or for a node's Telemt."""
+    conf = (Path(__file__).resolve().parents[2] / "node-image" / "files" / "nftables.conf").read_text()
+    chain = conf.split("chain input", 1)[1].split("\n\t}", 1)[0]  # the inbound rules only
+    dropped: set[int] = set()
+    for ports in re.findall(r"tcp dport \{?([0-9, ]+)\}? counter drop", chain):
+        dropped |= {int(p) for p in ports.replace(" ", "").split(",") if p}
+    assert {22, 9090, 9091, 10085} <= dropped
+    assert dropped <= FORBIDDEN_PORTS
+    assert {9090, 10085} <= RESERVED_PORTS
 
 
 def test_settings_normalise_the_domain() -> None:

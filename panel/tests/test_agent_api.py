@@ -455,6 +455,7 @@ async def test_desired_state_rules(env: Env) -> None:
             {"ports": [], "tls_domain": "a.example.com"},
             {"ports": [443, 443], "tls_domain": "a.example.com"},
             {"ports": [9090], "tls_domain": "a.example.com"},
+            {"ports": [8443, 10085], "tls_domain": "a.example.com"},  # Xray's API port
             {"ports": [70000], "tls_domain": "a.example.com"},
             {"ports": [443], "tls_domain": "10.1.2.3"},
             {"ports": [443], "tls_domain": "Example.com"},
