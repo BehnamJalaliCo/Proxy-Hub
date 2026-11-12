@@ -178,7 +178,7 @@ export default function SecurityPage() {
             <div className="p-5">
               {me.isPending ? (
                 <SkeletonLines lines={3} />
-              ) : me.isError ? (
+              ) : me.isLoadingError ? (
                 <ErrorState error={me.error} compact onRetry={() => void me.refetch()} />
               ) : (
                 <dl className="grid grid-cols-[7.5rem_1fr] gap-y-3 text-sm">
@@ -220,7 +220,7 @@ export default function SecurityPage() {
           <div className="p-3 sm:p-4">
             {sessions.isPending ? (
               <SkeletonLines lines={4} className="p-2" />
-            ) : sessions.isError ? (
+            ) : sessions.isLoadingError ? (
               <ErrorState error={sessions.error} compact onRetry={() => void sessions.refetch()} />
             ) : (
               <ul className="flex flex-col divide-y divide-line">

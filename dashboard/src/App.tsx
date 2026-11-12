@@ -8,7 +8,8 @@ import { AppShell } from "./components/layout/AppShell";
 import { LogoMark } from "./components/layout/Brand";
 import { ErrorState, Skeleton } from "./components/ui/Feedback";
 import { Toaster } from "./components/ui/Toaster";
-import { isApiError, setUnauthorizedHandler } from "./lib/api";
+import { setUnauthorizedHandler } from "./lib/api";
+import { ownerGateView } from "./lib/ownerGate";
 import { makeQueryClient, useMe } from "./lib/queries";
 
 const OverviewPage = lazy(() => import("./pages/OverviewPage"));
@@ -77,12 +78,13 @@ function PageFallback() {
 function RequireOwner() {
   const me = useMe();
   const location = useLocation();
-  if (me.isPending) return <Splash />;
-  if (me.isError) {
-    if (isApiError(me.error) && me.error.status === 401) {
-      const next = location.pathname + location.search;
-      return <Navigate to={next === "/" ? "/login" : `/login?next=${encodeURIComponent(next)}`} replace />;
-    }
+  const view = ownerGateView(me);
+  if (view === "splash") return <Splash />;
+  if (view === "login") {
+    const next = location.pathname + location.search;
+    return <Navigate to={next === "/" ? "/login" : `/login?next=${encodeURIComponent(next)}`} replace />;
+  }
+  if (view === "error") {
     return (
       <div className="ph-backdrop grid min-h-dvh place-items-center px-4">
         <div className="w-full max-w-md rounded-3xl border border-line bg-surface shadow-card">

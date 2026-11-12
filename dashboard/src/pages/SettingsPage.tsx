@@ -272,7 +272,7 @@ export default function SettingsPage() {
           <Skeleton className="h-72 rounded-3xl" />
           <Skeleton className="h-60 rounded-3xl" />
         </div>
-      ) : settings.isError ? (
+      ) : settings.isLoadingError ? (
         <Card>
           <ErrorState error={settings.error} onRetry={() => void settings.refetch()} />
         </Card>

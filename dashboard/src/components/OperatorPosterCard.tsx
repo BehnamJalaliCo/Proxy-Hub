@@ -429,7 +429,7 @@ export function OperatorPosterCard({ preview }: { preview: PostPreview | undefin
         <div className="p-5">
           <SkeletonLines lines={5} />
         </div>
-      ) : q.isError ? (
+      ) : q.isLoadingError ? (
         <LoadError error={q.error} compact onRetry={() => void q.refetch()} notYet={NOT_YET} />
       ) : (
         <Body v={q.data} preview={preview} />

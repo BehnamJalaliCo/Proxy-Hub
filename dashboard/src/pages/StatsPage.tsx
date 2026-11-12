@@ -628,7 +628,7 @@ function TrackingLinksCard({ className }: { className?: string }) {
             </p>
           ) : null}
         </form>
-        {links.isError ? (
+        {links.isLoadingError ? (
           <LoadError error={links.error} onRetry={() => void links.refetch()} compact />
         ) : links.isPending ? (
           <SkeletonLines lines={3} />
@@ -719,7 +719,7 @@ function LinkRow({ link }: { link: TrackingLink }) {
 
 function PostsSection({ q, outcome }: { q: ReturnType<typeof useChannelStats>; outcome: string | undefined }) {
   const note = channelStatsOutcomeText(outcome);
-  if (q.isError) {
+  if (q.isLoadingError) {
     return (
       <Section id="stats-posts" icon={<Eye className="size-5" />} title="بازدید و بازنشر پست‌ها">
         <Card>
@@ -875,7 +875,7 @@ function ThresholdsCard({ className }: { className?: string }) {
     <Card className={cn("flex flex-col", className)}>
       <CardHeader icon={<TriangleAlert className="size-5" />} title="آستانه‌های هشدار" subtitle="رسیدن به هر آستانه، روزی یک بار برای هر سرور، در چت تلگرام شما خبر داده میشود." />
       <div className="p-4 sm:p-5">
-        {q.isError ? <LoadError error={q.error} onRetry={() => void q.refetch()} compact /> : q.isPending ? <SkeletonLines lines={4} /> : <ThresholdsForm initial={q.data} />}
+        {q.isLoadingError ? <LoadError error={q.error} onRetry={() => void q.refetch()} compact /> : q.isPending ? <SkeletonLines lines={4} /> : <ThresholdsForm initial={q.data} />}
       </div>
     </Card>
   );
@@ -974,7 +974,7 @@ export default function StatsPage() {
           />
         }
       />
-      {summary.isError ? (
+      {summary.isLoadingError ? (
         <Card>
           <LoadError
             error={summary.error}
@@ -998,7 +998,7 @@ export default function StatsPage() {
           <Warnings s={summary.data} />
           <div className={cn("flex flex-col gap-8 transition-opacity", series.isPlaceholderData && "opacity-60")}>
             <TrafficSection s={summary.data} series={series.data} />
-            <UsersSection usage={usage.data} isError={usage.isError} error={usage.error} refetch={() => void usage.refetch()} />
+            <UsersSection usage={usage.data} isError={usage.isLoadingError} error={usage.error} refetch={() => void usage.refetch()} />
             <ChannelSection s={summary.data} series={series.data} />
             <PostsSection q={channelStats} outcome={summary.data.collector.channel_stats?.outcome} />
             <CapacitySection s={summary.data} series={series.data} />

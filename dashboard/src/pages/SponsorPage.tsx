@@ -616,7 +616,7 @@ export default function SponsorPage() {
           <Skeleton className="h-72 rounded-3xl lg:col-span-7" />
           <Skeleton className="h-72 rounded-3xl lg:col-span-5" />
         </div>
-      ) : q.isError ? (
+      ) : q.isLoadingError ? (
         <Card>
           <LoadError
             error={q.error}

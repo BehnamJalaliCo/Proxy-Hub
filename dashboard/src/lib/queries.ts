@@ -2,11 +2,38 @@
 // Telegram or Cloudflare token) do NOT go through useMutation: its cache would keep the input
 // ("variables") in memory.
 
-import { QueryClient, useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { QueryCache, QueryClient, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 
 import { isApiError, isEndpointMissing } from "./api";
 import * as api from "./endpoints";
+import { toast } from "./toast";
 import type { AuditEvent } from "./types";
+
+/** What a page shows for a query. A refresh that fails after data was loaded keeps status "error"
+ * in TanStack Query but also keeps the data: the page goes on showing it (its forms, drawers and
+ * dialogs stay mounted), and the error card is only for a first load that failed. */
+export function queryPhase(q: { data: unknown; isError: boolean }): "loading" | "error" | "ready" {
+  if (q.data !== undefined) return "ready";
+  return q.isError ? "error" : "loading";
+}
+
+/** At most one "refresh failed" note a minute, however many queries fail together. */
+export const STALE_WARNING_GAP_MS = 60_000;
+
+export function shouldWarnStale(lastMs: number | null, nowMs: number): boolean {
+  return lastMs === null || !Number.isFinite(lastMs) || nowMs - lastMs >= STALE_WARNING_GAP_MS || nowMs < lastMs;
+}
+
+let lastStaleWarning: number | null = null;
+
+/** A failed background refresh: the page keeps the last data, so the owner is told it may be old. */
+function warnStale(error: unknown, hadData: boolean): void {
+  if (!hadData || (isApiError(error) && error.status === 401)) return;
+  const now = Date.now();
+  if (!shouldWarnStale(lastStaleWarning, now)) return;
+  lastStaleWarning = now;
+  toast.warning("به‌روزرسانی ناموفق بود", "آخرین داده‌ی رسیده نشان داده میشود؛ پنل خودش دوباره تلاش میکند.");
+}
 
 export const keys = {
   setupStatus: ["setup-status"] as const,
@@ -37,6 +64,7 @@ const FINAL = new Set([400, 401, 403, 404, 409, 422, 429]);
 
 export function makeQueryClient(): QueryClient {
   return new QueryClient({
+    queryCache: new QueryCache({ onError: (error, query) => warnStale(error, query.state.data !== undefined) }),
     defaultOptions: {
       queries: {
         staleTime: 10_000,

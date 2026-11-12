@@ -500,7 +500,7 @@ function PlanCard() {
       <div className="p-3 sm:p-4">
         {plan.isPending ? (
           <SkeletonLines lines={4} className="p-2" />
-        ) : plan.isError ? (
+        ) : plan.isLoadingError ? (
           <ErrorState error={plan.error} onRetry={() => void plan.refetch()} compact />
         ) : plan.data.generated_at === null ? (
           <EmptyState icon={<Workflow className="size-7" />} title="هنوز برنامه‌ای ساخته نشده" description="چرخه‌ی ناوگان پس از اجرای worker، برنامه‌ی خود را اینجا میگذارد." />
@@ -580,7 +580,7 @@ function ActivityCard() {
             <Skeleton className="h-48 lg:col-span-7" />
             <SkeletonLines lines={5} className="lg:col-span-5" />
           </div>
-        ) : events.isError ? (
+        ) : events.isLoadingError ? (
           <ErrorState error={events.error} onRetry={() => void events.refetch()} compact />
         ) : events.data.length === 0 ? (
           <EmptyState icon={<Activity className="size-7" />} title="هنوز رویدادی ثبت نشده" description="با اولین کار پنل یا چرخه‌ها، اینجا پر میشود." />
@@ -660,7 +660,7 @@ export default function OverviewPage() {
               <PlanCard />
             </div>
           </>
-        ) : ov.isError ? (
+        ) : ov.isLoadingError ? (
           <Card>
             <ErrorState error={ov.error} title="وضعیت ناوگان بارگذاری نشد" onRetry={() => void ov.refetch()} />
           </Card>

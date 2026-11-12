@@ -106,7 +106,7 @@ export default function EventsPage() {
             <SkeletonLines lines={6} />
           </Card>
         </div>
-      ) : pages.isError ? (
+      ) : pages.isLoadingError ? (
         <Card>
           <ErrorState error={pages.error} onRetry={() => void pages.refetch()} />
         </Card>

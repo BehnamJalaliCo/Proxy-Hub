@@ -306,7 +306,7 @@ export function QcSupervisorCard() {
       <div className="flex flex-col gap-3 p-4 sm:p-5">
         {query.isPending ? (
           <Skeleton className="h-28 rounded-2xl" />
-        ) : query.isError ? (
+        ) : query.isLoadingError ? (
           <LoadError error={query.error} onRetry={() => void query.refetch()} notYet={NOT_YET} />
         ) : view ? (
           <>

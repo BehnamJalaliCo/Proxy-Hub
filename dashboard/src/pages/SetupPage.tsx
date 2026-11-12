@@ -172,7 +172,7 @@ export default function SetupPage() {
   let body: ReactNode;
   if (status.isPending) {
     body = <SkeletonLines lines={4} />;
-  } else if (status.isError && step === "intro") {
+  } else if (status.isLoadingError && step === "intro") {
     body = <ErrorState error={status.error} onRetry={() => void status.refetch()} compact />;
   } else if (status.data?.setup_required === false && step !== "codes") {
     body = (

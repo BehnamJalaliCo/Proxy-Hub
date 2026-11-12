@@ -392,7 +392,7 @@ export default function ReviewPage() {
             <Skeleton className="h-[34rem] rounded-3xl" />
             <Skeleton className="h-[34rem] rounded-3xl" />
           </div>
-        ) : queue.isError ? (
+        ) : queue.isLoadingError ? (
           <Card>
             <LoadError error={queue.error} onRetry={() => void queue.refetch()} notYet={NOT_YET} />
           </Card>

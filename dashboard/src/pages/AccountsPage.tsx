@@ -302,7 +302,7 @@ export default function AccountsPage() {
             </li>
           ))}
         </ul>
-      ) : accounts.isError ? (
+      ) : accounts.isLoadingError ? (
         <Card>
           <ErrorState error={accounts.error} onRetry={() => void accounts.refetch()} />
         </Card>

@@ -539,7 +539,7 @@ function SettingsCard({ s }: { s: PostsStatus }) {
         <div className="p-5">
           <SkeletonLines lines={5} />
         </div>
-      ) : settings.isError ? (
+      ) : settings.isLoadingError ? (
         <LoadError error={settings.error} compact onRetry={() => void settings.refetch()} notYet={NOT_YET} />
       ) : (
         <SettingsForm saved={settings.data} s={s} />
@@ -564,7 +564,7 @@ function PreviewCard({ s }: { s: PostsStatus }) {
       <div className="flex flex-col gap-3 p-4 sm:p-5">
         {preview.isPending ? (
           <Skeleton className="h-72 rounded-3xl" />
-        ) : preview.isError ? (
+        ) : preview.isLoadingError ? (
           <LoadError error={preview.error} compact onRetry={() => void preview.refetch()} notYet={NOT_YET} />
         ) : p ? (
           <>
@@ -631,7 +631,7 @@ function RecentCard() {
       <div className="p-4 sm:p-5">
         {recent.isPending ? (
           <SkeletonLines lines={4} />
-        ) : recent.isError ? (
+        ) : recent.isLoadingError ? (
           <LoadError error={recent.error} compact onRetry={() => void recent.refetch()} notYet={NOT_YET} />
         ) : posts.length === 0 ? (
           <EmptyState icon={<Send className="size-7 rtl:-scale-x-100" />} title="هنوز پست خودکاری نرفته" description="اولین پست در ساعت پست بعدی میرود، به شرط آنکه ربات، کانال و دست‌کم یک پروکسی زنده آماده باشد." />
@@ -930,7 +930,7 @@ function LibraryCard() {
       <div className="flex flex-col gap-3 p-4 sm:p-5">
         {content.isPending ? (
           <SkeletonLines lines={6} />
-        ) : content.isError ? (
+        ) : content.isLoadingError ? (
           <LoadError error={content.error} compact onRetry={() => void content.refetch()} notYet={NOT_YET} />
         ) : (
           <>
@@ -994,7 +994,7 @@ export default function ContentPage() {
             <Skeleton className="h-96 rounded-3xl lg:col-span-7" />
           </div>
         </div>
-      ) : status.isError ? (
+      ) : status.isLoadingError ? (
         <Card>
           <LoadError error={status.error} onRetry={() => void status.refetch()} notYet={NOT_YET} />
         </Card>

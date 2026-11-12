@@ -484,7 +484,7 @@ export default function CloudflarePage() {
           <Skeleton className="h-64 rounded-3xl lg:col-span-7" />
           <Skeleton className="h-48 rounded-3xl lg:col-span-12" />
         </div>
-      ) : status.isError ? (
+      ) : status.isLoadingError ? (
         <Card>
           <LoadError
             error={status.error}
