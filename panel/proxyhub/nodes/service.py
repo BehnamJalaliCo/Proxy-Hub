@@ -42,6 +42,7 @@ from proxyhub.fleet.planner import (
 from proxyhub.fleet.settings_store import SettingsCorrupt, load_fleet_settings
 from proxyhub.fleet.snapshot import load_accounts, load_nodes, load_offers
 from proxyhub.hetzner.client import HetznerReader, _delete_protected
+from proxyhub.mtproto.service import CONNECTIONS_FRESH_FOR
 from proxyhub.nodes.settings import get_live_settings
 from proxyhub.nodes.transitions import event, lock_node, transition
 from proxyhub.reconcilers.base import lock_key
@@ -537,7 +538,7 @@ async def list_nodes(db: AsyncSession, now: datetime) -> list[dict[str, Any]]:
     """GET /api/nodes: every node not deleted, plus the ones deleted within the last week."""
     connections = (
         select(TelemtUser.node_id, func.sum(TelemtUser.last_current_connections).label("conns"))
-        .where(TelemtUser.last_stats_at.is_not(None))
+        .where(TelemtUser.last_stats_at >= now - CONNECTIONS_FRESH_FOR)  # a last count is not "now"
         .group_by(TelemtUser.node_id)
         .subquery()
     )

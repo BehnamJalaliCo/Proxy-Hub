@@ -196,6 +196,15 @@ async def test_proxies_list_contract(client: AsyncClient, engine: AsyncEngine) -
     assert second["node_id"] == str(pending) and second["status"] == "pending"
     assert second["live_at"] is None and second["connections"] is None
     assert second["host"] == "203.0.113.22" and second["host_kind"] == "ip"
+    # Its last counts are 20 minutes old (Telemt down, or the node silent): not "connections now".
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE telemt_users SET last_stats_at = now() - interval '20 minutes' WHERE node_id = :n"),
+            {"n": one},
+        )
+    stale = (await client.get(BASE)).json()["proxies"][0]
+    assert stale["key"] == first["key"] and stale["connections"] is None
+    assert stale["stats_at"] is not None and stale["total_octets"] == 123456
 
 
 async def test_put_settings_saves_logs_and_the_loop_applies_them(

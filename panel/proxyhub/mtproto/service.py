@@ -32,6 +32,7 @@ from typing import Any, Literal
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
+from proxyhub.agent_api.desired import REPORT_INTERVAL_S
 from proxyhub.agent_api.sealing import SealError, open_secret
 from proxyhub.cloudflare.service import NodeNames, node_names
 from proxyhub.db.models import Node
@@ -50,6 +51,17 @@ HostKind = Literal["domain", "ip"]
 # Links of a deleted node stay listed (as expired) this long, so posts can still be marked.
 DELETED_KEPT_FOR = timedelta(days=7)
 OUT_OF_SERVICE = frozenset({NodeState.DRAINING.value, NodeState.RETIRING.value, NodeState.DELETED.value})
+# "Connections now" counts only while the agent keeps reporting them: five report intervals. A
+# dead node sends nothing, a down Telemt and a disabled user are not reported, so a last count
+# never lingers as if it were current (also the Nodes page, proxyhub/nodes/service.py).
+CONNECTIONS_FRESH_FOR = timedelta(seconds=5 * REPORT_INTERVAL_S)
+
+
+def fresh_connections(count: int | None, stats_at: datetime | None, now: datetime) -> int | None:
+    """The last reported connection count while it is still current (else None: not known)."""
+    if count is None or stats_at is None or now - stats_at > CONNECTIONS_FRESH_FOR:
+        return None
+    return count
 
 
 def proxy_status(node_state: str, enabled: bool, live_at: datetime | None) -> Status:
@@ -191,7 +203,7 @@ async def list_proxies(db: Db, seal_key: bytes, now: datetime) -> list[ProxyView
                 tls_domain=r.tls_domain,
                 enabled=bool(r.enabled),
                 sponsor_tag_set=r.user_ad_tag is not None or r.node_ad_tag is not None,
-                connections=r.last_current_connections,
+                connections=fresh_connections(r.last_current_connections, r.last_stats_at, now),
                 total_octets=r.last_total_octets,
                 stats_at=r.last_stats_at,
                 live_at=r.live_at,
