@@ -16,7 +16,9 @@
      ink on it (class .ph-gold).
    - cta-*: the primary button (class .ph-cta): espresso with champagne text on ivory, champagne
      with ink text on obsidian.
-   - on-brand / on-success / on-danger: text on a filled tone of that theme. */
+   - on-brand / on-success / on-danger: text on a filled tone of that theme.
+   Contrast (WCAG): every text tone is >= 4.5:1 on the card surface and on its own soft badge, and
+   fg-faint >= 4.2:1 on surface-3 (hints only). */
 :root {
   --ph-bg: #f4f1e9;
   --ph-bg-glow-1: rgb(201 162 77 / 0.17);
@@ -29,9 +31,9 @@
   --ph-line-strong: #d6cdb9;
   --ph-fg: #17140e;
   --ph-fg-muted: #5c564a;
-  --ph-fg-faint: #857f70;
-  --ph-brand: #8a671c;
-  --ph-brand-strong: #6f5213;
+  --ph-fg-faint: #736d60;
+  --ph-brand: #7c5c15;
+  --ph-brand-strong: #634910;
   --ph-brand-2: #b8923e;
   --ph-brand-soft: rgb(176 136 46 / 0.12);
   --ph-on-brand: #fffdf9;
@@ -44,16 +46,16 @@
   --ph-cta-shadow: 0 1px 0 rgb(255 255 255 / 0.1) inset, 0 12px 26px -14px rgb(23 19 12 / 0.6);
   --ph-sheen: rgb(184 146 62 / 0.5);
   --ph-glass: rgb(255 253 249 / 0.78);
-  --ph-success: #0b7f56;
-  --ph-success-soft: rgb(11 127 86 / 0.11);
+  --ph-success: #08704b;
+  --ph-success-soft: rgb(8 112 75 / 0.11);
   --ph-on-success: #ffffff;
-  --ph-warning: #b35708;
+  --ph-warning: #a14c05;
   --ph-warning-soft: rgb(214 110 20 / 0.12);
-  --ph-danger: #cf3346;
-  --ph-danger-soft: rgb(207 51 70 / 0.1);
+  --ph-danger: #be2b3e;
+  --ph-danger-soft: rgb(190 43 62 / 0.1);
   --ph-on-danger: #ffffff;
-  --ph-info: #2a6bd6;
-  --ph-info-soft: rgb(42 107 214 / 0.1);
+  --ph-info: #2360c4;
+  --ph-info-soft: rgb(35 96 196 / 0.1);
   --ph-shadow-card: 0 1px 2px rgb(40 32 12 / 0.04), 0 16px 36px -20px rgb(40 32 12 / 0.2);
   --ph-shadow-pop: 0 28px 64px -18px rgb(40 32 12 / 0.34);
   --ph-ring: rgb(176 136 46 / 0.4);
@@ -81,7 +83,7 @@
   --ph-line-strong: rgb(255 238 204 / 0.17);
   --ph-fg: #f5f1e8;
   --ph-fg-muted: #ada79a;
-  --ph-fg-faint: #7c766b;
+  --ph-fg-faint: #8b8578;
   --ph-brand: #e3c57f;
   --ph-brand-strong: #f1dca6;
   --ph-brand-2: #c39a48;
