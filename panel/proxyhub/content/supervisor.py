@@ -293,8 +293,9 @@ def _time(value: Any) -> datetime | None:
 CLAUDE_HINT_FA: Final[dict[str, str]] = {
     "auth": "ورود اشتراک Claude روی سرور باید تازه شود (پرامپت P22، گام ورود).",
     "bridge_missing": "پل Claude روی سرور نصب یا روشن نیست (پرامپت P22).",
-    "bridge_denied": "worker به پل Claude دسترسی ندارد (پرامپت P22، گام اتصال).",
-    "claude_missing": "Claude Code برای کاربر پل نصب نیست (پرامپت P22).",
+    # Each hint is a line of its own: it starts with a Persian word, so it reads right to left.
+    "bridge_denied": "دسترسی worker به پل Claude برقرار نیست (پرامپت P22، گام اتصال).",
+    "claude_missing": "برای کاربر پل، Claude Code نصب نیست (پرامپت P22).",
     "rate_limited": (
         "سقف مصرف اشتراک Claude پر است و خودش باز میشود؛ اگر زیاد تکرار شد سقف روزانه را کم کنید."
     ),
@@ -308,7 +309,8 @@ def claude_alert_fa(reason: str | None, hours: int) -> str:
     return (
         f"🤖 <b>ناظر محتوا (Claude) بیش از {fa_digits(hours)} ساعت در دسترس نیست.</b>\n"
         f"دلیل: {why}\n"
-        "پست‌ها بی‌وقفه با بانک محتوای همیشگی میروند و چیزی بی بررسی منتشر نمیشود.\n"
+        "در این مدت پست‌ها بی‌وقفه میروند: با نوشته‌های تأییدشده‌ی خود شما در بانک محتوا، "
+        "وگرنه فقط با پروکسی‌ها؛ چیزی بی بررسی منتشر نمیشود.\n"
         f"{hint}"
     )
 
@@ -316,7 +318,7 @@ def claude_alert_fa(reason: str | None, hours: int) -> str:
 def sources_alert_fa(hours: int) -> str:
     return (
         f"📰 <b>هیچ منبع محتوایی بیش از {fa_digits(hours)} ساعت کار نکرده است.</b>\n"
-        "پست‌ها بی‌وقفه با بانک محتوای همیشگی میروند.\n"
+        "پست‌ها بی‌وقفه میروند، ولی بی خبر: با نوشته‌های خود شما در بانک محتوا، وگرنه فقط با پروکسی‌ها.\n"
         "در صفحه‌ی «منبع‌های محتوا» منبع تازه اضافه کنید یا خطای منبع‌ها را ببینید."
     )
 

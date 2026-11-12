@@ -14,8 +14,10 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shutil
 import tempfile
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -38,7 +40,15 @@ from proxyhub.content.claude_backends import (
 from proxyhub.content.frames import Sampler
 from proxyhub.content.qc_prompt import Limits, VerdictInvalid, parse_verdict
 from proxyhub.content.qc_settings import FLAGS, QcConfig
-from proxyhub.content.supervisor import Pick, alert_due, pre_gate, score
+from proxyhub.content.supervisor import (
+    CLAUDE_HINT_FA,
+    Pick,
+    alert_due,
+    claude_alert_fa,
+    pre_gate,
+    score,
+    sources_alert_fa,
+)
 from proxyhub.content.writer import Image, ReviewRequest
 from proxyhub.vault import SecretValue
 
@@ -409,6 +419,19 @@ def test_gates_that_need_no_claude() -> None:
 
 
 # --- alerts ---------------------------------------------------------------------------------------------
+
+
+def test_owner_alerts_tell_what_posts_carry_now_and_read_right_to_left() -> None:
+    """D58 retired the seeded bank: with no news a post carries the owner's own bank items, else the
+    proxies alone. Every line of an alert starts with a Persian letter (Telegram sets each line's
+    direction by its first strong character)."""
+    texts = [claude_alert_fa(reason, 6) for reason in [*CLAUDE_HINT_FA, None, "something_new"]]
+    texts.append(sources_alert_fa(6))
+    for text in texts:
+        assert "همیشگی" not in text and "فقط با پروکسی‌ها" in text
+        for line in re.sub(r"<[^>]+>", "", text).split("\n"):
+            strong = next(c for c in line if unicodedata.bidirectional(c) in ("L", "R", "AL"))
+            assert unicodedata.bidirectional(strong) in ("R", "AL"), line
 
 
 def test_an_alert_goes_once_per_episode_and_then_daily() -> None:

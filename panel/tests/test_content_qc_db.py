@@ -893,7 +893,7 @@ async def test_claude_down_means_the_bank_and_one_alert(
         assert out.alerts == (["claude_unavailable"] if i == 1 else []), (i, out)
     (alert,) = await jobs(engine, "alert")
     assert "بیش از ۶ ساعت در دسترس نیست" in alert.payload["text"]
-    assert "بانک محتوای همیشگی" in alert.payload["text"] and "P22" in alert.payload["text"]
+    assert "فقط با پروکسی‌ها" in alert.payload["text"] and "P22" in alert.payload["text"]
     # Claude comes back: the episode ends.
     async with StubBridge(sockdir / "bridge.sock") as bridge:
         bridge.says(answer())
