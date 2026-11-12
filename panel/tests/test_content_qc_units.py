@@ -199,6 +199,25 @@ def test_anything_else_is_unparsable(text: Any) -> None:
         parse_verdict(text)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        answer(reasons=["ok\x00x"]),  # JSON's \u0000: PostgreSQL's jsonb refuses it
+        answer().replace("🌍", "\\ud83d"),  # a lone surrogate in the title
+        answer(body="خبر \\udc00 تازه").replace("\\\\udc00", "\\udc00"),
+        answer(reasons=["دلیل \\ud83d"]).replace("\\\\ud83d", "\\ud83d"),
+    ],
+)
+def test_text_the_database_cannot_keep_is_unparsable(text: str) -> None:
+    with pytest.raises(VerdictInvalid):
+        parse_verdict(text)
+
+
+def test_a_paired_surrogate_escape_is_an_emoji() -> None:
+    verdict = parse_verdict(answer().replace("🌍", "\\ud83d\\udcf0"))
+    assert verdict.title.startswith("📰")
+
+
 def test_the_schema_matches_the_parser() -> None:
     schema = qc_prompt.output_schema()
     assert set(schema["required"]) == qc_prompt.KEYS and schema["additionalProperties"] is False

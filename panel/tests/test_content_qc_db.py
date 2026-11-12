@@ -402,6 +402,51 @@ async def test_a_manipulation_flag_or_an_unparsable_answer_rejects(
     assert candidates.as_json(unparsable)["qc"]["checks_fa"] == ["پاسخ Claude در قالب درست نبود."]
 
 
+async def test_an_answer_the_database_cannot_keep_is_recorded_as_unparsable(
+    engine: AsyncEngine, sockdir: Path
+) -> None:
+    """A NUL in a reason made the review's UPDATE fail and roll back: the candidate stayed unreviewed
+    and was sent to Claude again at every slot."""
+    now = slot_time(1)
+    src = await source(engine, "newsfa", now - timedelta(hours=3))
+    cid = await candidate(engine, src, NEWS[0], when=now - timedelta(hours=1), views=9_000)
+    async with StubBridge(sockdir / "bridge.sock") as bridge:
+        bridge.says(answer(reasons=["ok\x00x"]))
+        out = await make(engine, sockdir, Clock(now)).run_round()
+    assert (out.action, out.decision) == ("reviewed", "reject")
+    found = await one(engine, cid)
+    assert found.qc_at is not None and (found.qc_error, found.qc_tries) == ("unparsable", 1)
+    assert [tuple(r) for r in await calls(engine)] == [("bridge", "ok", True, cid)]
+
+
+async def test_a_review_that_cannot_be_recorded_costs_a_try(
+    engine: AsyncEngine, sockdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever fails while a review is recorded, the call is kept and the candidate spends one of
+    its tries: after MAX_TRIES it is no longer offered to Claude."""
+    now = slot_time(1)
+    src = await source(engine, "newsfa", now - timedelta(hours=3))
+    cid = await candidate(engine, src, NEWS[0], when=now - timedelta(hours=1), views=9_000)
+
+    async def broken(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(Supervisor, "_decide", broken)
+    clock = Clock(now)
+    async with StubBridge(sockdir / "bridge.sock") as bridge:
+        for minute in range(supervisor.MAX_TRIES):
+            bridge.says(answer())
+            clock.at = now + timedelta(minutes=minute)
+            with pytest.raises(RuntimeError):
+                await make(engine, sockdir, clock).run_round()
+            found = await one(engine, cid)
+            assert (found.qc_tries, found.qc_error, found.qc_at) == (minute + 1, "record_failed", None)
+        assert len(await calls(engine)) == supervisor.MAX_TRIES
+        clock.at = now + timedelta(minutes=supervisor.MAX_TRIES)
+        assert (await make(engine, sockdir, clock).run_round()).action == "no_candidate"
+        assert len(bridge.reviews()) == supervisor.MAX_TRIES
+
+
 async def test_only_the_best_few_per_slot_reach_claude(engine: AsyncEngine, sockdir: Path) -> None:
     await configure(engine, per_slot=2)
     now = slot_time(1)

@@ -140,6 +140,7 @@ QC_OUTCOMES_FA: Final[dict[str, str]] = {
     "api_bad_answer": "API Anthropic پاسخ نادرست داد.",
     "ffmpeg_missing": "ffmpeg در پنل اجرا نشد و فریم‌های ویدیو ساخته نشد؛ مورد بعداً دوباره امتحان میشود.",
     "frames_failed": "ساختن فریم‌های ویدیو با خطای داخلی پنل روبه‌رو شد؛ مورد بعداً دوباره امتحان میشود.",
+    "record_failed": "ثبت بررسی Claude با خطای داخلی پنل روبه‌رو شد؛ مورد بعداً دوباره امتحان میشود.",
 }
 
 QC_CHECKS_FA: Final[dict[str, str]] = {

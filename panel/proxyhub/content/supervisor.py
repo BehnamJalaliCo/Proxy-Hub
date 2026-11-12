@@ -530,8 +530,7 @@ class Supervisor:
             out.action = "gone"
             return
         review = await ClaudeWriter(backends).review(prepared.request)
-        async with self.engine.begin() as conn:
-            await self._apply(conn, config, state, prepared, review, now, out)
+        await self._record(config, state, prepared, review, now, out)
 
     async def _breaking(self, config: QcConfig, state: dict[str, Any], now: datetime, out: Outcome) -> bool:
         """D56: review at once, out of the posting slots, the best young story several sources carry
@@ -576,8 +575,7 @@ class Supervisor:
         breaking.note_review(state, now)
         out.breaking_review = True
         review = await ClaudeWriter(backends).review(prepared.request)
-        async with self.engine.begin() as conn:
-            await self._apply(conn, config, state, prepared, review, now, out, slot=False)
+        await self._record(config, state, prepared, review, now, out, slot=False)
         return True
 
     # -- a video, before its review --
@@ -789,6 +787,35 @@ class Supervisor:
         state.setdefault("unavailable_since", iso(now))
         state["unavailable_last"] = iso(now)
         state["unavailable_reason"] = reason
+
+    async def _record(
+        self,
+        config: QcConfig,
+        state: dict[str, Any],
+        prepared: Prepared,
+        review: Review,
+        now: datetime,
+        out: Outcome,
+        *,
+        slot: bool = True,
+    ) -> None:
+        """:meth:`_apply` in its own transaction. When that fails (a bug, a value the database
+        refuses), the calls made are still logged (they count toward the caps) and the candidate
+        spends one of its :data:`MAX_TRIES`, so it cannot be asked again at every slot; the error
+        still reaches the loop."""
+        try:
+            async with self.engine.begin() as conn:
+                await self._apply(conn, config, state, prepared, review, now, out, slot=slot)
+        except Exception as exc:  # the type only: a message could carry the candidate or the answer
+            log.error("content qc: recording a review failed (%s)", type(exc).__name__)
+            async with self.engine.begin() as conn:
+                await self._log_calls(conn, review, prepared.pick.id, now)
+                await conn.execute(
+                    update(ContentCandidate)
+                    .where(ContentCandidate.id == prepared.pick.id)
+                    .values(qc_tries=ContentCandidate.qc_tries + 1, qc_error="record_failed", updated_at=now)
+                )
+            raise
 
     async def _apply(
         self,
