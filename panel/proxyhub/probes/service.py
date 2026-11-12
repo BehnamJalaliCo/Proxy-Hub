@@ -20,8 +20,16 @@ A cycle (P15, 2026-11-05: only a real TLS handshake tells the truth from Iran):
 Results are stored per measurement and per network; each node's verdict is recomputed from its
 stored rounds (proxyhub/probes/verdict.py, source ``https``). A changed verdict is written to
 actions_log. The live fleet (proxyhub/fleet/live.py) burns a READY slot node with a fresh
-``blocked`` verdict only when its own agent says the probed service is up. Every round also
-updates the node's row in ``probe_location_reach`` (the fleet's location scores).
+``blocked`` verdict. Every round also updates the node's row in ``probe_location_reach`` (the
+fleet's location scores).
+
+**A round decides nothing about a node that was not serving** (:func:`round_problem`): one that is
+not READY, became READY less than :data:`READY_GRACE` before the round, or whose own agent did not
+report Xray (443, the only port measured) up and running since before the round. A refused or
+silent port fails from every Iranian network exactly like a block, so such a round would burn a
+healthy node and its whole /24 for a fault on our side. Its measurements are stored for the
+dashboard, but its TLS observation is ``invalid`` (so the verdict is ``unknown``) and it writes
+nothing into ``probe_location_reach``.
 """
 
 from __future__ import annotations
@@ -42,6 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from proxyhub.cloudflare.service import NodeNames
 from proxyhub.db.models import Node
 from proxyhub.db.models_agent import TelemtNodeConfig
+from proxyhub.db.models_live import NodeOperation
 from proxyhub.db.models_net import (
     ProbeCycle,
     ProbeLocationReach,
@@ -51,6 +60,7 @@ from proxyhub.db.models_net import (
     ProbeRound,
     ProbeSource,
 )
+from proxyhub.db.models_reality import RealityNodeStatus
 from proxyhub.fleet.actions import iso, log_action
 from proxyhub.fleet.lifecycle import NodeState
 from proxyhub.probes.checkhost import CheckHostClient, CheckHostNode
@@ -76,6 +86,7 @@ from proxyhub.probes.verdict import (
     observe,
     observe_tls,
 )
+from proxyhub.reality.policy import REPORT_FRESH as XRAY_REPORT_FRESH
 
 log = logging.getLogger(__name__)
 
@@ -139,6 +150,7 @@ def _ipv4(value: Any) -> str | None:
 
 
 # A READY node gets its configs applied within a minute or two (P16); the first scheduled round waits.
+# Counted from when the node last became READY (a recovered node too), not only its first time.
 READY_GRACE: Final = timedelta(minutes=5)
 
 
@@ -148,6 +160,7 @@ async def due_targets(
     """READY nodes whose last round is older than the interval, and nodes the owner asked for.
     ``names``: the node names Cloudflare holds on the active domain (None: no domain)."""
     cutoff = now - timedelta(seconds=settings.interval_s)
+    ready_since = func.coalesce(NodeOperation.state_since, Node.ready_at)
     rows = (
         await db.execute(
             select(
@@ -163,13 +176,14 @@ async def due_targets(
             )
             .outerjoin(ProbeNodeState, ProbeNodeState.node_id == Node.id)
             .outerjoin(TelemtNodeConfig, TelemtNodeConfig.node_id == Node.id)
+            .outerjoin(NodeOperation, NodeOperation.node_id == Node.id)
             .where(
                 Node.ipv4.is_not(None),
                 Node.state != NodeState.DELETED.value,
                 (ProbeNodeState.run_requested_at.is_not(None))
                 | (
                     (Node.state == NodeState.READY.value)
-                    & (Node.ready_at.is_(None) | (Node.ready_at <= now - READY_GRACE))
+                    & (ready_since.is_(None) | (ready_since <= now - READY_GRACE))
                     & (ProbeNodeState.last_round_at.is_(None) | (ProbeNodeState.last_round_at <= cutoff))
                 ),
             )
@@ -544,6 +558,57 @@ async def _store_location_reach(
         )
 
 
+@dataclass(frozen=True)
+class Serving:
+    """What the panel knows, at storage time, about whether a node served 443 during a round."""
+
+    state: str
+    since: datetime | None  # when it entered that state (node_operations.state_since, else ready_at)
+    xray_enabled: bool | None = None  # reality_node_status (None: the agent never reported Xray)
+    xray_up: bool | None = None
+    xray_reported_at: datetime | None = None
+    xray_uptime_s: float | None = None
+
+
+def round_problem(s: Serving | None, started_at: datetime, finished_at: datetime) -> str | None:
+    """Why a round says nothing about the node's address, or None when it counts. ``node_not_serving``:
+    not READY now, or READY for less than :data:`READY_GRACE` before the round began (state_since only
+    moves forward, so READY since then means READY throughout). ``service_down``: its agent did not
+    report Xray, the only thing on 443, enabled and up within :data:`XRAY_REPORT_FRESH` of the
+    round's end and running since before the round began."""
+    if s is None or s.state != NodeState.READY.value:
+        return "node_not_serving"
+    if s.since is not None and s.since > started_at - READY_GRACE:
+        return "node_not_serving"
+    if not (s.xray_enabled and s.xray_up) or s.xray_reported_at is None:
+        return "service_down"
+    if s.xray_reported_at < finished_at - XRAY_REPORT_FRESH:
+        return "service_down"
+    if s.xray_uptime_s is not None and s.xray_reported_at - timedelta(seconds=s.xray_uptime_s) > started_at:
+        return "service_down"  # Xray (re)started during the round: 443 may have been closed
+    return None
+
+
+async def _serving(db: Db, node_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, Serving]:
+    rows = (
+        await db.execute(
+            select(
+                Node.id,
+                Node.state,
+                func.coalesce(NodeOperation.state_since, Node.ready_at).label("since"),
+                RealityNodeStatus.enabled,
+                RealityNodeStatus.up,
+                RealityNodeStatus.reported_at,
+                RealityNodeStatus.uptime_s,
+            )
+            .outerjoin(NodeOperation, NodeOperation.node_id == Node.id)
+            .outerjoin(RealityNodeStatus, RealityNodeStatus.node_id == Node.id)
+            .where(Node.id.in_(list(node_ids)))
+        )
+    ).all()
+    return {r.id: Serving(r.state, r.since, r.enabled, r.up, r.reported_at, r.uptime_s) for r in rows}
+
+
 async def store_cycle(
     db: Db, result: CycleResult, targets: Sequence[Target], settings: ProbeSettings
 ) -> dict[uuid.UUID, tuple[str, list[str]]]:
@@ -577,10 +642,17 @@ async def store_cycle(
     now = result.finished_at
     max_age = timedelta(seconds=settings.max_round_age_s)
     verdicts: dict[uuid.UUID, tuple[str, list[str]]] = {}
-    for t in result.measured or targets:
+    measured = list(result.measured or targets)
+    serving = await _serving(db, [t.node_id for t in measured])
+    for t in measured:
         node_tcp = tcp_by_node.get(t.node_id, {})
         observations = {s: observe(node_tcp.get(s), result.controls.get(s)) for s in SOURCES}
-        tls_obs = observe_tls(tls_by_node.get(t.node_id, []), result.tls_control, settings.key_networks)
+        problem = round_problem(serving.get(t.node_id), result.started_at, result.finished_at)
+        if problem is None:
+            tls_obs = observe_tls(tls_by_node.get(t.node_id, []), result.tls_control, settings.key_networks)
+        else:
+            # No cells either: neither the location scores nor the operator names may read them.
+            tls_obs = SourceObservation("invalid", problem)
         observations[TLS_SOURCE] = tls_obs
         previous = await _previous_rounds(db, t.node_id, now - max_age, settings.min_rounds - 1)
         current = RoundObs(at=result.started_at, observations=observations)
@@ -605,7 +677,8 @@ async def store_cycle(
                 verdict_reasons=reasons,
             )
         )
-        await _store_location_reach(db, t, tls_obs, network_names, result.started_at)
+        if problem is None:
+            await _store_location_reach(db, t, tls_obs, network_names, result.started_at)
         old = (
             await db.execute(select(ProbeNodeState.verdict).where(ProbeNodeState.node_id == t.node_id))
         ).scalar_one_or_none()
@@ -652,8 +725,8 @@ async def store_cycle(
                     "tls_ports": list(t.tls_ports),
                 },
                 result=(
-                    f"TLS reachability from Iran: {old or 'unknown'} -> {verdict} (the live fleet burns a "
-                    "blocked slot node only when its agent says the service is up)"
+                    f"TLS reachability from Iran: {old or 'unknown'} -> {verdict} (a round counts only "
+                    "while the node is ready and its agent reports Xray up on 443)"
                 ),
             )
         verdicts[t.node_id] = (verdict, reasons)
