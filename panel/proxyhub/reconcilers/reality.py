@@ -1,7 +1,9 @@
-"""Reality policy loop (team reality), every 30 seconds (proxyhub/reality/policy.py): ends configs
-that are full, expired or burned; moves key scopes to the owner's target setting; makes keys for new
-scopes and fresh configs on nodes that confirmed their scope's target; deletes the vaulted key of a
-slotless node that is gone.
+"""Reality policy loop (team reality), every 30 seconds (proxyhub/reality/policy.py): renews
+working configs (D41) and ends configs that are full, expired or burned (after a spell in which the
+panel saw no agent at all, a config that only its time ends waits for its nodes to report again,
+at most RESUME_GRACE, so it can still be renewed); moves key scopes to the owner's target setting;
+makes keys for new scopes and fresh configs on nodes that confirmed their scope's target; deletes
+the vaulted key of a slotless node that is gone.
 
 Every change goes to actions_log (actor ``reality``) without the config's UUID: that is the
 credential a link carries. The owner hears about what code cannot fix by itself: a node from which
@@ -26,9 +28,11 @@ from proxyhub.cloudflare.service import node_names
 from proxyhub.db.models_reality import RealityKey
 from proxyhub.fleet.actions import iso, log_action
 from proxyhub.reality.policy import (
+    RESUME_GRACE,
     create_configs,
     end_configs,
     ensure_keys,
+    fleet_blind,
     forget_gone_node_keys,
     renew_configs,
     retarget_scopes,
@@ -91,6 +95,7 @@ class RealityReconciler(Reconciler):
     async def run_once(self, conn: AsyncConnection) -> None:
         now = datetime.now(UTC)
         settings = await load_reality_settings(conn)
+        hold = await self._resume_hold(conn, now, settings)
         for config_id in await renew_configs(conn, settings, now):  # D41: before anything ends
             await log_action(
                 conn,
@@ -102,7 +107,8 @@ class RealityReconciler(Reconciler):
                 reasons=["still_working"],
                 context={"hours": settings.cap_hours, "gb": settings.cap_gb},
             )
-        for config_id, status in sorted((await end_configs(conn, now, settings.transport)).items()):
+        ended = await end_configs(conn, now, settings.transport, hold_time=hold)
+        for config_id, status in sorted(ended.items()):
             await self._ended(conn, config_id, [status])
         for node_id in await forget_gone_node_keys(conn):
             await log_action(
@@ -162,6 +168,20 @@ class RealityReconciler(Reconciler):
                 )
         await self._target_alert(conn, now, settings.transport)
         await self._risky_manual_alert(conn, now, settings)
+
+    async def _resume_hold(self, conn: AsyncConnection, now: datetime, settings: RealitySettings) -> bool:
+        """After the panel could not see its fleet (no serving node's report is fresh: its host, API
+        or database was down), configs whose end passed meanwhile wait up to RESUME_GRACE for their
+        nodes to report, so D41 can still renew them. Only while renewal is on."""
+        if not (settings.enabled and settings.renew):
+            return False
+        state = await load_state(conn)
+        if await fleet_blind(conn, now):
+            state["blind_at"] = now.isoformat()
+            await save_state(conn, state)
+            return True
+        last = state.get("blind_at")
+        return isinstance(last, str) and now - datetime.fromisoformat(last) < RESUME_GRACE
 
     async def _risky_manual_alert(
         self, conn: AsyncConnection, now: datetime, settings: RealitySettings
