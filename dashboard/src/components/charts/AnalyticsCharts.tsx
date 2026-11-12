@@ -9,7 +9,8 @@ import { useMemo } from "react";
 
 import type { DayPoint, ServerStat, TgGraph } from "../../lib/analytics";
 import { dayLabel, formatBytes, formatPct, tgSeriesName, toTb, WEEK_ROWS } from "../../lib/analyticsText";
-import { CHART_FONT, useChartColors, type ChartColors } from "../../lib/chart";
+import { CHART_FONT, rtlText, useChartColors, type ChartColors } from "../../lib/chart";
+import { membersOption } from "../../lib/chartOptions";
 import { formatJalali, formatNumber } from "../../lib/format";
 import { EChart, type EChartsOption } from "./EChart";
 
@@ -43,7 +44,7 @@ function categoryX(c: ChartColors, labels: string[]) {
     data: labels,
     axisTick: { show: false },
     axisLine: { lineStyle: { color: c.grid } },
-    axisLabel: { ...axisLabel(c), hideOverlap: true },
+    axisLabel: { ...axisLabel(c), hideOverlap: true, formatter: rtlText },
   };
 }
 
@@ -215,7 +216,7 @@ export function CpuChart({ points, threshold, className }: { points: { at: strin
             silent: true,
             symbol: "none",
             lineStyle: { color: c.warning, width: 1, type: "dashed" },
-            label: { formatter: `آستانه ${formatPct(threshold)}`, color: c.muted, fontFamily: CHART_FONT, fontSize: 11, position: "insideEndTop" },
+            label: { formatter: rtlText(`آستانه ${formatPct(threshold)}`), color: c.muted, fontFamily: CHART_FONT, fontSize: 11, position: "insideEndTop" },
             data: [{ yAxis: threshold }],
           },
         },
@@ -232,14 +233,9 @@ export function CpuChart({ points, threshold, className }: { points: { at: strin
 /** Members of the main channel over time (one series: no legend). */
 export function MembersChart({ points, className }: { points: { at: string; count: number }[]; className?: string }) {
   const c = useChartColors();
-  const option = useMemo<EChartsOption>(() => {
-    const values = points.map((p) => p.count);
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const pad = Math.max(1, Math.round((max - min) * 0.15));
-    return {
-      ...base,
-      grid: { top: 12, bottom: 4, left: 8, right: 8, containLabel: true },
+  const option = useMemo<EChartsOption>(
+    () => ({
+      ...membersOption(points, c),
       tooltip: {
         ...tooltip(c),
         axisPointer: { type: "line", lineStyle: { color: c.grid } },
@@ -249,22 +245,9 @@ export function MembersChart({ points, className }: { points: { at: string; coun
           return p ? `<div style="font-weight:700;margin-bottom:4px">${formatJalali(p.at, "short")}</div>${row(c.series1, "عضو", formatNumber(p.count))}` : "";
         },
       },
-      xAxis: { ...categoryX(c, points.map((p) => formatJalali(p.at, "day"))), boundaryGap: false },
-      yAxis: valueY(c, (v: number) => formatNumber(v), { min: Math.max(0, min - pad), max: max + pad, scale: true }),
-      series: [
-        {
-          type: "line",
-          showSymbol: points.length < 3,
-          symbolSize: 8,
-          lineStyle: { width: 2, color: c.series1 },
-          itemStyle: { color: c.series1, borderColor: c.surface, borderWidth: 2 },
-          areaStyle: { color: c.series1, opacity: 0.1 },
-          data: values,
-          endLabel: { show: true, color: c.fg, fontFamily: CHART_FONT, fontWeight: "bold", formatter: (p: { value: number }) => formatNumber(p.value) },
-        },
-      ],
-    };
-  }, [points, c]);
+    }),
+    [points, c],
+  );
   return <EChart option={option} label="تعداد اعضای کانال اصلی در طول زمان" className={className ?? "h-52"} />;
 }
 
@@ -320,7 +303,7 @@ export function RankedBars({ items, format, label, className }: { items: { label
         data: items.map((i) => i.label),
         axisTick: { show: false },
         axisLine: { show: false },
-        axisLabel: { ...axisLabel(c), color: c.muted, fontSize: 12, width: 130, overflow: "truncate" },
+        axisLabel: { ...axisLabel(c), color: c.muted, fontSize: 12, width: 130, overflow: "truncate", formatter: rtlText },
       },
       series: [
         {

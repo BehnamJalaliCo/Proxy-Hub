@@ -3,7 +3,7 @@ import { useMemo } from "react";
 import { bucketByDay, type DayBucket } from "../../lib/events";
 import { formatNumber } from "../../lib/format";
 import type { AuditEvent } from "../../lib/types";
-import { CHART_FONT, useChartColors } from "../../lib/chart";
+import { CHART_FONT, rtlText, useChartColors } from "../../lib/chart";
 import { EChart, type EChartsOption } from "./EChart";
 
 const SERIES: { key: keyof Pick<DayBucket, "allowed" | "info" | "blocked">; name: string; color: "series1" | "series3" | "series2" }[] = [
@@ -75,7 +75,7 @@ export function ActivityChart({ events, days = 14, className }: { events: AuditE
         data: buckets.map((b) => b.label),
         axisTick: { show: false },
         axisLine: { lineStyle: { color: c.grid } },
-        axisLabel: { color: c.faint, fontSize: 11, fontFamily: CHART_FONT, hideOverlap: true },
+        axisLabel: { color: c.faint, fontSize: 11, fontFamily: CHART_FONT, hideOverlap: true, formatter: rtlText },
       },
       yAxis: {
         type: "value",
