@@ -87,6 +87,7 @@ import {
 } from "../lib/analyticsText";
 import { errorMessage } from "../lib/api";
 import { cn } from "../lib/browser";
+import { queryPhase } from "../lib/queries";
 import { formatDecimal, formatJalali, formatNumber, formatRelative } from "../lib/format";
 import type { Tone } from "../lib/labels";
 import { toast } from "../lib/toast";
@@ -229,7 +230,26 @@ function Warnings({ s }: { s: AnalyticsSummary }) {
 
 // --- traffic and cost ---------------------------------------------------------------------------------------
 
-function TrafficSection({ s, series }: { s: AnalyticsSummary; series: AnalyticsSeries | undefined }) {
+/** Whether the chart series (GET /api/analytics/series) can be drawn: a pending or failed request
+ * must not read as "nothing recorded yet". */
+interface SeriesState {
+  phase: "loading" | "error" | "ready";
+  error: unknown;
+  retry: () => void;
+}
+
+/** In place of a series card while it loads, or when it failed (with a retry). */
+function SeriesPending({ state, className }: { state: SeriesState; className?: string }) {
+  return state.phase === "error" ? (
+    <Card className={className}>
+      <LoadError error={state.error} onRetry={state.retry} compact />
+    </Card>
+  ) : (
+    <Skeleton className={cn("h-64 rounded-3xl", className)} />
+  );
+}
+
+function TrafficSection({ s, series, state }: { s: AnalyticsSummary; series: AnalyticsSeries | undefined; state: SeriesState }) {
   const t = s.traffic;
   const live = s.servers.filter((x) => x.state !== "deleted");
   const nodesStatus = s.collector.nodes;
@@ -274,6 +294,9 @@ function TrafficSection({ s, series }: { s: AnalyticsSummary; series: AnalyticsS
         </Card>
       ) : (
         <div className="grid gap-4 lg:grid-cols-12">
+          {state.phase !== "ready" ? (
+            <SeriesPending state={state} className="lg:col-span-7" />
+          ) : (
           <ChartCard
             className="lg:col-span-7"
             icon={<BarChart3 className="size-5" />}
@@ -302,6 +325,7 @@ function TrafficSection({ s, series }: { s: AnalyticsSummary; series: AnalyticsS
               </table>
             </TableDetails>
           </ChartCard>
+          )}
           <ChartCard
             className="lg:col-span-5"
             icon={<Server className="size-5" />}
@@ -476,7 +500,7 @@ function UsersSection({ usage, isError, error, refetch }: { usage: AnalyticsUsag
 
 // --- channel growth and sources ------------------------------------------------------------------------------
 
-function ChannelSection({ s, series }: { s: AnalyticsSummary; series: AnalyticsSeries | undefined }) {
+function ChannelSection({ s, series, state }: { s: AnalyticsSummary; series: AnalyticsSeries | undefined; state: SeriesState }) {
   const main = s.channel.main;
   const test = s.channel.test;
   const sources = series?.sources ?? s.top_sources;
@@ -512,6 +536,13 @@ function ChannelSection({ s, series }: { s: AnalyticsSummary; series: AnalyticsS
         </Card>
       ) : (
         <div className="grid gap-4 lg:grid-cols-12">
+          {state.phase !== "ready" ? (
+            <>
+              <SeriesPending state={state} className="lg:col-span-6" />
+              <SeriesPending state={state} className="lg:col-span-6" />
+            </>
+          ) : (
+          <>
           <ChartCard
             className="lg:col-span-6"
             icon={<UsersRound className="size-5" />}
@@ -536,6 +567,8 @@ function ChannelSection({ s, series }: { s: AnalyticsSummary; series: AnalyticsS
           >
             <JoinsLeavesChart days={days} />
           </ChartCard>
+          </>
+          )}
           <ChartCard className="lg:col-span-5" icon={<Link2 className="size-5" />} title="از کجا آمدند" sentence={sourcesSentence(sources, series ? series.days.length : 30) ?? "هنوز عضوی با منبع ثبت نشده است."}>
             {sources.length > 0 ? (
               <>
@@ -812,7 +845,7 @@ function PostsSection({ q, outcome }: { q: ReturnType<typeof useChannelStats>; o
 
 // --- capacity and thresholds ---------------------------------------------------------------------------------
 
-function CapacitySection({ s, series }: { s: AnalyticsSummary; series: AnalyticsSeries | undefined }) {
+function CapacitySection({ s, series, state }: { s: AnalyticsSummary; series: AnalyticsSeries | undefined; state: SeriesState }) {
   const live = s.servers.filter((x) => x.state !== "deleted");
   const hot = live.filter((x) => x.signal !== "ok" && x.fresh).length;
   const sentence =
@@ -829,9 +862,17 @@ function CapacitySection({ s, series }: { s: AnalyticsSummary; series: Analytics
           className="lg:col-span-7"
           icon={<Activity className="size-5" />}
           title="CPU سرورها"
-          sentence={cpu.length ? "میانگین همه‌ی سرورها و پرکارترین سرور، ساعت به ساعت (درصد کل سرور)." : "هنوز CPU سنجیده نشده است."}
+          sentence={
+            state.phase === "error"
+              ? "نمودار CPU بارگذاری نشد."
+              : state.phase === "loading"
+                ? null
+                : cpu.length
+                  ? "میانگین همه‌ی سرورها و پرکارترین سرور، ساعت به ساعت (درصد کل سرور)."
+                  : "هنوز CPU سنجیده نشده است."
+          }
           legend={
-            cpu.length ? (
+            state.phase === "ready" && cpu.length ? (
               <ChartLegend
                 items={[
                   { name: "میانگین همه", color: "series1" },
@@ -841,7 +882,13 @@ function CapacitySection({ s, series }: { s: AnalyticsSummary; series: Analytics
             ) : null
           }
         >
-          {cpu.length ? <CpuChart points={cpu} threshold={s.thresholds.cpu_warn_pct} /> : null}
+          {state.phase === "error" ? (
+            <LoadError error={state.error} onRetry={state.retry} compact />
+          ) : state.phase === "loading" ? (
+            <Skeleton className="h-52 rounded-2xl" />
+          ) : cpu.length ? (
+            <CpuChart points={cpu} threshold={s.thresholds.cpu_warn_pct} />
+          ) : null}
           {live.length > 0 ? (
             <ul className="grid gap-2 sm:grid-cols-2">
               {live.map((x) => {
@@ -954,6 +1001,7 @@ export default function StatsPage() {
   const series = useAnalyticsSeries(Number(days));
   const usage = useAnalyticsUsage(Number(days));
   const channelStats = useChannelStats();
+  const seriesState: SeriesState = { phase: queryPhase(series), error: series.error, retry: () => void series.refetch() };
 
   return (
     <div className="flex flex-col gap-6">
@@ -997,11 +1045,11 @@ export default function StatsPage() {
           <Headline s={summary.data} usage={usage.data} stats={channelStats.data} />
           <Warnings s={summary.data} />
           <div className={cn("flex flex-col gap-8 transition-opacity", series.isPlaceholderData && "opacity-60")}>
-            <TrafficSection s={summary.data} series={series.data} />
+            <TrafficSection s={summary.data} series={series.data} state={seriesState} />
             <UsersSection usage={usage.data} isError={usage.isLoadingError} error={usage.error} refetch={() => void usage.refetch()} />
-            <ChannelSection s={summary.data} series={series.data} />
+            <ChannelSection s={summary.data} series={series.data} state={seriesState} />
             <PostsSection q={channelStats} outcome={summary.data.collector.channel_stats?.outcome} />
-            <CapacitySection s={summary.data} series={series.data} />
+            <CapacitySection s={summary.data} series={series.data} state={seriesState} />
           </div>
         </>
       )}

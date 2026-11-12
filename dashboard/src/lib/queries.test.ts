@@ -43,6 +43,33 @@ describe("a page keeps its data after a failed refresh", () => {
   });
 });
 
+describe("the stats charts while a range loads or fails", () => {
+  it("shows the previous range (placeholder) while pending and an error when the new range fails", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    type Series = { days: number };
+    const answer = (days: number): Promise<Series> =>
+      days === 90 ? Promise.reject(new ApiError(502, "http_502", "پاسخ نامعتبر")) : Promise.resolve({ days });
+    const options = (days: number) => ({
+      queryKey: ["series", days],
+      queryFn: () => answer(days),
+      placeholderData: (prev: Series | undefined) => prev,
+    });
+    const q = new QueryObserver<Series, Error, Series, Series, (string | number)[]>(client, options(30));
+    const stop = q.subscribe(() => undefined);
+    await q.refetch();
+    expect(queryPhase(q.getCurrentResult())).toBe("ready");
+    q.setOptions(options(90)); // the owner picks 90 days: the 30-day charts stay, dimmed
+    const pending = q.getCurrentResult();
+    expect(pending.isPlaceholderData).toBe(true);
+    expect(queryPhase(pending)).toBe("ready");
+    await q.refetch().catch(() => undefined);
+    const failed = q.getCurrentResult();
+    expect(failed.data).toBeUndefined(); // no data: the cards must not say "nothing recorded"
+    expect(queryPhase(failed)).toBe("error");
+    stop();
+  });
+});
+
 describe("the owner's session guard", () => {
   it("keeps the shell when /api/auth/me fails after it had loaded", async () => {
     const me = observed("me", [{ username: "o" }, new ApiError(502, "http_502", "پاسخ نامعتبر")]);
