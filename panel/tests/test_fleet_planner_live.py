@@ -19,6 +19,7 @@ from test_fleet_support import LOCATIONS, server
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
 from proxyhub.fleet.planner import (
     CREATION_WINDOW,
+    OBSERVATION_MAX_AGE,
     REPAIR_WINDOW,
     REPLACEMENT_SETTLE,
     REQUEST_BACKOFF,
@@ -240,7 +241,17 @@ def test_live_fleet_never_breaks_a_cap_or_skips_the_delete_gate(snap: FleetSnaps
         if n.hetzner_id is None:
             assert n.state in (S.REQUESTED, S.CREATING, S.RETIRING)
             continue
-        srv = snap.servers[(n.account_id, n.hetzner_id)]
+        srv = snap.servers.get((n.account_id, n.hetzner_id))
+        if srv is None:
+            # fleet:3: only a server Hetzner no longer has (a fresh, guard-green look at every server
+            # of the account, taken after the server existed, does not list it). The node is only
+            # closed: the executor reads the server live again, and can_delete decides if it is there.
+            a = {acc.id: acc for acc in snap.accounts}[n.account_id]
+            assert d.context.get("server_gone") is True
+            assert a.guard_ok is True and a.observed_at is not None
+            assert snap.now - a.observed_at <= OBSERVATION_MAX_AGE
+            assert a.observed_at > max(t for t in (n.ready_at, n.state_since) if t is not None)
+            continue
         assert srv.labels.get("managed-by") == "proxy-hub" and srv.labels.get("role") in DELETABLE_ROLES
         assert not srv.delete_protected
 
