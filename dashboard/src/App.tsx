@@ -6,6 +6,7 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from
 
 import { AppShell } from "./components/layout/AppShell";
 import { LogoMark } from "./components/layout/Brand";
+import { ErrorBoundary } from "./components/ui/ErrorBoundary";
 import { ErrorState, Skeleton } from "./components/ui/Feedback";
 import { Toaster } from "./components/ui/Toaster";
 import { setUnauthorizedHandler } from "./lib/api";
@@ -104,135 +105,137 @@ export default function App() {
         <QueryClientProvider client={queryClient}>
           <BrowserRouter>
             <UnauthorizedBridge />
-            <Suspense fallback={<Splash />}>
-              <Routes>
-                <Route path="/login" element={<LoginPage />} />
-                <Route path="/setup" element={<SetupPage />} />
-                <Route element={<RequireOwner />}>
-                  <Route
-                    index
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <OverviewPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="stats"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <StatsPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="nodes"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <NodesPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="telegram"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <TelegramPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route path="content" element={<Suspense fallback={<PageFallback />}><ContentPage /></Suspense>} />
-                  <Route
-                    path="review"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <ReviewPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="sources"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <SourcesPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="mtproto"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <MtprotoPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="cloudflare"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <CloudflarePage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="sponsor"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <SponsorPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="reality"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <RealityPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="accounts"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <AccountsPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="events"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <EventsPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="settings"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <SettingsPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="security"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <SecurityPage />
-                      </Suspense>
-                    }
-                  />
-                  <Route
-                    path="*"
-                    element={
-                      <Suspense fallback={<PageFallback />}>
-                        <NotFoundPage />
-                      </Suspense>
-                    }
-                  />
-                </Route>
-              </Routes>
-            </Suspense>
+            <ErrorBoundary fullScreen>
+              <Suspense fallback={<Splash />}>
+                <Routes>
+                  <Route path="/login" element={<LoginPage />} />
+                  <Route path="/setup" element={<SetupPage />} />
+                  <Route element={<RequireOwner />}>
+                    <Route
+                      index
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <OverviewPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="stats"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <StatsPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="nodes"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <NodesPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="telegram"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <TelegramPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route path="content" element={<Suspense fallback={<PageFallback />}><ContentPage /></Suspense>} />
+                    <Route
+                      path="review"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <ReviewPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="sources"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <SourcesPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="mtproto"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <MtprotoPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="cloudflare"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <CloudflarePage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="sponsor"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <SponsorPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="reality"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <RealityPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="accounts"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <AccountsPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="events"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <EventsPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="settings"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <SettingsPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="security"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <SecurityPage />
+                        </Suspense>
+                      }
+                    />
+                    <Route
+                      path="*"
+                      element={
+                        <Suspense fallback={<PageFallback />}>
+                          <NotFoundPage />
+                        </Suspense>
+                      }
+                    />
+                  </Route>
+                </Routes>
+              </Suspense>
+            </ErrorBoundary>
           </BrowserRouter>
           <Toaster />
         </QueryClientProvider>

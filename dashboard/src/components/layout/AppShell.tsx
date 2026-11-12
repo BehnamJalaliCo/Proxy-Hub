@@ -11,6 +11,7 @@ import { formatDurationSeconds } from "../../lib/format";
 import { useMe, useOverview } from "../../lib/queries";
 import { toast } from "../../lib/toast";
 import { StatusDot } from "../ui/Card";
+import { ErrorBoundary } from "../ui/ErrorBoundary";
 import { Logo, ThemeSwitch, ThemeToggleButton } from "./Brand";
 import { BOTTOM_NAV, NAV, titleFor } from "./nav";
 
@@ -280,7 +281,10 @@ export function AppShell() {
               animate={{ opacity: 1, y: 0, transition: { duration: 0.28, ease: [0.16, 1, 0.3, 1] } }}
               exit={{ opacity: 0, y: -6, transition: { duration: 0.12 } }}
             >
-              <FrozenOutlet />
+              {/* Keyed by the path with its motion.div: another page clears a caught error. */}
+              <ErrorBoundary>
+                <FrozenOutlet />
+              </ErrorBoundary>
             </motion.div>
           </AnimatePresence>
         </div>
