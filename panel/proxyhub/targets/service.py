@@ -41,7 +41,12 @@ from proxyhub.probes.service import store_measurement
 from proxyhub.probes.settings import ProbeSettings
 from proxyhub.probes.types import IRAN_NETWORKS_FA, Measurement
 from proxyhub.reality.settings import SETTINGS_KEY as REALITY_KEY
-from proxyhub.reality.settings import RealitySettings, load_reality_settings, save_reality_settings
+from proxyhub.reality.settings import (
+    RealitySettings,
+    load_reality_settings,
+    load_reality_settings_for_update,
+    save_reality_settings,
+)
 from proxyhub.reality.store import all_statuses
 from proxyhub.targets.choice import (
     Candidate,
@@ -404,16 +409,21 @@ async def apply_auto(db: Db, settings: TargetSettings, keys: Sequence[str], now:
     if reality.target_mode == "auto" and not await _reality_corrupt(db):
         choice = choose_reality(reality.target_host, listed, states, keys, now)
         if choice.switch:
-            new = RealitySettings.model_validate(
-                {**reality.model_dump(mode="json"), "target_host": choice.host, "target_port": PORT}
-            )
-            await save_reality_settings(db, new)
-            out.append(Switched("reality", reality.target_host, choice.host, choice.why))
-            passed = node_check(states.get(choice.host), now) == "passed"
-            await _logged_switch(db, "reality", reality.target_host, choice)
-            await enqueue_owner_alert(
-                db, reality_switch_text(reality.target_host, choice.host, choice, reality.transport, passed)
-            )
+            # Lock the row and look again: an owner's save in between wins (no Reality switch on
+            # this tick; the next one decides again on what the owner saved).
+            current = await load_reality_settings_for_update(db)
+            if current is not None and current == reality:
+                new = RealitySettings.model_validate(
+                    {**current.model_dump(mode="json"), "target_host": choice.host, "target_port": PORT}
+                )
+                await save_reality_settings(db, new)
+                out.append(Switched("reality", reality.target_host, choice.host, choice.why))
+                passed = node_check(states.get(choice.host), now) == "passed"
+                await _logged_switch(db, "reality", reality.target_host, choice)
+                await enqueue_owner_alert(
+                    db,
+                    reality_switch_text(reality.target_host, choice.host, choice, reality.transport, passed),
+                )
         elif choice.why is not None:
             stuck.append(("reality", choice))
 
