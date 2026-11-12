@@ -124,9 +124,19 @@ def _pick(group: list[SourcePost]) -> SourcePost:
     return chosen
 
 
-def items_from(name: str, posts: list[SourcePost]) -> list[FetchedItem]:
+def items_from(name: str, posts: list[SourcePost], *, full: bool = False) -> list[FetchedItem]:
     """The posts of a source as the engine's items (the same ids and links as its web preview, so
-    a source read either way never gives the same post twice)."""
+    a source read either way never gives the same post twice).
+
+    ``full``: the read gave as many messages as it asked for, so the window may cut through the
+    album at its old end (an album is several messages and arrives whole at the new end). That
+    album is left out: its first messages, with the caption, are already outside the window, and
+    the rest would come back as new caption-less posts, one more each time the window moves. An
+    earlier read stored it whole; on a source's first read it is not stored half."""
+    if full and posts:
+        oldest = min(posts, key=lambda p: p.id)
+        if oldest.grouped_id is not None:
+            posts = [p for p in posts if p.grouped_id != oldest.grouped_id]
     singles: list[SourcePost] = []
     albums: dict[int, list[SourcePost]] = {}
     for post in posts:
@@ -234,7 +244,7 @@ class AccountRead:
             if code in ("channel_private", "channel_not_found", "not_a_channel"):
                 self._forget(name)  # resolved again next time: the name may point elsewhere now
             raise FetchError(code) from None
-        return items_from(name, posts)
+        return items_from(name, posts, full=len(posts) >= READ_LIMIT)
 
     async def download(
         self, url: str, role: Literal["photo", "thumb", "video"]

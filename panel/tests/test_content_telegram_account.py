@@ -30,6 +30,7 @@ from proxyhub.content.engine import Engine
 from proxyhub.content.items import FetchedItem
 from proxyhub.content.net import FetchError, SafeHttp
 from proxyhub.content.telegram_account import (
+    READ_LIMIT,
     AccountReader,
     items_from,
     media_ref,
@@ -266,6 +267,28 @@ def test_items_keep_the_previews_ids_and_one_item_per_album() -> None:
     assert parse_media_ref("tgmsg:imtproto/26") == ("imtproto", 26)
     for bad in ("tgmsg:imtproto/0", "tgmsg:IMT/1", "https://t.me/imtproto/26", "tgmsg:a/1", None):
         assert parse_media_ref(bad) is None
+
+
+def test_an_album_cut_by_the_window_is_not_stored_again_in_pieces() -> None:
+    """The account reads the last READ_LIMIT messages; an album is several of them. When the
+    window cuts through the album at its old end, the pieces left are not new caption-less posts."""
+    pic = SourceMedia(kind="photo", size=1000)
+    album = [post(i, "متن آلبوم" if i == 100 else "", media=pic, group=55) for i in range(100, 104)]
+
+    def window(newest: int) -> list[SourcePost]:
+        older = [post(i, f"خبر {i}") for i in range(80, 100)]
+        everything = older + album + [post(i, f"خبر {i}") for i in range(104, newest + 1)]
+        return sorted(everything, key=lambda p: p.id, reverse=True)[:READ_LIMIT]
+
+    whole = items_from("imtproto", window(110), full=True)  # 91..110: the album is inside, whole
+    assert next(i for i in whole if i.external_id == "100").text == "متن آلبوم"
+    for newest in (119, 120, 121, 122):  # at the old edge (stored before), then cut
+        ids = {i.external_id for i in items_from("imtproto", window(newest), full=True)}
+        assert not ids & {"100", "101", "102", "103"}, newest
+        assert str(newest) in ids
+    # A window that is not full holds the whole channel: its oldest album is kept.
+    short = [post(i, media=pic, group=66) for i in (10, 11)] + [post(12, "خبر")]
+    assert {i.external_id for i in items_from("imtproto", short, full=False)} == {"10", "12"}
 
 
 def test_proxies_hidden_behind_a_posts_words_are_counted() -> None:
