@@ -154,7 +154,7 @@ export const REALITY_STATUS: Record<RealityStatus, { label: string; tone: Tone; 
   active: { label: "فعال", tone: "success", hint: "در پست‌ها قابل استفاده است." },
   expired: { label: "زمانش تمام شد", tone: "neutral", hint: "مهلت کانفیگ گذشت (⌛ روی پست)." },
   full: { label: "حجمش پر شد", tone: "warning", hint: "سقف حجم کانفیگ مصرف شد (🔴 روی پست)." },
-  burned: { label: "از دسترس خارج شد", tone: "danger", hint: "سرور یا دامنه‌اش دیگر کار نمیکند (🔴 روی پست)." },
+  burned: { label: "از دسترس خارج شد", tone: "danger", hint: "سرور یا دامنه‌اش دیگر کار نمیکند (🚫 روی پست)." },
 };
 
 const APPLY_ERRORS: Record<string, string> = {

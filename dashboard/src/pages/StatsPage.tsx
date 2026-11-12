@@ -536,7 +536,7 @@ function ChannelSection({ s, series }: { s: AnalyticsSummary; series: AnalyticsS
           >
             <JoinsLeavesChart days={days} />
           </ChartCard>
-          <ChartCard className="lg:col-span-5" icon={<Link2 className="size-5" />} title="از کجا آمدند" sentence={sourcesSentence(sources) ?? "هنوز عضوی با منبع ثبت نشده است."}>
+          <ChartCard className="lg:col-span-5" icon={<Link2 className="size-5" />} title="از کجا آمدند" sentence={sourcesSentence(sources, series ? series.days.length : 30) ?? "هنوز عضوی با منبع ثبت نشده است."}>
             {sources.length > 0 ? (
               <>
                 <RankedBars items={sources.map((x) => ({ label: sourceLabel(x), value: x.joins }))} format={(v) => `${formatNumber(v)} نفر`} label="عضو تازه به تفکیک منبع" />

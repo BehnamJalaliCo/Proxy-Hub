@@ -256,10 +256,11 @@ export function membersSentence(main: ChannelHeadline | null): string {
   );
 }
 
-export function sourcesSentence(top: SourceStat[]): string | null {
+/** `days`: the period the counts cover (the summary's 30, or the chart range's own days). */
+export function sourcesSentence(top: SourceStat[], days = 30): string | null {
   const best = top.find((x) => x.joins > 0);
   if (!best) return null;
-  return `بیشترین عضو تازه در ۳۰ روز اخیر از «${sourceLabel(best)}» آمد (${formatNumber(best.joins)} نفر، ${formatNumber(best.leaves)} نفرشان رفته‌اند).`;
+  return `بیشترین عضو تازه در ${formatNumber(days)} روز اخیر از «${sourceLabel(best)}» آمد (${formatNumber(best.joins)} نفر، ${formatNumber(best.leaves)} نفرشان رفته‌اند).`;
 }
 
 export function usersSentence(u: AnalyticsUsage): string {

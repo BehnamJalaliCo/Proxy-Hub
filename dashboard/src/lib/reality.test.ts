@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { LINK_STATUS } from "./posts";
 import {
   draftFrom,
   formatBytes,
@@ -163,6 +164,14 @@ describe("reality words", () => {
       expect(REALITY_STATUS[s].label).toMatch(/[؀-ۿ]/);
     }
     expect(REALITY_STATUS.burned.tone).toBe("danger");
+  });
+
+  it("names the same mark the post shows for an ended config", () => {
+    const bare = (s: string) => s.replace(/️/g, "");
+    for (const s of ["expired", "full", "burned"] as const) {
+      expect(bare(REALITY_STATUS[s].hint), s).toContain(bare(LINK_STATUS[s].mark));
+    }
+    expect(REALITY_STATUS.burned.hint).not.toContain("🔴");
   });
 
   it("explains a node's Xray state", () => {

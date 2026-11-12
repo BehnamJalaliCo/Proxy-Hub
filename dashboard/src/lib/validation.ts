@@ -157,7 +157,8 @@ export function usernameError(u: string): string | null {
 
 export function passwordError(p: string, username: string): string | null {
   if (p.length < PASSWORD_MIN) return `رمز باید دست‌کم ${faNum(PASSWORD_MIN)} نویسه باشد.`;
-  if (username.length >= 3 && p.toLowerCase().includes(username.toLowerCase())) return "رمز نباید نام کاربری را در خود داشته باشد.";
+  // Same threshold as password_problem() in panel/proxyhub/auth/passwords.py (4 characters).
+  if (username.length >= 4 && p.toLowerCase().includes(username.toLowerCase())) return "رمز نباید نام کاربری را در خود داشته باشد.";
   return null;
 }
 

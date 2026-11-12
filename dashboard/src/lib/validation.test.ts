@@ -134,6 +134,9 @@ describe("login and setup rules", () => {
     expect(passwordError("short", "owner")).not.toBeNull();
     expect(passwordError("my-owner-password-123", "owner")).not.toBeNull();
     expect(passwordError("correct horse battery", "owner")).toBeNull();
+    // The server checks the username only from 4 characters on (auth/passwords.py).
+    expect(passwordError("Formalization!2026", "ali")).toBeNull();
+    expect(passwordError("my-alix-password-1", "alix")).not.toBeNull();
   });
 
   it("scores strength as a hint only", () => {
