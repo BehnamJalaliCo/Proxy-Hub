@@ -6,6 +6,7 @@ exceeded, whatever the fleet state; checked on hand-made scenarios and by a prop
 
 from __future__ import annotations
 
+import dataclasses
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -28,7 +29,7 @@ from proxyhub.fleet.planner import (
     NodeSnapshot,
     build_plan,
 )
-from proxyhub.safety.budget import Price, rest_of_month_cost
+from proxyhub.safety.budget import CostItem, Price, month_bounds, projected_month_total, rest_of_month_cost
 from proxyhub.settings_schema import FleetSettings
 
 NOW = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
@@ -74,6 +75,7 @@ def node(
     ready_min_ago: float | None = 3 * 24 * 60 - 5,
     is_test: bool = False,
     now: datetime = NOW,
+    deleted_at: datetime | None = None,
 ) -> NodeSnapshot:
     return NodeSnapshot(
         id=f"node-{n}",
@@ -84,7 +86,7 @@ def node(
         state=state,
         hetzner_id=1000 + n,
         created_at=now - timedelta(minutes=created_min_ago),
-        deleted_at=None,
+        deleted_at=deleted_at,
         slot=slot,
         is_test=is_test,
         ready_at=None if ready_min_ago is None else now - timedelta(minutes=ready_min_ago),
@@ -115,6 +117,57 @@ def plan_for(settings_: FleetSettings, **kw: object) -> FleetPlan:
 
 def creates(plan: FleetPlan) -> list:  # type: ignore[type-arg]
     return [a for a in plan.actions if a.action == "create"]
+
+
+def offer_prices(snap: FleetSnapshot) -> dict[tuple[str, str, str], Price]:
+    return {(ao.account_id, ao.offer.server_type, ao.offer.location): ao.offer.price for ao in snap.offers}
+
+
+def month_so_far(snap: FleetSnapshot) -> tuple[Decimal, tuple[str, ...]]:
+    """Rule 8's oracle: what the snapshot's servers cost this month to its end, and the names of
+    those without a price, worked out here and not by the planner or node_cost_items, so a planner
+    that under-counts them cannot pass its own running total off as checked."""
+    start, _ = month_bounds(snap.now)
+    prices = offer_prices(snap)
+    total, unpriced = Decimal(0), []
+    for n in snap.nodes:  # test nodes are billed too
+        deleted_at = n.deleted_at
+        if n.state == NodeState.DELETED:
+            if n.hetzner_id is None:
+                continue  # Hetzner never made it
+            deleted_at = deleted_at or snap.now  # deleted, time unknown: billed up to now
+        if deleted_at is not None and deleted_at < start:
+            continue  # gone before this month
+        price = prices.get((n.account_id, n.server_type, n.location))
+        if price is None:
+            unpriced.append(n.name)
+            continue
+        total += projected_month_total([CostItem(price, n.created_at, deleted_at)], snap.now)
+    return total, tuple(unpriced)
+
+
+def check_budget(snap: FleetSnapshot, plan: FleetPlan) -> None:
+    """The plan's starting figure is the oracle's, and its allowed creations fit with it under the cap."""
+    existing, unpriced = month_so_far(snap)
+    assert plan.projected_month_eur == existing
+    assert plan.missing_prices == unpriced
+    allowed = [a for a in plan.actions if a.action == "create" and a.allowed]
+    if not allowed:
+        return
+    cap = snap.settings.budget_cap_eur
+    assert cap is not None and not unpriced
+    prices = offer_prices(snap)
+    new = sum(
+        (
+            rest_of_month_cost(
+                prices[(a.context["account_id"], a.context["server_type"], a.context["location"])], snap.now
+            )
+            for a in allowed
+        ),
+        Decimal(0),
+    )
+    assert existing + new <= cap
+    assert plan.projected_after_eur == existing + new
 
 
 # --- fresh panel: nothing may happen ----------------------------------------------------------
@@ -174,6 +227,53 @@ def test_test_nodes_count_against_node_cap_and_budget() -> None:
     plan = plan_for(open_settings(node_cap_total=4), nodes=tests)
     assert sum(a.allowed for a in creates(plan)) == 1
     assert len(creates(plan)) == 9  # test nodes never occupy a slot
+
+    # The budget: 3 test nodes cost 19.47 this month, so 26 EUR leaves room for one more CPX02 only.
+    plan = plan_for(open_settings(node_cap_total=20, budget_cap_eur=Decimal("26")), nodes=tests)
+    assert plan.projected_month_eur == Decimal("19.47")
+    assert [a.allowed for a in creates(plan)] == [True] + [False] * 8
+    assert all("budget_cap_reached" in a.reasons for a in creates(plan)[1:])
+    assert plan.projected_after_eur == Decimal("25.96")
+
+
+def test_the_running_fleet_counts_against_the_budget_cap() -> None:
+    """Rule 8: 9 live CPX02 already cost 58.41 this month; with a 60 EUR cap not one more fits."""
+    plan = plan_for(open_settings(budget_cap_eur=Decimal("60"), target_slots=12), nodes=tuple(full_fleet()))
+    assert plan.projected_month_eur == Decimal("58.41")
+    cs = creates(plan)
+    assert [a.target for a in cs] == ["slot-10", "slot-11", "slot-12"]
+    assert not any(a.allowed for a in cs)
+    assert all("budget_cap_reached" in a.reasons for a in cs)
+    assert plan.projected_after_eur == Decimal("58.41")
+
+
+def test_a_node_deleted_this_month_counts_its_hours_against_the_cap() -> None:
+    """A server deleted on the 2nd was billed 24 hours (0.2496); one deleted last month costs
+    nothing now, nor one Hetzner never made. 3 new CPX02 (19.47) plus 0.2496 is over 19.60."""
+    month = datetime(2026, 11, 1, tzinfo=UTC)
+    billed = node(
+        60,
+        slot=None,
+        state=NodeState.DELETED,
+        created_min_ago=(NOW - month).total_seconds() / 60,
+        deleted_at=month + timedelta(days=1),
+    )
+    last_month = node(
+        61,
+        slot=None,
+        state=NodeState.DELETED,
+        created_min_ago=60 * 24 * 20,
+        deleted_at=month - timedelta(days=2),
+    )
+    never_made = dataclasses.replace(node(62, slot=None, state=NodeState.DELETED), hetzner_id=None)
+    cap = Decimal("19.60")
+    plan = plan_for(open_settings(budget_cap_eur=cap), nodes=(last_month, never_made))
+    assert plan.projected_month_eur == 0
+    assert [a.allowed for a in creates(plan)][:4] == [True, True, True, False]
+    plan = plan_for(open_settings(budget_cap_eur=cap), nodes=(billed, last_month, never_made))
+    assert plan.projected_month_eur == Decimal("0.2496")
+    assert [a.allowed for a in creates(plan)][:3] == [True, True, False]
+    assert "budget_cap_reached" in creates(plan)[2].reasons
 
 
 # --- placement --------------------------------------------------------------------------------
@@ -339,6 +439,17 @@ def test_fingerprint_ignores_cost_drift_but_not_decisions() -> None:
 STATES = ["verifying", "preparing", "active", "draining", "retired", "locked"]
 
 
+def deleted_variant(draw: st.DrawFn, n: NodeSnapshot, now: datetime) -> NodeSnapshot:
+    """A deleted node as the database can hold it: never seen by Hetzner, or deleted at an unknown
+    time, earlier this month or before it (each bills differently against the cap)."""
+    if n.state != NodeState.DELETED:
+        return n
+    hetzner_id = draw(st.sampled_from([n.hetzner_id, n.hetzner_id, None]))
+    ago = draw(st.one_of(st.none(), st.floats(0, 60 * 24 * 40)))
+    deleted_at = None if ago is None else max(n.created_at, now - timedelta(minutes=ago))
+    return dataclasses.replace(n, hetzner_id=hetzner_id, deleted_at=deleted_at)
+
+
 @st.composite
 def snapshots(draw: st.DrawFn, open_fleet: bool = False) -> FleetSnapshot:
     now = NOW + timedelta(days=draw(st.integers(0, 27)), hours=draw(st.integers(0, 23)))
@@ -368,17 +479,21 @@ def snapshots(draw: st.DrawFn, open_fleet: bool = False) -> FleetSnapshot:
         else st.sampled_from(["cpx02", "cpx12", "ccx99"])
     )
     nodes = tuple(
-        node(
-            i,
-            slot=draw(st.one_of(st.none(), st.integers(1, 13))),
-            state=draw(st.sampled_from(list(NodeState))),
-            location=draw(st.sampled_from(LOCATIONS)),
-            account_id=draw(st.sampled_from(priced if open_fleet else ids)),
-            server_type=draw(types),
-            created_min_ago=draw(st.one_of(st.floats(61, 60 * 24 * 40), st.floats(0, 60))),
-            ready_min_ago=draw(st.one_of(st.none(), st.floats(0, 60))),
-            is_test=draw(st.booleans()),
-            now=now,
+        deleted_variant(
+            draw,
+            node(
+                i,
+                slot=draw(st.one_of(st.none(), st.integers(1, 13))),
+                state=draw(st.sampled_from(list(NodeState))),
+                location=draw(st.sampled_from(LOCATIONS)),
+                account_id=draw(st.sampled_from(priced if open_fleet else ids)),
+                server_type=draw(types),
+                created_min_ago=draw(st.one_of(st.floats(61, 60 * 24 * 40), st.floats(0, 60))),
+                ready_min_ago=draw(st.one_of(st.none(), st.floats(0, 60))),
+                is_test=draw(st.booleans()),
+                now=now,
+            ),
+            now,
         )
         for i in range(draw(st.integers(0, 12)))
     )
@@ -412,6 +527,7 @@ def check_caps(snap: FleetSnapshot) -> int:
     """Assert every cap for the plan's allowed creations; returns how many were allowed."""
     plan = build_plan(snap)
     s = snap.settings
+    check_budget(snap, plan)
     allowed = [a for a in plan.actions if a.action == "create" and a.allowed]
     if not allowed:
         return 0
