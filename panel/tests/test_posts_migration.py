@@ -63,4 +63,5 @@ async def test_migration_0014_round_trip_seed_and_no_drift(migrated_db: str) -> 
         assert {"post_links.missing_since", "posts.shown_sha256"} <= columns
         await asyncio.to_thread(command.check, _alembic_config())  # the models and the migration agree
     finally:
+        await asyncio.to_thread(migrate, "head")  # the next tests need the whole schema
         await engine.dispose()

@@ -76,4 +76,5 @@ async def test_migration_0022_round_trip_checks_and_no_drift(migrated_db: str) -
             assert (await conn.execute(text("SELECT count(*) FROM mtproxybot_entries"))).scalar_one() == 0
         await asyncio.to_thread(command.check, _alembic_config())  # the models and the migration agree
     finally:
+        await asyncio.to_thread(migrate, "head")  # the next tests need the whole schema
         await engine.dispose()

@@ -651,8 +651,11 @@ async def test_migration_round_trip_single_head_and_no_drift(engine: AsyncEngine
     script = ScriptDirectory.from_config(cfg)
     (head,) = script.get_heads()  # one head; the round-3 merge builds on 0016
     assert "0016_analytics" in {rev.revision for rev in script.walk_revisions("base", head)}
-    await asyncio.to_thread(downgrade, "0010_domains")
-    tables = await rows(engine, "SELECT tablename FROM pg_tables WHERE tablename LIKE 'analytics_%'")
-    assert tables == []
-    await asyncio.to_thread(migrate, "head")
-    await asyncio.to_thread(command.check, cfg)
+    try:
+        await asyncio.to_thread(downgrade, "0010_domains")
+        tables = await rows(engine, "SELECT tablename FROM pg_tables WHERE tablename LIKE 'analytics_%'")
+        assert tables == []
+        await asyncio.to_thread(migrate, "head")
+        await asyncio.to_thread(command.check, cfg)
+    finally:
+        await asyncio.to_thread(migrate, "head")  # the next tests need the whole schema

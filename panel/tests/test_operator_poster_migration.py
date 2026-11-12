@@ -58,4 +58,5 @@ async def test_migration_0021_round_trip_and_no_drift(migrated_db: str) -> None:
             await conn.execute(text("DELETE FROM outbox"))
         await asyncio.to_thread(command.check, _alembic_config())  # the models and the migration agree
     finally:
+        await asyncio.to_thread(migrate, "head")  # the next tests need the whole schema
         await engine.dispose()

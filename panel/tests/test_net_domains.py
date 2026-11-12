@@ -1145,15 +1145,18 @@ async def test_migration_0010_round_trip_and_no_drift(engine: AsyncEngine) -> No
     (head,) = script.get_heads()  # one head; later migrations build on 0010
     assert "0010_domains" in {rev.revision for rev in script.walk_revisions("base", head)}
     await add_zone(engine, ZONE_ID, "old.example", pool="deleted")
-    await asyncio.to_thread(downgrade, "0009_merge")
-    async with engine.connect() as conn:
-        assert (await conn.execute(text("SELECT pool_state FROM cf_zones"))).scalar_one() == "retired"
-    async with engine.begin() as conn:
-        await conn.execute(text("UPDATE cf_zones SET pool_state = 'filtered'"))
-    await asyncio.to_thread(migrate, "head")
-    row = await zone(engine, ZONE_ID)
-    assert row.pool_state == "filtered" and row.filtered_at is not None and row.delete_attempts == 0
-    await asyncio.to_thread(command.check, cfg)  # the models and the migrations agree
+    try:
+        await asyncio.to_thread(downgrade, "0009_merge")
+        async with engine.connect() as conn:
+            assert (await conn.execute(text("SELECT pool_state FROM cf_zones"))).scalar_one() == "retired"
+        async with engine.begin() as conn:
+            await conn.execute(text("UPDATE cf_zones SET pool_state = 'filtered'"))
+        await asyncio.to_thread(migrate, "head")
+        row = await zone(engine, ZONE_ID)
+        assert row.pool_state == "filtered" and row.filtered_at is not None and row.delete_attempts == 0
+        await asyncio.to_thread(command.check, cfg)  # the models and the migrations agree
+    finally:
+        await asyncio.to_thread(migrate, "head")  # the next tests need the whole schema
 
 
 # --- real public APIs (opt-in with the other real calls: PROXYHUB_GLOBALPING_TESTS=1) ----------------
