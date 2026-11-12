@@ -22,8 +22,13 @@ import (
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/xray"
 )
 
-// targetRecheck is how often the REALITY target (or a passed own-TLS check) is checked again.
+// targetRecheck is how often a passed REALITY target (or own-TLS) check is checked again.
 const targetRecheck = 6 * time.Hour
+
+// targetRetry: a failed REALITY target check is repeated this often. One dropped dial must not stand
+// for hours: the panel renews and creates configs only on a node whose check passed (D41). Longer
+// than ownTLSRetry because this dial goes to a third-party site, not to loopback.
+const targetRetry = 5 * time.Minute
 
 // ownTLSRetry: a failed own-TLS check is repeated this often (it is local and cheap; right after a
 // restart Xray may simply not listen yet).
@@ -369,13 +374,20 @@ func (a *Agent) liveUsers(ctx context.Context, plan xray.Plan) error {
 	return nil
 }
 
-// checkXrayTarget re-checks the REALITY target from this node when it changed or every few hours.
+// checkXrayTarget re-checks the REALITY target from this node when it changed, a few minutes after
+// a failure, and every few hours after a success.
 func (a *Agent) checkXrayTarget(ctx context.Context) {
 	x := a.doc.Xray
 	target, sni := x.Target, x.ServerNames[0]
-	if target == a.xr.targetChecked && sni == a.xr.sniChecked && a.xr.certChecked == "" &&
-		a.now().Sub(a.xr.targetAt) < targetRecheck {
-		return
+	same := target == a.xr.targetChecked && sni == a.xr.sniChecked && a.xr.certChecked == ""
+	if same && a.xr.targetOK != nil {
+		wait := targetRecheck
+		if !*a.xr.targetOK {
+			wait = targetRetry
+		}
+		if a.now().Sub(a.xr.targetAt) < wait {
+			return
+		}
 	}
 	ok := a.xr.checkTarget(ctx, target, sni, nil) == nil
 	a.xr.targetOK, a.xr.targetChecked, a.xr.sniChecked, a.xr.certChecked, a.xr.targetAt = &ok, target, sni, "", a.now()

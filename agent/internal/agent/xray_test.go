@@ -234,7 +234,8 @@ func (b *lockedBuffer) String() string {
 
 // The REALITY target is checked again as soon as the panel names another one (the owner replaced a
 // target that failed), and the report always says which target and server name its result is about,
-// so the panel never pins an old result on the new target.
+// so the panel never pins an old result on the new target. A failed check is repeated after a few
+// minutes, a passed one after six hours.
 func TestXrayTargetIsRecheckedWhenTheDesiredTargetChanges(t *testing.T) {
 	dir := t.TempDir()
 	caPath := writeIdentity(t, dir)
@@ -265,9 +266,10 @@ func TestXrayTargetIsRecheckedWhenTheDesiredTargetChanges(t *testing.T) {
 	}
 	a.xr.service.Binary = "" // no config test here: this is about the target check
 	var checks []string
+	googleFails := true
 	a.xr.checkTarget = func(_ context.Context, target, name string, _ *x509.CertPool) error {
 		checks = append(checks, target+" "+name)
-		if name == "dl.google.com" {
+		if name == "dl.google.com" && googleFails {
 			return errors.New("target: no HTTP/2")
 		}
 		return nil
@@ -295,18 +297,42 @@ func TestXrayTargetIsRecheckedWhenTheDesiredTargetChanges(t *testing.T) {
 	if ok, target, name := reported(); ok != false || target != "dl.google.com:443" || name != "dl.google.com" {
 		t.Fatalf("first check reported %v %v %v", ok, target, name)
 	}
-	// Same target within six hours: no new check.
-	now = now.Add(time.Hour)
+	// A failure is not held for hours (one dropped dial would stop renewal, D41): no new check
+	// within targetRetry...
+	now = now.Add(targetRetry - time.Second)
 	_ = a.ApplyXray(t.Context())
 	if len(checks) != 1 {
-		t.Fatalf("checks %v", checks)
+		t.Fatalf("a failure was re-checked too soon: %v", checks)
 	}
+	// ...and after it the same target is checked again; the pass is reported at once.
+	googleFails = false
+	now = now.Add(time.Second)
+	_ = a.ApplyXray(t.Context())
+	if len(checks) != 2 {
+		t.Fatalf("a failed target was not checked again: %v", checks)
+	}
+	if ok, target, name := reported(); ok != true || target != "dl.google.com:443" || name != "dl.google.com" {
+		t.Fatalf("after the retry reported %v %v %v", ok, target, name)
+	}
+	// A pass is held for six hours: no new check one hour later.
+	now = now.Add(time.Hour)
+	_ = a.ApplyXray(t.Context())
+	if len(checks) != 2 {
+		t.Fatalf("a passed target was re-checked within six hours: %v", checks)
+	}
+	// Six hours after the pass the same target is checked again.
+	now = now.Add(targetRecheck - time.Hour)
+	_ = a.ApplyXray(t.Context())
+	if len(checks) != 3 {
+		t.Fatalf("no periodic re-check: %v", checks)
+	}
+	googleFails = true
 	// The panel names another target: checked at once, and the report follows.
 	a.doc.Xray.Target, a.doc.Xray.ServerNames = "www.example.org:443", []string{"www.example.org"}
 	if err := a.ApplyXray(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if len(checks) != 2 || checks[1] != "www.example.org:443 www.example.org" {
+	if len(checks) != 4 || checks[3] != "www.example.org:443 www.example.org" {
 		t.Fatalf("checks %v", checks)
 	}
 	if ok, target, name := reported(); ok != true || target != "www.example.org:443" || name != "www.example.org" {
@@ -315,17 +341,11 @@ func TestXrayTargetIsRecheckedWhenTheDesiredTargetChanges(t *testing.T) {
 	// Only the server name changes: that is another check too.
 	a.doc.Xray.ServerNames = []string{"dl.google.com"}
 	_ = a.ApplyXray(t.Context())
-	if len(checks) != 3 {
+	if len(checks) != 5 {
 		t.Fatalf("a new server name was not checked: %v", checks)
 	}
 	if ok, target, name := reported(); ok != false || target != "www.example.org:443" || name != "dl.google.com" {
 		t.Fatalf("after the server name change reported %v %v %v", ok, target, name)
-	}
-	// Six hours later the same target is checked again.
-	now = now.Add(targetRecheck)
-	_ = a.ApplyXray(t.Context())
-	if len(checks) != 4 {
-		t.Fatalf("no periodic re-check: %v", checks)
 	}
 }
 
