@@ -28,6 +28,10 @@ from proxyhub.db.models_auth import AuthThrottle
 
 GLOBAL_KEY = "global"
 PRUNE_AFTER = timedelta(days=2)
+# The stored level stops here; every policy reaches its max_lock long before (USER at 8, GLOBAL at 3).
+MAX_LOCK_LEVEL = 64
+# 15 minutes x 2**20 is far above any max_lock and far inside timedelta's range.
+_MAX_DOUBLINGS = 20
 
 
 @dataclass(frozen=True)
@@ -40,8 +44,10 @@ class LockPolicy:
     level_reset_after: timedelta
 
     def lock_duration(self, level: int) -> timedelta:
-        factor: int = 2 ** max(level - 1, 0)
-        return min(self.base_lock * factor, self.max_lock)
+        """Doubling from base_lock up to max_lock. The exponent is clamped before multiplying: from
+        level 38 on, base_lock * 2**(level-1) overflows timedelta and the failure was never counted."""
+        doublings = min(max(level - 1, 0), _MAX_DOUBLINGS)
+        return min(self.base_lock * (1 << doublings), self.max_lock)
 
 
 USER_POLICY = LockPolicy(
@@ -113,7 +119,7 @@ def register_failure(row: AuthThrottle, policy: LockPolicy, now: datetime) -> Lo
     level = row.lock_level
     if previous_end is None or now - previous_end > policy.level_reset_after:
         level = 0
-    level += 1
+    level = min(level + 1, MAX_LOCK_LEVEL)
     duration = policy.lock_duration(level)
     row.lock_level = level
     row.locked_until = now + duration
