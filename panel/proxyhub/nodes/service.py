@@ -241,6 +241,18 @@ async def evaluate_create(
     def fresh(a: AccountSnapshot) -> bool:
         return a.observed_at is not None and now - a.observed_at <= OBSERVATION_MAX_AGE
 
+    live_nodes = [n for n in nodes if n.state in LIVE_STATES]
+
+    def has_room(a: AccountSnapshot) -> bool:
+        """Below its learned server limit, as the planner's placement asks (youngest account first,
+        the next one when it is full). With a live look the account is fixed (the executor's own
+        re-check), and ``can_create`` checks the limit."""
+        if live is not None:
+            return True
+        limit = effective_server_limit(a, now)
+        in_a = sum(1 for n in live_nodes if n.account_id == a.id)
+        return limit is None or max(a.servers_total or 0, in_a) + 1 <= limit
+
     chosen: AccountSnapshot | None = None
     chosen_loc: str | None = locations[0] if locations else None
     chosen_offer: LiveOffer | None = None
@@ -254,8 +266,8 @@ async def evaluate_create(
             )
             if offer is None:
                 continue
-            good = live.guard_ok if live is not None else (fresh(a) and a.guard_ok is True)
-            if good:
+            green = live.guard_ok if live is not None else (fresh(a) and a.guard_ok is True)
+            if green and has_room(a):
                 chosen, chosen_loc, chosen_offer = a, loc, offer
                 break
             if fallback is None:
@@ -273,7 +285,6 @@ async def evaluate_create(
     if chosen is not None and live is None and not fresh(chosen):
         reasons.append("account_observation_stale")
 
-    live_nodes = [n for n in nodes if n.state in LIVE_STATES]
     in_account = sum(1 for n in live_nodes if chosen is not None and n.account_id == chosen.id)
     if chosen is not None:
         if live is not None:
@@ -465,8 +476,10 @@ async def request_retire(
     if settings.kill_switch:
         reasons.append("kill_switch_on")
     if not reasons and node.state == NodeState.RETIRING.value:
+        # Already on its way out. The rollback expires ``node``: reading it again would be lazy IO
+        # outside the async greenlet (MissingGreenlet, a 500 for an idempotent request).
         await db.rollback()
-        return node.state  # already on its way out
+        return NodeState.RETIRING.value
     account_id, hetzner_id, seen_state, name = node.account_id, node.hetzner_id, node.state, node.name
     await db.rollback()  # no transaction (and no row lock) is held across a Hetzner call
 

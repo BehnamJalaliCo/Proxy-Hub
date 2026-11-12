@@ -255,6 +255,34 @@ async def test_an_old_server_limit_does_not_block_the_gate(world: LiveWorld) -> 
         assert "account_server_limit_reached" not in old.reasons, learned_at
 
 
+async def test_a_test_node_goes_to_the_next_account_when_the_youngest_is_full(world: LiveWorld) -> None:
+    """nodes-hetzner:4: the gate took the youngest account with a price and a green guard even when it
+    was full, and refused, although an older account had room. Placement now follows the planner:
+    youngest first, the next one when it is full; with every account full the youngest is refused."""
+    import secrets
+
+    from test_live_support import seed_account
+
+    await world.settings(good_settings())
+    young = await seed_account(world.engine, world.vault, token=secrets.token_hex(32), name="younger-account")
+    await _sql(
+        world,
+        "UPDATE hetzner_accounts SET created_at = now() + interval '1 day', learned_server_limit = 2, "
+        "learned_server_limit_at = now() WHERE id = :a",
+        a=young,
+    )
+    await _sql(
+        world, "UPDATE hetzner_account_observations SET servers_total = 2 WHERE account_id = :a", a=young
+    )
+    async with world.sessions() as s:
+        ev = await evaluate_create(s, datetime.now(UTC), location="fsn1")
+    assert ev.allowed and ev.account_id == world.account_id, ev.reasons
+    await _server_limit(world)  # the older account is full too
+    async with world.sessions() as s:
+        ev = await evaluate_create(s, datetime.now(UTC), location="fsn1")
+    assert not ev.allowed and ev.account_id == young and "account_server_limit_reached" in ev.reasons
+
+
 @pytest.mark.parametrize(("reason", "setup"), REFUSALS, ids=[r for r, _ in REFUSALS])
 async def test_executor_refuses_again_before_any_hetzner_call(
     world: LiveWorld, reason: str, setup: Setup
@@ -510,6 +538,23 @@ async def test_retire_without_a_server_and_the_retiring_step(world: LiveWorld) -
     assert world.no_hetzner.calls == 0
     log = await world.rows("SELECT reasons FROM actions_log WHERE action = 'node_delete'")
     assert log and log[0][0]["reasons"] == ["no_server_requested"]
+
+
+async def test_retiring_a_node_already_retiring_answers_as_before(world: LiveWorld) -> None:
+    """nodes-hetzner:3: the early exit read the node after a rollback had expired it (lazy IO on an
+    AsyncSession: MissingGreenlet), so a second retire was a 500 in the API and a traceback in the CLI."""
+    from proxyhub.nodes import service
+
+    await world.settings(good_settings())
+    node_id = await world.add_node(state="retiring")
+    async with api_client(world) as c:
+        r = await c.post(f"/api/nodes/{node_id}/retire")
+    assert r.status_code == 202 and r.json() == {}
+    async with world.sessions() as s:
+        state = await service.request_retire(s, node_id, actor="test", now=datetime.now(UTC))
+    assert state == "retiring"
+    assert (await world.node(node_id))["state"] == "retiring"
+    assert world.no_hetzner.calls == 0
 
 
 # --- reading -------------------------------------------------------------------------------------
