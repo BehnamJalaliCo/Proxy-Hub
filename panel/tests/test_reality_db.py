@@ -982,6 +982,20 @@ async def test_dashboard_api(world: World) -> None:
             body = (await c.get("/api/reality")).json()
             assert body["settings"]["cap_hours"] == 48 and body["settings"]["port"] == 443
             assert body["totals"]["active"] == 1 and body["totals"]["nodes_enabled"] == 1
+            # reality:3. A deleted server's last status row is not counted; a stale report is not up.
+            gone = await world.node(slot=11, ipv4="203.0.113.111")
+            await world.report(gone, now=datetime.now(UTC))
+            await world.rows("UPDATE nodes SET state = 'deleted' WHERE id = :n", n=gone)
+            totals = (await c.get("/api/reality")).json()
+            assert (totals["totals"]["nodes_enabled"], totals["totals"]["nodes_up"]) == (1, 1)
+            assert str(gone) not in {n["node_id"] for n in totals["nodes"]}
+            await world.rows(
+                "UPDATE reality_node_status SET reported_at = now() - interval '1 hour' WHERE node_id = :n",
+                n=node,
+            )
+            totals = (await c.get("/api/reality")).json()["totals"]
+            assert (totals["nodes_enabled"], totals["nodes_up"]) == (1, 0)
+            await world.report(node, now=datetime.now(UTC))
             [cfg] = body["configs"]
             assert (
                 cfg["status"] == "active"
