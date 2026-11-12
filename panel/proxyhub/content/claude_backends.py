@@ -58,6 +58,10 @@ API_EFFORT: Final = "medium"
 VAULT_NAME: Final = "anthropic_api_key"
 MAX_ANSWER_BYTES: Final = 1024 * 1024
 HEALTH_TIMEOUT_S: Final = 8.0
+# Sending a request (a video's frames are megabytes, far over a unix socket's buffer): the bridge
+# reads every request at once, so this only ends a bridge that is alive but not running (stopped).
+WRITE_TIMEOUT_S: Final = 30.0
+CLOSE_TIMEOUT_S: Final = 2.0
 
 # Outcomes about the candidate (Claude was reached but gave no usable answer): the review ends and
 # the candidate is rejected; trying another backend would only spend more.
@@ -140,16 +144,33 @@ def _int(value: Any) -> int | None:
 # --- the bridge --------------------------------------------------------------------------------------
 
 
+async def _close(writer: asyncio.StreamWriter) -> None:
+    """Close without waiting on a peer that stopped reading: bytes it never took are dropped (a
+    plain close would wait for them forever)."""
+    with contextlib.suppress(OSError, ConnectionError):
+        if writer.transport.get_write_buffer_size() > 0:
+            writer.transport.abort()
+        else:
+            writer.close()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(writer.wait_closed(), CLOSE_TIMEOUT_S)
+
+
 async def bridge_call(socket_path: Path, request: dict[str, Any], timeout_s: float) -> dict[str, Any]:
-    """One request to the bridge. Returns its answer, or ``{"ok": false, "error": <code>}``."""
+    """One request to the bridge. Returns its answer, or ``{"ok": false, "error": <code>}``. Every
+    step is bounded: connecting, sending, the answer, closing."""
     writer: asyncio.StreamWriter | None = None
     try:
         reader, connected = await asyncio.wait_for(
             asyncio.open_unix_connection(str(socket_path), limit=MAX_ANSWER_BYTES), 5
         )
         writer = connected
-        connected.write((json.dumps(request, ensure_ascii=False) + "\n").encode())
-        await connected.drain()
+
+        async def send() -> None:
+            connected.write((json.dumps(request, ensure_ascii=False) + "\n").encode())
+            await connected.drain()
+
+        await asyncio.wait_for(send(), WRITE_TIMEOUT_S)
         line = await asyncio.wait_for(reader.readuntil(b"\n"), timeout_s)
     except FileNotFoundError:
         return {"ok": False, "error": "bridge_missing"}
@@ -163,9 +184,7 @@ async def bridge_call(socket_path: Path, request: dict[str, Any], timeout_s: flo
         return {"ok": False, "error": "bridge_bad_answer"}
     finally:
         if writer is not None:
-            with contextlib.suppress(OSError, ConnectionError):
-                writer.close()
-                await writer.wait_closed()
+            await _close(writer)
     try:
         answer = json.loads(line)
     except (ValueError, RecursionError):

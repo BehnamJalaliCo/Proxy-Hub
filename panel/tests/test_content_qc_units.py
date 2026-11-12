@@ -10,9 +10,12 @@ API's responses are bodies in its documented shape fed to the real reader; the r
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -543,6 +546,30 @@ async def test_an_unreachable_backend_says_so() -> None:
     got = await bridge.review(REQUEST)
     assert isinstance(got, Attempt) and got.outcome == "bridge_missing"
     assert await bridge.health() == {"ok": False, "error": "bridge_missing"}
+
+
+async def test_a_bridge_that_stops_reading_cannot_hang_the_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bridge alive but stopped (SIGSTOP, a frozen cgroup) still completes connects from the
+    kernel's backlog; a request bigger than the socket's buffer then never drains."""
+    import socket
+
+    from proxyhub.content import claude_backends
+
+    monkeypatch.setattr(claude_backends, "WRITE_TIMEOUT_S", 0.3)
+    folder = Path(tempfile.mkdtemp(prefix="phb-"))  # short: a unix socket path is at most 107 bytes
+    path = folder / "bridge.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listening:
+            listening.bind(str(path))
+            listening.listen(1)  # never accepted, never read
+            got = await asyncio.wait_for(
+                claude_backends.bridge_call(path, {"op": "review", "x": "A" * 2_000_000}, 1.0), 5
+            )
+        assert got == {"ok": False, "error": "bridge_timeout"}
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 @dataclass
