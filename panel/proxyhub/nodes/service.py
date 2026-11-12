@@ -34,10 +34,11 @@ from proxyhub.fleet.costs import money, node_cost_items
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
 from proxyhub.fleet.planner import (
     OBSERVATION_MAX_AGE,
-    OFFER_MAX_AGE,
     AccountSnapshot,
     counts_as_creation,
     effective_server_limit,
+    prices_stale,
+    projection_prices,
 )
 from proxyhub.fleet.settings_store import SettingsCorrupt, load_fleet_settings
 from proxyhub.fleet.snapshot import load_accounts, load_nodes, load_offers
@@ -212,13 +213,11 @@ async def evaluate_create(
 
     nodes = [n for n in await load_nodes(db, now) if exclude_node is None or n.id != str(exclude_node)]
     stored_offers = await load_offers(db)
-    prices = {
-        (ao.account_id, ao.offer.server_type, ao.offer.location): ao.offer.price for ao in stored_offers
-    }
-    items, missing = node_cost_items(nodes, prices, now)
+    accounts = await load_accounts(db)
+    items, missing = node_cost_items(nodes, projection_prices(stored_offers, accounts), now)
     if missing:
         reasons.append("projection_incomplete")
-    if any(ao.fetched_at is not None and now - ao.fetched_at > OFFER_MAX_AGE for ao in stored_offers):
+    if prices_stale(stored_offers, accounts, nodes, now):
         reasons.append("prices_stale")
     offers_by_account: dict[str, list[LiveOffer]] = {}
     for ao in stored_offers:
@@ -230,7 +229,6 @@ async def evaluate_create(
     if not locations:
         reasons.append("no_location_configured")
 
-    accounts = await load_accounts(db)
     if account_id is not None:
         candidates = [a for a in accounts if a.id == str(account_id)]
     else:

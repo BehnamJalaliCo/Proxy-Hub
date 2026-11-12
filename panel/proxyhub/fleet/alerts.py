@@ -59,6 +59,7 @@ CREATE_BLOCKS: dict[str, timedelta] = {
     "account_guard_failed": timedelta(minutes=30),
     "account_not_usable": timedelta(minutes=30),
     "no_live_price": timedelta(minutes=30),
+    "prices_stale": timedelta(minutes=30),
     "no_other_location": timedelta(minutes=30),
     "spare_in_use": timedelta(hours=1),
     "agent_domain_not_set": timedelta(minutes=5),
@@ -154,6 +155,10 @@ def _create_text(code: str, slots: list[int], plan: FleetPlan, snap: FleetSnapsh
         "no_live_price": (
             "برای نوع سرور مجاز در locationهای تنظیمات، قیمت زنده یا موجودی در هتزنر نیست. "
             "نوع سرور یا location دیگری را در «تنظیمات» مجاز کنید."
+        ),
+        "prices_stale": (
+            "قیمت‌های زنده‌ی هتزنر بیش از ۶ ساعت است تازه نشده‌اند؛ با قیمت کهنه خرج ماه شاید از سقف "
+            "بودجه بگذرد، پس تا تازه نشوند سروری ساخته نمیشود. صفحه‌ی «حساب‌های هتزنر» داشبورد را ببینید."
         ),
         "no_other_location": (
             "location دیگری برای سرور جایگزین نمانده است. location دیگری در «تنظیمات» اضافه کنید."

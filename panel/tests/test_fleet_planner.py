@@ -6,6 +6,7 @@ exceeded, whatever the fleet state; checked on hand-made scenarios and by a prop
 
 from __future__ import annotations
 
+import dataclasses
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -15,6 +16,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from test_fleet_support import LOCATIONS, live_offers, server
 
+from proxyhub.accounts.hetzner_io import LiveOffer
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
 from proxyhub.fleet.planner import (
     LIMIT_RECHECK,
@@ -250,6 +252,83 @@ def test_stale_prices_block_every_creation() -> None:
     blocked = creates(plan_for(open_settings(), offers=old))
     assert blocked and not any(a.allowed for a in blocked)
     assert all("prices_stale" in a.reasons for a in blocked)
+
+
+def _cheaper(offer: LiveOffer) -> LiveOffer:
+    return dataclasses.replace(
+        offer, price=Price(hourly=offer.price.hourly / 2, monthly=offer.price.monthly / 2)
+    )
+
+
+def test_old_prices_of_a_locked_or_retired_account_block_nothing() -> None:
+    """sweep-stuck:1: the pricing loop never reads a locked or retired account again, so its offers
+    age forever; they blocked every creation in every other account, silently. They still price that
+    account's nodes billed this month, so the rows stay (no projection_incomplete)."""
+    from proxyhub.fleet.planner import OFFER_MAX_AGE
+
+    fresh = tuple(AccountOffer("acc-a", o, NOW - timedelta(minutes=20)) for o in OFFERS)
+    old = tuple(AccountOffer("acc-old", o, NOW - OFFER_MAX_AGE - timedelta(hours=1)) for o in OFFERS)
+    gone = dataclasses.replace(
+        node(1, slot=1, account_id="acc-old", location="fsn1"),
+        state=NodeState.DELETED,
+        deleted_at=NOW - timedelta(days=1),
+    )
+    for state in ("retired", "locked"):
+        accounts = (account(), account("acc-old", state=state, age_days=60, observed_min_ago=None))
+        plan = plan_for(open_settings(), accounts=accounts, offers=fresh + old, nodes=(gone,))
+        cs = creates(plan)
+        assert len(cs) == 9 and all(a.allowed for a in cs), (state, cs[0].reasons)
+        assert not plan.missing_prices and plan.projected_month_eur > 0  # the deleted node is priced
+        # Without the old rows that node would have no price: the rows must stay.
+        plan = plan_for(open_settings(), accounts=accounts, offers=fresh, nodes=(gone,))
+        assert all("projection_incomplete" in a.reasons for a in creates(plan))
+    # An account the pricing loop still reads blocks with old prices, as before.
+    for state in ("active", "draining"):
+        accounts = (account(), account("acc-old", state=state, age_days=60))
+        blocked = creates(plan_for(open_settings(), accounts=accounts, offers=fresh + old))
+        assert blocked and all(not a.allowed and "prices_stale" in a.reasons for a in blocked), state
+
+
+def test_a_live_node_in_a_locked_account_is_priced_at_todays_price() -> None:
+    """Rule 8: a frozen price may be lower than today's, so a live node of a locked account is
+    priced at least at what a refreshed account pays for the same type and location; with nothing
+    to compare it to, its price is unknown and nothing is built (prices_stale)."""
+    from proxyhub.fleet.planner import OFFER_MAX_AGE
+
+    old_at = NOW - OFFER_MAX_AGE - timedelta(hours=1)
+    fresh = tuple(AccountOffer("acc-a", o, NOW - timedelta(minutes=20)) for o in OFFERS)
+    frozen_cheap = tuple(AccountOffer("acc-old", _cheaper(o), old_at) for o in OFFERS)
+    frozen_full = tuple(AccountOffer("acc-old", o, old_at) for o in OFFERS)
+    accounts = (account(), account("acc-old", state="locked", age_days=60, observed_min_ago=None))
+    stuck = node(1, slot=1, account_id="acc-old", location="fsn1")
+    plan = plan_for(open_settings(), accounts=accounts, offers=fresh + frozen_cheap, nodes=(stuck,))
+    assert all("prices_stale" not in a.reasons for a in creates(plan))
+    at_todays = plan_for(open_settings(), accounts=accounts, offers=fresh + frozen_full, nodes=(stuck,))
+    assert plan.projected_month_eur == at_todays.projected_month_eur > 0
+
+    # Nobody else sells that type there any more: the frozen price is all there is.
+    alone = tuple(a for a in fresh if a.offer.server_type != "cpx02")
+    plan = plan_for(open_settings(), accounts=accounts, offers=alone + frozen_cheap, nodes=(stuck,))
+    assert creates(plan) and all(not a.allowed and "prices_stale" in a.reasons for a in creates(plan))
+    # A recent frozen price still counts (the account was locked a moment ago).
+    recent = tuple(dataclasses.replace(a, fetched_at=NOW - timedelta(hours=1)) for a in frozen_cheap)
+    plan = plan_for(open_settings(), accounts=accounts, offers=alone + recent, nodes=(stuck,))
+    assert all("prices_stale" not in a.reasons for a in creates(plan))
+
+
+def test_stale_prices_are_told_to_the_owner_and_every_create_block_has_a_text() -> None:
+    """Old prices of an account still in use mean the pricing loop is failing: the owner hears of it
+    (before, nothing was sent at all). A code in CREATE_BLOCKS without a text would raise in the loop."""
+    from proxyhub.fleet.alerts import CREATE_BLOCKS, _create_text, findings
+    from proxyhub.fleet.planner import OFFER_MAX_AGE
+
+    old = tuple(AccountOffer("acc-a", o, NOW - OFFER_MAX_AGE - timedelta(minutes=1)) for o in OFFERS)
+    snap = FleetSnapshot(now=NOW, settings=open_settings(), accounts=(account(),), offers=old)
+    plan = build_plan(snap)
+    (f,) = [f for f in findings(plan, snap) if f.code == "prices_stale"]
+    assert f.detail == {"slots": list(range(1, 10))} and "۶ ساعت" in f.text and "سقف" in f.text
+    for code in CREATE_BLOCKS:
+        assert _create_text(code, [1], plan, snap).startswith("⚠️ ناوگان"), code
 
 
 def test_healthy_full_fleet_plans_nothing() -> None:

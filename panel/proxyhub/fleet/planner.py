@@ -43,13 +43,14 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 
 from proxyhub.accounts.hetzner_io import LiveOffer
+from proxyhub.accounts.state import OBSERVED_STATES
 from proxyhub.fleet.costs import NodeCostInput, PriceKey, money, node_cost_items
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
 from proxyhub.fleet.locations import CLASS_RANK
@@ -130,6 +131,76 @@ def effective_server_limit(a: AccountSnapshot, now: datetime) -> int | None:
     if a.learned_limit_at is None or now - a.learned_limit_at >= LIMIT_RECHECK:
         return None
     return a.learned_server_limit
+
+
+def _frozen_accounts(accounts: Iterable[AccountSnapshot]) -> set[str]:
+    """Accounts whose offers the pricing loop no longer refreshes (locked, retired). Their rows stay:
+    they still price that account's nodes billed this month."""
+    return {a.id for a in accounts if a.state not in OBSERVED_STATES}
+
+
+def _offer_old(ao: AccountOffer, now: datetime) -> bool:
+    return ao.fetched_at is not None and now - ao.fetched_at > OFFER_MAX_AGE
+
+
+def projection_prices(
+    offers: Iterable[AccountOffer], accounts: Iterable[AccountSnapshot]
+) -> dict[PriceKey, Price]:
+    """Prices for the month projection by (account, type, location). A locked or retired account's
+    prices are frozen and Hetzner may have raised them since (twice in 2026), so each is raised to the
+    highest price of the same type and location that a refreshed account sees (rule 8). The planner
+    AND the executor's gate (``evaluate_create``) use this, as :func:`prices_stale`."""
+    offers = list(offers)
+    frozen = _frozen_accounts(accounts)
+    current: dict[tuple[str, str], Price] = {}
+    for ao in offers:
+        if ao.account_id in frozen:
+            continue
+        key, p = (ao.offer.server_type, ao.offer.location), ao.offer.price
+        cur = current.get(key)
+        current[key] = p if cur is None else Price(max(cur.hourly, p.hourly), max(cur.monthly, p.monthly))
+    out: dict[PriceKey, Price] = {}
+    for ao in offers:
+        p = ao.offer.price
+        cur = current.get((ao.offer.server_type, ao.offer.location)) if ao.account_id in frozen else None
+        if cur is not None:
+            p = Price(max(cur.hourly, p.hourly), max(cur.monthly, p.monthly))
+        out[(ao.account_id, ao.offer.server_type, ao.offer.location)] = p
+    return out
+
+
+def prices_stale(
+    offers: Iterable[AccountOffer],
+    accounts: Iterable[AccountSnapshot],
+    nodes: Iterable[NodeCostInput],
+    now: datetime,
+) -> bool:
+    """Fail closed while prices may be lower than today's: an offer older than OFFER_MAX_AGE of an
+    account the pricing loop still refreshes (the loop is broken), or a live node in a locked or
+    retired account whose frozen price is old and that no fresh offer of a refreshed account confirms
+    (:func:`projection_prices`). The old offers of such an account alone block nothing: the pricing
+    loop never reads them again, and they used to block every creation forever. The planner AND the
+    executor's gate (``evaluate_create``) use this, as :func:`effective_server_limit`."""
+    offers = list(offers)
+    frozen = _frozen_accounts(accounts)
+    if any(_offer_old(ao, now) and ao.account_id not in frozen for ao in offers):
+        return True
+    confirmed = {
+        (ao.offer.server_type, ao.offer.location)
+        for ao in offers
+        if ao.account_id not in frozen and not _offer_old(ao, now)
+    }
+    frozen_old = {
+        (ao.account_id, ao.offer.server_type, ao.offer.location)
+        for ao in offers
+        if ao.account_id in frozen and _offer_old(ao, now)
+    }
+    return any(
+        n.state in LIVE_STATES
+        and (n.account_id, n.server_type, n.location) in frozen_old
+        and (n.server_type, n.location) not in confirmed
+        for n in nodes
+    )
 
 
 def counts_as_creation(n: NodeSnapshot, now: datetime) -> bool:
@@ -277,10 +348,9 @@ class _Planner:
         self.limits = self.s.limits()
         allowed_types = set(self.s.allowed_server_types)
         self.offers: dict[str, dict[str, list[LiveOffer]]] = defaultdict(lambda: defaultdict(list))
-        self.prices: dict[PriceKey, Price] = {}
+        self.prices = projection_prices(snap.offers, snap.accounts)
         for ao in snap.offers:
             o = ao.offer
-            self.prices[(ao.account_id, o.server_type, o.location)] = o.price
             if o.server_type in allowed_types and o.orderable:
                 self.offers[ao.account_id][o.location].append(o)
         for by_loc in self.offers.values():
@@ -314,7 +384,7 @@ class _Planner:
             self.global_reasons.append("projection_incomplete")
         if not self.s.locations:
             self.global_reasons.append("no_location_configured")
-        if any(ao.fetched_at is not None and self.now - ao.fetched_at > OFFER_MAX_AGE for ao in snap.offers):
+        if prices_stale(snap.offers, snap.accounts, snap.nodes, self.now):
             self.global_reasons.append("prices_stale")  # fail closed until the pricing loop recovers
         self.accounts_by_id = {a.id: a for a in snap.accounts}
 

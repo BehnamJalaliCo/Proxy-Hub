@@ -148,6 +148,36 @@ async def test_stale_stored_prices_block_creations(engine: AsyncEngine, tmp_path
     assert all(not a["allowed"] and "prices_stale" in a["reasons"] for a in plan)
 
 
+@pytest.mark.parametrize("state", ["retired", "locked"])
+async def test_old_prices_of_a_retired_or_locked_account_block_nothing(
+    engine: AsyncEngine, tmp_path: Path, state: str
+) -> None:
+    """sweep-stuck:1: the pricing loop never refreshes such an account, so its stored offers age
+    forever. The planner and the executor's gate both ignore their age (one shared helper)."""
+    from proxyhub.nodes.service import evaluate_create
+
+    vault = make_vault(tmp_path)
+    old = await add_account(engine, vault, "nodes-old-account")
+    await add_account(engine, vault, "nodes-new-account")
+    await set_settings(engine, OPEN)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE hetzner_accounts SET state = :s WHERE id = :a"), {"s": state, "a": old}
+        )
+        await conn.execute(
+            text("UPDATE hetzner_offers SET fetched_at = now() - interval '7 hours' WHERE account_id = :a"),
+            {"a": old},
+        )
+    assert await FleetReconciler().try_run_once(engine)
+    plan = await q(engine, "SELECT actions FROM fleet_plans ORDER BY id DESC LIMIT 1")
+    assert isinstance(plan, list) and len(plan) == 9
+    assert [a["allowed"] for a in plan] == [True] * 3 + [False] * 6  # budget and rate caps, as before
+    assert not any("prices_stale" in a["reasons"] for a in plan)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        ev = await evaluate_create(session, datetime.now(UTC), location="fsn1")
+    assert ev.allowed and ev.account_name == "nodes-new-account", ev.reasons
+
+
 async def test_dry_run_false_with_the_kill_switch_on_still_plans_dry(
     engine: AsyncEngine, tmp_path: Path
 ) -> None:
