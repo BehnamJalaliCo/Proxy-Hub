@@ -87,7 +87,8 @@ class PromoteJob:
 
 Job = RegisterJob | PromoteJob
 
-# A promotion may need one press more: the list's second page (P18: 10 proxies, 2 pages).
+# A promotion may need one press more: the list's second page (P18: 10 proxies, 2 pages). A longer
+# list needs one more press per page (proxyhub/sponsor/driver.py messages_needed).
 MESSAGES_NEEDED: Final[dict[type[RegisterJob] | type[PromoteJob], int]] = {RegisterJob: 3, PromoteJob: 5}
 
 

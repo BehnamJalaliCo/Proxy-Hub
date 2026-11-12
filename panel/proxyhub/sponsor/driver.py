@@ -25,6 +25,7 @@ from typing import Final, Protocol
 from proxyhub.mtproxy.userclient import BotMessage, MtpError, RequestNotAllowed
 from proxyhub.sponsor import replies
 from proxyhub.sponsor.conversation import (
+    MESSAGES_NEEDED,
     Forgotten,
     Job,
     Observation,
@@ -42,6 +43,16 @@ from proxyhub.sponsor.pacing import PaceStop
 
 MAX_ACTIONS: Final = 8  # a promotion: 4 messages plus up to 4 list pages
 REFUSED: Final = "request_not_allowed"
+
+
+def messages_needed(job: Job, list_pages: int | None) -> int:
+    """The messages ``job`` may take, so a conversation starts only when the hour can hold all of
+    it: 3 for a registration; for a sponsor change /myproxies, one press per further page of the
+    list (as many pages as the last read of the whole list had, two before any read), the proxy,
+    "Set promotion" and the link, never more than :data:`MAX_ACTIONS`."""
+    if isinstance(job, RegisterJob):
+        return MESSAGES_NEEDED[RegisterJob]
+    return min(MAX_ACTIONS, 3 + max(list_pages or 0, 2))
 
 
 class Chat(Protocol):

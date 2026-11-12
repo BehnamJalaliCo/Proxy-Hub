@@ -59,7 +59,6 @@ from proxyhub.sponsor import campaigns as camp
 from proxyhub.sponsor import driver, pacing, store
 from proxyhub.sponsor.channels import ChannelError, channel_link, parse_public_channel
 from proxyhub.sponsor.conversation import (
-    MESSAGES_NEEDED,
     Forgotten,
     PromoteJob,
     PromotionSet,
@@ -847,6 +846,7 @@ async def run_once(deps: Deps) -> str:
         windows = [c.window for c in await store.load_campaigns(db)]
         account = await account_store.load_row(db)
         pace = await pacing.load(db)
+        pages = await store.list_pages(db)
     await apply_tags(deps.engine, provider, tag_jobs, now)
     if account.state != account_state.CONNECTED or account.mtproxybot_id is None:
         return "no_account"
@@ -864,7 +864,7 @@ async def run_once(deps: Deps) -> str:
     )
     if work is None:
         return "idle"
-    if pacing.remaining(pace, now) < MESSAGES_NEEDED[type(work.job)]:
+    if pacing.remaining(pace, now) < driver.messages_needed(work.job, pages):
         return "paced"
     outcome = await _converse(deps, work)
     if isinstance(outcome, str):

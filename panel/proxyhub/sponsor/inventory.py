@@ -95,7 +95,7 @@ from proxyhub.telegram.store import enqueue_owner_alert
 
 log = logging.getLogger(__name__)
 
-KEY: Final = "sponsor.mtproxybot"
+KEY: Final = store.MTPROXYBOT_KEY
 INVENTORY: Final = "inventory"
 CLEANUP: Final = "cleanup"
 LOOK: Final = "look"

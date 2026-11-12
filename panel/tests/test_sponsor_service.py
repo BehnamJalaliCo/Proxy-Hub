@@ -748,6 +748,31 @@ async def test_failures_back_off_and_a_silent_bot_becomes_stuck(
     assert failed[1]["reasons"]["context"]["telegram_error"] == "FLOOD_WAIT"
 
 
+@pytest.mark.parametrize(("pages", "outcome"), [(3, "paced"), (2, "failed:telegram_unavailable")])
+async def test_a_sponsor_change_starts_only_when_the_hour_holds_every_page_of_the_list(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes, pages: int, outcome: str
+) -> None:
+    """With 5 messages left a sponsor change on a 3-page list would be cut off at the cap after
+    its 5th message, and tried again with 5 left: it waits for the 6th instead."""
+    await kill_switch(engine, False)
+    provider = TelemtUsersProvider(seal_key)
+    await create_proxy_node(engine, seal_key, ipv4="203.0.113.43")
+    await register(engine, vault, provider)  # registered; its sponsor is not set yet
+    await seed_connected(engine, vault, port=closed_port(), mtproxybot_id=BOT_ID)  # Telegram unreachable
+    now = datetime.now(UTC)
+    async with engine.begin() as conn:
+        used = pacing.HOURLY_CAP - 5
+        await pacing.save(conn, pacing.Pace(sent=tuple(now - timedelta(minutes=30) for _ in range(used))))
+        await conn.execute(
+            text(
+                "INSERT INTO settings (key, value) VALUES ('sponsor.mtproxybot', CAST(:v AS jsonb)) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value"
+            ),
+            {"v": json.dumps({"last_list": {"read_at": now.isoformat(), "pages": pages, "complete": True}})},
+        )
+    assert await service.run_once(deps(engine, vault, provider)) == outcome
+
+
 async def test_telegram_refusing_the_chat_is_not_retried_blindly(
     engine: AsyncEngine, vault: Vault, seal_key: bytes
 ) -> None:
