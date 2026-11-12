@@ -3,9 +3,10 @@
 **New posts** (:func:`publish_due`): when a slot of today's plan is due (proxyhub/posts/plan.py),
 the post is the next content + the live links of every provider + the channel tag, queued for
 the TEST channel, or for the MAIN channel only when the owner turned ``main_enabled`` on. Checks,
-in order: publisher on, a bot, the target channel set, a due slot not yet posted, the day not full,
-not inside a no-post window (D21), at least ``post_interval_min`` since the last post (both
-channels), and no earlier post still waiting in the outbox. **A post never goes without at least
+in order: publisher on, a bot, the target channel set, a due slot not yet posted (no day-plan post
+since its time, :func:`slot_taken`, so a plan changed during the day keeps its later slots), the
+day not full, not inside a no-post window (D21), at least ``post_interval_min`` since the last post
+(both channels), and no earlier post still waiting in the outbox. **A post never goes without at least
 one live link** (docs/04): then nothing is queued, the slot stays due until its grace ends, and the
 owner hears it at most once a day (not while the fleet's kill switch is on: nothing can run then).
 Its MTProto links take an operator's name only from the panel's own fresh probes (decision D50,
@@ -223,12 +224,39 @@ async def validity_hours(db: AsyncConnection) -> int:
 
 
 async def slot_taken(db: AsyncConnection, role: str, slot: plan.Slot) -> bool:
+    """A day-plan post of the slot's day made at or after the slot's time is that slot's post: a
+    post is only made while its slot is the latest one due. By time, not by index: after the owner
+    changes ``posts_per_day``, the posting hours or the no-post windows, an index means another time,
+    and a slot still to come must not count as posted because a morning post held its index."""
     row = (
         await db.execute(
-            select(Post.id).where(Post.role == role, Post.plan_day == slot.day, Post.plan_slot == slot.index)
+            select(Post.id)
+            .where(
+                Post.role == role,
+                Post.plan_day == slot.day,
+                Post.breaking.is_(False),
+                Post.created_at >= slot.at,
+            )
+            .limit(1)
         )
     ).first()
     return row is not None
+
+
+async def free_index(db: AsyncConnection, role: str, slot: plan.Slot) -> plan.Slot:
+    """``slot`` with an index no day-plan post of its day holds yet (``uq_posts_role_plan``): after a
+    plan change a post made earlier under the old plan may hold it; the slot then takes the next
+    free index and keeps its time (``planned_at``)."""
+    used = set(
+        (
+            await db.execute(
+                select(Post.plan_slot).where(
+                    Post.role == role, Post.plan_day == slot.day, Post.plan_slot < BREAKING_SLOT_BASE
+                )
+            )
+        ).scalars()
+    )
+    return slot if slot.index not in used else replace(slot, index=max(used) + 1)
 
 
 async def posts_on(db: AsyncConnection, role: str, day: date) -> int:
@@ -364,7 +392,7 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
         candidate,
         item,
         recycled,
-        slot=slot,
+        slot=await free_index(db, where.role, slot),
         reason="slot_due",
         poster=poster,
     )

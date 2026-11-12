@@ -228,6 +228,35 @@ async def test_each_slot_once_gap_and_day_cap(engine: AsyncEngine, vault: Vault)
     assert len(await jobs(engine, "send_post")) == 2
 
 
+async def test_a_plan_changed_during_the_day_keeps_its_later_slots(engine: AsyncEngine, vault: Vault) -> None:
+    await ready_fleet(engine)
+    await setup_telegram(engine, vault)
+    await quiet(engine, [], interval=0)
+    await configure(engine, posts_per_day=20)
+    today = slot_time(0).astimezone(TEHRAN).date()
+    old = plan.day_plan(today, count=20, start=time(8), end=time(0), quiet=[])
+    for i in (0, 1, 3, 4):  # the morning under the old plan (slot 2 was missed)
+        assert await publish(engine, old[i].at + timedelta(seconds=30)) == "queued"
+        await deliver(engine, (await jobs(engine, "send_post"))[-1].id, message_id=60 + i)
+    last = old[4].at + timedelta(seconds=30)
+    # The owner lowers posts_per_day at noon: the new plan's slots after the last post have indexes
+    # the morning posts already hold, yet nothing was posted at their time.
+    await configure(engine, posts_per_day=10)
+    new = plan.day_plan(today, count=10, start=time(8), end=time(0), quiet=[])
+    later = [s for s in new if s.at > last and s.index in (0, 1, 3, 4)]
+    assert len(later) == 2
+    for n, slot in enumerate(later):
+        assert await publish(engine, slot.at + timedelta(seconds=30)) == "queued"
+        [made] = await rows(engine, "SELECT plan_slot, planned_at FROM posts ORDER BY id DESC LIMIT 1")
+        assert (made.plan_slot, made.planned_at) == (5 + n, slot.at)  # the next free index, its own time
+        await deliver(engine, (await jobs(engine, "send_post"))[-1].id, message_id=70 + n)
+        assert await publish(engine, slot.at + timedelta(minutes=1)) == "already_posted"
+    # A new slot at or before a morning post is covered by it: nothing goes twice.
+    earlier = [s for s in new if s.at <= last]
+    assert await publish(engine, earlier[-1].at + timedelta(seconds=30)) == "already_posted"
+    assert len(await jobs(engine, "send_post")) == 6
+
+
 async def test_no_post_window_and_waiting_post(engine: AsyncEngine, vault: Vault) -> None:
     await ready_fleet(engine)
     await setup_telegram(engine, vault)
