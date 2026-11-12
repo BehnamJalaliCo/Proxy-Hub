@@ -52,3 +52,10 @@ export function useChartColors(): ChartColors {
 }
 
 export const CHART_FONT = '"Vazirmatn Variable", Vazirmatn, system-ui, sans-serif';
+
+/** A Persian label drawn inside a chart. The chart's SVG is left-to-right (EChart.tsx), so that
+ * ECharts' start/end text anchors land where it means them; an RLI…PDI isolate keeps the label's
+ * own words in Persian order («۱۳ آبان»، «آستانه ۸۰٪»). */
+export function rtlText(s: string): string {
+  return `⁧${s}⁩`;
+}

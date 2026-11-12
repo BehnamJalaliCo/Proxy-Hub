@@ -494,7 +494,7 @@ export function MtproxyAccountCard() {
         <div className="flex flex-col gap-3">
           {query.isPending ? (
             <SkeletonLines lines={5} />
-          ) : query.isError ? (
+          ) : query.isLoadingError ? (
             <LoadError
               error={query.error}
               compact

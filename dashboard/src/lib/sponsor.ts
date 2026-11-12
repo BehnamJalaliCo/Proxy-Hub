@@ -129,6 +129,8 @@ export interface BotListEntry {
   registration: { address: string; state: string; state_reason: string | null; node_state: string | null } | null;
   /** The public channel the proxy's own screen names (live proxies only). */
   sponsor_channel: string | null;
+  /** The sponsor's title when the screen names it only by title (P26/P33; the panel's key of it). */
+  sponsor_title?: string | null;
   menu_read_at: string | null;
   promotion: BotPromotion | null;
   removal_state: BotRemovalState | null;
@@ -536,6 +538,16 @@ export function priceText(price: string | null, currency: string | null): string
   return `${formatDecimal(price)} ${currency ?? ""}`.trim();
 }
 
+/** The lead before a campaign, 0..360 minutes in Persian or Latin digits. An empty field is an
+ * error, never 0: Number("") is 0, and a lead of 0 makes the customer's channel show up about an
+ * hour late. Forms such as "1e2" or "0x10" are refused. */
+export function parseLeadMinutes(raw: string): Parsed<number> {
+  const s = asciiDigits(raw.trim());
+  if (s === "") return { ok: false, error: "این مقدار لازم است؛ ۰ یعنی درست در زمان شروع." };
+  if (!/^\d{1,3}$/.test(s) || Number(s) > 360) return { ok: false, error: "عددی بین ۰ تا ۳۶۰ دقیقه." };
+  return { ok: true, value: Number(s) };
+}
+
 export function leadText(minutes: number): string {
   if (minutes === 0) return "درست در زمان شروع";
   if (minutes % 60 === 0) return `${formatNumber(minutes / 60)} ساعت زودتر`;
@@ -591,8 +603,11 @@ export function botPromotionInfo(e: BotListEntry, wanted: string): { tone: Tone;
       // The bot names the sponsor by its title, so the panel may hold no @name for it (P33): the
       // check passed, so it is the wanted channel.
       return { tone: "success", text: `اسپانسر: ${channelText(e.sponsor_channel ?? wanted)}` };
-    case "other":
-      return { tone: "danger", text: `اسپانسر ${channelText(e.sponsor_channel)} است، نه ${channelText(wanted)}` };
+    case "other": {
+      // The bot usually names the sponsor by its title only, so there may be no @name to show.
+      const shown = e.sponsor_channel ? channelText(e.sponsor_channel) : e.sponsor_title ? `«${e.sponsor_title}»` : "کانال دیگری";
+      return { tone: "danger", text: `اسپانسر ${shown} است، نه ${channelText(wanted)}` };
+    }
     case "not_shown":
       return { tone: "warning", text: "صفحه‌ی ربات هیچ کانالی نشان نداد" };
     case "several":

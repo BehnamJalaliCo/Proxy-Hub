@@ -1,6 +1,7 @@
 // One typed function per API route of the contract. Paths and bodies follow it exactly.
 
 import { request } from "./api";
+import { settingsPutBody, type TotpReenrollInput } from "./validation";
 import type {
   Account,
   AuditEvent,
@@ -28,6 +29,7 @@ import type {
   TgPairing,
   TgSettings,
   TgStatus,
+  TotpBegin,
 } from "./types";
 
 // --- setup and login (public routes; their 401/404 are answers, not a lost session) ----------
@@ -72,6 +74,13 @@ export const revokeSession = (id: string) =>
 export const regenerateRecoveryCodes = (totp_code: string) =>
   request<RecoveryCodes>("POST", "/api/auth/recovery-codes/regenerate", { totp_code });
 
+/** A new Authenticator after a lost phone: begin gives the new secret, finish stores it (with the
+ * password and the old Authenticator's code or a recovery code), returns new recovery codes and
+ * ends every other session. Any mistake is one generic 400 reenroll_invalid. */
+export const totpReenrollBegin = () => request<TotpBegin>("POST", "/api/auth/totp/begin");
+
+export const totpReenrollFinish = (input: TotpReenrollInput) => request<RecoveryCodes>("POST", "/api/auth/totp/finish", input);
+
 // --- fleet, accounts, settings ------------------------------------------------------------------
 
 export const getOverview = (signal?: AbortSignal) =>
@@ -93,8 +102,9 @@ export const retireAccount = (id: string) =>
 export const getFleetSettings = (signal?: AbortSignal) =>
   request<FleetSettings>("GET", "/api/settings/fleet", undefined, signal ? { signal } : {});
 
-export const putFleetSettings = (settings: FleetSettings) =>
-  request<FleetSettings>("PUT", "/api/settings/fleet", settings);
+/** `readAt`: the updated_at the form was read with (see settingsPutBody). */
+export const putFleetSettings = (settings: FleetSettings, readAt: string | null | undefined) =>
+  request<FleetSettings>("PUT", "/api/settings/fleet", settingsPutBody(settings, readAt));
 
 export const setKillSwitch = (on: boolean) => request<KillSwitch>("POST", "/api/kill-switch", { on });
 

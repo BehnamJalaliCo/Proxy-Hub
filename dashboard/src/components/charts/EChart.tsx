@@ -4,12 +4,16 @@
 import { BarChart, GaugeChart } from "echarts/charts";
 import { GridComponent, TooltipComponent } from "echarts/components";
 import * as echarts from "echarts/core";
+import { LegacyGridContainLabel } from "echarts/features";
 import { SVGRenderer } from "echarts/renderers";
 import { useEffect, useRef } from "react";
 
 import { cn } from "../../lib/browser";
 
-echarts.use([BarChart, GaugeChart, GridComponent, TooltipComponent, SVGRenderer]);
+// LegacyGridContainLabel: every chart here lays its grid out with `grid.containLabel`. Without it
+// ECharts 6 maps that to its new outer-bounds layout, which collapses the plot of a chart with an
+// inverse (RTL) x axis to a thin strip, or to nothing, in the browser (members over 15 days).
+echarts.use([BarChart, GaugeChart, GridComponent, TooltipComponent, SVGRenderer, LegacyGridContainLabel]);
 
 export type EChartsOption = echarts.EChartsCoreOption;
 
@@ -44,5 +48,8 @@ export function EChart({
     chart.current?.setOption(option, { notMerge: true, lazyUpdate: true });
   }, [option]);
 
-  return <div ref={ref} role="img" aria-label={label} className={cn("w-full", className)} />;
+  // dir=ltr: ECharts writes SVG text-anchor start/end meaning left/right, and the browser reads them
+  // against the inherited direction (rtl here): y labels would run into the plot and end labels over
+  // the line. Persian labels keep their order with rtlText (lib/chart.ts).
+  return <div ref={ref} dir="ltr" role="img" aria-label={label} className={cn("w-full", className)} />;
 }

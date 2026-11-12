@@ -175,6 +175,28 @@ export function slotCounts(data: Pick<FleetSlots, "slots">): { healthy: number; 
   return { healthy, working, trouble, empty };
 }
 
+export interface SlotSquare {
+  slot: number;
+  /** A SlotStatus, or "unknown" while the slots are not loaded. */
+  status: string;
+  label: string;
+  tone: Tone;
+}
+
+/** One square per target slot with that slot's own state (as on the nodes page), not one filled
+ * square per live node: slot 9 empty, slot 7 unhealthy and slot 8 burned are shown as such. */
+export function slotSquares(targetSlots: number, slots: Pick<FleetSlot, "slot" | "status">[] | null, max = 40): SlotSquare[] {
+  const shown = Math.max(0, Math.min(targetSlots, max));
+  const bySlot = new Map((slots ?? []).map((s) => [s.slot, s.status]));
+  return Array.from({ length: shown }, (_, i) => {
+    const slot = i + 1;
+    if (slots === null) return { slot, status: "unknown", label: "نامعلوم", tone: "neutral" };
+    const status = bySlot.get(slot) ?? "empty";
+    const info = slotStatusInfo(status);
+    return { slot, status, label: info.label, tone: info.tone };
+  });
+}
+
 /** The node to show as the slot's server: the one its name follows, else what is on its way. */
 export function shownNode(slot: Pick<FleetSlot, "node" | "replacement">): SlotNode | null {
   return slot.node ?? slot.replacement;

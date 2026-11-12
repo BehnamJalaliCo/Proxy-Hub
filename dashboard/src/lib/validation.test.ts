@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import { ApiError } from "./api";
+import { actionLabel, reasonLabel } from "./labels";
 import type { FleetSettings } from "./types";
 import {
   draftFromSettings,
+  isSettingsChanged,
+  isSetupLinkDead,
   isTotp,
   LOCATION,
   MAX_BUDGET_EUR,
@@ -16,7 +20,10 @@ import {
   sameSettings,
   SERVER_TYPE,
   settingsFromDraft,
+  settingsPutBody,
+  totpReenrollInput,
   usernameError,
+  withKillSwitch,
 } from "./validation";
 
 const BASE: FleetSettings = {
@@ -122,6 +129,75 @@ describe("settings draft round trip", () => {
   });
 });
 
+describe("a save over a newer change (lost update)", () => {
+  const READ = { ...BASE, updated_at: "2026-11-12T08:30:00.123456+00:00" };
+
+  it("sends the stamp the form was read with, never the settings' own", () => {
+    const body = settingsPutBody(READ, READ.updated_at);
+    expect(body["expected_updated_at"]).toBe("2026-11-12T08:30:00.123456+00:00");
+    expect("updated_at" in body).toBe(false);
+    expect(body["dry_run"]).toBe(true);
+    // Settings never saved: the stamp is null and is sent as null.
+    expect(settingsPutBody({ ...BASE, updated_at: null }, null)["expected_updated_at"]).toBeNull();
+    // An older panel sent no stamp: nothing extra goes back (its schema forbids unknown fields).
+    expect(Object.keys(settingsPutBody(BASE, undefined)).sort()).toEqual(Object.keys(BASE).sort());
+  });
+
+  it("recognises the server's refusal", () => {
+    expect(isSettingsChanged(new ApiError(409, "settings_changed", "عوض شده"))).toBe(true);
+    expect(isSettingsChanged(new ApiError(409, "other", "x"))).toBe(false);
+    expect(isSettingsChanged(new ApiError(422, "settings_changed", "x"))).toBe(false);
+    expect(isSettingsChanged(new Error("x"))).toBe(false);
+  });
+
+  it("keeps the new stamp after this tab switched the kill switch", () => {
+    expect(withKillSwitch(READ, { kill_switch: false, updated_at: "2026-11-12T09:00:00+00:00" })).toEqual({
+      ...READ,
+      kill_switch: false,
+      updated_at: "2026-11-12T09:00:00+00:00",
+    });
+    expect(withKillSwitch(READ, { kill_switch: false })?.updated_at).toBe(READ.updated_at);
+    expect(withKillSwitch(undefined, { kill_switch: true })).toBeUndefined();
+  });
+});
+
+describe("a new Authenticator after a lost phone", () => {
+  it("sends exactly one proof, and only when every field is ready", () => {
+    expect(totpReenrollInput("p", "123456", "pw", { kind: "recovery", value: " ۱۲۳۴-۵۶۷۸ " })).toEqual({
+      pending: "p",
+      new_code: "123456",
+      password: "pw",
+      recovery_code: "1234-5678",
+    });
+    expect(totpReenrollInput("p", "123456", "pw", { kind: "totp", value: "654321" })).toEqual({
+      pending: "p",
+      new_code: "123456",
+      password: "pw",
+      totp_code: "654321",
+    });
+    expect(totpReenrollInput("", "123456", "pw", { kind: "totp", value: "654321" })).toBeNull();
+    expect(totpReenrollInput("p", "12345", "pw", { kind: "totp", value: "654321" })).toBeNull();
+    expect(totpReenrollInput("p", "123456", "", { kind: "totp", value: "654321" })).toBeNull();
+    expect(totpReenrollInput("p", "123456", "pw", { kind: "totp", value: "65432" })).toBeNull();
+    expect(totpReenrollInput("p", "123456", "pw", { kind: "recovery", value: "  12 " })).toBeNull();
+  });
+
+  it("names the audit actions in Persian", () => {
+    expect(actionLabel("totp_reenrolled")).toMatch(/[آ-ی]/);
+    expect(actionLabel("totp_reenroll_failed")).toMatch(/[آ-ی]/);
+    expect(reasonLabel("factor:new_code")).toMatch(/[آ-ی]/);
+  });
+});
+
+describe("a failed start of the setup", () => {
+  it("ends the page only when the link itself is dead", () => {
+    expect(isSetupLinkDead(new ApiError(404, "setup_token_invalid", "لینک نامعتبر"))).toBe(true);
+    expect(isSetupLinkDead(new ApiError(422, "invalid_request", "درخواست نادرست"))).toBe(true);
+    for (const status of [0, 500, 502, 503]) expect(isSetupLinkDead(new ApiError(status, `http_${String(status)}`, "x")), String(status)).toBe(false);
+    expect(isSetupLinkDead(new TypeError("Failed to fetch"))).toBe(false);
+  });
+});
+
 describe("login and setup rules", () => {
   it("mirrors the server username rule", () => {
     expect(usernameError("owner")).toBeNull();
@@ -134,6 +210,9 @@ describe("login and setup rules", () => {
     expect(passwordError("short", "owner")).not.toBeNull();
     expect(passwordError("my-owner-password-123", "owner")).not.toBeNull();
     expect(passwordError("correct horse battery", "owner")).toBeNull();
+    // The server checks the username only from 4 characters on (auth/passwords.py).
+    expect(passwordError("Formalization!2026", "ali")).toBeNull();
+    expect(passwordError("my-alix-password-1", "alix")).not.toBeNull();
   });
 
   it("scores strength as a hint only", () => {

@@ -2,22 +2,24 @@ import { useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Laptop, LogOut, MonitorSmartphone, ShieldCheck, Smartphone, UserRound } from "lucide-react";
 import { motion } from "motion/react";
 import { useState, type SubmitEvent } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { useNavigate } from "react-router";
 
 import { RecoveryCodesPanel } from "../components/RecoveryCodesPanel";
 import { Button } from "../components/ui/Button";
 import { Badge, Card, CardHeader } from "../components/ui/Card";
 import { ConfirmDialog, Modal } from "../components/ui/Dialogs";
-import { ErrorState, SkeletonLines } from "../components/ui/Feedback";
-import { Field, TextInput } from "../components/ui/Form";
+import { CopyButton, ErrorState, SkeletonLines } from "../components/ui/Feedback";
+import { Field, SecretInput, Segmented, TextInput } from "../components/ui/Form";
 import { PageHeader } from "../components/ui/PageHeader";
 import { errorMessage, isApiError } from "../lib/api";
+import { dismissAllowed } from "../lib/dialogs";
 import * as api from "../lib/endpoints";
-import { formatJalali, formatRelative } from "../lib/format";
+import { formatJalali, formatRelative, groupSecret } from "../lib/format";
 import { keys, useMe, useSessions } from "../lib/queries";
 import { toast } from "../lib/toast";
-import type { SessionInfo } from "../lib/types";
-import { isTotp, normalizeTotp } from "../lib/validation";
+import type { SessionInfo, TotpBegin } from "../lib/types";
+import { isTotp, normalizeTotp, totpReenrollInput } from "../lib/validation";
 
 /** A short, readable device name from the user agent (no fingerprinting, display only). */
 function deviceName(ua: string | null): { name: string; mobile: boolean } {
@@ -36,6 +38,7 @@ function RegenerateDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
   const [codes, setCodes] = useState<string[] | null>(null);
 
   const close = (v: boolean) => {
+    if (!dismissAllowed(busy, v)) return; // the new codes come back in this sheet only
     if (!v) {
       setCode("");
       setCodes(null);
@@ -102,6 +105,184 @@ function RegenerateDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
   );
 }
 
+/** A new Authenticator after the phone was lost (or replaced). The new secret, the password and the
+ * codes live only in this sheet's state: never in a query cache, never logged (rule 3). */
+function ReenrollDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
+  const qc = useQueryClient();
+  const [enroll, setEnroll] = useState<TotpBegin | null>(null);
+  const [newCode, setNewCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [proofKind, setProofKind] = useState<"recovery" | "totp">("recovery");
+  const [proof, setProof] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [codes, setCodes] = useState<string[] | null>(null);
+  const input = enroll ? totpReenrollInput(enroll.pending, newCode, password, { kind: proofKind, value: proof }) : null;
+
+  const close = (v: boolean) => {
+    if (!dismissAllowed(busy, v)) return;
+    if (!v) {
+      setEnroll(null);
+      setNewCode("");
+      setPassword("");
+      setProof("");
+      setCodes(null);
+      setError(null);
+    }
+    onOpenChange(v);
+  };
+
+  const begin = () => {
+    setBusy(true);
+    setError(null);
+    api
+      .totpReenrollBegin()
+      .then(setEnroll)
+      .catch((err: unknown) => setError(errorMessage(err)))
+      .finally(() => setBusy(false));
+  };
+
+  const submit = (e: SubmitEvent) => {
+    e.preventDefault();
+    if (!input || busy) return;
+    setBusy(true);
+    setError(null);
+    api
+      .totpReenrollFinish(input)
+      .then((res) => {
+        setEnroll(null);
+        setCodes(res.recovery_codes);
+        void qc.invalidateQueries({ queryKey: keys.sessions });
+        toast.success("Authenticator تازه ثبت شد", "جلسه‌های دیگر بسته شدند و کدهای بازیابی قبلی باطل شد.");
+      })
+      .catch((err: unknown) => setError(errorMessage(err)))
+      .finally(() => {
+        setPassword("");
+        setNewCode("");
+        setProof("");
+        setBusy(false);
+      });
+  };
+
+  return (
+    <Modal
+      open={open}
+      onOpenChange={close}
+      title="Authenticator تازه"
+      description={
+        codes
+          ? "کدهای بازیابی تازه فقط همین یک بار نشان داده میشوند."
+          : "اگر گوشی گم شد یا عوض شد، برنامه‌ی Authenticator تازه را اینجا ثبت کنید. کد قبلی و کدهای بازیابی قبلی دیگر کار نمیکنند."
+      }
+      icon={<Smartphone className="size-5" />}
+    >
+      {codes ? (
+        <RecoveryCodesPanel
+          codes={codes}
+          title="کدهای بازیابی"
+          intro="Authenticator تازه ثبت شد و جلسه‌های دیگر بسته شدند. این ۱۰ کد را جای امنی نگه دارید؛ هر کدام یک بار کار میکند."
+          continueLabel="تمام شد"
+          onContinue={() => close(false)}
+        />
+      ) : !enroll ? (
+        <div className="flex flex-col gap-4">
+          <p className="text-sm leading-7 text-fg-muted">
+            پنل یک کلید تازه میسازد. آن را در برنامه‌ی Authenticator گوشی تازه ثبت میکنید و با رمز و یک کد بازیابی (یا کد برنامه‌ی قبلی، اگر هنوز دارید) تأیید میکنید. تا یک ساعت فرصت دارید.
+          </p>
+          {error ? (
+            <p role="alert" className="rounded-2xl bg-danger-soft p-3 text-sm leading-7 text-danger">
+              {error}
+            </p>
+          ) : null}
+          <Button size="lg" block loading={busy} onClick={begin} icon={<KeyRound className="size-5" />}>
+            ساخت کلید تازه
+          </Button>
+        </div>
+      ) : (
+        <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
+          <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-stretch">
+            <div className="rounded-3xl bg-white p-3 shadow-card ring-1 ring-line" data-ph-secret>
+              <QRCodeSVG value={enroll.totp_uri} size={168} level="M" marginSize={1} bgColor="#ffffff" fgColor="#0b0d17" title="QR ثبت در Authenticator" />
+            </div>
+            <div className="flex w-full min-w-0 flex-1 flex-col gap-3">
+              <a
+                href={enroll.totp_uri}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-2xl border border-line bg-surface-2 px-4 text-sm font-semibold text-fg"
+              >
+                <Smartphone className="size-4" />
+                افزودن به Authenticator همین گوشی
+              </a>
+              <div className="rounded-2xl border border-line bg-surface-2 p-3">
+                <div className="mb-1 text-xs font-semibold text-fg-muted">کلید دستی</div>
+                <code className="ltr block font-mono text-[0.95rem] leading-7 font-bold break-all text-fg" data-ph-secret>
+                  {groupSecret(enroll.totp_secret)}
+                </code>
+                <CopyButton text={enroll.totp_secret} label="کپی کلید" className="mt-2" />
+              </div>
+            </div>
+          </div>
+          <Field label="کد ۶ رقمی برنامه‌ی تازه" htmlFor="reenroll-new" hint="کدی که برنامه‌ی Authenticator تازه همین حالا نشان میدهد.">
+            <TextInput
+              id="reenroll-new"
+              latin
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              value={newCode}
+              onChange={(e) => setNewCode(normalizeTotp(e.target.value))}
+              className="text-center text-xl tracking-[0.5em]"
+              placeholder="123456"
+            />
+          </Field>
+          <Field label="رمز ورود" htmlFor="reenroll-password">
+            <SecretInput id="reenroll-password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          </Field>
+          <div className="flex flex-col gap-2">
+            <Segmented<"recovery" | "totp">
+              value={proofKind}
+              onChange={(v) => {
+                setProofKind(v);
+                setProof("");
+              }}
+              label="تأیید با"
+              options={[
+                { value: "recovery", label: "کد بازیابی" },
+                { value: "totp", label: "کد برنامه‌ی قبلی" },
+              ]}
+              className="self-start"
+            />
+            {proofKind === "recovery" ? (
+              <Field label="یکی از کدهای بازیابی" htmlFor="reenroll-proof" hint="همان کدهایی که هنگام راه‌اندازی یا ساخت کدهای تازه گرفتید.">
+                <TextInput id="reenroll-proof" latin autoComplete="off" value={proof} onChange={(e) => setProof(e.target.value)} />
+              </Field>
+            ) : (
+              <Field label="کد ۶ رقمی برنامه‌ی قبلی" htmlFor="reenroll-proof">
+                <TextInput
+                  id="reenroll-proof"
+                  latin
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  value={proof}
+                  onChange={(e) => setProof(normalizeTotp(e.target.value))}
+                  className="text-center text-xl tracking-[0.5em]"
+                  placeholder="123456"
+                />
+              </Field>
+            )}
+          </div>
+          {error ? (
+            <p role="alert" className="rounded-2xl bg-danger-soft p-3 text-sm leading-7 text-danger">
+              {error}
+            </p>
+          ) : null}
+          <Button type="submit" size="lg" block loading={busy} disabled={input === null} icon={<ShieldCheck className="size-5" />}>
+            ثبت Authenticator تازه
+          </Button>
+        </form>
+      )}
+    </Modal>
+  );
+}
+
 function SessionRow({ s, index, onRevoke }: { s: SessionInfo; index: number; onRevoke: () => void }) {
   const d = deviceName(s.user_agent);
   const Icon = d.mobile ? Smartphone : Laptop;
@@ -141,6 +322,7 @@ export default function SecurityPage() {
   const me = useMe();
   const sessions = useSessions();
   const [regen, setRegen] = useState(false);
+  const [reenroll, setReenroll] = useState(false);
   const [revoke, setRevoke] = useState<SessionInfo | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -178,7 +360,7 @@ export default function SecurityPage() {
             <div className="p-5">
               {me.isPending ? (
                 <SkeletonLines lines={3} />
-              ) : me.isError ? (
+              ) : me.isLoadingError ? (
                 <ErrorState error={me.error} compact onRetry={() => void me.refetch()} />
               ) : (
                 <dl className="grid grid-cols-[7.5rem_1fr] gap-y-3 text-sm">
@@ -207,6 +389,12 @@ export default function SecurityPage() {
               <Button variant="secondary" icon={<ShieldCheck className="size-4" />} onClick={() => setRegen(true)} className="self-start">
                 ساخت کدهای تازه
               </Button>
+              <p className="border-t border-line pt-3 text-sm leading-7 text-fg-muted">
+                گوشی گم شد یا عوض شد؟ با رمز و یک کد بازیابی، برنامه‌ی Authenticator تازه را ثبت کنید؛ پس از آن کدهای بازیابی تازه میگیرید.
+              </p>
+              <Button variant="secondary" icon={<Smartphone className="size-4" />} onClick={() => setReenroll(true)} className="self-start">
+                ثبت Authenticator تازه
+              </Button>
             </div>
           </Card>
         </div>
@@ -220,7 +408,7 @@ export default function SecurityPage() {
           <div className="p-3 sm:p-4">
             {sessions.isPending ? (
               <SkeletonLines lines={4} className="p-2" />
-            ) : sessions.isError ? (
+            ) : sessions.isLoadingError ? (
               <ErrorState error={sessions.error} compact onRetry={() => void sessions.refetch()} />
             ) : (
               <ul className="flex flex-col divide-y divide-line">
@@ -234,6 +422,7 @@ export default function SecurityPage() {
       </div>
 
       <RegenerateDialog open={regen} onOpenChange={setRegen} />
+      <ReenrollDialog open={reenroll} onOpenChange={setReenroll} />
       <ConfirmDialog
         open={revoke !== null}
         onOpenChange={(v) => {

@@ -1,6 +1,7 @@
 // Client-side checks that mirror the server's rules, so the owner sees a clear Persian hint before
 // sending. The server is always the authority; these never replace its checks.
 
+import { isApiError, type ApiError } from "./api";
 import { formatDecimal } from "./format";
 import type { FleetSettings } from "./types";
 
@@ -125,6 +126,28 @@ export function settingsFromDraft(
   return { settings, errors };
 }
 
+/** The PUT body: the settings without their own stamp, plus the stamp they were read with
+ * (`readAt`, exactly as read, null included), so the server refuses (409 settings_changed) a save
+ * over a newer change made on another device or tab. A panel that sent no stamp gets none back. */
+export function settingsPutBody(settings: FleetSettings, readAt: string | null | undefined): Record<string, unknown> {
+  const body: Record<string, unknown> = { ...settings };
+  delete body["updated_at"];
+  if (readAt !== undefined) body["expected_updated_at"] = readAt;
+  return body;
+}
+
+/** The server refused a save because the settings changed since they were read. */
+export function isSettingsChanged(err: unknown): boolean {
+  return isApiError(err) && err.status === 409 && err.code === "settings_changed";
+}
+
+/** The cached settings after this tab switched the kill switch: its new stamp too, or the next save
+ * here would be refused as if someone else had saved. */
+export function withKillSwitch(old: FleetSettings | undefined, res: { kill_switch: boolean; updated_at?: string | null }): FleetSettings | undefined {
+  if (!old) return old;
+  return res.updated_at === undefined ? { ...old, kill_switch: res.kill_switch } : { ...old, kill_switch: res.kill_switch, updated_at: res.updated_at };
+}
+
 /** Same values? (decimal strings compared as written by parseBudget). */
 export function sameSettings(a: FleetSettings, b: FleetSettings): boolean {
   return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
@@ -145,6 +168,33 @@ function canonical(s: FleetSettings): unknown[] {
 
 // --- login / setup -----------------------------------------------------------------------------
 
+/** The setup link itself is dead (unknown, used, revoked or expired; or malformed, which no retry
+ * fixes). Anything else (no network, a 5xx while the panel restarts) leaves the link usable:
+ * starting the setup does not use it up, only finishing does. */
+export function isSetupLinkDead(err: unknown): err is ApiError {
+  return isApiError(err) && (err.code === "setup_token_invalid" || err.status === 422);
+}
+
+/** The body of POST /api/auth/totp/finish: exactly one proof besides the password (the old
+ * Authenticator's code, or a recovery code when the phone is gone). */
+export type TotpReenrollInput =
+  | { pending: string; new_code: string; password: string; totp_code: string }
+  | { pending: string; new_code: string; password: string; recovery_code: string };
+
+/** The re-enrolment body, or null while a field is not ready (the button stays off). */
+export function totpReenrollInput(
+  pending: string,
+  newCode: string,
+  password: string,
+  proof: { kind: "totp" | "recovery"; value: string },
+): TotpReenrollInput | null {
+  if (pending === "" || !isTotp(newCode) || password === "") return null;
+  const base = { pending, new_code: newCode, password };
+  if (proof.kind === "totp") return isTotp(proof.value) ? { ...base, totp_code: proof.value } : null;
+  const code = normalizeDigits(proof.value.trim());
+  return code.length >= 6 ? { ...base, recovery_code: code } : null;
+}
+
 /** Server rule (auth team): 3-32 chars of a-z 0-9 . _ - */
 export const USERNAME = /^[a-z0-9._-]{3,32}$/;
 export const PASSWORD_MIN = 12;
@@ -157,7 +207,8 @@ export function usernameError(u: string): string | null {
 
 export function passwordError(p: string, username: string): string | null {
   if (p.length < PASSWORD_MIN) return `رمز باید دست‌کم ${faNum(PASSWORD_MIN)} نویسه باشد.`;
-  if (username.length >= 3 && p.toLowerCase().includes(username.toLowerCase())) return "رمز نباید نام کاربری را در خود داشته باشد.";
+  // Same threshold as password_problem() in panel/proxyhub/auth/passwords.py (4 characters).
+  if (username.length >= 4 && p.toLowerCase().includes(username.toLowerCase())) return "رمز نباید نام کاربری را در خود داشته باشد.";
   return null;
 }
 

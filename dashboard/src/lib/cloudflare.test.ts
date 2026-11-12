@@ -1,10 +1,29 @@
 import { describe, expect, it } from "vitest";
 
-import { activeZone, cfTokenProblem, checkSummary, deletionLine, noStandbyLeft, poolChangeText, sortZones, ttlText } from "./cloudflare";
+import { activeZone, cfTokenProblem, checkSummary, deletionLine, noStandbyLeft, poolChangeText, sortZones, tokenStateNote, ttlText } from "./cloudflare";
 import { deleteBlockedText, deleteWaitText, domainVerdictInfo, POOL_CHOICES, POOL_ORDER, poolStateInfo, zoneStatusInfo } from "./labels";
 import type { CfPoolSummary, CfZone, DomainCheck } from "./types";
 
 const Z = (id: string, name: string, pool_state: CfZone["pool_state"]): CfZone => ({ id, name, status: "active", pool_state });
+
+describe("what the hourly token check found", () => {
+  it("says why a stored token stopped passing and that DNS stays put", () => {
+    const n = tokenStateNote({ token_set: true, verified: false, error: "cf_token_multiple_accounts" });
+    expect(n?.tone).toBe("danger");
+    expect(n?.text).toMatch(/All zones from an account/);
+    expect(n?.text).toMatch(/DNS/);
+    const unknown = tokenStateNote({ token_set: true, verified: false, error: null });
+    expect(unknown?.tone).toBe("danger");
+    expect(unknown?.text).toMatch(/DNS/);
+  });
+
+  it("keeps a Cloudflare outage soft and says nothing when all is well", () => {
+    expect(tokenStateNote({ token_set: true, verified: true, error: null })).toBeNull();
+    expect(tokenStateNote({ token_set: true, verified: true })).toBeNull();
+    expect(tokenStateNote({ token_set: true, verified: true, error: "cf_unavailable" })?.tone).toBe("warning");
+    expect(tokenStateNote({ token_set: false, verified: false, error: "cf_token_invalid" })).toBeNull();
+  });
+});
 
 describe("Cloudflare token", () => {
   it("accepts a token-shaped string and never echoes a bad one", () => {

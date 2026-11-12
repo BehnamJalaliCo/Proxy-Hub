@@ -838,7 +838,7 @@ function ScheduleCard() {
         <div className="p-5">
           <SkeletonLines lines={4} />
         </div>
-      ) : settings.isError ? (
+      ) : settings.isLoadingError ? (
         <LoadError error={settings.error} compact onRetry={() => void settings.refetch()} />
       ) : (
         <ScheduleForm key={version} initial={settings.data} onSaved={() => setVersion((v) => v + 1)} />
@@ -877,7 +877,7 @@ export default function TelegramPage() {
             <Skeleton className="h-72 rounded-3xl lg:col-span-7" />
           </div>
         </div>
-      ) : status.isError ? (
+      ) : status.isLoadingError ? (
         <Card>
           <LoadError
             error={status.error}

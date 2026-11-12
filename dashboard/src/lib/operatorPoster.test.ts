@@ -84,6 +84,9 @@ describe("words", () => {
       expect(text).toMatch(PERSIAN);
       expect(text).toContain("ربات");
     }
+    // The login form is on the Telegram page; no page is called @MTProxybot.
+    expect(readyText("not_connected")).toContain("صفحه‌ی تلگرام");
+    expect(readyText("not_connected")).not.toContain("صفحه‌ی ‎@MTProxybot");
   });
 
   it("warnings about the account's rights", () => {

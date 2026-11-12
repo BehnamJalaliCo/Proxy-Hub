@@ -1,6 +1,65 @@
 import { describe, expect, it } from "vitest";
 
-import { cleanSummary, confirmMatches, CONFIRM_TEXT, keptLines, MIN_AGE_OPTIONS, normalizeConfirm, purgeLines } from "./cleanup";
+import {
+  cleanSummary,
+  confirmMatches,
+  CONFIRM_TEXT,
+  keptLines,
+  latestOnly,
+  MIN_AGE_OPTIONS,
+  normalizeConfirm,
+  previewFor,
+  purgeLines,
+  type EndedPurge,
+} from "./cleanup";
+
+describe("«پاک کردن پایان‌یافته‌ها»: the preview belongs to the selected age", () => {
+  const preview = (hours: number, total: number): EndedPurge => ({
+    dry_run: true,
+    min_age_hours: hours,
+    cutoff: "2026-11-12T08:00:00Z",
+    removed: { nodes: total },
+    total,
+    kept: {},
+    ip_history_unlinked: 0,
+  });
+
+  it("never labels or enables a purge with the counts of another age", () => {
+    expect(previewFor(preview(168, 3), 1)).toBeNull();
+    expect(previewFor(preview(1, 300), 1)?.total).toBe(300);
+    expect(previewFor(null, 1)).toBeNull();
+  });
+
+  it("applies only the newest of two answers that arrive out of order", async () => {
+    const gate = latestOnly();
+    const applied: number[] = [];
+    let loading = true;
+    const settle = (token: number, total: number) => {
+      if (!gate.isCurrent(token)) return;
+      applied.push(total);
+      loading = false;
+    };
+    let resolveOld: (n: number) => void = () => undefined;
+    let resolveNew: (n: number) => void = () => undefined;
+    const old = new Promise<number>((r) => (resolveOld = r)); // 168 h, asked first
+    const fresh = new Promise<number>((r) => (resolveNew = r)); // 1 h, asked second
+    const t1 = gate.next();
+    const p1 = old.then((n) => settle(t1, n));
+    const t2 = gate.next();
+    const p2 = fresh.then((n) => settle(t2, n));
+    resolveOld(3);
+    await p1;
+    expect(applied).toEqual([]); // the older answer neither shows nor ends the loading
+    expect(loading).toBe(true);
+    resolveNew(300);
+    await p2;
+    expect(applied).toEqual([300]);
+    expect(loading).toBe(false);
+    const t3 = gate.next();
+    gate.cancel(); // the dialog closed
+    expect(gate.isCurrent(t3)).toBe(false);
+  });
+});
 
 describe("«پاک کردن پایان‌یافته‌ها»: the counts as Persian lines", () => {
   const removed = {

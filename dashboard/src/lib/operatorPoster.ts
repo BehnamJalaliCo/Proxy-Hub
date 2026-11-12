@@ -138,7 +138,7 @@ export function readyText(code: string | null): string | null {
     case "kill_switch":
       return "کلید توقف روشن است؛ تا خاموش شدنش پست‌ها با ربات میروند.";
     case "not_connected":
-      return "حساب دوم وصل نیست؛ پست‌ها با ربات میروند. حساب را در صفحه‌ی ‎@MTProxybot‎ وصل کنید.";
+      return "حساب دوم وصل نیست؛ پست‌ها با ربات میروند. حساب را در صفحه‌ی تلگرام (کارت «حساب عملیاتی ‎@MTProxybot‎») وصل کنید.";
     case "no_username":
       return "این کانال نام کاربری عمومی (@) ندارد؛ حساب دوم کانال را فقط با نام عمومی پیدا میکند، پس پست‌ها با ربات میروند.";
     case "hold":

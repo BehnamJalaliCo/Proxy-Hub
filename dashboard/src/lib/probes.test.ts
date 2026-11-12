@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildHeatmap, cellTone, networkKey, sourceStatus, targetOf, verdictCounts } from "./probes";
+import { buildHeatmap, cellTone, measuredPortsText, networkKey, sourceStatus, targetOf, verdictCounts } from "./probes";
 import type { ProbeTarget } from "./types";
 
 // Shapes as the contract defines them (GET /api/probes/summary "targets").
@@ -30,6 +30,21 @@ const TARGETS: ProbeTarget[] = [
 ];
 
 describe("probe heatmap", () => {
+  it("names the ports the numbers were measured on (443 only since P16)", () => {
+    const on = (port: number | undefined): ProbeTarget => ({
+      node_id: "n9",
+      name: "ph-slot-9",
+      ipv4: "203.0.113.9",
+      verdict: "ok",
+      networks: [{ network: "MCI", asn: 197207, ok: 1, fail: 0, at: "2026-11-03T10:00:00Z", port }],
+    });
+    expect(measuredPortsText([on(443), on(443)])).toBe("۴۴۳");
+    expect(measuredPortsText([on(443)])).not.toContain("MTProto");
+    expect(measuredPortsText([on(8443), on(443)])).toBe("۴۴۳ و ۸۴۴۳");
+    expect(measuredPortsText([])).toBe("۴۴۳");
+    expect(measuredPortsText(TARGETS)).toBe("۴۴۳"); // rows without a port
+  });
+
   it("grades a cell by its numbers", () => {
     expect(cellTone(0, 0)).toBe("neutral");
     expect(cellTone(3, 0)).toBe("success");

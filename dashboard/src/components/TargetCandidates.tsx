@@ -145,7 +145,7 @@ export function TargetCandidates() {
       <div className="flex flex-col gap-4 p-5">
         {targets.isPending ? (
           <SkeletonLines lines={4} />
-        ) : targets.isError ? (
+        ) : targets.isLoadingError ? (
           <LoadError
             error={targets.error}
             compact

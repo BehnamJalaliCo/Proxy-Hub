@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Archive, FlaskConical, Gauge, MapPin, Save, Server, SlidersHorizontal, Undo2 } from "lucide-react";
+import { Archive, FlaskConical, Gauge, MapPin, RefreshCw, Save, Server, SlidersHorizontal, Undo2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useState, type SubmitEvent, type ReactNode } from "react";
 
@@ -20,6 +20,7 @@ import { toast } from "../lib/toast";
 import type { FleetSettings } from "../lib/types";
 import {
   draftFromSettings,
+  isSettingsChanged,
   sameSettings,
   settingsFromDraft,
   type DraftErrors,
@@ -65,6 +66,7 @@ function SettingsForm({ initial, onSaved }: { initial: FleetSettings; onSaved: (
   const [serverErrors, setServerErrors] = useState<DraftErrors>({});
   const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [changedElsewhere, setChangedElsewhere] = useState(false);
 
   const { settings, errors } = settingsFromDraft(draft, initial);
   const dirty = !sameSettings(settings, initial) || JSON.stringify(draft) !== JSON.stringify(draftFromSettings(initial));
@@ -81,10 +83,12 @@ function SettingsForm({ initial, onSaved }: { initial: FleetSettings; onSaved: (
     setSubmitted(true);
     if (hasErrors || busy) return;
     setBusy(true);
-    // Re-read the kill switch right before saving, so a stale form can never undo an emergency stop.
+    setChangedElsewhere(false);
+    // Re-read the kill switch right before saving, so a stale form can never undo an emergency stop;
+    // the stamp the form was read with makes the server refuse a save over a newer change (409).
     api
       .getFleetSettings()
-      .then((fresh) => api.putFleetSettings({ ...settings, kill_switch: fresh.kill_switch }))
+      .then((fresh) => api.putFleetSettings({ ...settings, kill_switch: fresh.kill_switch }, initial.updated_at))
       .then((saved) => {
         qc.setQueryData(keys.settings, saved);
         void qc.invalidateQueries({ queryKey: keys.overview });
@@ -94,6 +98,8 @@ function SettingsForm({ initial, onSaved }: { initial: FleetSettings; onSaved: (
         onSaved(saved);
       })
       .catch((err: unknown) => {
+        // What the owner typed stays in the form; the notice below asks for a reload.
+        if (isSettingsChanged(err)) setChangedElsewhere(true);
         setServerErrors(serverFieldErrors(err));
         toast.error("تنظیمات ذخیره نشد", errorMessage(err));
       })
@@ -213,6 +219,17 @@ function SettingsForm({ initial, onSaved }: { initial: FleetSettings; onSaved: (
         </div>
       </Card>
 
+      {changedElsewhere ? (
+        <div role="alert" className="flex flex-col gap-3 rounded-xl bg-danger-soft px-3 py-2 text-sm leading-7 text-fg sm:flex-row sm:items-center">
+          <span className="min-w-0 flex-1">
+            تنظیمات در این میان در جای دیگری (دستگاه یا زبانه‌ی دیگر) ذخیره شده است و این ذخیره انجام نشد. صفحه را تازه کنید تا مقدارهای تازه را ببینید، بعد تغییر خود را دوباره بزنید. آنچه اینجا نوشته‌اید تا تازه کردن در فرم میماند.
+          </span>
+          <Button variant="secondary" size="sm" icon={<RefreshCw className="size-4" />} onClick={() => window.location.reload()}>
+            تازه کردن صفحه
+          </Button>
+        </div>
+      ) : null}
+
       <AnimatePresence>
         {dirty ? (
           <motion.div
@@ -272,7 +289,7 @@ export default function SettingsPage() {
           <Skeleton className="h-72 rounded-3xl" />
           <Skeleton className="h-60 rounded-3xl" />
         </div>
-      ) : settings.isError ? (
+      ) : settings.isLoadingError ? (
         <Card>
           <ErrorState error={settings.error} onRetry={() => void settings.refetch()} />
         </Card>

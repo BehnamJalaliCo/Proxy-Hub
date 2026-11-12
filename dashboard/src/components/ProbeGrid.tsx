@@ -8,7 +8,7 @@ import * as api from "../lib/endpoints";
 import { formatJalali, formatNumber, formatRelative } from "../lib/format";
 import { portsText } from "../lib/iranReach";
 import { PROBE_SOURCE, verdictInfo, type Tone } from "../lib/labels";
-import { buildHeatmap, sourceStatus, verdictCounts, type HeatCell, type HeatColumn } from "../lib/probes";
+import { buildHeatmap, measuredPortsText, sourceStatus, verdictCounts, type HeatCell, type HeatColumn } from "../lib/probes";
 import { keys } from "../lib/queries";
 import { toast } from "../lib/toast";
 import { TONE_SOFT } from "../lib/tones";
@@ -96,7 +96,7 @@ export function ProbeGrid({ summary }: { summary: ProbeSummary }) {
           {/* The grid scrolls inside its own box on a phone; the page itself never scrolls sideways. */}
           <div className="overflow-x-auto rounded-2xl border border-line">
             <table className="w-full border-separate border-spacing-0 text-sm">
-              <caption className="sr-only">باز بودن هر node از هر شبکه‌ی ایران: تعداد دست‌دادن TLS موفق از کل (پورت ۴۴۳ و پورت MTProto)</caption>
+              <caption className="sr-only">باز بودن هر node از هر شبکه‌ی ایران: تعداد دست‌دادن TLS موفق از کل، روی پورت {measuredPortsText(summary.targets)}</caption>
               <thead>
                 <tr>
                   <th scope="col" className="sticky start-0 z-10 bg-surface-2 px-3 py-2.5 text-start text-xs font-semibold text-fg-muted">
@@ -187,7 +187,9 @@ export function ProbeGrid({ summary }: { summary: ProbeSummary }) {
                 </span>
               );
             })}
-            <span>عدد هر خانه: دست‌دادن TLS موفق از کل (پورت ۴۴۳ و پورت MTProto). ping و TCP دیگر ملاک نیست: همراه اول و رایتل به TCP جواب جعلی میدهند.</span>
+            <span>
+              عدد هر خانه: دست‌دادن TLS موفق از کل، روی پورت {measuredPortsText(summary.targets)}؛ پورت MTProto با TLS سنجیده نمیشود و نتیجه‌ی ۴۴۳ جای آن را میگیرد. ping و TCP دیگر ملاک نیست: همراه اول و رایتل به TCP جواب جعلی میدهند.
+            </span>
             {summary.last_run_at ? <span className="ms-auto">{formatJalali(summary.last_run_at, "datetime")}</span> : null}
           </div>
         </>

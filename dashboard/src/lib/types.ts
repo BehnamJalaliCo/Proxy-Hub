@@ -28,6 +28,14 @@ export interface RecoveryCodes {
   recovery_codes: string[];
 }
 
+/** POST /api/auth/totp/begin: a new Authenticator secret (nothing stored yet) and its sealed
+ * `pending` blob, valid one hour. Kept only in the dialog's state, never in a cache. */
+export interface TotpBegin {
+  pending: string;
+  totp_uri: string;
+  totp_secret: string;
+}
+
 export interface LoginResult {
   username: string;
 }
@@ -83,10 +91,15 @@ export interface FleetSettings {
   target_slots: number;
   allowed_server_types: string[];
   locations: string[];
+  /** When the settings were last saved (null before the first save). Sent back with a save as
+   * expected_updated_at, so a save over a newer change from another device is refused (409). */
+  updated_at?: string | null;
 }
 
 export interface KillSwitch {
   kill_switch: boolean;
+  /** The settings' new save time (the kill switch is part of them). */
+  updated_at?: string | null;
 }
 
 export type PlanActionKind = "create" | "delete" | "none";
@@ -313,6 +326,9 @@ export interface CfStatus {
   token_set: boolean;
   verified: boolean;
   checked_at: string | null;
+  /** Why the last check failed (cf_token_invalid, cf_token_multiple_accounts,
+   * cf_permissions_missing, cf_unavailable); null when it passed. */
+  error?: string | null;
   zones: CfZone[];
   /** Missing on a panel older than the automatic pool (D35). */
   pool?: CfPoolSummary;
@@ -354,7 +370,7 @@ export interface ProbeTarget {
   verdict: ProbeVerdict;
   verdict_at?: string | null;
   verdict_reasons?: string[];
-  /** TLS handshakes per network and port (443 and the MTProto port). */
+  /** TLS handshakes per network on 443 (the MTProto port is not measured by TLS, P16). */
   networks: ProbeNetwork[];
   /** The name (or IP) the handshakes went to: the node's own DNS name when it points at the node. */
   tls_target?: string | null;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { modeInfo, planNote, shownNode, slotCounts, slotStatusInfo, spareText, type FleetSlot, type SlotNode } from "./fleet";
+import { modeInfo, planNote, shownNode, slotCounts, slotSquares, slotStatusInfo, spareText, type FleetSlot, type SlotNode } from "./fleet";
 import { FLEET_ACTION, FLEET_REASON, FLEET_TRANSITION } from "./fleetLabels";
 import { actionLabel, nodeEventLabel, reasonLabel, transitionReasonLabel } from "./labels";
 
@@ -97,5 +97,59 @@ describe("slot helpers", () => {
     expect(spareText({ spare: { in_use: false, slots: [] }, slots: [] }, fa)).toContain("آزاد");
     expect(spareText({ spare: { in_use: true, slots: [3] }, slots: [] }, fa)).toBe("در کار جایگاه 3.");
     expect(spareText({ spare: { in_use: true, slots: [] }, slots: [] }, fa)).toBe("در کار است.");
+  });
+});
+
+describe("the overview's slot squares", () => {
+  it("shows each slot's own state, not one filled square per live node", () => {
+    // 9 live nodes, but slot 7 is unhealthy, slot 8 burned with a replacement booting, slot 9 empty.
+    const slots = [1, 2, 3, 4, 5, 6].map((n) => ({ slot: n, status: "healthy" }));
+    slots.push({ slot: 7, status: "unhealthy" }, { slot: 8, status: "replacing" }, { slot: 9, status: "empty" });
+    const squares = slotSquares(9, slots);
+    expect(squares.map((s) => s.status)).toEqual([...Array<string>(6).fill("healthy"), "unhealthy", "replacing", "empty"]);
+    expect(squares[6]).toMatchObject({ slot: 7, label: "ناسالم", tone: "danger" });
+    expect(squares[8]).toMatchObject({ slot: 9, label: "خالی" });
+  });
+
+  it("marks a slot the API does not list as empty, and every slot unknown before loading", () => {
+    expect(slotSquares(3, [{ slot: 1, status: "healthy" }]).map((s) => s.status)).toEqual(["healthy", "empty", "empty"]);
+    expect(slotSquares(2, null).map((s) => s.status)).toEqual(["unknown", "unknown"]);
+    expect(slotSquares(50, null, 40)).toHaveLength(40);
+    expect(slotSquares(0, [])).toEqual([]);
+  });
+});
+
+describe("owner alert and executor codes", () => {
+  // Every key of DELAY in panel/proxyhub/fleet/alerts.py (CREATE_BLOCKS plus the three after it):
+  // a new alert code is added there and here, with its Persian word in fleetLabels.ts.
+  const ALERT_CODES = [
+    "budget_cap_reached",
+    "node_cap_reached",
+    "budget_cap_not_set",
+    "node_cap_not_set",
+    "account_server_limit_reached",
+    "no_active_account",
+    "account_guard_failed",
+    "account_not_usable",
+    "no_live_price",
+    "no_other_location",
+    "spare_in_use",
+    "agent_domain_not_set",
+    "all_locations_closed",
+    "delete_blocked",
+    "burned_ip_streak",
+    "download_suspect",
+  ];
+
+  it("names every owner alert of the fleet in Persian", () => {
+    for (const code of ALERT_CODES) expect(reasonLabel(code), code).toMatch(/[آ-ی]/);
+  });
+
+  it("names the executor's closing reasons in the timeline, the events and the slot", () => {
+    for (const code of ["no_server_found", "server_already_gone", "no_server_requested"]) {
+      expect(transitionReasonLabel(code), code).toMatch(/[آ-ی]/);
+      expect(reasonLabel(code), code).toMatch(/[آ-ی]/);
+    }
+    expect(reasonLabel("create_failed")).toBe("هتزنر ساخت را تأیید نکرد");
   });
 });

@@ -40,9 +40,14 @@ export const FLEET_REASON: Record<string, string> = {
   fleet_dry_run: "ناوگان در حالت خشک است؛ سرور جایگاه‌ها نه ساخته میشود نه حذف",
   fleet_live_disabled: "حالت زنده‌ی ناوگان در کد بسته است؛ سرور جایگاه‌ها نه ساخته میشود نه حذف",
   fleet_managed: "node ناوگان را خود ناوگان جایگزین یا بازنشسته میکند",
-  // owner alerts (fleet_alerts.code)
+  no_server_found: "سروری با برچسب این node در هتزنر پیدا نشد",
+  server_already_gone: "سرور پیش‌تر در هتزنر حذف شده بود",
+  no_server_requested: "هرگز درخواست ساخت به هتزنر نرفت",
+  create_failed: "هتزنر ساخت را تأیید نکرد",
+  // owner alerts (fleet_alerts.code; keep in step with DELAY in proxyhub/fleet/alerts.py)
   delete_blocked: "قفل حذف، حذف یک سرور را رد میکند",
   burned_ip_streak: "چند سرور پشت سر هم IP سوخته گرفتند",
+  download_suspect: "دانلود یک یا چند سرور مشکوک است (آپلود هست، دانلود نه)",
   // lost registration or delegation (proxyhub/cloudflare/delegation.py)
   delegation_lost: "ثبت یا nameserverهای دامنه دیگر روی Cloudflare نیست",
   delegation_restored: "دامنه دوباره روی Cloudflare است",

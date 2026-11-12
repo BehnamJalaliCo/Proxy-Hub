@@ -363,7 +363,7 @@ function NodeEventsDrawer({ node, onClose }: { node: NodeInfo | null; onClose: (
     >
       {events.isPending ? (
         <SkeletonLines lines={6} />
-      ) : events.isError ? (
+      ) : events.isLoadingError ? (
         <LoadError error={events.error} compact onRetry={() => void events.refetch()} />
       ) : list.length === 0 ? (
         <EmptyState icon={<History className="size-7" />} title="هنوز رویدادی ثبت نشده" />
@@ -532,7 +532,7 @@ function FleetSlotsSection() {
         }
       />
       <div className="flex flex-col gap-4 p-3 sm:p-5">
-        {q.isError ? (
+        {q.isLoadingError ? (
           <LoadError
             error={q.error}
             compact
@@ -700,7 +700,7 @@ export default function NodesPage() {
               ))}
             </ul>
           </>
-        ) : nodes.isError ? (
+        ) : nodes.isLoadingError ? (
           <Card>
             <LoadError error={nodes.error} notYet={NODES_NOT_YET} onRetry={() => void nodes.refetch()} />
           </Card>
@@ -799,7 +799,7 @@ export default function NodesPage() {
           <div className="p-3 sm:p-5">
             {probes.isPending ? (
               <SkeletonLines lines={4} className="p-2" />
-            ) : probes.isError ? (
+            ) : probes.isLoadingError ? (
               <LoadError
                 error={probes.error}
                 compact

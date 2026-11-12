@@ -41,7 +41,7 @@ export function EventRow({ event, compact = false }: { event: AuditEvent; compac
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="text-[0.93rem] font-bold text-fg">{actionLabel(event.action)}</span>
+            <span className="text-[0.93rem] font-bold text-fg">{actionLabel(event.action, event.target)}</span>
             {event.dry_run ? (
               <Badge tone="warning" className="gap-1 px-2 py-0.5">
                 <FlaskConical className="size-3" aria-hidden />

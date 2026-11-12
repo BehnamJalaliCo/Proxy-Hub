@@ -33,10 +33,12 @@ import { AnimatedNumber, EmptyState, ErrorState, Skeleton, SkeletonLines } from 
 import { IconButton } from "../components/ui/Button";
 import { PageHeader } from "../components/ui/PageHeader";
 import { cn } from "../lib/browser";
+import { slotCounts, slotSquares, useFleetSlots } from "../lib/fleet";
 import { decimalToNumber, formatDecimal, formatDurationSeconds, formatJalali, formatNumber, formatPercent, formatRelative } from "../lib/format";
 import { planActionInfo, reasonLabel, type Tone } from "../lib/labels";
-import { groupPlan } from "../lib/plan";
-import { useFleetPlan, useOverview, useRecentEvents } from "../lib/queries";
+import { planAllHealthy, planCounts, planRows } from "../lib/plan";
+import { coveredDays } from "../lib/events";
+import { EVENTS_MAX, useFleetPlan, useOverview, useRecentEvents } from "../lib/queries";
 import { TONE_SOFT } from "../lib/tones";
 import type { Overview } from "../lib/types";
 
@@ -229,9 +231,19 @@ function KpiRow({ o }: { o: Overview }) {
 
 // --- fleet slots ----------------------------------------------------------------------------------
 
+/** A square's look by the slot's state: healthy is the full brand square, empty a dashed outline,
+ * every other state its status tone. */
+function squareClass(status: string, tone: Tone): string {
+  if (status === "healthy") return "ph-gold";
+  if (status === "empty" || status === "unknown") return "border-2 border-dashed border-line-strong text-fg-faint";
+  return TONE_SOFT[tone];
+}
+
 function SlotGrid({ o }: { o: Overview }) {
+  const fleet = useFleetSlots();
   const shown = Math.min(o.target_slots, 40);
-  const filled = Math.min(o.nodes_live, shown);
+  const squares = slotSquares(o.target_slots, fleet.data?.slots ?? null, shown);
+  const counts = fleet.data ? slotCounts(fleet.data) : null;
   const extra = Math.max(0, o.nodes_live - o.target_slots);
   const cols = shown <= 10 ? "grid-cols-5" : shown <= 20 ? "grid-cols-5 sm:grid-cols-10" : "grid-cols-8 sm:grid-cols-10";
   return (
@@ -247,31 +259,38 @@ function SlotGrid({ o }: { o: Overview }) {
         ) : (
           <>
             <ul className={cn("grid gap-2.5", cols)} aria-label="جایگاه‌ها">
-              {Array.from({ length: shown }, (_, i) => {
-                const live = i < filled;
+              {squares.map((sq, i) => {
+                const withServer = sq.status !== "empty" && sq.status !== "unknown";
                 return (
                   <motion.li
-                    key={i}
+                    key={sq.slot}
                     initial={{ opacity: 0, scale: 0.6 }}
                     animate={{ opacity: 1, scale: 1 }}
                     transition={{ delay: 0.03 * i, type: "spring", stiffness: 320, damping: 22 }}
-                    className={cn(
-                      "relative grid aspect-square place-items-center rounded-2xl",
-                      live
-                        ? "ph-gold"
-                        : "border-2 border-dashed border-line-strong text-fg-faint",
-                    )}
-                    aria-label={live ? `جایگاه ${formatNumber(i + 1)}: node زنده` : `جایگاه ${formatNumber(i + 1)}: خالی`}
+                    className={cn("relative grid aspect-square place-items-center rounded-2xl", squareClass(sq.status, sq.tone))}
+                    aria-label={`جایگاه ${formatNumber(sq.slot)}: ${sq.label}`}
+                    title={`جایگاه ${formatNumber(sq.slot)}: ${sq.label}`}
                   >
-                    {live ? <Server className="size-5" /> : <span className="text-xs font-bold">{formatNumber(i + 1)}</span>}
+                    {withServer ? <Server className="size-5" /> : <span className="text-xs font-bold">{formatNumber(sq.slot)}</span>}
                   </motion.li>
                 );
               })}
             </ul>
             <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-fg-muted">
               <span className="flex items-center gap-1.5">
-                <span className="size-3 rounded bg-[linear-gradient(135deg,var(--ph-brand),var(--ph-brand-2))]" /> node زنده
+                <span className="ph-gold size-3 rounded" /> سالم
+                {counts ? ` (${formatNumber(counts.healthy)})` : null}
               </span>
+              {counts && counts.working > 0 ? (
+                <span className="flex items-center gap-1.5">
+                  <span className={cn("size-3 rounded", TONE_SOFT.info)} /> در حال ساخت یا جایگزینی ({formatNumber(counts.working)})
+                </span>
+              ) : null}
+              {counts && counts.trouble > 0 ? (
+                <span className="flex items-center gap-1.5">
+                  <span className={cn("size-3 rounded", TONE_SOFT.danger)} /> ناسالم یا سوخته ({formatNumber(counts.trouble)})
+                </span>
+              ) : null}
               <span className="flex items-center gap-1.5">
                 <span className="size-3 rounded border-2 border-dashed border-line-strong" /> جایگاه خالی
               </span>
@@ -484,7 +503,7 @@ function AccountsSplit({ o }: { o: Overview }) {
 function PlanCard() {
   const plan = useFleetPlan();
   const actions = plan.data?.actions ?? [];
-  const blocked = actions.filter((a) => !a.allowed).length;
+  const { work, blocked, idle } = planCounts(actions);
   return (
     <Card className="lg:col-span-8">
       <CardHeader
@@ -500,20 +519,27 @@ function PlanCard() {
       <div className="p-3 sm:p-4">
         {plan.isPending ? (
           <SkeletonLines lines={4} className="p-2" />
-        ) : plan.isError ? (
+        ) : plan.isLoadingError ? (
           <ErrorState error={plan.error} onRetry={() => void plan.refetch()} compact />
         ) : plan.data.generated_at === null ? (
           <EmptyState icon={<Workflow className="size-7" />} title="هنوز برنامه‌ای ساخته نشده" description="چرخه‌ی ناوگان پس از اجرای worker، برنامه‌ی خود را اینجا میگذارد." />
-        ) : actions.length === 0 ? (
+        ) : planAllHealthy(actions) ? (
           <EmptyState icon={<CircleCheck className="size-7" />} title="کاری لازم نیست" description="ناوگان با هدف همخوان است." />
         ) : (
           <>
             <div className="mb-2 flex flex-wrap gap-2 px-2">
-              <Badge tone="brand">{formatNumber(actions.length)} کار</Badge>
-              {blocked > 0 ? <Badge tone="danger">{formatNumber(blocked)} رد با قفل ایمنی</Badge> : <Badge tone="success">همه مجاز</Badge>}
+              {work > 0 ? (
+                <>
+                  <Badge tone="brand">{formatNumber(work)} کار</Badge>
+                  {blocked > 0 ? <Badge tone="danger">{formatNumber(blocked)} رد با قفل ایمنی</Badge> : <Badge tone="success">همه مجاز</Badge>}
+                </>
+              ) : (
+                <Badge tone="success">کاری لازم نیست</Badge>
+              )}
+              {idle > 0 ? <Badge tone="neutral">{formatNumber(idle)} جایگاه بی کار</Badge> : null}
             </div>
             <ul className="flex flex-col divide-y divide-line">
-              {groupPlan(actions).map((g, i) => {
+              {planRows(actions).map((g, i) => {
                 const kind = planActionInfo(g.action);
                 const shown = g.targets.slice(0, 6);
                 return (
@@ -537,7 +563,7 @@ function PlanCard() {
                         </div>
                       ) : null}
                     </div>
-                    {g.allowed ? (
+                    {g.action === "none" ? null : g.allowed ? (
                       <Badge tone="success" className="gap-1">
                         <CircleCheck className="size-3.5" /> مجاز
                       </Badge>
@@ -559,8 +585,13 @@ function PlanCard() {
 
 // --- activity --------------------------------------------------------------------------------------
 
+/** The chart counts loaded events, so it reads the most one request gives, every 5 minutes, and is
+ * drawn only over the days those events fully cover. The list needs only the newest five. */
 function ActivityCard() {
-  const events = useRecentEvents(100);
+  const events = useRecentEvents(5);
+  const history = useRecentEvents(EVENTS_MAX, 300_000);
+  const days = history.data ? coveredDays(history.data, EVENTS_MAX, 14) : 14;
+  const capped = days < 14;
   return (
     <Card className="lg:col-span-12">
       <CardHeader
@@ -580,7 +611,7 @@ function ActivityCard() {
             <Skeleton className="h-48 lg:col-span-7" />
             <SkeletonLines lines={5} className="lg:col-span-5" />
           </div>
-        ) : events.isError ? (
+        ) : events.isLoadingError ? (
           <ErrorState error={events.error} onRetry={() => void events.refetch()} compact />
         ) : events.data.length === 0 ? (
           <EmptyState icon={<Activity className="size-7" />} title="هنوز رویدادی ثبت نشده" description="با اولین کار پنل یا چرخه‌ها، اینجا پر میشود." />
@@ -588,10 +619,13 @@ function ActivityCard() {
           <div className="grid gap-5 lg:grid-cols-12">
             <div className="lg:col-span-7">
               <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <span className="text-sm font-semibold whitespace-nowrap text-fg">۱۴ روز اخیر</span>
+                <span className="text-sm font-semibold whitespace-nowrap text-fg">
+                  {formatNumber(days)} روز اخیر
+                  {capped ? <span className="ms-1 text-xs font-normal text-fg-faint">(بر پایه‌ی {formatNumber(EVENTS_MAX)} رویداد اخیر)</span> : null}
+                </span>
                 <ActivityLegend />
               </div>
-              <ActivityChart events={events.data} days={14} className="h-52" />
+              {history.data ? <ActivityChart events={history.data} days={days} className="h-52" /> : <Skeleton className="h-52" />}
             </div>
             <ul className="flex flex-col lg:col-span-5">
               {events.data.slice(0, 5).map((e) => (
@@ -660,7 +694,7 @@ export default function OverviewPage() {
               <PlanCard />
             </div>
           </>
-        ) : ov.isError ? (
+        ) : ov.isLoadingError ? (
           <Card>
             <ErrorState error={ov.error} title="وضعیت ناوگان بارگذاری نشد" onRetry={() => void ov.refetch()} />
           </Card>

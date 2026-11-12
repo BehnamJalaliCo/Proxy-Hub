@@ -458,6 +458,35 @@ export function titleLine(title: string): string {
   return `${TITLE_MARK} ${t}`;
 }
 
+/** The content part of a post as the panel composes it (compose_content in telegram/templates.py):
+ * the bold title line, a blank line, then the body as plain text (the owner, 2026-11-07: «معمولی و
+ * تمیز», no quote). Like BODY_TAGS there, a quote or pre block in the body loses its tags, not its
+ * text. The title is shown literally (escaped as the server does). */
+export function contentPreviewHtml(title: string, body: string): string {
+  const parts: string[] = [];
+  if (title.trim() !== "") {
+    const t = titleLine(title).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    parts.push(`<b>${t}</b>`);
+  }
+  const b = body.replace(/<\/?(?:blockquote|pre)\b[^>]*>/gi, "").trim();
+  if (b !== "" && plainText(parseTgHtml(b)).trim() !== "") parts.push(b);
+  return parts.join("\n\n");
+}
+
+/** The opening tag for the link toolbar: an http(s) address with no space, else null. */
+export function linkOpenTag(raw: string): string | null {
+  const url = raw.trim();
+  if (!/^https?:\/\/\S+$/i.test(url)) return null;
+  return `<a href="${url.replace(/"/g, "%22")}">`;
+}
+
+/** Whether the editor holds anything the owner would lose by closing it: a field differs from what
+ * it opened with (blank fields of a new item count as untouched). */
+export function contentDirty(item: Pick<ContentItem, "title" | "body" | "tags"> | null, title: string, body: string, tagsRaw: string): boolean {
+  if (item === null) return title.trim() !== "" || body.trim() !== "" || tagsRaw.trim() !== "";
+  return title !== item.title || body !== item.body || tagsRaw !== item.tags.join("، ");
+}
+
 /** One-line excerpt of a body for lists. */
 export function excerpt(html: string, max = 140): string {
   const s = plainText(parseTgHtml(html)).replace(/\s+/g, " ").trim();

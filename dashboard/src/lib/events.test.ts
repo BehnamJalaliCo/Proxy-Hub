@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { bucketByDay, EMPTY_FILTER, filterEvents, resultText, verdictOf } from "./events";
+import { bucketByDay, coveredDays, EMPTY_FILTER, filterEvents, resultText, verdictOf } from "./events";
 import { accountActions, actionLabel, actorLabel, reasonLabel, stateReasonText } from "./labels";
-import { groupPlan } from "./plan";
-import type { AuditEvent } from "./types";
+import { groupPlan, planAllHealthy, planCounts, planRows } from "./plan";
+import type { AuditEvent, PlanAction } from "./types";
 
 const ev = (id: number, at: string, extra: Partial<AuditEvent> = {}): AuditEvent => ({
   id,
@@ -38,6 +38,21 @@ describe("events", () => {
     expect(days[2]).toMatchObject({ blocked: 1, allowed: 0, info: 0 });
     expect(days[1]).toMatchObject({ blocked: 0, allowed: 1, info: 0 });
     expect(days[0]).toMatchObject({ info: 1, allowed: 0, blocked: 0 });
+  });
+
+  it("draws only the days a capped page of events fully covers", () => {
+    const now = new Date("2026-11-12T12:00:00Z"); // 15:30 on 21 Aban in Tehran
+    // 100 events within the last ~30 hours: the oldest day (yesterday) is cut short.
+    const page = Array.from({ length: 100 }, (_, i) => ({ at: new Date(now.getTime() - i * 18 * 60_000).toISOString() }));
+    expect(coveredDays(page, 100, 14, now)).toBe(1);
+    // A page shorter than the limit holds every event there is: all 14 days are true.
+    expect(coveredDays(page.slice(0, 40), 100, 14, now)).toBe(14);
+    // The oldest loaded event on 16 Aban (about five days ago): 17 to 21 Aban are whole.
+    const spread = Array.from({ length: 100 }, (_, i) => ({ at: new Date(now.getTime() - i * 72 * 60_000).toISOString() }));
+    expect(coveredDays(spread, 100, 14, now)).toBe(5);
+    // Older than the window: nothing is cut inside it.
+    const old = [...page.slice(0, 99), { at: "2026-10-01T10:00:00Z" }];
+    expect(coveredDays(old, 100, 14, now)).toBe(14);
   });
 
   it("filters by verdict, mode, actor and text (Persian labels included)", () => {
@@ -162,5 +177,34 @@ describe("plan grouping", () => {
       ["delete", true, ["node-a"]],
       ["create", true, ["slot-3"]],
     ]);
+  });
+
+  const healthy = (n: number): PlanAction[] =>
+    Array.from({ length: n }, (_, i) => ({ action: "none", target: `slot-${String(i + 1)}`, allowed: false, reasons: ["slot_healthy"] }));
+
+  it("does not count idle slots as refusals (the planner writes one action per slot)", () => {
+    expect(planCounts(healthy(9))).toEqual({ work: 0, blocked: 0, idle: 9 });
+    expect(planAllHealthy(healthy(9))).toBe(true);
+    expect(planRows(healthy(9))).toEqual([]);
+
+    const refused = [...healthy(8), { action: "create" as const, target: "slot-9", allowed: false, reasons: ["kill_switch_on"] }];
+    expect(planCounts(refused)).toEqual({ work: 1, blocked: 1, idle: 8 });
+    expect(planAllHealthy(refused)).toBe(false);
+    expect(planRows(refused).map((g) => g.action)).toEqual(["create"]);
+
+    const allowed: PlanAction[] = [
+      ...healthy(7),
+      { action: "create", target: "slot-8", allowed: true, reasons: [] },
+      { action: "delete", target: "node-a", allowed: true, reasons: [] },
+    ];
+    expect(planCounts(allowed).blocked).toBe(0);
+  });
+
+  it("keeps idle slots that tell something", () => {
+    const starting: PlanAction[] = [...healthy(8), { action: "none", target: "slot-9", allowed: false, reasons: ["slot_starting"] }];
+    expect(planAllHealthy(starting)).toBe(false);
+    expect(planCounts(starting)).toEqual({ work: 0, blocked: 0, idle: 9 });
+    expect(planRows(starting).map((g) => [g.action, g.reasons])).toEqual([["none", ["slot_starting"]]]);
+    expect(planAllHealthy([])).toBe(true);
   });
 });
