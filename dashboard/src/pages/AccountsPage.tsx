@@ -12,6 +12,7 @@ import { Field, SecretInput, TextInput } from "../components/ui/Form";
 import { PageHeader } from "../components/ui/PageHeader";
 import { cn } from "../lib/browser";
 import { errorMessage, isApiError } from "../lib/api";
+import { dismissAllowed } from "../lib/dialogs";
 import * as api from "../lib/endpoints";
 import { formatJalali, formatNumber, formatRelative } from "../lib/format";
 import { accountActions, accountStateInfo, stateReasonText } from "../lib/labels";
@@ -32,6 +33,8 @@ function AddAccountDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
   const [err, setErr] = useState<{ field: "name" | "token" | null; text: string } | null>(null);
 
   const close = (v: boolean) => {
+    // Escape, the X or a tap outside while Hetzner is being asked would hide its answer.
+    if (!dismissAllowed(busy, v)) return;
     if (!v) {
       setToken("");
       setErr(null);

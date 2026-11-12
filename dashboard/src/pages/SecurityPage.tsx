@@ -12,6 +12,7 @@ import { ErrorState, SkeletonLines } from "../components/ui/Feedback";
 import { Field, TextInput } from "../components/ui/Form";
 import { PageHeader } from "../components/ui/PageHeader";
 import { errorMessage, isApiError } from "../lib/api";
+import { dismissAllowed } from "../lib/dialogs";
 import * as api from "../lib/endpoints";
 import { formatJalali, formatRelative } from "../lib/format";
 import { keys, useMe, useSessions } from "../lib/queries";
@@ -36,6 +37,7 @@ function RegenerateDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
   const [codes, setCodes] = useState<string[] | null>(null);
 
   const close = (v: boolean) => {
+    if (!dismissAllowed(busy, v)) return; // the new codes come back in this sheet only
     if (!v) {
       setCode("");
       setCodes(null);

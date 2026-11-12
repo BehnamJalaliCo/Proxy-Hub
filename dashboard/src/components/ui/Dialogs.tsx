@@ -4,6 +4,7 @@ import { AlertDialog, Dialog } from "radix-ui";
 import { useState, useSyncExternalStore, type ReactNode } from "react";
 
 import { cn } from "../../lib/browser";
+import { ackFor, type AckState } from "../../lib/dialogs";
 import { Button } from "./Button";
 
 const WIDE = "(min-width: 640px)";
@@ -205,16 +206,14 @@ export function ConfirmDialog({
   onConfirm: () => void;
   children?: ReactNode;
 }) {
-  const [ack, setAck] = useState(false);
+  const [ackState, setAckState] = useState<AckState>({ open, ack: false });
+  const current = ackFor(ackState, open);
+  if (current !== ackState) setAckState(current); // reset during render: opened or closed by anyone
+  const ack = current.ack;
+  const setAck = (v: boolean) => setAckState({ open, ack: v });
   const iconTone = tone === "danger" ? "bg-danger-soft text-danger" : tone === "success" ? "bg-success-soft text-success" : "bg-brand-soft text-brand";
   return (
-    <AlertDialog.Root
-      open={open}
-      onOpenChange={(v) => {
-        if (!v) setAck(false);
-        onOpenChange(v);
-      }}
-    >
+    <AlertDialog.Root open={open} onOpenChange={onOpenChange}>
       <AnimatePresence>
         {open ? (
           <AlertDialog.Portal forceMount>
