@@ -708,6 +708,53 @@ async def test_without_an_owner_chat_the_lost_token_is_only_logged(engine: Async
     ]
 
 
+@pytest.mark.db
+async def test_records_of_a_zone_that_left_the_account_are_not_read_or_shown(
+    engine: AsyncEngine, vault: Vault
+) -> None:
+    now = datetime.now(UTC)
+    token = SecretValue(secrets.token_urlsafe(30))
+    async with engine.begin() as conn:
+        await vault.put(conn, service.TOKEN_SECRET, token)
+        await service.save_state(conn, now, verified=True, checked_at=now, zones_refreshed_at=now, missing=[])
+    await add_zone(engine, ZONE_ID, "left.example", status="gone", pool="standby")
+    await add_zone(engine, ZONE_ID_2, "live.example", pool="active")
+    async with engine.begin() as conn:
+        for purpose, name in (("slot", "slot1.left.example"), ("acme", "_acme-challenge.left.example")):
+            await conn.execute(
+                text(
+                    "INSERT INTO cf_records (id, zone_id, cf_record_id, name, type, content, ttl, proxied, "
+                    "purpose) VALUES (:id, :z, :cf, :n, :t, '203.0.113.7', 60, false, :p)"
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "z": ZONE_ID,
+                    "cf": secrets.token_hex(16),
+                    "n": name,
+                    "t": "A" if purpose == "slot" else "TXT",
+                    "p": purpose,
+                },
+            )
+        assert await service.zones_with_rows(conn, "slot") == []
+        assert await service.zones_with_rows(conn, "acme") == []  # the ACME loop's leftovers, too
+        assert (await service.status(conn))["records"] == []  # not shown as live records
+    async with LocalCloudflare(lambda method, path: cf_ok([])) as cf_server:
+        loop = DnsReconciler(vault_factory=lambda: vault, client_factory=cf_server.client)
+        async with engine.begin() as conn:
+            await loop.run_once(conn)
+        assert cf_server.requests == []  # nothing to do on the live zone, nothing tried on the gone one
+        async with engine.connect() as conn:
+            assert (await conn.execute(text("SELECT count(*) FROM cf_records"))).scalar_one() == 2
+        # Cloudflare lists the zone again (same id): it is reconciled like any other zone.
+        async with engine.begin() as conn:
+            await conn.execute(text("UPDATE cf_zones SET status = 'active' WHERE id = :id"), {"id": ZONE_ID})
+            await loop.run_once(conn)
+        assert ("GET", f"/zones/{ZONE_ID}/dns_records") in cf_server.requests
+    async with engine.connect() as conn:
+        left = (await conn.execute(text("SELECT purpose FROM cf_records"))).scalars().all()
+    assert left == ["acme"]  # the slot row whose record is gone was forgotten
+
+
 def test_token_alert_texts() -> None:
     many = service.token_lost_alert_fa("cf_token_multiple_accounts")
     assert "بیش از یک حساب" in many and "Proxy-Hub" in many

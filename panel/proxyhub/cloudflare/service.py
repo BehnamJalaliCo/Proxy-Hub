@@ -501,7 +501,8 @@ async def status(db: Db) -> dict[str, Any]:
                 CfRecord.proxied,
                 CfRecord.updated_at,
             )
-            .where(CfRecord.cf_record_id.is_not(None))
+            .join(CfZone, CfZone.id == CfRecord.zone_id)
+            .where(CfRecord.cf_record_id.is_not(None), CfZone.status != GONE)  # gone: not live any more
             .order_by(CfRecord.name, CfRecord.type)
         )
     ).all()
@@ -768,8 +769,18 @@ async def owned_rows(db: Db, zone_id: str, purpose: str) -> list[OwnedRow]:
 
 
 async def zones_with_rows(db: Db, purpose: str) -> list[str]:
+    """Zones holding rows of ours for ``purpose``. A zone the account no longer lists is left out:
+    the token cannot read it (every call would fail, forever). Its rows stay, so a zone that comes
+    back with the same id is reconciled again."""
     return list(
-        (await db.execute(select(CfRecord.zone_id).where(CfRecord.purpose == purpose).distinct())).scalars()
+        (
+            await db.execute(
+                select(CfRecord.zone_id)
+                .join(CfZone, CfZone.id == CfRecord.zone_id)
+                .where(CfRecord.purpose == purpose, CfZone.status != GONE)
+                .distinct()
+            )
+        ).scalars()
     )
 
 
