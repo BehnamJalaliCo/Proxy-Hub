@@ -104,9 +104,10 @@ export function checkErrorText(code: string | null | undefined): string | null {
     case "session_missing":
       return "نشست در گاوصندوق پنل نیست. «قطع اتصال» را بزنید و از اول وارد شوید.";
     case "api_id_invalid":
+    case "api_id_published":
       return "تلگرام دیگر این api_id را نمیپذیرد. «قطع اتصال» را بزنید و با api_id تازه وارد شوید.";
     default:
-      return `بررسی آخر ناموفق بود (${code}).`;
+      return `بررسی آخر ناموفق بود (${code}). بررسی خودکار بعدی دوباره امتحان میکند؛ اگر درست نشد، «قطع اتصال» را بزنید و دوباره وارد شوید.`;
   }
 }
 

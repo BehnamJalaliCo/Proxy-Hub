@@ -28,7 +28,7 @@ from test_telegram_support import SilentServer, free_closed_port
 
 from proxyhub.fleet.settings_store import save_fleet_settings
 from proxyhub.mtproxy import service, state, store
-from proxyhub.mtproxy.userclient import ClientOptions, Endpoint
+from proxyhub.mtproxy.userclient import Account, ClientOptions, Endpoint
 from proxyhub.reconcilers.base import lock_key
 from proxyhub.reconcilers.mtproxy_account import MtproxyAccountReconciler
 from proxyhub.settings_schema import FleetSettings
@@ -149,6 +149,8 @@ async def test_a_session_telegram_ended_disconnects_once_and_alerts_once(
 
 
 async def test_a_lasting_failure_moves_to_error_and_back(engine: AsyncEngine, vault: Vault) -> None:
+    async with engine.begin() as conn:
+        await tg_store.set_owner_chat(conn, 111222333, datetime.now(UTC))
     await kill_switch(engine, False)
     _, _, checked = await seed_connected(engine, vault, port=1, now=LONG_AGO)
     d = deps(engine, vault)
@@ -158,7 +160,37 @@ async def test_a_lasting_failure_moves_to_error_and_back(engine: AsyncEngine, va
     row = await load_row(engine)
     assert row.state == "error" and row.error == "api_id_invalid"
     assert [r["action"] for r in await actions(engine)] == ["mtproxy.account_check_failed"]
-    assert await service.check_session(d) == "idle"  # an error waits for the owner
+    alerts = await outbox_alerts(engine)
+    assert len(alerts) == 1 and "API_ID_INVALID" in alerts[0] and "api_id" in alerts[0]
+    # An error is checked again like a connected session (it does not wait for the owner).
+    assert await service.check_session(d) == "not_due"
+    later = service.Deps(
+        engine=engine,
+        vault=vault,
+        redis=None,
+        options=d.options,
+        clock=lambda: datetime.now(UTC) + timedelta(minutes=31),
+    )
+    assert await service.check_session(later) == "failed:telegram_unavailable"
+    row = await load_row(engine)
+    assert (row.state, row.error, row.last_check_error) == ("error", "api_id_invalid", "telegram_unavailable")
+    # The same lasting cause again: the row is saved, but no second line and no second alert.
+    errored = await load_row(engine)
+    assert await service._record_check(
+        d, errored, code="api_id_invalid", rpc="API_ID_INVALID", account=None, bot_id=None
+    ) == ("failed:api_id_invalid")
+    assert len(await actions(engine)) == 1 and len(await outbox_alerts(engine)) == 1
+    # The cause went away: connected again, logged, and the owner hears it once.
+    account = Account(user_id=USER_ID, first_name="Operator", is_bot=False)
+    assert await service._record_check(d, errored, code=None, rpc=None, account=account, bot_id=None) == "ok"
+    row = await load_row(engine)
+    assert (row.state, row.error, row.last_check_error) == ("connected", None, None)
+    assert [r["action"] for r in await actions(engine)] == [
+        "mtproxy.account_check_failed",
+        "mtproxy.account_check_ok",
+    ]
+    alerts = await outbox_alerts(engine)
+    assert len(alerts) == 2 and "دوباره کار میکند" in alerts[1]
 
 
 async def test_a_session_that_cannot_be_decrypted_is_an_error(
@@ -166,9 +198,42 @@ async def test_a_session_that_cannot_be_decrypted_is_an_error(
 ) -> None:
     await kill_switch(engine, False)
     (tmp_path / "other").mkdir()
-    await seed_connected(engine, make_vault(tmp_path / "other"), port=1, now=LONG_AGO)
+    other = make_vault(tmp_path / "other")
+    await seed_connected(engine, other, port=1, now=LONG_AGO)
     assert await service.check_session(deps(engine, vault)) == "failed:session_unreadable"
     assert (await load_row(engine)).state == "error"
+    # The right master key is back: once due, the check runs again instead of waiting for the owner.
+    right = service.Deps(
+        engine=engine,
+        vault=other,
+        redis=None,
+        options=deps(engine, vault).options,
+        clock=lambda: datetime.now(UTC) + timedelta(minutes=31),
+    )
+    assert await service.check_session(right) == "failed:telegram_unavailable"  # it reached the network
+    assert (await load_row(engine)).state == "error"
+    assert [r["reasons"]["reasons"] for r in await actions(engine)] == [["session_unreadable"]]
+
+
+async def test_a_flood_wait_is_honoured_before_the_next_check(engine: AsyncEngine, vault: Vault) -> None:
+    await kill_switch(engine, False)
+    _, _, checked = await seed_connected(engine, vault, port=1, now=LONG_AGO)
+    d = deps(engine, vault)
+    outcome = await service._record_check(
+        d, checked, code="flood_wait", rpc="FLOOD_WAIT", account=None, bot_id=None, seconds=7200
+    )
+    assert outcome == "failed:flood_wait"
+    row = await load_row(engine)
+    assert row.state == "connected" and row.check_after is not None
+    in_an_hour = service.Deps(
+        engine=engine,
+        vault=vault,
+        redis=None,
+        options=d.options,
+        clock=lambda: datetime.now(UTC) + timedelta(hours=1),
+    )
+    assert await service.check_session(in_an_hour) == "not_due"  # 30 minutes passed, the wait did not
+    assert await actions(engine) == [] and await outbox_alerts(engine) == []
 
 
 # --- the loop itself ---------------------------------------------------------------------------------------

@@ -99,6 +99,8 @@ describe("operator account states", () => {
     for (const via of ["app", "sms", "call", "email", "fragment", "sms_word", "other", null]) expect(codeViaText(via)).toMatch(PERSIAN);
     expect(codeViaText("app")).toContain("اپ تلگرام");
     expect(checkErrorText(null)).toBeNull();
+    expect(checkErrorText("telegram_refused")).toContain("بررسی خودکار بعدی");
+    expect(checkErrorText("api_id_published")).toBe(checkErrorText("api_id_invalid"));
     for (const code of ["telegram_unavailable", "flood_wait", "mtproxybot_not_found", "session_unreadable", "session_missing", "api_id_invalid", "x"]) {
       expect(checkErrorText(code)).toMatch(PERSIAN);
     }

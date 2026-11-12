@@ -10,7 +10,9 @@ States:
 ``password_needed``  the code was right and the account has a two-step password
 ``connected``      a session is in the vault and the last check (or the login) found it working
 ``disconnected``   Telegram ended the session (from Settings > Devices, or the account was deleted)
-``error``          a session is stored but cannot be used for a reason that does not pass by itself
+``error``          a session is stored but the last check failed for a reason that may not pass by
+                   itself; the check keeps running every 30 minutes, so a cause that went away
+                   (a key restored, a Telegram refusal that stopped) brings it back to ``connected``
 =================  ===============================================================================
 
 A pending state whose time ran out is shown as ``none`` with ``notice: "login_expired"``.
@@ -72,6 +74,7 @@ class AccountRow:
     disconnected_at: str | None = None
     disconnect_reason: str | None = None
     error: str | None = None
+    check_after: str | None = None  # a flood wait Telegram asked for at the last check
 
     @classmethod
     def from_json(cls, value: Any) -> AccountRow:
@@ -164,8 +167,16 @@ def cleared() -> AccountRow:
     return AccountRow()
 
 
+CHECKED: Final = (CONNECTED, ERROR)
+
+
 def check_due(row: AccountRow, now: datetime, every: timedelta = CHECK_EVERY) -> bool:
-    if row.state != CONNECTED or row.session_id is None:
+    """A stored session is checked every ``every``, also in ``error`` (the cause may be gone), but
+    never before a flood wait Telegram asked for has passed."""
+    if row.state not in CHECKED or row.session_id is None:
+        return False
+    after = _parse_time(row.check_after)
+    if after is not None and now < after:
         return False
     last = row.last_check
     return last is None or now - last >= every
@@ -178,9 +189,11 @@ def after_check(
     rpc: str | None = None,
     first_name: str | None = None,
     mtproxybot_id: int | None = None,
+    seconds: int | None = None,
     now: datetime,
 ) -> AccountRow:
-    """The row after a check: ``code`` None means get_me answered."""
+    """The row after a check: ``code`` None means get_me answered. ``seconds`` is the wait a
+    ``flood_wait`` asked for; no check runs before it has passed."""
     if code is None:
         return replace(
             row,
@@ -190,6 +203,7 @@ def after_check(
             last_check_at=iso(now),
             last_check_error=None,
             error=None,
+            check_after=None,
         )
     if code == "session_terminated":
         return replace(
@@ -200,10 +214,15 @@ def after_check(
             last_check_error=None,
             disconnected_at=iso(now),
             disconnect_reason=(rpc or "session_terminated").lower(),
+            check_after=None,
         )
     if code in TRANSIENT:
-        return replace(row, last_check_at=iso(now), last_check_error=code)
-    return replace(row, state=ERROR, last_check_at=iso(now), last_check_error=code, error=code)
+        wait = seconds if code == "flood_wait" and seconds is not None and seconds > 0 else None
+        after = iso(now + timedelta(seconds=wait)) if wait is not None else None
+        return replace(row, last_check_at=iso(now), last_check_error=code, check_after=after)
+    return replace(
+        row, state=ERROR, last_check_at=iso(now), last_check_error=code, error=code, check_after=None
+    )
 
 
 # --- the API's view --------------------------------------------------------------------------------
