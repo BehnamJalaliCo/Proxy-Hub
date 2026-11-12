@@ -318,6 +318,9 @@ export interface CfStatus {
   token_set: boolean;
   verified: boolean;
   checked_at: string | null;
+  /** Why the last check failed (cf_token_invalid, cf_token_multiple_accounts,
+   * cf_permissions_missing, cf_unavailable); null when it passed. */
+  error?: string | null;
   zones: CfZone[];
   /** Missing on a panel older than the automatic pool (D35). */
   pool?: CfPoolSummary;

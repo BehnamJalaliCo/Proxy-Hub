@@ -11,7 +11,7 @@ import { Field, SecretInput } from "../components/ui/Form";
 import { PageHeader } from "../components/ui/PageHeader";
 import { errorList, errorMessage, isApiError } from "../lib/api";
 import { cn } from "../lib/browser";
-import { cfTokenProblem, checkSummary, deletionLine, noStandbyLeft, poolChangeText, sortZones, ttlText } from "../lib/cloudflare";
+import { cfTokenProblem, checkSummary, deletionLine, noStandbyLeft, poolChangeText, sortZones, tokenStateNote, ttlText } from "../lib/cloudflare";
 import * as api from "../lib/endpoints";
 import { formatJalali, formatNumber, formatRelative } from "../lib/format";
 import { domainVerdictInfo, POOL_CHOICES, poolStateInfo, zoneStatusInfo } from "../lib/labels";
@@ -71,6 +71,7 @@ function TokenCard({ s }: { s: CfStatus }) {
     : s.verified
       ? { tone: "success" as const, label: "وارسی‌شده" }
       : { tone: "danger" as const, label: "وارسی نشد" };
+  const note = tokenStateNote(s);
 
   return (
     <Card className="lg:col-span-5">
@@ -94,6 +95,11 @@ function TokenCard({ s }: { s: CfStatus }) {
                 آخرین وارسی: {s.checked_at ? `${formatRelative(s.checked_at)} · ${formatJalali(s.checked_at, "short")}` : "هنوز نه"}
               </span>
             </span>
+          </p>
+        ) : null}
+        {note ? (
+          <p role={note.tone === "danger" ? "alert" : "status"} className={cn("rounded-2xl p-3 text-sm leading-7 text-fg", note.tone === "danger" ? "bg-danger-soft" : "bg-warning-soft")}>
+            {note.text}
           </p>
         ) : null}
 
