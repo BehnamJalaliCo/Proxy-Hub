@@ -185,7 +185,7 @@ async def test_due_post_carries_content_links_and_tag(engine: AsyncEngine, vault
     assert f"{QUOTE}<code>vless://{node_vless_id(nodes[0])}@slot1.proxyhub-posts.example:443" in body
     assert body.count(LOCK) == 1 and body.count("vless://") == 1 and "<pre" not in body
     assert f">{word(2)}</a>{MARK}\n<a href=" in body and f">{word(3)}</a>{MARK}\n\n{LOCK}" in body
-    assert body.endswith("</blockquote>\n\n—\n🔗 \u200e@ipoxxo")
+    assert body.endswith("</blockquote>\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗 \u200e@ipoxxo")
     [post] = await rows(engine, "SELECT * FROM posts")
     assert (post.role, post.plan_slot, post.outbox_id, post.poster) == ("test", 1, job.id, "bot")
     assert post.content_html and post.channel_tag == "@ipoxxo" and post.content_item_id == first.id
@@ -493,7 +493,10 @@ async def test_expired_and_gone_links(engine: AsyncEngine, vault: Vault) -> None
     # Missing for the whole grace: the post shows them as paused (not dead) with its other changes.
     assert await refresh(engine, t + publisher.MISSING_GRACE) == 1
     body = await edit_text(engine)
-    assert f"</a>{SEP}⏸{NBSP}{word(2)}{MARK}\n\n⌛️ زمان این کانفیگ تمام شد\n\n{PAUSED_LINE}\n\n—\n🔗" in body
+    assert (
+        f"</a>{SEP}⏸{NBSP}{word(2)}{MARK}\n\n⌛️ زمان این کانفیگ تمام شد\n\n{PAUSED_LINE}\n\n"
+        "📲 این پست را برای دوستانت بفرست\n—\n🔗" in body
+    )
     assert "<s>" not in body and "<code" not in body and "🔒" not in body
     assert node_secret(nodes[1]) not in body and node_vless_id(nodes[1]) not in body
     assert node_secret(nodes[0]) in body  # node 1's MTProto link still works
@@ -557,7 +560,10 @@ async def test_a_missing_config_past_its_own_expiry_is_marked_expired(
     # Its provider no longer lists the config at all, and the config's own end has passed.
     assert await refresh(engine, later, [mtproto_provider]) == 1
     body = await edit_text(engine)
-    assert f"</a>{MARK}\n\n⌛️ زمان این کانفیگ تمام شد\n\n—\n🔗" in body and node_secret(nodes[0]) in body
+    assert (
+        f"</a>{MARK}\n\n⌛️ زمان این کانفیگ تمام شد\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗" in body
+        and node_secret(nodes[0]) in body
+    )
     got = {label: status for label, (status, _) in (await carried_links(engine, post_id)).items()}
     assert got == {"پروکسی ۱": "active", "ریلیتی ۱": "expired"}
 
@@ -623,7 +629,9 @@ async def test_a_config_and_its_xhttp_link_are_marked_in_the_post_and_its_edits(
     assert body.count(LOCK) == 1 and body.count(QUOTE) == 2 and "<pre" not in body
     assert f"\nTCP\n{QUOTE}<code>vless://{node_vless_id(nodes[0])}@" in body
     assert f"</code></blockquote>\n\nXHTTP\n{QUOTE}<code>vless://{node_vless_id(nodes[0])}@" in body
-    assert body.count("</code></blockquote>\n\n—\n🔗") == 1  # the pair stays together, then the tag
+    assert (
+        body.count("</code></blockquote>\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗") == 1
+    )  # the pair stays together, then the tag
     carried = await rows(engine, "SELECT key, label FROM post_links WHERE kind = 'reality' ORDER BY position")
     assert [c.key.endswith(":xhttp") for c in carried] == [False, True]
     assert not any(c.label in body for c in carried)  # the owner's labels; a post shows none
@@ -632,7 +640,10 @@ async def test_a_config_and_its_xhttp_link_are_marked_in_the_post_and_its_edits(
     await set_node(engine, nodes[0], state="burned")
     assert await refresh(engine, now + timedelta(minutes=1), providers) == 1
     edited = await edit_text(engine)
-    assert f">{word(2)}</a>{MARK}\n\n🚫 این کانفیگ از دسترس خارج شد\n\n—\n🔗" in edited
+    assert (
+        f">{word(2)}</a>{MARK}\n\n🚫 این کانفیگ از دسترس خارج شد\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗"
+        in edited
+    )
     assert node_vless_id(nodes[0]) not in edited and "🔒" not in edited and QUOTE not in edited
     assert "TCP" not in edited and "XHTTP" not in edited
     assert f"🚫{NBSP}<s>{word(1)}</s>{SEP}<a href=" in edited
@@ -741,7 +752,10 @@ def before_d48(text_html: str) -> str:
         text_html.replace(SEP, "  ")
         .replace(f"پروکسی{NBSP}", f"⚡{NBSP}اتصال{NBSP}")
         .replace(QUOTE, "<pre>")
-        .replace("</blockquote>\n\n—\n🔗", "</pre>\n\n—\n🔗")
+        .replace(
+            "</blockquote>\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗",
+            "</pre>\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗",
+        )
     )
 
 

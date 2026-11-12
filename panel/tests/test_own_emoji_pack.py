@@ -267,6 +267,7 @@ def test_the_pack_draws_every_emoji_of_the_post_templates() -> None:
         templates.TITLE_MARK,  # the title line's emoji when a title has none (D48)
         templates.REALITY_MARK,  # the line above a config's quote (D48)
         templates.TAG_PREFIX,
+        templates.SHARE_LINE,  # D62
         templates.ALL_DEAD_LINE,
         templates.PAUSED_LINE,
         templates.PAUSED_MARK,

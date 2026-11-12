@@ -478,7 +478,10 @@ def test_the_compact_layouts_emoji_sit_on_exact_utf16_offsets() -> None:
     grid = "\n".join([f"پروکسی{NBSP}• پروکسی{NBSP}•"] * 3)
     lock = f"{REALITY_MARK} کانفیگ V2Ray"
     tag = "🔗 \u200e@ipoxxo"
-    assert m.text == f"{title}\n\nمتن خبر\n\n{grid}\n\n{lock}\nvless://a@203.0.113.9:443#x\n\n—\n{tag}"
+    share = "📲 این پست را برای دوستانت بفرست"  # D62
+    assert (
+        m.text == f"{title}\n\nمتن خبر\n\n{grid}\n\n{lock}\nvless://a@203.0.113.9:443#x\n\n{share}\n—\n{tag}"
+    )
     got = [(covered(m, e), e.offset, e.length, e.document_id) for e in m.entities if e.kind == "custom_emoji"]
     assert m.text.startswith(TITLE_MARK)  # a plain emoji: no entity at offset 0 (iOS)
     assert got == [

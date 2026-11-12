@@ -389,6 +389,10 @@ REALITY_NAME: Final = "کانفیگ V2Ray"
 CONFIG_VALIDITY_HOURS: Final = 48
 # The line over the channel tag, under the link part (decision D50).
 SIGN_OFF: Final = "—"
+# Over the sign-off (decision D62, the owner, 2026-11-12): proxies forwarded reach strangers, whose
+# connections are what the @MTProxybot sponsor turns into members. 📲 is drawn in the channel's own
+# emoji pack (proxyhub/posts/emoji_art.py).
+SHARE_LINE: Final = "📲 این پست را برای دوستانت بفرست"
 # An MTProto link's word when the post names it after an operator (decision D50), in the order a
 # post shows them; any other link is «پروکسی».
 OPERATOR_WORDS: Final[dict[str, str]] = {"mci": "همراه اول", "irancell": "ایرانسل", "rightel": "رایتل"}
@@ -657,8 +661,8 @@ def _reality_block(links: Sequence[PostLink], texts: StatusTexts) -> str:
 
 
 def post_tail(links: Sequence[PostLink], channel_username: str, texts: StatusTexts) -> str:
-    """Everything under the content: the proxy grid, the configs, the closing line, then «—» and the
-    channel tag (D50)."""
+    """Everything under the content: the proxy grid, the configs, the closing line, then the share
+    line (D62), «—» and the channel tag (D50)."""
     mtproto = [x for x in links if x.kind == "mtproto"]
     reality = [x for x in links if x.kind == "reality"]
     parts: list[str] = []
@@ -668,7 +672,8 @@ def post_tail(links: Sequence[PostLink], channel_username: str, texts: StatusTex
         parts.append(_reality_block(reality, texts))
     if links and all(x.dead for x in links):
         parts.append(ALL_DEAD_LINE)
-    parts.append(f"{SIGN_OFF}\n{TAG_PREFIX}{LRM}{html.escape(channel_tag(channel_username), quote=False)}")
+    tag = html.escape(channel_tag(channel_username), quote=False)
+    parts.append(f"{SHARE_LINE}\n{SIGN_OFF}\n{TAG_PREFIX}{LRM}{tag}")
     return "\n\n".join(parts)
 
 
