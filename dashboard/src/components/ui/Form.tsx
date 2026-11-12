@@ -170,7 +170,7 @@ export function Toggle({
           on,
         )}
       >
-        <RSwitch.Thumb className="block size-6 translate-x-[-2px] rounded-full bg-white shadow-md transition-transform duration-200 will-change-transform data-[state=checked]:translate-x-[-22px]" />
+        <RSwitch.Thumb className="block size-6 translate-x-[-2px] rounded-full bg-[#fffdf9] shadow-[0_1px_3px_rgb(0_0_0/0.35),0_0_0_0.5px_rgb(0_0_0/0.12)] transition-transform duration-200 will-change-transform data-[state=checked]:translate-x-[-22px]" />
       </RSwitch.Root>
     </div>
   );
