@@ -47,7 +47,7 @@ from proxyhub.content import clean
 from proxyhub.content.items import FetchedItem
 from proxyhub.content.media import MediaInfo
 from proxyhub.content.messages import media_error_fa
-from proxyhub.content.sources import Source
+from proxyhub.content.sources import Source, column_chars
 from proxyhub.db.models import Outbox
 from proxyhub.db.models_content import CANDIDATE_STATUSES, ContentCandidate, ContentMedia
 from proxyhub.db.models_posts import Post
@@ -61,6 +61,10 @@ MAX_BODY: Final = clean.MAX_BODY_CHARS
 KEEP_ENDED: Final = timedelta(days=14)  # rows of ended candidates (no media) kept for de-duplication
 OWNER_STATUSES: Final = ("pending", "approved", "rejected")
 EDITABLE: Final = ("pending", "approved")
+# The columns' own lengths: a longer address (any plugin) is not stored rather than failing the
+# whole source's insert.
+MAX_LINK_CHARS: Final = column_chars(ContentCandidate.url)
+MAX_MEDIA_URL_CHARS: Final = column_chars(ContentCandidate.media_url)
 Sort = Literal["new", "views", "hot"]
 _SPACES = re.compile(r"[ \t]+")
 
@@ -238,6 +242,10 @@ def _when(item: FetchedItem, now: datetime) -> datetime:
     return item.published_at or now
 
 
+def _fits(value: str | None, limit: int) -> str | None:
+    return value if value and len(value) <= limit else None
+
+
 async def _recent_norms(db: Db, now: datetime) -> list[tuple[int, str]]:
     rows = (
         await db.execute(
@@ -290,17 +298,19 @@ async def store_items(
             skipped += 1
             proxy_posts += 1
             continue
-        if not text and (item.media is None or (item.media.url is None and item.media.thumb_url is None)):
+        media = item.media
+        media_url = _fits(media.url, MAX_MEDIA_URL_CHARS) if media else None
+        thumb_url = _fits(media.thumb_url, MAX_MEDIA_URL_CHARS) if media else None
+        if not text and media_url is None and thumb_url is None:
             skipped += 1
             continue
         norm = clean.norm_text(text)
         original = next((cid for cid, other in norms if clean.similar(norm, other)), None)
         title, body = clean.split_caption(text)  # Claude's caption replaces it on approval (QC)
         title, body = title[:MAX_TITLE_CHARS], body[:MAX_BODY]
-        media = item.media
         media_state = "none"
         if media is not None:
-            media_state = "waiting" if media.url else "failed"
+            media_state = "waiting" if media_url else "failed"
         inserted = (
             await db.execute(
                 pg_insert(ContentCandidate)
@@ -309,7 +319,7 @@ async def store_items(
                     source_kind=source.kind,
                     source_label=source.label,
                     external_id=item.external_id,
-                    url=item.url,
+                    url=_fits(item.url, MAX_LINK_CHARS),
                     published_at=item.published_at,
                     views=item.views,
                     source_text=text,
@@ -319,10 +329,10 @@ async def store_items(
                     status="duplicate" if original is not None else "pending",
                     duplicate_of=original,
                     media_kind=media.kind if media else None,
-                    media_url=media.url if media else None,
-                    thumb_url=media.thumb_url if media else None,
+                    media_url=media_url,
+                    thumb_url=thumb_url,
                     media_state=media_state,
-                    media_error="no_url" if media is not None and not media.url else None,
+                    media_error="no_url" if media is not None and not media_url else None,
                     created_at=now,
                     updated_at=now,
                 )

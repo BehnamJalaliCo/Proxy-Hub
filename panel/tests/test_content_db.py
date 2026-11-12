@@ -286,6 +286,140 @@ async def test_a_round_reads_feeds_stores_candidates_and_downloads_photos(
         assert (ten["status"], ten["duplicate_of"]) == ("duplicate", one["id"])
 
 
+async def test_a_long_link_or_a_failing_store_never_stops_the_round(
+    engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine's promise: one source never holds up the others, an unknown failure is recorded
+    as ``internal``. A link longer than its column is stored as no link; a store that fails records
+    the error on its source and the round goes on (other sources, then the media)."""
+    long_link = "https://news.example/" + "خ" * 180  # 201 characters in a feed, 1101 once encoded
+    async with LocalSite(tmp_path) as site:
+        site.pages[("news.example", "/a.xml")] = Page(
+            body=feed(
+                f"<item><title>طولانی</title><description>{NEWS}</description><link>{long_link}</link>"
+                f"<guid>long</guid><pubDate>{format_datetime(T0)}</pubDate></item>"
+            ),
+            headers={"Content-Type": "application/rss+xml"},
+        )
+        site.pages[("news.example", "/b.xml")] = Page(
+            body=feed(
+                item(
+                    "b1",
+                    "فوتبال",
+                    OTHER_NEWS,
+                    T0,
+                    '<enclosure url="https://cdn.example/b.png" type="image/png"/>',
+                )
+            ),
+            headers={"Content-Type": "application/rss+xml"},
+        )
+        site.pages[("cdn.example", "/b.png")] = Page(
+            body=png(8, 8, seed=7), headers={"Content-Type": "image/png"}
+        )
+        a = await add(engine, "https://news.example/a.xml", "الف")
+        b = await add(engine, "https://news.example/b.xml", "ب")
+        clock = [T0]
+        eng = make_engine(engine, site, clock)
+        result = await eng.run_round()
+        assert result.read == {a.id: "ok:1", b.id: "ok:1"}
+        found = await all_candidates(engine)
+        assert found["long"]["url"] is None and found["long"]["status"] == "pending"
+        async with engine.connect() as conn:
+            state = {s.id: s for s in await sources.list_all(conn)}
+        assert all(
+            s.last_error is None and s.next_fetch_at == T0 + timedelta(minutes=5) for s in state.values()
+        )
+
+        # The first source's store fails (a bug of ours): it is recorded, the second is still read.
+        real_store = candidates.store_items
+
+        async def store(db: Any, source: sources.Source, items: Any, now: datetime) -> candidates.Stored:
+            if source.id == a.id:
+                raise RuntimeError("boom")
+            return await real_store(db, source, items, now)
+
+        monkeypatch.setattr(candidates, "store_items", store)
+        site.pages[("news.example", "/b.xml")] = Page(
+            body=feed(
+                item(
+                    "b2",
+                    "عکس روز",
+                    SUNSET,
+                    T0,
+                    '<enclosure url="https://cdn.example/b2.png" type="image/png"/>',
+                )
+            ),
+            headers={"Content-Type": "application/rss+xml"},
+        )
+        site.pages[("cdn.example", "/b2.png")] = Page(
+            body=png(8, 8, seed=8), headers={"Content-Type": "image/png"}
+        )
+        clock[0] = T0 + timedelta(minutes=5)
+        result = await eng.run_round()
+        assert result.read == {a.id: "internal", b.id: "ok:1"}
+        b2 = (await all_candidates(engine))["b2"]
+        assert result.media == {b2["id"]: "ok"}  # the media loop still ran
+        async with engine.connect() as conn:
+            state = {s.id: s for s in await sources.list_all(conn)}
+        assert (state[a.id].last_error, state[a.id].failures) == ("internal", 1)
+        assert state[a.id].next_fetch_at == clock[0] + sources.backoff(1)
+        assert state[b.id].last_error is None
+
+
+async def test_an_unknown_download_error_costs_a_try_not_the_round(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """A download that fails in a way the panel does not know (a bug, a library's own error) counts
+    as one of the file's 3 tries, and the files after it are still downloaded."""
+    source = await add(engine, "https://news.example/a.xml")
+    async with engine.begin() as conn:
+        await candidates.store_items(
+            conn,
+            source,
+            [
+                FetchedItem("old", None, T0 - timedelta(hours=1), OTHER_NEWS, media=MediaRef("photo", "https://cdn.example/old.png")),
+                FetchedItem("new", None, T0, NEWS, media=MediaRef("photo", "https://cdn.example/bad.png")),
+            ],
+            T0 - timedelta(minutes=1),
+        )  # fmt: skip
+    async with LocalSite(tmp_path) as site:
+        site.pages[("cdn.example", "/old.png")] = Page(
+            body=png(8, 8, seed=3), headers={"Content-Type": "image/png"}
+        )
+        clock = [T0]
+        eng = make_engine(engine, site, clock)
+        real = eng.http_factory
+
+        class Failing:
+            def __init__(self) -> None:
+                self.inner = real()
+
+            async def __aenter__(self) -> Failing:
+                await self.inner.__aenter__()
+                return self
+
+            async def __aexit__(self, *exc: object) -> None:
+                await self.inner.__aexit__(None, None, None)
+
+            async def get(self, url: str, **kwargs: Any) -> Any:
+                if url.endswith("/bad.png"):
+                    raise ValueError("not a FetchError")
+                return await self.inner.get(url, **kwargs)
+
+        eng.http_factory = Failing  # type: ignore[assignment]
+        found = await all_candidates(engine)
+        old, new = found["old"]["id"], found["new"]["id"]
+        result = await eng.run_round()
+        assert result.media == {new: "internal", old: "ok"}
+        for n in (2, 3):
+            clock[0] = T0 + timedelta(minutes=n)
+            assert (await eng.run_round()).media == {new: "internal"}
+        bad = (await all_candidates(engine))["new"]
+        assert (bad["media_state"], bad["media_tries"], bad["media_error"]) == ("failed", 3, "internal")
+        clock[0] = T0 + timedelta(minutes=4)
+        assert (await eng.run_round()).media == {}
+
+
 async def test_a_source_removed_takes_only_its_unreviewed_candidates(engine: AsyncEngine) -> None:
     source = await add(engine, "https://news.example/a.xml")
     items = [

@@ -234,7 +234,13 @@ class Engine:
             code = exc.code
         except Exception as exc:  # a parser bug must not stop the loop, nor print fetched text
             log.error("content: reading source %d failed (%s)", source.id, type(exc).__name__)
-        return await self._store(source, items, code, every)
+        if items is None:  # a database that is really down still stops the round (the loop backs off)
+            return await self._store(source, None, code, every)
+        try:
+            return await self._store(source, items, code, every)
+        except Exception as exc:  # one source's items must not stop the round; its transaction is gone
+            log.error("content: storing source %d failed (%s)", source.id, type(exc).__name__)
+            return await self._store(source, None, "internal", every)
 
     async def _store(
         self, source: sources.Source, items: list[FetchedItem] | None, code: str, every: timedelta
@@ -257,18 +263,24 @@ class Engine:
     async def _save_download(
         self, task: candidates.MediaTask, fetching: Awaitable[tuple[media.MediaInfo, bytes]]
     ) -> tuple[str, int]:
+        """Await one download and store it. An error of a kind the panel does not know (in the fetch
+        or in storing) counts as one of the file's tries (``internal``) instead of ending the round."""
         try:
             info, body = await fetching
+            async with self.engine.begin() as conn:
+                if await candidates.get(conn, task.candidate_id) is None:
+                    return "gone", 0
+                await candidates.save_media(conn, task, info, body, self.clock())
         except FetchError as exc:
             await self._failed(task, exc.code, final=exc.code in FINAL_ERRORS)
             return exc.code, 0
         except media.MediaRefused as exc:
             await self._failed(task, exc.code, final=True)
             return exc.code, 0
-        async with self.engine.begin() as conn:
-            if await candidates.get(conn, task.candidate_id) is None:
-                return "gone", 0
-            await candidates.save_media(conn, task, info, body, self.clock())
+        except Exception as exc:  # the type only: a message could carry fetched text
+            log.error("content: media of candidate %d failed (%s)", task.candidate_id, type(exc).__name__)
+            await self._failed(task, "internal", final=False)
+            return "internal", 0
         return "ok", len(body)
 
     async def _failed(self, task: candidates.MediaTask, code: str, *, final: bool) -> None:

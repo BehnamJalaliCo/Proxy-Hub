@@ -39,6 +39,16 @@ MAX_BACKOFF: Final = timedelta(hours=6)
 _SPACES = re.compile(r"\s+")
 
 
+def column_chars(column: Any) -> int:
+    """A string column's own length (``String(n)``): what may be stored in it."""
+    length = column.type.length
+    assert isinstance(length, int)
+    return length
+
+
+MAX_REF_CHARS: Final = column_chars(ContentSource.ref)
+
+
 def backoff(failures: int) -> timedelta:
     """The wait after ``failures`` errors in a row: 5 min, 10, 20, 40 ... at most 6 h."""
     minutes: int = 5 * 2 ** min(max(0, failures - 1), 10)
@@ -205,6 +215,8 @@ async def create(db: Db, *, kind: Any, ref: Any, label: Any, now: datetime) -> S
     if not isinstance(ref, str):
         raise SourceInvalid("telegram_name_invalid" if kind == "telegram" else "feed_url_invalid")
     ref = plugin.check_ref(ref)
+    if len(ref) > MAX_REF_CHARS:  # its normal form (a feed URL percent-encoded) is too long to keep
+        raise SourceInvalid("telegram_name_invalid" if kind == "telegram" else "feed_url_invalid")
     label = check_label(label, plugin.default_label(ref))
     count = int((await db.execute(select(func.count()).select_from(ContentSource))).scalar_one())
     if count >= MAX_SOURCES:

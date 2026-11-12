@@ -8,7 +8,10 @@ The preview page below follows the markup of Telegram's real public preview (t.m
 
 from __future__ import annotations
 
+import contextlib
 import gzip
+import ssl
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,6 +21,7 @@ from test_content_support import LocalSite, Page, jpeg_header, mp4, png, site_ht
 from proxyhub.content import clean, media
 from proxyhub.content.items import SourceInvalid
 from proxyhub.content.net import (
+    MAX_URL_CHARS,
     FetchError,
     GuardedBackend,
     SafeHttp,
@@ -65,6 +69,17 @@ def test_good_urls_are_normalized() -> None:
     )
     assert check_url("https://t.me/s/bbcpersian") == "https://t.me/s/bbcpersian"
     assert valid_hostname("cdn4.telesco.pe") and not valid_hostname("CDN.example")
+
+
+def test_the_normalized_url_is_bounded_too() -> None:
+    """Percent-encoding makes a Persian slug six times longer: the RESULT is what gets stored."""
+    head = "https://news.example/"
+    with pytest.raises(FetchError, match="bad_url"):
+        check_url(head + "خ" * 400)  # 421 characters in, 2421 out
+    exact = head + "a" * (MAX_URL_CHARS - len(head))
+    assert check_url(exact) == exact
+    with pytest.raises(FetchError, match="bad_url"):
+        check_url(exact + "a")
 
 
 @pytest.mark.parametrize(
@@ -134,6 +149,8 @@ async def test_a_page_is_read_and_every_redirect_hop_is_checked(tmp_path: Path) 
             ("http://news.example/feed", "bad_url"),
             ("https://127.0.0.1/feed", "bad_url"),
             ("https://news.example:8443/feed", "bad_url"),
+            ("https://[", "bad_redirect"),  # urljoin itself refuses it (ValueError)
+            ("//[x", "bad_redirect"),
         ):
             site.pages[("news.example", "/away")] = Page(301, headers={"Location": location})
             with pytest.raises(FetchError, match=code):
@@ -168,6 +185,47 @@ async def test_bodies_are_bounded_also_when_compressed(tmp_path: Path) -> None:
         assert (await http.get("https://news.example/small.gz", limit=100)).body == b"ok"
         with pytest.raises(FetchError, match="bad_encoding"):
             await http.get("https://news.example/br", limit=100)
+
+
+class _Stream:
+    """A response whose body read fails the way a TLS alert after the handshake does."""
+
+    status = 200
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+        self.headers = [(b"Content-Type", b"text/xml")]
+
+    async def aiter_stream(self) -> AsyncIterator[bytes]:
+        yield b"<rss>"
+        raise self.error
+
+
+class _Pool:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    @contextlib.asynccontextmanager
+    async def stream(self, *args: object, **kwargs: object) -> AsyncIterator[_Stream]:
+        yield _Stream(self.error)
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (ssl.SSLError(1, "certificate required"), "connect_failed"),
+        (ConnectionResetError(), "connect_failed"),
+        (TimeoutError(), "timeout"),
+    ],
+)
+async def test_every_error_of_a_read_is_a_fetch_error(error: BaseException, code: str) -> None:
+    http = SafeHttp()
+    http._pool = _Pool(error)  # type: ignore[assignment]
+    with pytest.raises(FetchError, match=code):
+        await http.get("https://news.example/feed", limit=1000)
 
 
 async def test_the_certificate_is_checked_for_the_name(tmp_path: Path) -> None:
@@ -393,6 +451,21 @@ async def test_a_feed_is_read_over_the_guard(tmp_path: Path) -> None:
 def test_bad_feed_urls(raw: str) -> None:
     with pytest.raises(SourceInvalid, match="feed_url_invalid"):
         RssFeed().check_ref(raw)
+
+
+def test_long_entry_links_leave_the_parser_bounded() -> None:
+    """An agency's link carries the whole headline as its slug: what leaves the plugin is still a
+    URL :func:`check_url` accepted, never longer than :data:`MAX_URL_CHARS`."""
+    slug = "خ" * 400
+    document = (
+        f"<rss><channel><item><title>t</title><link>https://news.example/{slug}</link><guid>g1</guid>"
+        f'<enclosure url="https://cdn.example/{slug}.jpg" type="image/jpeg"/></item>'
+        f"<item><title>t2</title><link>https://news.example/{'خ' * 180}</link><guid>g2</guid></item>"
+        "</channel></rss>"
+    )
+    first, second = parse_feed(document.encode())
+    assert first.url is None and first.media is None  # each over 2048 once encoded
+    assert second.url is not None and 1024 < len(second.url) <= MAX_URL_CHARS
 
 
 # --- cleaning and captions ------------------------------------------------------------------------

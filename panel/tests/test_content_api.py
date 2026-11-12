@@ -105,6 +105,8 @@ async def test_the_owner_adds_changes_and_removes_sources(client: AsyncClient) -
         ({"kind": "telegram", "ref": "https://t.me/joinchat/x"}, 422, "telegram_name_invalid"),
         ({"kind": "rss", "ref": "http://news.example/f"}, 422, "feed_url_invalid"),
         ({"kind": "rss", "ref": "https://169.254.169.254/latest"}, 422, "feed_url_invalid"),
+        # 121 characters typed, 621 once percent-encoded: longer than the column (was a bare 500)
+        ({"kind": "rss", "ref": "https://news.example/" + "خ" * 100}, 422, "feed_url_invalid"),
         ({"kind": "instagram", "ref": "x"}, 422, "kind_invalid"),
         ({"kind": "rss", "ref": "https://news.example/f", "label": "x" * 81}, 422, "label_invalid"),
         ({"kind": "rss", "ref": "https://news.example/f", "extra": 1}, 422, "invalid_request"),
