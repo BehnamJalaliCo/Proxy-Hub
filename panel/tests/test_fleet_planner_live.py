@@ -13,7 +13,17 @@ from decimal import Decimal
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
-from test_fleet_planner import NOW, account, creates, full_fleet, node, offers_for, open_settings, plan_for
+from test_fleet_planner import (
+    NOW,
+    account,
+    check_budget,
+    creates,
+    full_fleet,
+    node,
+    offers_for,
+    open_settings,
+    plan_for,
+)
 from test_fleet_support import LOCATIONS, server
 
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
@@ -222,6 +232,7 @@ def test_live_fleet_never_breaks_a_cap_or_skips_the_delete_gate(snap: FleetSnaps
     live = [n for n in snap.nodes if n.state in LIVE_STATES]
     allowed = [a for a in plan.actions if a.action == "create" and a.allowed]
     STATS["examples"] += 1
+    check_budget(snap, plan)
     if allowed:
         STATS["creates"] += 1
         assert not s.kill_switch and s.budget_cap_eur is not None and s.node_cap_total is not None

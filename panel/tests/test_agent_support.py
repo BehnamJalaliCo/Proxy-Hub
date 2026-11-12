@@ -48,6 +48,8 @@ AGENT_TABLES = (
     "agent_registration_tokens",
     "agent_ca_certificates",
 )
+TEST_PREFIX = "agent-test-"  # the names of the nodes and accounts create_node makes
+REGISTRATION_DOMAIN = ".proxy.example.com"  # the hosts of the registrations create_registration makes
 
 requires_go = pytest.mark.skipif(
     shutil.which("go") is None or not (AGENT_DIR / "go.mod").exists(),
@@ -147,9 +149,32 @@ def reset_config_caches() -> None:
     reset_runtime_cache()
 
 
-async def clean_agent_tables(engine: AsyncEngine) -> None:
+async def clean_agent_rows(engine: AsyncEngine) -> None:
+    """Empty the agent tables and drop every row create_node/create_registration made.
+
+    Run at setup and at teardown: a leftover 'booting' agent-test node is a node the MTProto
+    policy configures, so it would leak into every later test that runs the policy over the whole
+    table (tests/test_wstls_db.py, tests/test_mtproto_*.py).
+    """
     async with engine.begin() as conn:
         await conn.execute(text(f"TRUNCATE {', '.join(AGENT_TABLES)}"))
+        # node_events and mtproxy_stats reference nodes / registrations without ON DELETE CASCADE.
+        await conn.execute(
+            text("DELETE FROM node_events WHERE node_id IN (SELECT id FROM nodes WHERE name LIKE :p)"),
+            {"p": f"{TEST_PREFIX}%"},
+        )
+        await conn.execute(
+            text(
+                "DELETE FROM mtproxy_stats WHERE registration_id IN "
+                "(SELECT id FROM mtproxy_registrations WHERE host LIKE :h)"
+            ),
+            {"h": f"%{REGISTRATION_DOMAIN}"},
+        )
+        await conn.execute(text("DELETE FROM nodes WHERE name LIKE :p"), {"p": f"{TEST_PREFIX}%"})
+        await conn.execute(
+            text("DELETE FROM mtproxy_registrations WHERE host LIKE :h"), {"h": f"%{REGISTRATION_DOMAIN}"}
+        )
+        await conn.execute(text("DELETE FROM hetzner_accounts WHERE name LIKE :p"), {"p": f"{TEST_PREFIX}%"})
 
 
 async def create_node(engine: AsyncEngine, state: str = "booting") -> uuid.UUID:
@@ -161,14 +186,14 @@ async def create_node(engine: AsyncEngine, state: str = "booting") -> uuid.UUID:
                 "INSERT INTO hetzner_accounts (id, name, token_secret_name, state) "
                 "VALUES (:id, :name, 'agent-test-token-file-name', 'active')"
             ),
-            {"id": account_id, "name": f"agent-test-{account_id}"},
+            {"id": account_id, "name": f"{TEST_PREFIX}{account_id}"},
         )
         await conn.execute(
             text(
                 "INSERT INTO nodes (id, account_id, name, location, server_type, state, is_test) "
                 "VALUES (:id, :acc, :name, 'fsn1', 'cpx12', :state, true)"
             ),
-            {"id": node_id, "acc": account_id, "name": f"agent-test-{node_id}", "state": state},
+            {"id": node_id, "acc": account_id, "name": f"{TEST_PREFIX}{node_id}", "state": state},
         )
     return node_id
 
@@ -181,7 +206,7 @@ async def create_registration(engine: AsyncEngine, secret_name: str) -> uuid.UUI
                 "INSERT INTO mtproxy_registrations (id, host, port, secret_name, state) "
                 "VALUES (:id, :host, 443, :name, 'registered')"
             ),
-            {"id": reg_id, "host": f"n-{reg_id.hex[:8]}.proxy.example.com", "name": secret_name},
+            {"id": reg_id, "host": f"n-{reg_id.hex[:8]}{REGISTRATION_DOMAIN}", "name": secret_name},
         )
     return reg_id
 

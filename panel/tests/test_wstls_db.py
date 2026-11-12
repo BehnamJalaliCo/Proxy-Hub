@@ -417,6 +417,7 @@ async def test_migration_0018_backfills_paths_and_keeps_old_configs_reality(migr
         await asyncio.to_thread(downgrade, "0017_merge")
         await asyncio.to_thread(migrate, "head")
     finally:
+        await asyncio.to_thread(migrate, "head")  # the next tests need the whole schema
         async with engine.begin() as conn:
             await conn.execute(text("DELETE FROM cf_records WHERE zone_id = :z"), {"z": "e" * 32})
             await conn.execute(text("DELETE FROM cf_zones WHERE id = :z"), {"z": "e" * 32})

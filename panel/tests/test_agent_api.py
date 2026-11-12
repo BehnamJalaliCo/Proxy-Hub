@@ -12,6 +12,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,8 +29,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from test_agent_support import (
     FP_HEADER,
     PROXY_HEADER,
+    REGISTRATION_DOMAIN,
+    TEST_PREFIX,
     SecretFiles,
-    clean_agent_tables,
+    clean_agent_rows,
     create_node,
     create_registration,
     reset_config_caches,
@@ -98,16 +101,24 @@ class Env:
 
 @pytest.fixture
 async def env(migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Env]:
+    async with open_env(migrated_db, tmp_path, monkeypatch) as opened:
+        yield opened
+
+
+@asynccontextmanager
+async def open_env(migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Env]:
+    """The ``env`` fixture's body, callable from a test that checks what its teardown leaves."""
     from proxyhub.api.app import app
 
     files = write_secret_files(tmp_path / "secrets")
     use_secret_files(monkeypatch, files)
     engine = create_async_engine(migrated_db)
-    await clean_agent_tables(engine)
+    await clean_agent_rows(engine)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="https://agent.test") as client:
             yield Env(engine=engine, files=files, client=client)
     finally:
+        await clean_agent_rows(engine)
         await engine.dispose()
         await get_engine().dispose()
         reset_config_caches()
@@ -1000,3 +1011,43 @@ async def test_migration_matches_models(env: Env) -> None:
 
     ours = [c for c in changes if table_of(c) is not None]
     assert ours == [], json.dumps([repr(c) for c in ours])
+
+
+# --- test hygiene -------------------------------------------------------------------------------
+
+
+async def test_env_teardown_leaves_no_agent_rows(
+    migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leftover 'booting' agent-test node is one the MTProto policy configures, so it would leak
+    into every later test that runs the policy over the whole table (tests/test_wstls_db.py)."""
+    async with open_env(migrated_db, tmp_path, monkeypatch) as opened:
+        node_id, fp = await registered(opened)
+        reg_id = await create_registration(opened.engine, "alice")
+        async with opened.maker()() as session:
+            await set_telemt_node_config(session, node_id, ports=[443], tls_domain="cdn.example.com")
+            await create_telemt_user(session, opened.seal_key, node_id, "alice", registration_id=reg_id)
+            await session.commit()
+        resp = await opened.client.post("/agent/v1/report", json=report_body(), headers=opened.headers(fp))
+        assert resp.status_code == 204, resp.text
+        # The two rows whose foreign keys do not cascade: the teardown must remove them first.
+        assert await opened.rows("SELECT 1 FROM node_events WHERE node_id = :n", n=node_id)
+        assert await opened.rows("SELECT 1 FROM mtproxy_stats WHERE registration_id = :r", r=reg_id)
+
+    engine = create_async_engine(migrated_db)
+    try:
+        async with engine.connect() as conn:
+            left = (
+                await conn.execute(
+                    text(
+                        "SELECT (SELECT count(*) FROM nodes WHERE name LIKE :p), "
+                        "(SELECT count(*) FROM hetzner_accounts WHERE name LIKE :p), "
+                        "(SELECT count(*) FROM mtproxy_registrations WHERE host LIKE :h), "
+                        "(SELECT count(*) FROM telemt_users)"
+                    ),
+                    {"p": f"{TEST_PREFIX}%", "h": f"%{REGISTRATION_DOMAIN}"},
+                )
+            ).one()
+    finally:
+        await engine.dispose()
+    assert tuple(left) == (0, 0, 0, 0)

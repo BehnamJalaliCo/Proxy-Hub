@@ -17,8 +17,10 @@ pytestmark = pytest.mark.db
 async def test_migrations_round_trip(migrated_db: str) -> None:
     from proxyhub.cli import downgrade, migrate
 
-    await asyncio.to_thread(downgrade, "base")
-    await asyncio.to_thread(migrate, "head")
+    try:
+        await asyncio.to_thread(downgrade, "base")
+    finally:
+        await asyncio.to_thread(migrate, "head")  # the next tests need the whole schema
     engine = create_async_engine(migrated_db)
     async with engine.connect() as conn:
         tables = set(
