@@ -60,6 +60,34 @@ tests:
               summary: "دیتابیس پنل پاسخ نمیدهد"
               description: "API پنل بیش از ۱ دقیقه به PostgreSQL وصل نشده است."
 
+  # A worker loop (dns, every 60 s) stops finishing passes: over 3 x 60 s + 900 s from minute 19,
+  # firing 5 minutes later. The healthy loop (acme) never alerts.
+  - interval: 1m
+    input_series:
+      - series: 'proxyhub_reconciler_last_success_age_seconds{job="proxyhub-api", instance="api:8000", name="dns"}'
+        values: "0+60x40"
+      - series: 'proxyhub_reconciler_interval_seconds{job="proxyhub-api", instance="api:8000", name="dns"}'
+        values: "60x40"
+      - series: 'proxyhub_reconciler_last_success_age_seconds{job="proxyhub-api", instance="api:8000", name="acme"}'
+        values: "30x40"
+      - series: 'proxyhub_reconciler_interval_seconds{job="proxyhub-api", instance="api:8000", name="acme"}'
+        values: "300x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ReconcilerStalled
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ReconcilerStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: proxyhub-api
+              instance: "api:8000"
+              name: dns
+            exp_annotations:
+              summary: "چرخه‌ی کنترل dns در worker پنل کارش را تمام نمیکند"
+              description: "چرخه‌ی dns مدتی است هیچ دوری را با موفقیت تمام نکرده است (هر بار خطا میدهد یا گیر کرده). جزئیات در لاگ worker است."
+
   # API scrape fails for more than 2 minutes.
   - interval: 15s
     input_series:

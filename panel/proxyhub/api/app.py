@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -22,6 +22,7 @@ from proxyhub.config import get_config
 from proxyhub.db.models import ACCOUNT_STATES
 from proxyhub.db.session import get_engine
 from proxyhub.fleet.lifecycle import NodeState
+from proxyhub.reconcilers.base import LOOP_KEY_PREFIX
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,14 @@ OUTBOX_PENDING = Gauge("proxyhub_outbox_pending_jobs", "Telegram outbox jobs tha
 OUTBOX_OLDEST_DUE_AGE = Gauge(
     "proxyhub_outbox_oldest_due_age_seconds",
     "Seconds the oldest due, unfinished outbox job has been waiting (0 if none).",
+)
+RECONCILER_SUCCESS_AGE = Gauge(
+    "proxyhub_reconciler_last_success_age_seconds",
+    "Seconds since a worker loop last finished a pass (+Inf: it has only failed so far).",
+    ["name"],
+)
+RECONCILER_INTERVAL = Gauge(
+    "proxyhub_reconciler_interval_seconds", "A worker loop's normal time between passes.", ["name"]
 )
 METRICS_ERRORS = Counter(
     "proxyhub_metrics_collect_errors", "Failures while collecting panel metrics, by part.", ["part"]
@@ -139,7 +148,14 @@ async def _collect_db_metrics() -> None:
                 )
             )
         ).one()
+        loops = (
+            await conn.execute(
+                text("SELECT key, value, now() AS at FROM settings WHERE key LIKE :p"),
+                {"p": LOOP_KEY_PREFIX + "%"},
+            )
+        ).all()
     DB_UP.set(1)
+    _set_loop_gauges(loops)
     WORKER_HEARTBEAT_AGE.set(math.inf if heartbeat_age is None else float(heartbeat_age))
     node_counts = {state.value: 0 for state in NodeState} | {str(s): int(n) for s, n in nodes}
     for state, count in node_counts.items():
@@ -151,6 +167,28 @@ async def _collect_db_metrics() -> None:
     OUTBOX_OLDEST_DUE_AGE.set(float(oldest_due))
 
 
+def _set_loop_gauges(rows: Sequence[Any]) -> None:
+    """One series per loop record (proxyhub/reconcilers/base.py); a malformed record is skipped."""
+    RECONCILER_SUCCESS_AGE.clear()
+    RECONCILER_INTERVAL.clear()
+    for key, value, at in rows:
+        if not isinstance(value, dict):
+            continue
+        name = str(key).removeprefix(LOOP_KEY_PREFIX)
+        try:
+            interval = float(value["interval_s"])
+            ok_at = value.get("ok_at")
+            age = (
+                math.inf
+                if ok_at is None
+                else max((at - datetime.fromisoformat(str(ok_at))).total_seconds(), 0.0)
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        RECONCILER_SUCCESS_AGE.labels(name=name).set(age)
+        RECONCILER_INTERVAL.labels(name=name).set(interval)
+
+
 def _mark_db_down() -> None:
     """Unknown, not zero: stale numbers must not look healthy while the database is unreachable."""
     DB_UP.set(0)
@@ -159,6 +197,8 @@ def _mark_db_down() -> None:
     HETZNER_ACCOUNTS.clear()
     OUTBOX_PENDING.set(math.nan)
     OUTBOX_OLDEST_DUE_AGE.set(math.nan)
+    RECONCILER_SUCCESS_AGE.clear()
+    RECONCILER_INTERVAL.clear()
 
 
 async def collect_panel_metrics(redis: aioredis.Redis | None) -> None:

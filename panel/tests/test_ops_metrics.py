@@ -77,6 +77,34 @@ async def test_worker_heartbeat_age(client: AsyncClient, engine: AsyncEngine) ->
     assert 0 <= age < 10, age
 
 
+async def test_each_worker_loop_reports_the_age_of_its_last_finished_pass(
+    client: AsyncClient, engine: AsyncEngine
+) -> None:
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql("DELETE FROM settings WHERE key LIKE 'worker.loop.%'")
+        await conn.exec_driver_sql(
+            "INSERT INTO settings (key, value) VALUES "
+            "('worker.loop.dns', jsonb_build_object('ok_at', now() - interval '2 hours', 'interval_s', 60, "
+            "'failures', 7)), "
+            "('worker.loop.acme', '{\"failures\": 3, \"interval_s\": 300}'::jsonb), "
+            '(\'worker.loop.broken\', \'{"ok_at": "not a time", "interval_s": 15}\'::jsonb)'
+        )
+    try:
+        m = await _scrape(client)
+        age = m[("proxyhub_reconciler_last_success_age_seconds", (("name", "dns"),))]
+        assert 7200 <= age < 7260, age
+        assert m[("proxyhub_reconciler_interval_seconds", (("name", "dns"),))] == 60
+        assert math.isinf(
+            m[("proxyhub_reconciler_last_success_age_seconds", (("name", "acme"),))]
+        )  # never ok
+        assert ("proxyhub_reconciler_interval_seconds", (("name", "broken"),)) not in m  # skipped
+    finally:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql("DELETE FROM settings WHERE key LIKE 'worker.loop.%'")
+    m = await _scrape(client)
+    assert ("proxyhub_reconciler_interval_seconds", (("name", "dns"),)) not in m  # gone with its record
+
+
 async def test_fleet_and_outbox_gauges(client: AsyncClient, engine: AsyncEngine) -> None:
     from proxyhub.db.models import ACCOUNT_STATES
     from proxyhub.fleet.lifecycle import NodeState
