@@ -28,6 +28,7 @@ from test_telegram_support import (
     telegram_reachable,
 )
 
+from proxyhub.posts import settings as posting
 from proxyhub.reconcilers.telegram import TelegramOutboxReconciler
 from proxyhub.telegram import outbox, store
 from proxyhub.telegram.client import NetworkError, TelegramError, parse_api_response
@@ -91,6 +92,11 @@ async def setup(engine: AsyncEngine, vault: Vault, *, token: str | None = None) 
         await store.save_channel(conn, "test", channel(TEST_CHAT))
         await store.save_channel(conn, "main", channel(MAIN_CHAT))
     return token
+
+
+async def main_switch(conn: AsyncConnection, on: bool) -> None:
+    """The owner's main switch (posts.settings ``main_enabled``): off, nothing goes to MAIN."""
+    await posting.save(conn, posting.parse({**posting.DEFAULTS.as_json(), "main_enabled": on}))
 
 
 async def enqueue(conn: AsyncConnection, kind: str, payload: dict[str, Any]) -> int:
@@ -221,6 +227,7 @@ async def test_main_posts_wait_for_the_quiet_window_but_alerts_and_test_posts_do
     start = (local - timedelta(minutes=30)).strftime("%H:%M")
     end_local = (local + timedelta(hours=1)).replace(second=0, microsecond=0)
     async with engine.begin() as conn:
+        await main_switch(conn, on=True)
         await store.save_posting_settings(
             conn,
             store.PostingSettings(
@@ -243,6 +250,7 @@ async def test_post_interval_after_the_last_main_post(engine: AsyncEngine, vault
     await setup(engine, vault)
     now = datetime.now(UTC)
     async with engine.begin() as conn:
+        await main_switch(conn, on=True)
         await store.save_posting_settings(conn, store.PostingSettings(quiet_windows=[], post_interval_min=60))
         await conn.execute(
             text("INSERT INTO channel_posts (role, chat_id, message_id, kind, text_sha256, created_at) "
@@ -253,6 +261,38 @@ async def test_post_interval_after_the_last_main_post(engine: AsyncEngine, vault
         assert await outbox.pick(conn, now) is None
         assert (await job_row(conn, job)).not_before == now + timedelta(minutes=50)
         assert await outbox.pick(conn, now + timedelta(minutes=50)) is not None
+
+
+async def test_a_main_post_is_not_sent_once_the_owner_turned_main_posting_off(
+    engine: AsyncEngine, vault: Vault
+) -> None:
+    """As on the operator's path: a main post that waited (a no-post window, a 429, a paused bot)
+    while the owner switched main off is failed, never sent; test posts are not affected."""
+    await setup(engine, vault)
+    now = datetime.now(UTC)
+    async with engine.begin() as conn:
+        await store.save_posting_settings(conn, store.PostingSettings(quiet_windows=[], post_interval_min=0))
+        await main_switch(conn, on=False)
+        main = await enqueue(conn, "send_post", {"role": "main", "text": "m"})
+        assert await outbox.pick(conn, now) is None
+        row = await job_row(conn, main)
+        assert row.done_at is not None and row.last_error.startswith("failed: main_disabled")
+        logged = (
+            await conn.execute(
+                text("SELECT actor, target, reasons FROM actions_log WHERE action = 'posts.bot_not_sent'")
+            )
+        ).one()
+        assert (logged.actor, logged.target) == ("telegram", f"main:outbox:{main}")
+        assert logged.reasons["reasons"] == ["main_disabled"]
+        test_post = await enqueue(conn, "send_post", {"role": "test", "text": "t"})
+        picked = await outbox.pick(conn, now)
+        assert picked is not None and picked[0].id == test_post
+        await main_switch(conn, on=True)
+        again = await enqueue(conn, "send_post", {"role": "main", "text": "m"})
+        picked = await outbox.pick(conn, now)
+        assert picked is not None and (picked[0].id, picked[1].chat_id) == (again, MAIN_CHAT)
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM actions_log WHERE action = 'posts.bot_not_sent'"))
 
 
 # --- failures ------------------------------------------------------------------------------------

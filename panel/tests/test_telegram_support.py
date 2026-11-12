@@ -39,7 +39,8 @@ TELEGRAM_TABLES_SQL = (
     "DELETE FROM telegram_pacing",
     "DELETE FROM outbox",
     "DELETE FROM tg_updates",
-    "DELETE FROM settings WHERE key LIKE 'telegram.%'",
+    # 'posting': the owner's main switch, which the bot outbox reads for a main post.
+    "DELETE FROM settings WHERE key LIKE 'telegram.%' OR key = 'posting'",
     "DELETE FROM secrets WHERE name LIKE 'telegram:%'",
     "DELETE FROM actions_log WHERE action LIKE 'telegram.%'",
 )
