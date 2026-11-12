@@ -256,9 +256,14 @@ class ChannelStatsReconciler(Reconciler):
         raise NotImplementedError("this loop manages its own transactions (try_run_once)")
 
     async def try_run_once(self, engine: AsyncEngine) -> bool:
+        """True after a finished pass, including one that found the next read not due yet (the
+        loop wakes every minute but reads every CHANNEL_STATS_INTERVAL); False only when another
+        holder had the operator account's lock. The worker records a pass that returned True as
+        alive (proxyhub/reconcilers/base.py), so a quiet wait never looks like a stalled loop
+        (P34: ReconcilerStalled fired 18 minutes after every read)."""
         now = self._clock()
         if self.next_at is not None and now < self.next_at:
-            return False
+            return True
 
         async def step() -> None:
             if self._vault is None:

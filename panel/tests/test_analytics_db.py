@@ -490,11 +490,15 @@ async def test_channel_stats_loop_runs_only_with_kill_switch_off_and_a_connected
     assert await loop.try_run_once(engine) and loop.last_outcome == "not_connected"
     await seed_connected(engine, vault, port=free_closed_port())
     assert await loop.try_run_once(engine) and loop.last_outcome == "failed:telegram_unavailable"
-    assert not await loop.try_run_once(engine)  # not due again for 3 hours
-    assert await rows(engine, "SELECT 1 FROM analytics_channel_stats") == []
     async with engine.connect() as conn:
         status = await store.get_setting(conn, STATUS_KEY)
     assert status is not None and status["channel_stats"]["outcome"] == "failed:telegram_unavailable"
+    # Not due again for 3 hours: the pass finishes (True, so the worker records the loop as alive
+    # and ReconcilerStalled stays quiet, P34) without reading anything or writing a new status.
+    assert await loop.try_run_once(engine) and loop.last_outcome == "failed:telegram_unavailable"
+    assert await rows(engine, "SELECT 1 FROM analytics_channel_stats") == []
+    async with engine.connect() as conn:
+        assert await store.get_setting(conn, STATUS_KEY) == status
 
 
 # --- the analytics loop ---------------------------------------------------------------------------
