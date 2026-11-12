@@ -57,6 +57,15 @@ func (u *Usage) Observe(name, generation string, raw uint64) {
 	e.LastRaw = raw
 }
 
+// Restarted records that the counters began again at zero (the service restarted). Observe alone
+// sees a restart only when a counter went down; one that has already passed its old value would
+// otherwise lose the old value from the total.
+func (u *Usage) Restarted() {
+	for _, e := range u.Users {
+		e.LastRaw = 0
+	}
+}
+
 // Total returns the cumulative octets of a user with the given secret generation.
 func (u *Usage) Total(name, generation string) uint64 {
 	if e := u.Users[name]; e != nil && e.Generation == generation {

@@ -22,15 +22,21 @@ import (
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/xray"
 )
 
-// targetRecheck is how often the REALITY target (or a passed own-TLS check) is checked again.
+// targetRecheck is how often a passed REALITY target (or own-TLS) check is checked again.
 const targetRecheck = 6 * time.Hour
+
+// targetRetry: a failed REALITY target check is repeated this often. One dropped dial must not stand
+// for hours: the panel renews and creates configs only on a node whose check passed (D41). Longer
+// than ownTLSRetry because this dial goes to a third-party site, not to loopback.
+const targetRetry = 5 * time.Minute
 
 // ownTLSRetry: a failed own-TLS check is repeated this often (it is local and cheap; right after a
 // restart Xray may simply not listen yet).
 const ownTLSRetry = time.Minute
 
 // downRestart: an Xray whose API does not answer although its config is in place is restarted, at
-// most this often (systemd restarts it after a crash already; this covers a clean exit).
+// most this often (systemd restarts it after a crash already; this covers a clean exit). Telemt
+// likewise, once its metrics have not answered for this long (agent.go, telemtDown).
 const downRestart = 2 * time.Minute
 
 // Certificate files: readable by the Xray user (owner) and group, nobody else.
@@ -68,6 +74,9 @@ type xrayRuntime struct {
 	certChecked   string
 	targetAt      time.Time
 	lastRestart   time.Time
+	// scrapedAt: when the last scrape that worked began (this process only, so a.now's monotonic
+	// reading applies): an uptime shorter than the time since then means Xray restarted meanwhile.
+	scrapedAt time.Time
 	// xhttpPort: the port of the VLESS + XHTTP + REALITY inbound in the config last applied without
 	// an error (0: none). Reported while Xray is up, so the panel publishes XHTTP links only for a
 	// node that really serves them.
@@ -126,6 +135,7 @@ func (a *Agent) ScrapeXray(ctx context.Context) {
 	if a.xr == nil {
 		return
 	}
+	at := a.now()
 	uptime, err := a.xr.api.Uptime(ctx)
 	var counted xray.Traffic
 	if err == nil {
@@ -135,21 +145,42 @@ func (a *Agent) ScrapeXray(ctx context.Context) {
 		a.xr.up, a.xr.uptimeS, a.xr.split = false, nil, false
 		return
 	}
-	traffic := counted.Users
+	a.foldXray(at, uptime, counted)
+}
+
+// foldXray takes one scrape that worked (begun at "at"). Xray's counters run from its start, so a
+// restart since the last scrape is told to the tracker first: one the agent did itself (flagged),
+// or any other (a crash, systemd) by an uptime shorter than the time since that scrape. Without
+// it, a new counter that has already passed the old value would lose the old value. Xray truncates
+// its uptime to whole seconds, hence the +1: an Xray that answered the last scrape is never taken
+// for a restarted one.
+func (a *Agent) foldXray(at time.Time, uptime uint32, counted xray.Traffic) {
+	restarted := a.local.XrayCountersFresh ||
+		(!a.xr.scrapedAt.IsZero() && float64(uptime)+1 <= at.Sub(a.xr.scrapedAt).Seconds())
+	a.xr.scrapedAt = at
+	save := false
+	if restarted {
+		a.local.XrayUsage.Restarted()
+		a.local.XrayCountersFresh = false
+		save = true
+	}
 	up := float64(uptime)
 	a.xr.up, a.xr.uptimeS = true, &up
 	a.xr.uplink, a.xr.downlink, a.xr.split = counted.Uplink, counted.Downlink, true
-	if a.doc == nil || a.doc.Xray == nil {
+	if a.doc != nil && a.doc.Xray != nil {
+		keep := map[string]bool{}
+		for _, u := range a.doc.Xray.Users {
+			keep[u.Email] = true
+			if raw, ok := counted.Users[u.Email]; ok {
+				a.local.XrayUsage.Observe(u.Email, enforce.Generation(u.ID), raw)
+			}
+		}
+		a.local.XrayUsage.Prune(keep)
+		save = true
+	}
+	if !save {
 		return
 	}
-	keep := map[string]bool{}
-	for _, u := range a.doc.Xray.Users {
-		keep[u.Email] = true
-		if raw, ok := traffic[u.Email]; ok {
-			a.local.XrayUsage.Observe(u.Email, enforce.Generation(u.ID), raw)
-		}
-	}
-	a.local.XrayUsage.Prune(keep)
 	if err := a.saveLocal(); err != nil {
 		a.log.Warn("could not save xray usage", "error", err.Error())
 	}
@@ -192,6 +223,10 @@ func (a *Agent) applyXray(ctx context.Context) (xray.TLSFiles, xray.Kind, error)
 		if err := a.xr.service.Stop(ctx); err != nil {
 			a.xr.applyErr = "xray_service_failed"
 			return files, xray.KindNone, err
+		}
+		a.local.XrayCountersFresh = true
+		if err := a.saveLocal(); err != nil {
+			a.log.Warn("could not save local state", "error", err.Error())
 		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			a.xr.applyErr = "xray_write_failed"
@@ -278,7 +313,7 @@ func (a *Agent) applyXray(ctx context.Context) (xray.TLSFiles, xray.Kind, error)
 		a.xr.applyErr = "xray_service_failed"
 		return files, xray.KindRestart, err
 	}
-	a.local.XrayRestartPending = false
+	a.local.XrayRestartPending, a.local.XrayCountersFresh = false, true
 	if err := a.saveLocal(); err != nil {
 		a.log.Warn("could not save local state", "error", err.Error())
 	}
@@ -369,13 +404,20 @@ func (a *Agent) liveUsers(ctx context.Context, plan xray.Plan) error {
 	return nil
 }
 
-// checkXrayTarget re-checks the REALITY target from this node when it changed or every few hours.
+// checkXrayTarget re-checks the REALITY target from this node when it changed, a few minutes after
+// a failure, and every few hours after a success.
 func (a *Agent) checkXrayTarget(ctx context.Context) {
 	x := a.doc.Xray
 	target, sni := x.Target, x.ServerNames[0]
-	if target == a.xr.targetChecked && sni == a.xr.sniChecked && a.xr.certChecked == "" &&
-		a.now().Sub(a.xr.targetAt) < targetRecheck {
-		return
+	same := target == a.xr.targetChecked && sni == a.xr.sniChecked && a.xr.certChecked == ""
+	if same && a.xr.targetOK != nil {
+		wait := targetRecheck
+		if !*a.xr.targetOK {
+			wait = targetRetry
+		}
+		if a.now().Sub(a.xr.targetAt) < wait {
+			return
+		}
 	}
 	ok := a.xr.checkTarget(ctx, target, sni, nil) == nil
 	a.xr.targetOK, a.xr.targetChecked, a.xr.sniChecked, a.xr.certChecked, a.xr.targetAt = &ok, target, sni, "", a.now()

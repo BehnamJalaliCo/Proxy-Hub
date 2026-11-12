@@ -14,7 +14,9 @@ Group=telemt
 WorkingDirectory=/var/lib/telemt
 ExecStart=/usr/local/bin/telemt /etc/telemt/telemt.toml
 ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
+# always, not on-failure: systemd counts exit 0 and death by SIGHUP (the reload signal) as a clean
+# stop and would leave Telemt down. Nothing on the node stops Telemt on purpose.
+Restart=always
 RestartSec=2
 # Rule 7: no process output is kept anywhere (log_level is "silent" as well).
 StandardOutput=null

@@ -12,4 +12,6 @@ RemainAfterExit=yes
 ExecStart=/usr/sbin/nft flush chain inet proxyhub boot_window
 
 [Install]
-WantedBy=multi-user.target
+# Not multi-user.target: ordered after cloud-final.service, which is After=multi-user.target on
+# Ubuntu (see proxyhub-agent.service).
+WantedBy=cloud-init.target
