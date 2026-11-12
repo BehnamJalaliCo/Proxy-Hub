@@ -405,6 +405,10 @@ PAUSED_LINE: Final = "⏸ فعلاً در دسترس نیست"
 # never used as a separator: next to Persian digits it reads as a zero ("۱ ·" looks like "۱۰"); the
 # words of the proxy grid are separated by a bullet with a space on each side (D48).
 LRM: Final = "\u200e"
+# Right-to-left mark: a Telegram client gives each line the direction of its first strong letter
+# (an emoji has none), so a Persian line whose first word is Latin ("API", "worker", "Redis") would
+# lay out left-to-right; with this mark in front it stays right-to-left.
+RLM: Final = "\u200f"
 MAX_LABEL_CHARS: Final = 32
 MAX_TITLE_CHARS: Final = 120
 MAX_VLESS_CHARS: Final = 2048

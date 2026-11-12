@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from proxyhub.telegram.templates import RLM
+
 ERRORS_FA: Final[dict[str, str]] = {
     "bot_token_invalid": (
         "توکن ربات درست نیست یا در BotFather باطل شده است. "
@@ -42,9 +44,10 @@ ERRORS_FA: Final[dict[str, str]] = {
 PAIRED_FA: Final = "✅ <b>این چت به Proxy-Hub وصل شد.</b>\nاز این پس هشدارها و پیام‌های پنل به همین چت میرسند."
 TEST_ALERT_FA: Final = "🧪 <b>پیام آزمایشی Proxy-Hub</b>\nهشدارهای پنل به همین چت میرسند."
 TEST_POST_FA: Final = "🧪 <b>پست آزمایشی Proxy-Hub</b>\nارسال و ویرایش پست در این کانال درست کار میکند."
+# Each line starts with a Latin word, so each starts with RLM to stay right-to-left (templates.RLM).
 API_DOWN_FA: Final = (
-    "🔴 <b>API پنل از دسترس خارج است</b>\n"
-    "worker سه بار پشت سر هم (در حدود ۳ دقیقه) نتوانست به API پنل برسد. "
+    f"{RLM}🔴 <b>API پنل از دسترس خارج است</b>\n"
+    f"{RLM}worker سه بار پشت سر هم (در حدود ۳ دقیقه) نتوانست به API پنل برسد. "
     "داشبورد و دریافت هشدارهای Alertmanager ممکن است کار نکنند."
 )
-API_BACK_FA: Final = "✅ <b>API پنل دوباره در دسترس است.</b>"
+API_BACK_FA: Final = f"{RLM}✅ <b>API پنل دوباره در دسترس است.</b>"

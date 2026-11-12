@@ -4,13 +4,16 @@ Alertmanager sent (tests/test_telegram_captured.py), dedupe, retry and the datab
 from __future__ import annotations
 
 import json
+import re
 import time
+import unicodedata
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from test_fleet_support import make_vault
@@ -48,7 +51,8 @@ from proxyhub.telegram.alerts import (
     send_direct,
 )
 from proxyhub.telegram.client import NetworkError
-from proxyhub.telegram.templates import MAX_MESSAGE_CHARS, utf16_len, visible_text
+from proxyhub.telegram.messages import API_BACK_FA, API_DOWN_FA, PAIRED_FA, TEST_ALERT_FA
+from proxyhub.telegram.templates import MAX_MESSAGE_CHARS, RLM, utf16_len, visible_text
 from proxyhub.vault import SecretValue, Vault
 
 ROUTE = "/internal/alerts/alertmanager"
@@ -65,10 +69,66 @@ def test_firing_message_from_the_real_body() -> None:
     text = render_alertmanager_message(hook(FIRING_WORKER_STALE).alerts)
     assert text == (
         "🚨 <b>هشدار Proxy-Hub</b>\n\n"
-        "🔴 <b>worker پنل از کار افتاده است</b>\n"
-        "آخرین ضربان worker ۳ دقیقه و ۲۰ ثانیه پیش بوده است (حد مجاز ۹۰ ثانیه). چرخه‌های کنترل اجرا نمیشوند.\n"
-        "⏱ از ساعت ۲۳:۵۴ (تهران)"  # 20:24:26Z = 23:54 in Tehran (UTC+03:30)
+        f"{RLM}🔴 <b>worker پنل از کار افتاده است</b>\n"
+        f"{RLM}آخرین ضربان worker ۳ دقیقه و ۲۰ ثانیه پیش بوده است (حد مجاز ۹۰ ثانیه). "
+        "چرخه‌های کنترل اجرا نمیشوند.\n"
+        f"{RLM}⏱ از ساعت ۲۳:۵۴ (تهران)"  # 20:24:26Z = 23:54 in Tehran (UTC+03:30)
     )
+
+
+def first_strong(line: str) -> str | None:
+    """The bidi class of the first strong letter Telegram shows on a line: it sets the line's direction."""
+    for ch in visible_text(line):
+        kind = unicodedata.bidirectional(ch)
+        if kind in {"L", "R", "AL"}:
+            return kind
+    return None
+
+
+def right_to_left(text: str) -> bool:
+    return all(first_strong(line) in {"R", "AL"} for line in text.split("\n") if visible_text(line).strip())
+
+
+_IF = re.compile(r"\{\{ if [^}]*\}\}(.*?)\{\{ else \}\}(.*?)\{\{ end \}\}", re.S)
+_ACTION = re.compile(r"\{\{.*?\}\}", re.S)
+
+
+def filled(template: str) -> list[str]:
+    """Each text a rule's annotation can give (both branches of an if), its values filled in."""
+    m = _IF.search(template)
+    variants = (
+        [template] if m is None else [template[: m.start()] + b + template[m.end() :] for b in m.groups()]
+    )
+    return [_ACTION.sub(lambda a: "/data" if "$labels" in a.group(0) else "۹۰", v) for v in variants]
+
+
+def test_every_alert_line_the_owner_gets_reads_right_to_left() -> None:
+    rules_file = Path(__file__).resolve().parents[2] / "deploy/monitoring/prometheus/rules/panel.yml"
+    rules = [r for g in yaml.safe_load(rules_file.read_text(encoding="utf-8"))["groups"] for r in g["rules"]]
+    template = json.loads(FIRING_WORKER_STALE)["alerts"][0]
+    checked = 0
+    for rule in rules:
+        if rule["alert"] == "Watchdog":  # never sent to Telegram
+            continue
+        notes = rule["annotations"]
+        for summary in filled(notes["summary"]):
+            for description in filled(notes.get("description", "")):
+                for status in ("firing", "resolved"):
+                    alert = AmAlert.model_validate(
+                        {
+                            **template,
+                            "status": status,
+                            "labels": {"alertname": rule["alert"], **rule.get("labels", {})},
+                            "annotations": {"summary": summary, "description": description},
+                        }
+                    )
+                    text = render_alertmanager_message([alert])
+                    assert right_to_left(text), (rule["alert"], status, text)
+                    checked += 1
+    assert checked >= 2 * 14  # 14 rules reach Telegram, firing and resolved
+    for message in (API_DOWN_FA, API_BACK_FA, PAIRED_FA, TEST_ALERT_FA):
+        assert right_to_left(message), message
+    assert first_strong("🔴 <b>API پنل</b>") == "L"  # what the mark is for
 
 
 def test_two_warnings_in_one_group() -> None:
@@ -80,7 +140,9 @@ def test_two_warnings_in_one_group() -> None:
 
 def test_resolved_messages() -> None:
     text = render_alertmanager_message(hook(RESOLVED_WORKER_STALE).alerts)
-    assert text == "✅ <b>برطرف شد (Proxy-Hub)</b>\n\n🟢 <b>worker پنل از کار افتاده است</b> (ساعت ۲۳:۵۴)"
+    assert (
+        text == f"✅ <b>برطرف شد (Proxy-Hub)</b>\n\n{RLM}🟢 <b>worker پنل از کار افتاده است</b> (ساعت ۲۳:۵۴)"
+    )
     disks = render_alertmanager_message(hook(RESOLVED_DISK_TWO).alerts)
     assert disks.count("🟢") == 2 and "(ساعت ۲۳:۵۸)" in disks and "🚨" not in disks
 
