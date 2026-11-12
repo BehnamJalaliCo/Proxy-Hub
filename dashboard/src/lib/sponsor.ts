@@ -588,7 +588,9 @@ export function botPromotionInfo(e: BotListEntry, wanted: string): { tone: Tone;
     case null:
       return null;
     case "ok":
-      return { tone: "success", text: `اسپانسر: ${channelText(e.sponsor_channel)}` };
+      // The bot names the sponsor by its title, so the panel may hold no @name for it (P33): the
+      // check passed, so it is the wanted channel.
+      return { tone: "success", text: `اسپانسر: ${channelText(e.sponsor_channel ?? wanted)}` };
     case "other":
       return { tone: "danger", text: `اسپانسر ${channelText(e.sponsor_channel)} است، نه ${channelText(wanted)}` };
     case "not_shown":
