@@ -174,7 +174,7 @@ prune_old_images() {
     case "$tag" in
       "$keep" | "$previous" | "<none>") continue ;;
     esac
-    docker image rm "proxyhub/panel:$tag" >/dev/null 2>&1 || log "kept image proxyhub/panel:${tag:0:12} (in use)"
+    docker image rm "proxyhub/panel:$tag" >/dev/null 2>&1 || log "kept image proxyhub/panel:${tag:0:12} (in use?)"
   done
 }
 

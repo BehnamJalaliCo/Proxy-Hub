@@ -299,6 +299,29 @@ def test_the_gate_clock_starts_when_compose_up_returns() -> None:
     assert up < mark < gate
 
 
+def test_the_gate_reads_the_heartbeat_age_of_the_real_healthz_answer() -> None:
+    """If /healthz renamed the field or the gate misread FastAPI's JSON, every deploy would fail."""
+    import re
+
+    from fastapi.responses import JSONResponse
+
+    import proxyhub.api.app as app_module
+
+    assert 'result["worker_heartbeat_age_s"] = round(age, 1)' in Path(app_module.__file__).read_text()
+    m = re.search(r"^\s*local age_re='([^']*)'$", DEPLOYER.read_text(), re.MULTILINE)
+    assert m, "age_re in wait_healthy"
+    for age, whole in ((12.3, "12"), (0.0, "0"), (-0.0, "0"), (95.5, "95")):
+        answer = {"version": "1", "commit": "c", "db": True, "worker_heartbeat_age_s": round(age, 1)}
+        body = bytes(JSONResponse({**answer, "redis": True, "status": "ok"}).body).decode()
+        out = subprocess.run(  # noqa: S603 - fixed argv: bash running a fixed one-liner
+            ["bash", "-c", '[[ $1 =~ $2 ]] && echo "${BASH_REMATCH[1]}"', "_", body, m.group(1)],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert out.stdout.strip() == whole, body
+
+
 def test_old_panel_images_are_removed_but_never_the_running_one_or_the_rollback_target(box: Sandbox) -> None:
     previous = box.commit("previous")
     assert box.run().returncode == 0
