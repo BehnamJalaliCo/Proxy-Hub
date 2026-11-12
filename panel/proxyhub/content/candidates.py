@@ -732,13 +732,17 @@ async def edit(db: Db, candidate_id: int, title: Any, body: Any, now: datetime) 
 async def set_status(
     db: Db, candidate_id: int, status: str, now: datetime
 ) -> tuple[Candidate | None, str | None]:
-    """The owner moves a candidate (pending, approved, rejected). Returns it and its old status."""
+    """The owner moves a candidate (pending, approved, rejected). Returns it and its old status. An
+    item older than :data:`MAX_AGE` cannot go back to the queue: it is stale (:func:`expire` would
+    end it within a minute, and :func:`next_for_post` never takes it)."""
     if status not in OWNER_STATUSES:
         raise CandidateInvalid("status_invalid")
     current = await get(db, candidate_id, lock=True)
     if current is None:
         return None, None
     if current.status not in OWNER_STATUSES:
+        raise CandidateInvalid("not_editable")
+    if status in EDITABLE and status != current.status and current.when < now - MAX_AGE:
         raise CandidateInvalid("not_editable")
     if status == "approved" and not (current.title or current.body):
         raise CandidateInvalid("caption_invalid")
@@ -813,7 +817,15 @@ async def drop_media(db: Db, now: datetime, posted_keep: timedelta = timedelta(h
     """Remove files nobody needs any more: those of ended candidates (rejected, expired, duplicate),
     and those of used candidates once their post's job finished (sent, or failed for good) and an
     hour passed: the outbox reads the file only when it sends, and a status edit changes only the
-    caption."""
+    caption. A rejected candidate whose file goes waits for its download again (as
+    :func:`drop_video`), so moving it back to the queue fetches the file as before instead of
+    posting the news without it."""
+    await db.execute(
+        update(ContentCandidate)
+        .where(ContentCandidate.status == "rejected", ContentCandidate.media_state == "ready")
+        # updated_at is left as it is: it dates the rejection, which prune counts from
+        .values(media_state=case((ContentCandidate.media_url.is_not(None), "waiting"), else_="failed"))
+    )
     still_sending = (
         select(Post.content_candidate_id)
         .join(Outbox, Outbox.id == Post.outbox_id)

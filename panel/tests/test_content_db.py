@@ -649,6 +649,68 @@ async def test_the_owner_edits_approves_rejects_and_the_publisher_takes_in_order
         assert (await candidates.counts(conn))["used"] == 1
 
 
+async def test_a_rejected_item_moved_back_gets_its_file_again(engine: AsyncEngine) -> None:
+    """The file of a rejected item is dropped; moving it back must not post the news without it."""
+    from proxyhub.content.media import check_for
+
+    source = await add(engine, "https://news.example/a.xml")
+    async with engine.begin() as conn:
+        await candidates.store_items(
+            conn,
+            source,
+            [
+                FetchedItem("p", None, T0, NEWS, media=MediaRef("photo", "https://cdn.example/p.png")),
+                FetchedItem("v", None, T0, OTHER_NEWS, media=MediaRef("video", "https://cdn.example/v.mp4")),
+            ],
+            T0,
+        )
+    found = await all_candidates(engine)
+    photo, video = int(found["p"]["id"]), int(found["v"]["id"])
+    picture = png(8, 8, seed=21)
+    photo_task = candidates.MediaTask(photo, "photo", "https://cdn.example/p.png")
+    video_task = candidates.MediaTask(video, "video", "https://cdn.example/v.mp4")
+    clip = mp4(640, 360, 12)
+    async with engine.begin() as conn:
+        await candidates.save_media(conn, photo_task, check_for("photo", picture), picture, T0)
+        await candidates.set_status(conn, video, "approved", T0)
+        await candidates.save_media(conn, video_task, check_for("video", clip), clip, T0)
+        await candidates.set_status(conn, photo, "rejected", T0)
+        await candidates.set_status(conn, video, "rejected", T0)  # the owner changed their mind
+        assert await candidates.drop_media(conn, T0 + timedelta(minutes=1)) == 2
+        for cid in (photo, video):
+            got = await candidates.get(conn, cid)
+            assert got is not None and got.media_state == "waiting"
+        await candidates.set_status(conn, photo, "pending", T0 + timedelta(minutes=2))
+        await candidates.set_status(conn, video, "approved", T0 + timedelta(minutes=2))
+        tasks = {(t.role, t.url) for t in await candidates.media_tasks(conn, 6)}
+        assert tasks == {("photo", "https://cdn.example/p.png"), ("video", "https://cdn.example/v.mp4")}
+        await candidates.set_status(conn, photo, "approved", T0 + timedelta(minutes=3))
+        nxt = await candidates.next_for_post(conn, T0 + timedelta(minutes=3))
+        assert nxt is None  # both wait for their files, as a fresh candidate does
+        await candidates.save_media(
+            conn, photo_task, check_for("photo", picture), picture, T0 + timedelta(minutes=4)
+        )
+        nxt = await candidates.next_for_post(conn, T0 + timedelta(minutes=4))
+        assert nxt is not None and nxt.id == photo and await candidates.post_media(conn, nxt) is not None
+
+
+async def test_a_stale_rejected_item_cannot_go_back_to_the_queue(engine: AsyncEngine) -> None:
+    source = await add(engine, "https://news.example/a.xml")
+    async with engine.begin() as conn:
+        await candidates.store_items(conn, source, [FetchedItem("1", None, T0, NEWS)], T0)
+    cid = int((await all_candidates(engine))["1"]["id"])
+    async with engine.begin() as conn:
+        await candidates.set_status(conn, cid, "rejected", T0)
+        late = T0 + candidates.MAX_AGE + timedelta(minutes=1)
+        for status in ("pending", "approved"):
+            with pytest.raises(CandidateInvalid, match="not_editable"):
+                await candidates.set_status(conn, cid, status, late)
+        got = await candidates.get(conn, cid)
+        assert got is not None and got.status == "rejected"
+        moved, before = await candidates.set_status(conn, cid, "pending", T0 + timedelta(hours=1))
+        assert moved is not None and (before, moved.status) == ("rejected", "pending")
+
+
 async def test_old_candidates_expire_and_their_files_go(engine: AsyncEngine) -> None:
     source = await add(engine, "https://news.example/a.xml")
     async with engine.begin() as conn:
