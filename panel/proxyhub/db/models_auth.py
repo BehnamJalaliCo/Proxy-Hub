@@ -1,4 +1,5 @@
-"""Auth tables (M1.3): the owner's admin account, setup links, sessions, recovery codes, throttle.
+"""Auth tables (M1.3): the owner's admin account, setup links, sessions, recovery codes, known
+devices, throttle.
 
 Nothing here holds a secret in clear (CLAUDE.md rule 3): tokens and codes are SHA-256 digests, the
 TOTP secret is AES-256-GCM encrypted (proxyhub/auth/secretbox.py) and the password is argon2id.
@@ -92,6 +93,22 @@ class AdminRecoveryCode(Base):
     code_hash: Mapped[bytes] = mapped_column(LargeBinary(32), unique=True, nullable=False)
     created_at: Mapped[datetime] = _now_col()
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AdminDevice(Base):
+    """A browser the owner logged in from (an OWASP "device cookie"). Strangers can keep the global
+    and the username lock tripped at no cost; a browser with this cookie is throttled on its own
+    counter instead, so the owner can still log in. Only the SHA-256 of the cookie is stored, and
+    nothing that describes the device."""
+
+    __tablename__ = "admin_devices"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary(32), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class AuthThrottle(Base):

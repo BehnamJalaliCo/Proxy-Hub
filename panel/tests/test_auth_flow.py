@@ -41,6 +41,7 @@ CSRF = {"X-Requested-With": "proxyhub"}
 USERNAME = "owner"
 PASSWORD = "Kite!river-7-Moss_lamp"
 AUTH_TABLES = (
+    "admin_devices",
     "admin_sessions",
     "admin_recovery_codes",
     "admin_enrollments",
@@ -230,6 +231,8 @@ async def test_full_setup_flow_without_leaking_secrets(
     assert {"httponly", "secure", "samesite=strict", "path=/"} <= session_cookie_attrs(r)
     first_cookie = client.cookies.get("ph_session")
     assert first_cookie
+    device_cookie = client.cookies.get("ph_device")
+    assert device_cookie
 
     r = await client.get("/api/auth/me")
     assert r.status_code == 200 and r.json()["username"] == "owner"
@@ -254,7 +257,7 @@ async def test_full_setup_flow_without_leaking_secrets(
     async with make_client() as replay:
         assert_error(await login(replay, totp_code=next_code), 401, "invalid_credentials")
 
-    secrets_handed_out = [PASSWORD, token, secret, first_cookie, second_cookie, *codes]
+    secrets_handed_out = [PASSWORD, token, secret, first_cookie, second_cookie, device_cookie, *codes]
     secrets_handed_out += [c.replace("-", "") for c in codes]
     log_text = caplog.text + "\n".join(str(rec.args) for rec in caplog.records)
     for value in secrets_handed_out:
@@ -521,6 +524,135 @@ async def test_global_lock_stops_everyone(env: Env, client: AsyncClient) -> None
         assert_error(await login(c, totp_code=await env.fresh_code(owner.secret)), 429, "locked")
     (lock,) = await env.audit("locked")
     assert lock.reasons["scope"] == "global" and lock.target is None
+
+
+def device_cookie_attrs(r: Response) -> set[str]:
+    headers = [h for h in r.headers.get_list("set-cookie") if h.startswith("ph_device=")]
+    assert len(headers) == 1
+    return {part.strip().lower() for part in headers[0].split(";")[1:]}
+
+
+async def trip_global_lock(env: Env) -> None:
+    """A stranger's 50th wrong login with a random username (the 49 before it are set directly)."""
+    await env.rows(
+        "INSERT INTO auth_throttle (key, failures, window_started_at) VALUES ('global', 49, now()) "
+        "ON CONFLICT (key) DO UPDATE SET failures = 49, window_started_at = now()"
+    )
+    async with make_client() as stranger:
+        assert_error(await login(stranger, username=f"x{secrets.token_hex(4)}"), 429, "locked")
+
+
+async def test_a_known_device_logs_in_while_strangers_hold_the_global_lock(
+    env: Env, client: AsyncClient
+) -> None:
+    """api-a:2: anyone can renew the global lock every hour for free. The owner's own browser
+    (device cookie from setup or an earlier login) still gets in; everyone else stays locked."""
+    owner = await do_setup(env, client)
+    device = client.cookies.get("ph_device")
+    assert device and len(device) == 43
+    await trip_global_lock(env)
+    async with make_client() as new_browser:
+        r = await login(new_browser, totp_code=await env.fresh_code(owner.secret))
+        assert_error(r, 429, "locked")  # the right credentials, but no known device
+        assert new_browser.cookies.get("ph_device") is None
+
+    r = await login(client, totp_code=await env.fresh_code(owner.secret))
+    assert r.status_code == 200, r.text
+    assert {
+        "httponly",
+        "secure",
+        "samesite=strict",
+        "path=/api/auth",
+        "max-age=15552000",
+    } <= device_cookie_attrs(r)
+    assert client.cookies.get("ph_device") == device  # the same device, renewed
+    (row,) = await env.rows(
+        "SELECT failures, locked_until > now() AS locked FROM auth_throttle WHERE key = 'global'"
+    )
+    assert row.locked  # the global lock still stands for everyone else
+    ok = await env.audit("login_ok")
+    assert [r.reasons["device"] for r in ok] == ["known"]
+    stored = await env.dump()
+    assert device not in stored  # only its SHA-256
+
+
+async def test_a_known_device_has_its_own_counter(env: Env, client: AsyncClient) -> None:
+    """The owner's typos on a known device lock that device only: they never count toward the
+    global lock or the username lock that every other browser shares."""
+    owner = await do_setup(env, client)
+    for _ in range(4):
+        assert_error(await login(client, password="wrong-password-12"), 401, "invalid_credentials")
+    body = assert_error(await login(client, password="wrong-password-12"), 429, "locked")
+    assert 899 <= body["retry_after_s"] <= 900
+    assert_error(await login(client, totp_code=await env.fresh_code(owner.secret)), 429, "locked")
+    keys = [row.key for row in await env.rows("SELECT key FROM auth_throttle")]
+    assert len(keys) == 1 and keys[0].startswith("d:")  # neither the global nor the username counter
+    async with make_client() as other:  # the username itself is not locked
+        assert (await login(other, totp_code=await env.fresh_code(owner.secret))).status_code == 200
+    (lock,) = await env.audit("locked")
+    assert (lock.reasons["scope"], lock.reasons["level"], lock.target) == ("device", 1, "owner")
+    failed = await env.audit("login_failed")
+    assert [r.reasons["device"] for r in failed] == ["known"] * 5
+
+
+async def test_a_device_cookie_helps_only_its_own_username(env: Env, client: AsyncClient) -> None:
+    """With another username the owner's device cookie changes nothing: the global and the
+    username counters apply, and a failure there still counts on the global row."""
+    owner = await do_setup(env, client)
+    await env.rows(
+        "INSERT INTO auth_throttle (key, failures, window_started_at) VALUES ('global', 49, now()) "
+        "ON CONFLICT (key) DO UPDATE SET failures = 49, window_started_at = now()"
+    )
+    assert_error(await login(client, username="ghost"), 429, "locked")
+    (lock,) = await env.audit("locked")
+    assert lock.reasons["scope"] == "global"
+    assert_error(await login(client, username="ghost", totp_code="123456"), 429, "locked")
+    assert (await login(client, totp_code=await env.fresh_code(owner.secret))).status_code == 200
+
+
+async def test_a_forged_or_stale_device_cookie_is_like_none(env: Env, client: AsyncClient) -> None:
+    owner = await do_setup(env, client)
+    real = client.cookies.get("ph_device")
+    assert real
+    await env.rows("UPDATE admin_devices SET last_used_at = now() - interval '181 days'")
+    await trip_global_lock(env)
+    answers = []
+    for cookie in (None, "garbage", new_token(), real):  # real: unused for more than 180 days
+        async with make_client() as c:
+            if cookie is not None:
+                c.cookies.set("ph_device", cookie, domain="panel.test", path="/api/auth")
+            r = await login(c, totp_code=await env.fresh_code(owner.secret))
+            body = assert_error(r, 429, "locked")
+            answers.append((r.status_code, body["error"], body["message_fa"], set(body)))
+            assert c.cookies.get("ph_session") is None
+    assert all(a == answers[0] for a in answers)
+    await env.rows("UPDATE auth_throttle SET locked_until = NULL, failures = 0 WHERE key = 'global'")
+    wrong = []
+    for cookie in (None, "garbage", new_token()):
+        async with make_client() as c:
+            if cookie is not None:
+                c.cookies.set("ph_device", cookie, domain="panel.test", path="/api/auth")
+            wrong.append(
+                assert_error(await login(c, password="wrong-password-12"), 401, "invalid_credentials")
+            )
+    assert all(b == wrong[0] for b in wrong)
+    (row,) = await env.rows("SELECT failures FROM auth_throttle WHERE key = 'global'")
+    assert row.failures == 3  # all three counted like any stranger's attempt
+
+
+async def test_new_recovery_codes_forget_the_other_devices(env: Env, client: AsyncClient) -> None:
+    owner = await do_setup(env, client)
+    async with make_client() as phone:
+        assert (await login(phone, totp_code=await env.fresh_code(owner.secret))).status_code == 200
+        r = await phone.post(
+            "/api/auth/recovery-codes/regenerate", json={"totp_code": await env.fresh_code(owner.secret)}
+        )
+        assert r.status_code == 200, r.text
+        assert "path=/api/auth" in device_cookie_attrs(r)
+        await trip_global_lock(env)
+        assert (await login(phone, totp_code=await env.fresh_code(owner.secret))).status_code == 200
+    assert_error(await login(client, totp_code=await env.fresh_code(owner.secret)), 429, "locked")
+    assert len(await env.rows("SELECT id FROM admin_devices")) == 1
 
 
 async def test_parallel_guesses_cannot_exceed_the_threshold(env: Env, client: AsyncClient) -> None:

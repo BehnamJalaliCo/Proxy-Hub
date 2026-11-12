@@ -8,6 +8,11 @@ Global: 50 failures within 15 minutes, across all usernames, lock every login fo
 doubling up to 1 hour. The cap is lower than per username on purpose: anyone on the internet can
 trip the global counter, and the owner must never be shut out for a whole day by strangers.
 
+Known device: a browser that once logged in carries a device cookie (``admin_devices``). Its
+logins skip the global and the username counters, which anyone can keep tripped at no cost, and
+count on a counter of their own with the per-username policy. Without a valid cookie nothing
+changes.
+
 Rows are keyed by an HMAC of the username (master-key subkey), so a password typed into the
 username box by mistake is never stored in a readable form.
 """
@@ -15,8 +20,9 @@ username box by mistake is never stored in a readable form.
 from __future__ import annotations
 
 import math
+import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from sqlalchemy import delete, or_, select
@@ -66,6 +72,7 @@ GLOBAL_POLICY = LockPolicy(
     max_lock=timedelta(hours=1),
     level_reset_after=timedelta(hours=24),
 )
+DEVICE_POLICY = replace(USER_POLICY, scope="device")
 
 
 @dataclass(frozen=True)
@@ -78,6 +85,10 @@ class LockEvent:
 
 def user_key(username: str) -> str:
     return "u:" + keyed_digest("throttle-username", username)
+
+
+def device_key(device_id: uuid.UUID) -> str:
+    return f"d:{device_id}"
 
 
 async def ensure_rows(session: AsyncSession, keys: Sequence[str]) -> None:

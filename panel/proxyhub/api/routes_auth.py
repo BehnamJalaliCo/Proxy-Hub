@@ -27,7 +27,12 @@ from proxyhub.api.deps import (
     require_csrf,
 )
 from proxyhub.auth import service
-from proxyhub.auth.service import SESSION_ABSOLUTE_TIMEOUT, AuthError, NewSession
+from proxyhub.auth.service import DEVICE_IDLE_TIMEOUT, SESSION_ABSOLUTE_TIMEOUT, AuthError, NewSession
+
+# The known-device cookie (auth/throttle.py): sent only to /api/auth/*, outlives sessions and
+# logouts, renewed on every login from this browser.
+DEVICE_COOKIE = "ph_device"
+DEVICE_COOKIE_PATH = "/api/auth"
 
 router = APIRouter(prefix="/api", route_class=ApiRoute, dependencies=[Depends(require_csrf)], tags=["auth"])
 
@@ -90,6 +95,18 @@ def _set_session_cookie(response: Response, new_session: NewSession) -> None:
     )
 
 
+def _set_device_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        DEVICE_COOKIE,
+        token,
+        max_age=int(DEVICE_IDLE_TIMEOUT.total_seconds()),
+        path=DEVICE_COOKIE_PATH,
+        secure=True,
+        httponly=True,
+        samesite="strict",
+    )
+
+
 def _clear_session_cookie(response: Response) -> None:
     response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
 
@@ -130,6 +147,7 @@ async def setup_finish(body: SetupFinishIn, request: Request, session: DbSession
         return _error(exc)
     response = JSONResponse({"recovery_codes": result.recovery_codes})
     _set_session_cookie(response, result.session)
+    _set_device_cookie(response, result.device_token)
     return response
 
 
@@ -144,11 +162,13 @@ async def login(body: LoginIn, request: Request, session: DbSession) -> Response
             recovery_code=body.recovery_code,
             user_agent=request.headers.get("user-agent"),
             presented_cookie=request.cookies.get(SESSION_COOKIE),
+            presented_device=request.cookies.get(DEVICE_COOKIE),
         )
     except AuthError as exc:
         return _error(exc)
     response = JSONResponse({"username": result.username})
     _set_session_cookie(response, result.session)
+    _set_device_cookie(response, result.device_token)
     return response
 
 
@@ -200,7 +220,9 @@ async def revoke(session_id: str, admin: Admin, session: DbSession) -> Response:
 @router.post("/auth/recovery-codes/regenerate")
 async def regenerate_recovery_codes(body: TotpIn, admin: Admin, session: DbSession) -> Response:
     try:
-        codes = await service.regenerate_recovery_codes(session, admin.resolved(), body.totp_code)
+        result = await service.regenerate_recovery_codes(session, admin.resolved(), body.totp_code)
     except AuthError as exc:
         return _error(exc)
-    return JSONResponse({"recovery_codes": codes})
+    response = JSONResponse({"recovery_codes": result.recovery_codes})
+    _set_device_cookie(response, result.device_token)
+    return response
