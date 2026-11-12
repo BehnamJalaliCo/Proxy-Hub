@@ -148,8 +148,10 @@ rm -rf /var/log/journal  # a persistent journal directory would override Storage
 
 nft -c -f /etc/nftables.conf
 systemctl daemon-reload
-systemctl enable nftables.service proxyhub-lockdown.service telemt.service xray.service \
-  proxyhub-agent.service
+systemctl enable nftables.service telemt.service xray.service
+# reenable: a run over an older install also drops its multi-user.target.wants links for these two
+# (they are wanted by cloud-init.target now; see proxyhub-agent.service).
+systemctl reenable proxyhub-lockdown.service proxyhub-agent.service
 
 if [ "$START" -eq 1 ]; then
   echo "== applying now"

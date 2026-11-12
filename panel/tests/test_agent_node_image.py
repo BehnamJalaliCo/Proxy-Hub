@@ -10,6 +10,7 @@ download anything.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -155,6 +156,83 @@ def test_firewall_blocks_mail_private_ranges_and_metadata() -> None:
     assert not [r for r in rules if re.search(r"\blog\b", r)]  # no rule logs packets (addresses)
     lockdown = (FILES / "proxyhub-lockdown.service").read_text()
     assert "After=cloud-final.service" in lockdown and "flush chain inet proxyhub boot_window" in lockdown
+
+
+def _wanted_by(unit: str) -> list[str]:
+    install = unit.partition("[Install]")[2]
+    return [t for line in install.splitlines() if line.startswith("WantedBy=") for t in line[9:].split()]
+
+
+def test_units_after_cloud_final_are_wanted_by_cloud_init_target() -> None:
+    """Ubuntu's cloud-final.service is After=multi-user.target. A unit ordered after it but wanted
+    by multi-user.target makes an ordering cycle on every boot after the first, and systemd drops
+    that unit's start to break it: after a reboot the agent would never run again. cloud-init.target
+    is After=multi-user.target itself."""
+    for name in ("proxyhub-agent.service", "proxyhub-lockdown.service"):
+        assert _wanted_by((FILES / name).read_text()) == ["cloud-init.target"], name
+    for unit in FILES.glob("*.service"):
+        text = unit.read_text()
+        after = [u for line in text.splitlines() if line.startswith("After=") for u in line[6:].split()]
+        if "cloud-final.service" in after:
+            assert "multi-user.target" not in _wanted_by(text), unit.name
+    # A re-run over an older install also drops the old multi-user.target.wants links.
+    provision = (NODE_IMAGE / "provision.sh").read_text()
+    assert "systemctl reenable proxyhub-lockdown.service proxyhub-agent.service" in provision
+
+
+# cloud-init's units as Ubuntu 24.04 ships them (cloud-init 26.2-0ubuntu1~24.04.2), cut down to what
+# matters for the boot order: cloud-final.service and cloud-init.target are After=multi-user.target.
+BOOT_STUBS = {
+    "cloud-final.service": (
+        "[Unit]\nAfter=network-online.target cloud-config.service\nAfter=multi-user.target\n"
+        "Wants=network-online.target cloud-config.service\n"
+        "[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n"
+        "[Install]\nWantedBy=cloud-init.target\n"
+    ),
+    "cloud-config.service": (
+        "[Unit]\nAfter=network-online.target\n"
+        "[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n"
+        "[Install]\nWantedBy=cloud-init.target\n"
+    ),
+    "cloud-init.target": "[Unit]\nAfter=multi-user.target\n",
+    "nftables.service": (
+        "[Unit]\nDefaultDependencies=no\nWants=network-pre.target\n"
+        "Before=network-pre.target shutdown.target\nConflicts=shutdown.target\n"
+        "[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n"
+        "[Install]\nWantedBy=sysinit.target\n"
+    ),
+    "graphical.target": "[Unit]\nRequires=multi-user.target\nAfter=multi-user.target\n",
+}
+
+
+@pytest.mark.skipif(shutil.which("systemd-analyze") is None, reason="needs systemd-analyze")
+def test_a_reboot_starts_the_agent_and_the_lockdown(tmp_path: Path) -> None:
+    """The boot transaction of a later boot, built by systemd itself: no ordering cycle, and the
+    agent's and the lockdown's start jobs are in it."""
+    for unit in FILES.glob("*.service"):
+        shutil.copy(unit, tmp_path / unit.name)
+    for name, text in BOOT_STUBS.items():
+        (tmp_path / name).write_text(text)
+    # What `systemctl enable` makes of each [Install], plus the link cloud-init's generator adds on
+    # every boot where it finds a datasource (always on Hetzner).
+    links = [(t, u.name) for u in tmp_path.iterdir() for t in _wanted_by(u.read_text())]
+    links.append(("multi-user.target", "cloud-init.target"))
+    for target, name in links:
+        wants = tmp_path / f"{target}.wants"
+        wants.mkdir(exist_ok=True)
+        (wants / name).symlink_to(tmp_path / name)
+    result = subprocess.run(  # noqa: S603 - fixed argv of a test tool
+        [shutil.which("systemd-analyze") or "systemd-analyze", "verify", "--man=no", "graphical.target"],
+        env={**os.environ, "SYSTEMD_UNIT_PATH": f"{tmp_path}:", "SYSTEMD_LOG_LEVEL": "debug"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    out = result.stdout + result.stderr
+    assert "ordering cycle" not in out, out
+    for name in ("proxyhub-agent.service", "proxyhub-lockdown.service"):
+        assert f"Installed new job {name}/start" in out, name
 
 
 def test_telemt_unit_never_runs_unconfigured_or_logs() -> None:
