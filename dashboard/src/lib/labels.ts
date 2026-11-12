@@ -60,7 +60,7 @@ function toFa(s: string): string {
   return s.replace(/[0-9]/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[Number(d)] ?? d);
 }
 
-export const SETTINGS_LABEL: Record<keyof FleetSettings, string> = {
+export const SETTINGS_LABEL: Record<Exclude<keyof FleetSettings, "updated_at">, string> = {
   kill_switch: "کلید توقف",
   dry_run: "حالت خشک",
   budget_cap_eur: "سقف بودجه‌ی ماه",
@@ -402,6 +402,8 @@ export function isOwnerActor(actor: string): boolean {
 
 /** Persian text of the round-2 error codes, used when a response carries no message_fa. */
 const ERROR_FA: Record<string, string> = {
+  // fleet settings: saved meanwhile on another device or tab (the form keeps what was typed)
+  settings_changed: "تنظیمات در این میان در جای دیگری ذخیره شده است؛ صفحه را تازه کنید و تغییر خود را دوباره بزنید.",
   // nodes
   gate_refused: "قفل‌های ایمنی این کار را رد کردند. دلیل‌ها در فهرست آمده‌اند.",
   test_node_exists: "یک node آزمایشی زنده هست. اول همان را بازنشسته کنید.",

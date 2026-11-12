@@ -83,10 +83,15 @@ export interface FleetSettings {
   target_slots: number;
   allowed_server_types: string[];
   locations: string[];
+  /** When the settings were last saved (null before the first save). Sent back with a save as
+   * expected_updated_at, so a save over a newer change from another device is refused (409). */
+  updated_at?: string | null;
 }
 
 export interface KillSwitch {
   kill_switch: boolean;
+  /** The settings' new save time (the kill switch is part of them). */
+  updated_at?: string | null;
 }
 
 export type PlanActionKind = "create" | "delete" | "none";

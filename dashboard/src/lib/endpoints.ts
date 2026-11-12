@@ -1,6 +1,7 @@
 // One typed function per API route of the contract. Paths and bodies follow it exactly.
 
 import { request } from "./api";
+import { settingsPutBody } from "./validation";
 import type {
   Account,
   AuditEvent,
@@ -93,8 +94,9 @@ export const retireAccount = (id: string) =>
 export const getFleetSettings = (signal?: AbortSignal) =>
   request<FleetSettings>("GET", "/api/settings/fleet", undefined, signal ? { signal } : {});
 
-export const putFleetSettings = (settings: FleetSettings) =>
-  request<FleetSettings>("PUT", "/api/settings/fleet", settings);
+/** `readAt`: the updated_at the form was read with (see settingsPutBody). */
+export const putFleetSettings = (settings: FleetSettings, readAt: string | null | undefined) =>
+  request<FleetSettings>("PUT", "/api/settings/fleet", settingsPutBody(settings, readAt));
 
 export const setKillSwitch = (on: boolean) => request<KillSwitch>("POST", "/api/kill-switch", { on });
 

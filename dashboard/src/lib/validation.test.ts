@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import { ApiError } from "./api";
 import type { FleetSettings } from "./types";
 import {
   draftFromSettings,
+  isSettingsChanged,
   isTotp,
   LOCATION,
   MAX_BUDGET_EUR,
@@ -16,7 +18,9 @@ import {
   sameSettings,
   SERVER_TYPE,
   settingsFromDraft,
+  settingsPutBody,
   usernameError,
+  withKillSwitch,
 } from "./validation";
 
 const BASE: FleetSettings = {
@@ -119,6 +123,38 @@ describe("settings draft round trip", () => {
     expect(sameSettings({ ...BASE, budget_cap_eur: "150.00" }, { ...BASE, budget_cap_eur: "150" })).toBe(true);
     expect(sameSettings({ ...BASE, locations: ["hel1", "fsn1", "nbg1"] }, BASE)).toBe(true);
     expect(sameSettings({ ...BASE, dry_run: false }, BASE)).toBe(false);
+  });
+});
+
+describe("a save over a newer change (lost update)", () => {
+  const READ = { ...BASE, updated_at: "2026-11-12T08:30:00.123456+00:00" };
+
+  it("sends the stamp the form was read with, never the settings' own", () => {
+    const body = settingsPutBody(READ, READ.updated_at);
+    expect(body["expected_updated_at"]).toBe("2026-11-12T08:30:00.123456+00:00");
+    expect("updated_at" in body).toBe(false);
+    expect(body["dry_run"]).toBe(true);
+    // Settings never saved: the stamp is null and is sent as null.
+    expect(settingsPutBody({ ...BASE, updated_at: null }, null)["expected_updated_at"]).toBeNull();
+    // An older panel sent no stamp: nothing extra goes back (its schema forbids unknown fields).
+    expect(Object.keys(settingsPutBody(BASE, undefined)).sort()).toEqual(Object.keys(BASE).sort());
+  });
+
+  it("recognises the server's refusal", () => {
+    expect(isSettingsChanged(new ApiError(409, "settings_changed", "عوض شده"))).toBe(true);
+    expect(isSettingsChanged(new ApiError(409, "other", "x"))).toBe(false);
+    expect(isSettingsChanged(new ApiError(422, "settings_changed", "x"))).toBe(false);
+    expect(isSettingsChanged(new Error("x"))).toBe(false);
+  });
+
+  it("keeps the new stamp after this tab switched the kill switch", () => {
+    expect(withKillSwitch(READ, { kill_switch: false, updated_at: "2026-11-12T09:00:00+00:00" })).toEqual({
+      ...READ,
+      kill_switch: false,
+      updated_at: "2026-11-12T09:00:00+00:00",
+    });
+    expect(withKillSwitch(READ, { kill_switch: false })?.updated_at).toBe(READ.updated_at);
+    expect(withKillSwitch(undefined, { kill_switch: true })).toBeUndefined();
   });
 });
 

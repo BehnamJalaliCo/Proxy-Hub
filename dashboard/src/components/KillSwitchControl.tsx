@@ -9,6 +9,7 @@ import * as api from "../lib/endpoints";
 import { keys } from "../lib/queries";
 import { toast } from "../lib/toast";
 import type { FleetSettings, Overview } from "../lib/types";
+import { withKillSwitch } from "../lib/validation";
 import { Button } from "./ui/Button";
 import { Card } from "./ui/Card";
 import { ConfirmDialog } from "./ui/Dialogs";
@@ -25,7 +26,7 @@ export function KillSwitchControl({ on, budgetSet, nodeCapSet }: { on: boolean; 
     api
       .setKillSwitch(target)
       .then((res) => {
-        qc.setQueryData<FleetSettings>(keys.settings, (old) => (old ? { ...old, kill_switch: res.kill_switch } : old));
+        qc.setQueryData<FleetSettings>(keys.settings, (old) => withKillSwitch(old, res));
         qc.setQueryData<Overview>(keys.overview, (old) => (old ? { ...old, kill_switch: res.kill_switch } : old));
         void qc.invalidateQueries({ queryKey: keys.overview });
         void qc.invalidateQueries({ queryKey: ["events"] });
