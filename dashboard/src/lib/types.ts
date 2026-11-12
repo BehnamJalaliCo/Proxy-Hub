@@ -354,7 +354,7 @@ export interface ProbeTarget {
   verdict: ProbeVerdict;
   verdict_at?: string | null;
   verdict_reasons?: string[];
-  /** TLS handshakes per network and port (443 and the MTProto port). */
+  /** TLS handshakes per network on 443 (the MTProto port is not measured by TLS, P16). */
   networks: ProbeNetwork[];
   /** The name (or IP) the handshakes went to: the node's own DNS name when it points at the node. */
   tls_target?: string | null;

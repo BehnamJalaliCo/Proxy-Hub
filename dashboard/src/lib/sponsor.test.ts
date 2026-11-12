@@ -326,6 +326,15 @@ describe("@MTProxybot's own list", () => {
     const other = botPromotionInfo(entry({ promotion: "other", sponsor_channel: "someone" }), "ipoxxo");
     expect(other?.tone).toBe("danger");
     expect(other?.text).toMatch(/@someone.*@ipoxxo/);
+    // A wrong sponsor read by its title only: the title, or else words, never «—».
+    const byTitle = botPromotionInfo(entry({ promotion: "other", sponsor_channel: null, sponsor_title: "vpn & mtproxy | پروکسی" }), "cust");
+    expect(byTitle?.tone).toBe("danger");
+    expect(byTitle?.text).toContain("«vpn & mtproxy | پروکسی»");
+    expect(byTitle?.text).toContain("@cust");
+    expect(byTitle?.text).not.toContain("—");
+    const unnamed = botPromotionInfo(entry({ promotion: "other", sponsor_channel: null, sponsor_title: null }), "cust");
+    expect(unnamed?.text).toContain("کانال دیگری");
+    expect(unnamed?.text).not.toContain("—");
     expect(botPromotionInfo(entry({ promotion: "not_shown", sponsor_channel: null }), "ipoxxo")?.tone).toBe("warning");
     expect(botPromotionInfo(entry({ promotion: "unread" }), "ipoxxo")?.tone).toBe("info");
     expect(botPromotionInfo(entry({ status: "gone", promotion: null }), "ipoxxo")).toBeNull();

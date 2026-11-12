@@ -129,6 +129,8 @@ export interface BotListEntry {
   registration: { address: string; state: string; state_reason: string | null; node_state: string | null } | null;
   /** The public channel the proxy's own screen names (live proxies only). */
   sponsor_channel: string | null;
+  /** The sponsor's title when the screen names it only by title (P26/P33; the panel's key of it). */
+  sponsor_title?: string | null;
   menu_read_at: string | null;
   promotion: BotPromotion | null;
   removal_state: BotRemovalState | null;
@@ -591,8 +593,11 @@ export function botPromotionInfo(e: BotListEntry, wanted: string): { tone: Tone;
       // The bot names the sponsor by its title, so the panel may hold no @name for it (P33): the
       // check passed, so it is the wanted channel.
       return { tone: "success", text: `اسپانسر: ${channelText(e.sponsor_channel ?? wanted)}` };
-    case "other":
-      return { tone: "danger", text: `اسپانسر ${channelText(e.sponsor_channel)} است، نه ${channelText(wanted)}` };
+    case "other": {
+      // The bot usually names the sponsor by its title only, so there may be no @name to show.
+      const shown = e.sponsor_channel ? channelText(e.sponsor_channel) : e.sponsor_title ? `«${e.sponsor_title}»` : "کانال دیگری";
+      return { tone: "danger", text: `اسپانسر ${shown} است، نه ${channelText(wanted)}` };
+    }
     case "not_shown":
       return { tone: "warning", text: "صفحه‌ی ربات هیچ کانالی نشان نداد" };
     case "several":

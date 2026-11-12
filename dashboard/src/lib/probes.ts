@@ -2,6 +2,8 @@
 // answer from this operator's network": a pass/fail fact, so it wears the status tones and always
 // carries its numbers and an icon, never colour alone. Networks are operators/ASNs, never people.
 
+import { toFaDigits } from "./format";
+import { portsText } from "./iranReach";
 import { operatorName, operatorRank, type Tone } from "./labels";
 import type { ProbeNetwork, ProbeSource, ProbeTarget, ProbeVerdict } from "./types";
 
@@ -78,6 +80,12 @@ export function buildHeatmap(targets: ProbeTarget[]): { columns: HeatColumn[]; r
       return { target, cells };
     });
   return { columns, rows };
+}
+
+/** The ports the grid's handshakes were measured on ("۴۴۳"). Since P16 only 443 is measured: the
+ * MTProto port answers only its own fake-TLS domain, so the 443 result stands in for it (P21). */
+export function measuredPortsText(targets: ProbeTarget[]): string {
+  return portsText(targets.flatMap((t) => t.networks)) || toFaDigits("443");
 }
 
 export function verdictCounts(targets: ProbeTarget[]): Record<ProbeVerdict, number> {
