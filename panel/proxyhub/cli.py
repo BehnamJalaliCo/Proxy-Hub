@@ -22,9 +22,14 @@ def _alembic_config() -> Config:
 
 
 def migrate(revision: str = "head") -> None:
+    """Upgrade the schema. A database already on a revision this code does not know is left as it
+    is (one warning line): the deployer rolled a commit with a newer migration back to this one,
+    and api and worker must still start (they wait for ``migrate`` to succeed)."""
     from alembic import command
 
-    command.upgrade(_alembic_config(), revision)
+    cfg = _alembic_config()
+    cfg.attributes["tolerate_newer_schema"] = True
+    command.upgrade(cfg, revision)
 
 
 def downgrade(revision: str) -> None:

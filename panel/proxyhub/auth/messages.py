@@ -15,6 +15,10 @@ MESSAGES_FA: dict[str, str] = {
         "رمز باید دست‌کم ۱۲ نویسه باشد، از رمزهای رایج نباشد و نام کاربری یا نام پنل را در خود نداشته باشد."
     ),
     "totp_invalid": "کد برنامه‌ی Authenticator درست نیست یا پیش‌تر استفاده شده است. کد تازه را وارد کنید.",
+    "reenroll_invalid": (
+        "رمز، کد Authenticator فعلی (یا کد بازیابی) یا کد برنامه‌ی تازه درست نیست. "
+        "اگر بیش از یک ساعت از شروع گذشته است، ثبت Authenticator تازه را از اول شروع کنید."
+    ),
     "not_found": "این جلسه پیدا نشد یا پیش‌تر بسته شده است.",
     "invalid_request": "درخواست ناقص یا نادرست است.",
 }
@@ -28,6 +32,7 @@ STATUS: dict[str, int] = {
     "invalid_username": 400,
     "weak_password": 400,
     "totp_invalid": 400,
+    "reenroll_invalid": 400,
     "not_found": 404,
     "invalid_request": 422,
 }
