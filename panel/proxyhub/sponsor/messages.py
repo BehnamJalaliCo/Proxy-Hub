@@ -194,6 +194,29 @@ def cleanup_stuck_alert(*, address: str, step: str | None, reason: str) -> str:
     return "\n".join(lines)
 
 
+AUTO_JOB_FA: Final[dict[str, str]] = {
+    "inventory": "⚠️ <b>وارسی خودکار اسپانسر روی ‎@MTProxybot‎ متوقف شد</b>",
+    "cleanup": "⚠️ <b>پاک‌سازی خودکار ‎@MTProxybot‎ متوقف شد</b>",
+}
+
+
+def auto_job_stuck_alert(*, kind: str, target: str, step: str | None, reason: str) -> str:
+    """The owner alert (HTML) when a job the panel queued by itself (the promotion check, the
+    cleanup) stopped on a screen it does not know: until the owner starts a job, neither starts
+    again by itself (decision D63)."""
+    lines = [AUTO_JOB_FA.get(kind, AUTO_JOB_FA["inventory"])]
+    if target != "@MTProxybot":
+        lines.append(f"پروکسی: <code>{html.escape(target)}</code>")
+    if step:
+        lines.append(f"کجا: {html.escape(STEP_FA.get(step, step))}")
+    lines.append(f"چرا: {html.escape(list_reason(reason) or reason)}")
+    lines.append(
+        "تا شما از صفحه‌ی «اسپانسر» داشبورد یک کار تازه با فهرست ‎@MTProxybot‎ شروع نکنید، پنل نه وارسی "
+        "اسپانسر را خودش شروع میکند نه پاک‌سازی پروکسی‌های مرده را. شکل صفحه‌ها (بی secret) همان‌جا ثبت شده است."
+    )
+    return "\n".join(lines)
+
+
 PROMOTION_FA: Final[dict[str, str]] = {
     "not_shown": "هیچ کانالی را اسپانسر این پروکسی نشان نمیدهد",
     "other": "کانال دیگری را اسپانسر این پروکسی نشان میدهد",

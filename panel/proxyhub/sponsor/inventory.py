@@ -8,7 +8,8 @@ have to press anything when a node goes): with removal on, a ``cleanup`` is queu
 registration was retired as ``node_gone`` at least :data:`AUTO_AFTER` ago and after the last
 cleanup was queued (:func:`auto_cleanup_due`; one whose cleanup did not finish ``done`` is offered
 again :data:`CHECK_RETRY` later), at most one job per :data:`AUTO_GAP`, never after a job that got
-stuck (the owner looks at those first). The **promotion check** is queued the same way (decision D63,
+stuck (the owner looks at those first, and is told when the panel queued it, :func:`_stuck`). The
+**promotion check** is queued the same way (decision D63,
 2026-11-12: what the dashboard said of each proxy's sponsor was five days old, read before the bot's
 titles were understood, and two proxies had never been read): an ``inventory`` once per
 :data:`CHECK_EVERY`, and :data:`AUTO_AFTER` after a sponsor was set (:func:`auto_inventory_due`).
@@ -79,7 +80,12 @@ from proxyhub.sponsor.botlist import (
     WalkStuck,
 )
 from proxyhub.sponsor.conversation import MESSAGES_NEEDED, PromoteJob, RegisterJob, Step
-from proxyhub.sponsor.messages import cleanup_stuck_alert, list_reason, promotion_alert
+from proxyhub.sponsor.messages import (
+    auto_job_stuck_alert,
+    cleanup_stuck_alert,
+    list_reason,
+    promotion_alert,
+)
 from proxyhub.sponsor.provider import node_of
 from proxyhub.sponsor.service import NOT_COUNTED, Deps, _log, in_use, with_bot_chat
 from proxyhub.telegram import store as tg_store
@@ -902,8 +908,14 @@ async def _stuck(
     *,
     alert: bool,
 ) -> str:
-    """The walk met something unknown: the job stops here (fail-closed)."""
+    """The walk met something unknown: the job stops here (fail-closed). A stuck removal alerts the
+    owner (``alert``); so does any stuck job the panel queued by itself, since no automatic job
+    starts again until the owner starts one (:func:`auto_cleanup_due`, :func:`auto_inventory_due`)
+    and nobody is looking at the page."""
+    auto_kind: str | None = None
     if same and state.job is not None:
+        if state.job.requested_by == AUTO_ACTOR:
+            auto_kind = state.job.kind
         state = replace(
             state, job=replace(state.job, state=STUCK, reason=reason[:80], step=step_name, finished_at=now)
         )
@@ -918,6 +930,10 @@ async def _stuck(
     )
     if alert:
         await enqueue_owner_alert(db, cleanup_stuck_alert(address=target, step=step_name, reason=reason))
+    elif auto_kind is not None:
+        await enqueue_owner_alert(
+            db, auto_job_stuck_alert(kind=auto_kind, target=target, step=step_name, reason=reason)
+        )
     return f"mtproxybot:stuck:{reason}"
 
 

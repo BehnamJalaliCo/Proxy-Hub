@@ -848,6 +848,57 @@ async def test_a_promotion_check_does_not_hide_a_dead_proxy_from_the_automatic_c
         assert not await inventory.auto_cleanup_due(db, retry_at + timedelta(days=2))
 
 
+@pytest.mark.parametrize("actor", [inventory.AUTO_ACTOR, "admin:owner"])
+async def test_an_automatic_job_stuck_on_the_list_tells_the_owner_once(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes, actor: str
+) -> None:
+    """No automatic job starts again after a stuck one (D63): with nobody watching the page, the
+    owner is told. A job the owner started is in front of them already."""
+    from proxyhub.sponsor.messages import LIST_REASON_FA
+
+    await seed(engine, seal_key)
+    await pair_owner(engine)
+    await inventory.request_job(engine, inventory.INVENTORY, actor=actor, now=datetime.now(UTC))
+    stuck = WalkStuck(step=Step.SENT_MYPROXIES, reason="unexpected_reply", screens=(SCREEN,))
+    got = await record(
+        engine, await prepare(engine, vault), WalkResult(result=stuck, last_step=Step.SENT_MYPROXIES)
+    )
+    assert got == "mtproxybot:stuck:unexpected_reply" and (await job(engine)).state == "stuck"
+    sent = await alerts(engine)
+    if actor != inventory.AUTO_ACTOR:
+        assert sent == []
+        return
+    (alert,) = sent
+    assert "وارسی خودکار" in alert and LIST_REASON_FA["unexpected_reply"] in alert
+    assert await inventory.step(deps(engine, vault)) == "idle"
+    assert not await due(engine, datetime.now(UTC) + timedelta(days=1))
+    assert len(await alerts(engine)) == 1
+
+
+async def test_an_automatic_cleanup_stuck_tells_the_owner_once(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    await seed(engine, seal_key)
+    await pair_owner(engine)
+    await enable_removal(engine)
+    # Refused on the list read: the automatic cleanup's own alert.
+    await inventory.request_job(engine, inventory.CLEANUP, actor=inventory.AUTO_ACTOR, now=datetime.now(UTC))
+    refused = WalkResult(error="request_not_allowed", attempted_step=Step.SENT_MYPROXIES)
+    got = await record(engine, await prepare(engine, vault), refused)
+    assert got == "mtproxybot:stuck:request_not_allowed"
+    (alert,) = await alerts(engine)
+    assert "پاک‌سازی خودکار" in alert
+    # Stuck on a removal: the removal's alert, and only that one.
+    await inventory.request_job(engine, inventory.CLEANUP, actor=inventory.AUTO_ACTOR, now=datetime.now(UTC))
+    await read_the_list(engine, vault, *ALL_LABELS)
+    prepared = await prepare(engine, vault)
+    assert prepared.plan.kind == "remove"
+    stuck = WalkStuck(step=Step.PRESSED_REMOVE, reason="no_confirm_button", screens=(SCREEN,))
+    await record(engine, prepared, WalkResult(result=stuck, last_step=Step.PRESSED_REMOVE))
+    sent = await alerts(engine)
+    assert len(sent) == 2 and DEAD_IP in sent[1] and "پاک کردن پروکسی‌های مرده" in sent[1]
+
+
 # --- the promotion check the panel queues, and what it does with it (decision D63) -------------------------
 
 
