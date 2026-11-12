@@ -851,6 +851,14 @@ async def run_once(deps: Deps) -> str:
     return await _record(deps, work, outcome)
 
 
+async def wanted_now(db: AsyncConnection, now: datetime) -> str:
+    """The Proxy Sponsor every live proxy should have now: a running campaign's channel (from its
+    lead on), else the default."""
+    settings = await store.load_settings(db)
+    windows = [c.window for c in await store.load_campaigns(db)]
+    return camp.wanted_channel(windows, settings.default_channel, now, settings.lead)
+
+
 # --- the owner's view and actions (API) ----------------------------------------------------------------
 
 

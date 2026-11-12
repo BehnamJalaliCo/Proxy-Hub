@@ -177,7 +177,7 @@ export function BotListCard({ s, onApply }: { s: BotListSection; onApply: (o: Sp
     promotionNote =
       problem > 0 ? (
         <p className={cn("rounded-2xl px-3 py-2 text-sm leading-7", TONE_SOFT.danger)}>
-          {formatNumber(problem)} پروکسی فعال اسپانسر {channelText(s.wanted_channel)} را نشان نمیدهد (ستون «کانال اسپانسر»).
+          {formatNumber(problem)} پروکسی فعال اسپانسر {channelText(s.wanted_channel)} را نشان نمیدهد (ستون «کانال اسپانسر»). پنل خودش اسپانسر را دوباره تنظیم میکند و اگر باز هم درست نشد، به شما پیام میدهد.
         </p>
       ) : s.counts.promotion_ok === s.counts.live ? (
         <p className={cn("rounded-2xl px-3 py-2 text-sm leading-7", TONE_SOFT.success)}>
@@ -227,7 +227,7 @@ export function BotListCard({ s, onApply }: { s: BotListSection; onApply: (o: Sp
           <EmptyState
             icon={<ListChecks className="size-7" />}
             title="هنوز فهرست خوانده نشده"
-            description="«خواندن فهرست» را بزنید. پنل ‎/myproxies‎ را میفرستد، همه‌ی صفحه‌ها را میخواند و هر پروکسی را با سرورهای خودش جور میکند."
+            description="پنل روزی یک بار خودش فهرست را میخواند. برای همین حالا، «خواندن فهرست» را بزنید. پنل ‎/myproxies‎ را میفرستد، همه‌ی صفحه‌ها را میخواند و هر پروکسی را با سرورهای خودش جور میکند."
           />
         ) : (
           <>
@@ -240,7 +240,7 @@ export function BotListCard({ s, onApply }: { s: BotListSection; onApply: (o: Sp
             {promotionNote}
             <p className="text-xs leading-6 text-fg-faint">
               خوانده‌شده {formatRelative(s.list.read_at)} ({formatJalali(s.list.read_at, "short")})، {formatNumber(s.list.pages)} صفحه
-              {s.list.complete ? "" : "؛ همه‌ی صفحه‌ها خوانده نشد، پس چیزی پاک نمیشود"}.
+              {s.list.complete ? "" : "؛ همه‌ی صفحه‌ها خوانده نشد، پس چیزی پاک نمیشود"}. پنل روزی یک بار، و کمی پس از هر تنظیم اسپانسر، خودش فهرست و اسپانسرها را میخواند.
             </p>
             {s.entries.length > 0 ? <Table s={s} /> : <p className="text-sm text-fg-muted">فهرست ربات خالی بود.</p>}
           </>

@@ -7,7 +7,16 @@ One job at a time (settings row :data:`KEY`), started by the owner's button or t
 have to press anything when a node goes): with removal on, a ``cleanup`` is queued when a
 registration was retired as ``node_gone`` at least :data:`AUTO_AFTER` ago and after the last job
 (:func:`auto_cleanup_due`), at most once per :data:`AUTO_GAP`, never after a job that got stuck
-(the owner looks at those first):
+(the owner looks at those first). The **promotion check** is queued the same way (decision D63,
+2026-11-12: what the dashboard said of each proxy's sponsor was five days old, read before the bot's
+titles were understood, and two proxies had never been read): an ``inventory`` once per
+:data:`CHECK_EVERY`, and :data:`AUTO_AFTER` after a sponsor was set (:func:`auto_inventory_due`).
+What a finished inventory read is then acted on (:func:`repair_promotions`): a live proxy whose
+screen names no sponsor, or another one, while the panel holds the wanted one as set, has its
+sponsor set again by the sponsor loop (at most once per :data:`REPAIR_GAP` each); if the next read
+still does not show it, the owner is told (at most once per :data:`ALERT_GAP` each).
+
+The jobs:
 
 * ``inventory`` (mode ``look``): read every page of /myproxies; the read replaces the entries
   (table ``mtproxybot_entries``). Then open the screen of each LIVE proxy of ours, one per pass,
@@ -67,9 +76,9 @@ from proxyhub.sponsor.botlist import (
     WalkStuck,
 )
 from proxyhub.sponsor.conversation import MESSAGES_NEEDED, PromoteJob, RegisterJob, Step
-from proxyhub.sponsor.messages import cleanup_stuck_alert, list_reason
+from proxyhub.sponsor.messages import cleanup_stuck_alert, list_reason, promotion_alert
 from proxyhub.sponsor.provider import node_of
-from proxyhub.sponsor.service import NOT_COUNTED, Deps, _log, with_bot_chat
+from proxyhub.sponsor.service import NOT_COUNTED, Deps, _log, in_use, with_bot_chat
 from proxyhub.telegram import store as tg_store
 from proxyhub.telegram.store import enqueue_owner_alert
 
@@ -103,6 +112,13 @@ OBSERVED_OK: Final = "remove_button_found"
 AUTO_ACTOR: Final = "sponsor:auto"
 AUTO_AFTER: Final = timedelta(minutes=10)
 AUTO_GAP: Final = timedelta(hours=1)
+# The promotion check the panel queues by itself, and what it does with a finished one (D63).
+CHECK_EVERY: Final = timedelta(hours=24)
+CHECK_RETRY: Final = timedelta(hours=6)  # after a check that did not finish
+REPAIR_GAP: Final = timedelta(hours=24)  # one proxy's sponsor is set again at most this often
+ALERT_GAP: Final = timedelta(days=7)
+REPAIRABLE: Final = frozenset({"not_shown", "other"})  # "several" is a screen the panel misreads
+MAX_REPAIRS: Final = 200
 
 
 class InventoryError(Exception):
@@ -212,16 +228,49 @@ class ListInfo:
 
 
 @dataclass(frozen=True)
+class Repair:
+    """One registration whose sponsor the panel set again because the bot did not show it: when,
+    and when the owner was last told that it did not help."""
+
+    at: datetime
+    alerted_at: datetime | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {"at": iso(self.at), "alerted_at": iso(self.alerted_at)}
+
+    @classmethod
+    def from_json(cls, value: Any) -> Repair | None:
+        at = _time(value.get("at")) if isinstance(value, dict) else None
+        if at is None or not isinstance(value, dict):
+            return None
+        return cls(at=at, alerted_at=_time(value.get("alerted_at")))
+
+
+def _repairs(value: Any) -> dict[str, Repair]:
+    if not isinstance(value, dict):
+        return {}
+    found = {str(k)[:40]: Repair.from_json(v) for k, v in value.items()}
+    return {k: v for k, v in list(found.items())[:MAX_REPAIRS] if v is not None}
+
+
+@dataclass(frozen=True)
 class BotListState:
     """``removal_enabled``: real removal is on (only :func:`set_removal`, after an observation).
     ``observation``: what the latest observe run saw on a dead proxy's screen. ``screens``: the
-    current job's screens as shapes (no secret), at most :data:`MAX_SCREENS`."""
+    current job's screens as shapes (no secret), at most :data:`MAX_SCREENS`. ``check_queued_at``
+    and ``checked_at``: when an inventory was last queued and last finished ``done`` (the promotion
+    check). ``repaired_job``: the ``requested_at`` of the inventory whose reads were acted on.
+    ``repairs``: by registration id (:class:`Repair`)."""
 
     removal_enabled: bool = False
     job: Job | None = None
     last_list: ListInfo | None = None
     observation: dict[str, Any] | None = None
     screens: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    check_queued_at: datetime | None = None
+    checked_at: datetime | None = None
+    repaired_job: datetime | None = None
+    repairs: dict[str, Repair] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -230,6 +279,10 @@ class BotListState:
             "last_list": self.last_list.to_json() if self.last_list is not None else None,
             "observation": self.observation,
             "screens": list(self.screens),
+            "check_queued_at": iso(self.check_queued_at),
+            "checked_at": iso(self.checked_at),
+            "repaired_job": iso(self.repaired_job),
+            "repairs": {k: v.to_json() for k, v in self.repairs.items()},
         }
 
     @classmethod
@@ -247,6 +300,10 @@ class BotListState:
             screens=tuple(s for s in screens if isinstance(s, dict))[-MAX_SCREENS:]
             if isinstance(screens, list)
             else (),
+            check_queued_at=_time(value.get("check_queued_at")),
+            checked_at=_time(value.get("checked_at")),
+            repaired_job=_time(value.get("repaired_job")),
+            repairs=_repairs(value.get("repairs")),
         )
 
 
@@ -873,7 +930,8 @@ async def _finish(
     if state.job is None:
         return
     job = replace(state.job, state=final, reason=reason, finished_at=now)
-    await save_state(db, replace(state, job=job))
+    checked = now if job.kind == INVENTORY and final == DONE else state.checked_at
+    await save_state(db, replace(state, job=job, checked_at=checked))
     await _log(
         db,
         "sponsor.mtproxybot_finished",
@@ -903,7 +961,8 @@ async def request_job(engine: AsyncEngine, kind: str, *, actor: str, now: dateti
             raise InventoryError("mtproxybot_no_account")
         mode = LOOK if kind == INVENTORY else (REMOVE if state.removal_enabled else OBSERVE)
         job = Job(kind=kind, mode=mode, requested_by=actor[:120], requested_at=now)
-        await save_state(db, replace(state, job=job))
+        queued = now if kind == INVENTORY else state.check_queued_at
+        await save_state(db, replace(state, job=job, check_queued_at=queued))
         await _log(db, "sponsor.mtproxybot_requested", "@MTProxybot", reasons=[kind, mode], actor=actor)
     return job
 
@@ -928,6 +987,109 @@ async def auto_cleanup_due(db: AsyncConnection, now: datetime) -> bool:
     if last is not None:
         gone = gone.where(MtproxyRegistration.updated_at > last)
     return bool((await db.execute(gone)).scalar_one())
+
+
+def _checkable(reg: store.Reg, nodes: dict[uuid.UUID, str]) -> bool:
+    """A registered proxy a live node serves now, whose flow is not stuck (the owner looks at a
+    stuck one first)."""
+    return reg.state == store.REGISTERED and reg.ad_tag is not None and not reg.stuck and in_use(reg, nodes)
+
+
+async def auto_inventory_due(db: AsyncConnection, now: datetime) -> bool:
+    """Whether the panel should queue an ``inventory`` (the promotion check) by itself now (module
+    doc): a sponsor was set since the last one was queued, or the last finished one is older than
+    :data:`CHECK_EVERY` (tried again :data:`CHECK_RETRY` after one that did not finish)."""
+    state = await load_state(db)
+    if state.job is not None:
+        if state.job.open or state.job.state == STUCK:
+            return False
+        last = state.job.finished_at or state.job.requested_at
+        if last is not None and now - last < AUTO_GAP:
+            return False
+    regs = await store.load_regs(db)
+    nodes = await store.node_states(db, {n for r in regs if (n := node_of(r.proxy_key)) is not None})
+    live = [r for r in regs if _checkable(r, nodes)]
+    if not live:
+        return False
+    queued = state.check_queued_at
+    for reg in live:
+        at = reg.promotion_set_at
+        if at is not None and at <= now - AUTO_AFTER and (queued is None or at > queued):
+            return True
+    if state.checked_at is not None and now - state.checked_at < CHECK_EVERY:
+        return False
+    return queued is None or now - queued >= CHECK_RETRY
+
+
+def _read_job(state: BotListState) -> Job | None:
+    """The finished inventory whose reads were not acted on yet, if any."""
+    job = state.job
+    if job is None or job.kind != INVENTORY or job.state != DONE or job.requested_at is None:
+        return None
+    return None if state.repaired_job == job.requested_at else job
+
+
+async def repair_promotions(engine: AsyncEngine, *, wanted: str, now: datetime) -> list[str]:
+    """Act once on what the last finished inventory read (module doc). Returns the addresses whose
+    sponsor will be set again: their registration loses its ``sponsor_channel``, which is what the
+    owner's «ثبت دوباره» does, so the sponsor loop promotes them on its next passes."""
+    async with engine.connect() as db:
+        if _read_job(await load_state(db)) is None:  # the usual pass: nothing new was read
+            return []
+    async with engine.begin() as db:
+        state = await _locked_state(db)
+        job = _read_job(state)
+        if job is None:
+            return []
+        regs, nodes, entries, mapped = await _context(db)
+        wanted_title = await _channel_title(db, wanted)
+        name = wanted.lstrip("@").lower()
+        held = {str(r.registration_id) for r in regs if r.registration_id and r.state != store.RETIRED}
+        repairs = {k: v for k, v in state.repairs.items() if k in held}
+        again: list[str] = []
+        for entry, found in zip(entries, mapped, strict=True):
+            reg = found.regs[0] if found.regs else None
+            if reg is None or reg.registration_id is None or not _since(entry.menu_read_at, job):
+                continue
+            key = str(reg.registration_id)
+            promotion = _promotion(entry, found, wanted, wanted_title)
+            if promotion == "ok":
+                repairs.pop(key, None)
+                continue
+            if promotion not in REPAIRABLE or not _checkable(reg, nodes):
+                continue
+            if (reg.sponsor_channel or "").lstrip("@").lower() != name:
+                continue  # the loop is about to set it anyway (a campaign's start or end)
+            last = repairs.get(key)
+            if last is not None and now - last.at < REPAIR_GAP:
+                # Set again not long ago and the bot still does not show it: the owner is told.
+                if last.alerted_at is None or now - last.alerted_at >= ALERT_GAP:
+                    alert = promotion_alert(address=reg.address, promotion=promotion, wanted=name)
+                    if await enqueue_owner_alert(db, alert) is not None:
+                        repairs[key] = replace(last, alerted_at=now)
+                        await _log(
+                            db,
+                            "sponsor.promotion_alert",
+                            reg.address,
+                            allowed=False,
+                            reasons=[promotion],
+                            actor=AUTO_ACTOR,
+                        )
+                continue
+            await store.update_reg(db, reg.registration_id, now, sponsor_channel=None)
+            await store.update_flow(db, reg.id, now, attempts=0, next_attempt_at=None, last_error=None)
+            repairs[key] = Repair(at=now, alerted_at=last.alerted_at if last is not None else None)
+            again.append(reg.address)
+            await _log(
+                db,
+                "sponsor.promotion_repair",
+                reg.address,
+                reasons=[promotion],
+                context={"wanted": f"@{name}", "read_at": iso(entry.menu_read_at)},
+                actor=AUTO_ACTOR,
+            )
+        await save_state(db, replace(state, repairs=repairs, repaired_job=job.requested_at))
+    return again
 
 
 async def stop_job(engine: AsyncEngine, *, actor: str, now: datetime) -> None:
@@ -1072,6 +1234,7 @@ async def overview(engine: AsyncEngine, *, wanted: str) -> dict[str, Any]:
         "wanted_channel": wanted,
         "job": _job_view(state.job),
         "list": state.last_list.to_json() if state.last_list is not None else None,
+        "checked_at": iso(state.checked_at),
         "observation": state.observation,
         "counts": counts,
         "entries": views,

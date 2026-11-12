@@ -673,8 +673,9 @@ async def test_the_sponsor_loop_runs_a_step_only_when_it_has_nothing_else_to_do(
         provider=lambda: TelemtUsersProvider(seal_key),
         options=ClientOptions(endpoint=Endpoint("127.0.0.1", closed_port()), deadline_s=3),
     )
-    assert await loop.step(engine) == "idle"  # no job: the pass stays idle
-    await inventory.request_job(engine, inventory.INVENTORY, actor="admin:owner", now=datetime.now(UTC))
+    # No job, and the live proxy's sponsor was never read: the pass queues the check itself (D63).
+    assert await loop.step(engine) == "inventory_queued"
+    assert (await job(engine)).requested_by == inventory.AUTO_ACTOR
     assert await loop.step(engine) == "mtproxybot:failed:telegram_unavailable"
     await kill_switch(engine, True)
     assert await loop.step(engine) == "kill_switch"
@@ -740,6 +741,165 @@ async def test_the_panel_queues_the_cleanup_by_itself_after_a_node_is_gone(
     await finish(inventory.STUCK, now)
     async with engine.connect() as db:
         assert not await inventory.auto_cleanup_due(db, now + timedelta(days=1))  # the owner looks first
+
+
+# --- the promotion check the panel queues, and what it does with it (decision D63) -------------------------
+
+
+async def run_inventory(engine: AsyncEngine, vault: Vault, menu: WalkResult, *, actor: str = "cli") -> None:
+    """One whole inventory, through the real job code: the list, the live proxy's screen, the end."""
+    await inventory.request_job(engine, inventory.INVENTORY, actor=actor, now=datetime.now(UTC))
+    await read_the_list(engine, vault, *ALL_LABELS)
+    await record(engine, await prepare(engine, vault), menu)
+    assert await inventory.step(deps(engine, vault)) == "mtproxybot:done"
+
+
+async def due(engine: AsyncEngine, at: datetime) -> bool:
+    async with engine.connect() as db:
+        return await inventory.auto_inventory_due(db, at)
+
+
+async def state_of(engine: AsyncEngine) -> inventory.BotListState:
+    async with engine.connect() as db:
+        return await inventory.load_state(db)
+
+
+async def test_the_panel_queues_the_promotion_check_by_itself(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """2026-11-12: the sponsors the dashboard showed were five days old and two were never read. The
+    check comes once a day, and soon after a sponsor was set; never after a job that got stuck."""
+    from dataclasses import replace
+
+    ids = await seed(engine, seal_key)
+    now = datetime.now(UTC)
+    assert await due(engine, now)  # a live proxy, never checked
+    await run_inventory(engine, vault, seen_menu("ipoxxo"))
+    state = await state_of(engine)
+    assert state.checked_at is not None and state.check_queued_at is not None
+    assert (await view(engine))["checked_at"] is not None
+    gap = inventory.AUTO_GAP + timedelta(minutes=1)
+    assert not await due(engine, now + gap)  # checked today
+    assert not await due(engine, now + inventory.CHECK_EVERY - timedelta(hours=1))
+    assert await due(engine, now + inventory.CHECK_EVERY + timedelta(minutes=5))
+
+    # A sponsor set after the last check is read AUTO_AFTER later, not a day later.
+    set_at = datetime.now(UTC) + timedelta(minutes=2)
+    async with engine.begin() as db:
+        await db.execute(
+            text("UPDATE sponsor_flows SET promotion_set_at = :t WHERE registration_id = :i"),
+            {"t": set_at, "i": ids["live"]},
+        )
+    assert not await due(engine, set_at + timedelta(minutes=1))
+    assert not await due(engine, set_at + inventory.AUTO_AFTER + timedelta(minutes=1))  # the hour's gap
+    assert await due(engine, now + gap + inventory.AUTO_AFTER)
+
+    async def end(final: str, at: datetime) -> None:
+        async with engine.begin() as db:
+            current = await inventory._locked_state(db)
+            assert current.job is not None
+            await inventory.save_state(
+                db, replace(current, job=replace(current.job, state=final, finished_at=at))
+            )
+
+    # A check that did not finish is tried again CHECK_RETRY later; a stuck one waits for the owner.
+    later = now + inventory.CHECK_EVERY + timedelta(hours=1)
+    await inventory.request_job(engine, inventory.INVENTORY, actor=inventory.AUTO_ACTOR, now=later)
+    assert not await due(engine, later + gap)  # a job is open
+    await end(inventory.FAILED, later)
+    assert not await due(engine, later + gap)
+    assert await due(engine, later + inventory.CHECK_RETRY + timedelta(minutes=1))
+    await end(inventory.STUCK, later)
+    assert not await due(engine, later + timedelta(days=3))
+    # Nothing to check once no live node serves a registered proxy.
+    await end(inventory.DONE, later)
+    async with engine.begin() as db:
+        await db.execute(text("UPDATE nodes SET state = 'deleted'"))
+    assert not await due(engine, later + timedelta(days=3))
+
+
+async def sponsor_of(engine: AsyncEngine, reg_id: uuid.UUID) -> str | None:
+    async with engine.connect() as db:
+        row = await db.execute(
+            text("SELECT sponsor_channel FROM mtproxy_registrations WHERE id = :i"), {"i": reg_id}
+        )
+        return row.scalar_one()
+
+
+async def promoted_again(engine: AsyncEngine, reg_id: uuid.UUID) -> None:
+    """What the sponsor loop records once it set the sponsor again."""
+    async with engine.begin() as db:
+        await db.execute(
+            text("UPDATE mtproxy_registrations SET sponsor_channel = 'ipoxxo' WHERE id = :i"), {"i": reg_id}
+        )
+
+
+async def test_a_sponsor_the_bot_does_not_show_is_set_again_and_then_the_owner_is_told(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    ids = await seed(engine, seal_key)
+    await pair_owner(engine)
+    live = ids["live"]
+    address = f"{LIVE_HOST}:8443"
+
+    async def repair(wanted: str = "ipoxxo") -> list[str]:
+        return await inventory.repair_promotions(engine, wanted=wanted, now=datetime.now(UTC))
+
+    assert await repair() == []  # no inventory yet
+    await run_inventory(engine, vault, seen_menu())  # the screen names no sponsor
+    # During a campaign the loop is about to set the customer's channel anyway: nothing to repair.
+    assert await repair("customer_ch") == [] and await sponsor_of(engine, live) == "ipoxxo"
+    await run_inventory(engine, vault, seen_menu())
+    assert await repair() == [address]
+    assert await sponsor_of(engine, live) is None  # the loop promotes it on its next passes
+    assert await repair() == []  # one inventory is acted on once
+    log = [a for a in await actions(engine) if a["action"] == "sponsor.promotion_repair"]
+    assert [(a["actor"], a["target"], a["reasons"]["reasons"]) for a in log] == [
+        (inventory.AUTO_ACTOR, address, ["not_shown"])
+    ]
+    assert await alerts(engine) == []
+
+    # Set again, read again, still not shown: the owner is told once; no second repair that day.
+    await promoted_again(engine, live)
+    await run_inventory(engine, vault, seen_menu("customer_ch"))
+    assert await repair() == [] and await sponsor_of(engine, live) == "ipoxxo"
+    (alert,) = await alerts(engine)
+    assert address in alert and "کانال دیگری" in alert and "@ipoxxo" in alert
+    await run_inventory(engine, vault, seen_menu())
+    assert await repair() == [] and len(await alerts(engine)) == 1
+    # A day later it is set again (the alert stays quiet for ALERT_GAP).
+    await run_inventory(engine, vault, seen_menu())
+    tomorrow = datetime.now(UTC) + inventory.REPAIR_GAP + timedelta(minutes=1)
+    assert await inventory.repair_promotions(engine, wanted="ipoxxo", now=tomorrow) == [address]
+    assert len(await alerts(engine)) == 1
+
+    # A read that shows the sponsor forgets the repair; a screen read as "several" is left alone.
+    await promoted_again(engine, live)
+    await run_inventory(engine, vault, seen_menu("ipoxxo"))
+    assert await repair() == [] and (await state_of(engine)).repairs == {}
+    await run_inventory(engine, vault, seen_menu("ipoxxo", "other"))
+    assert await repair() == [] and await sponsor_of(engine, live) == "ipoxxo"
+
+
+async def test_the_sponsor_loop_repairs_before_it_checks_again(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    from test_sponsor_support import TelemtUsersProvider
+
+    from proxyhub.reconcilers.sponsor import SponsorReconciler
+
+    ids = await seed(engine, seal_key)
+    await seed_connected(engine, vault, port=closed_port(), mtproxybot_id=BOT_ID)
+    await run_inventory(engine, vault, seen_menu())
+    loop = SponsorReconciler(
+        vault_factory=lambda: vault,
+        provider=lambda: TelemtUsersProvider(seal_key),
+        options=ClientOptions(endpoint=Endpoint("127.0.0.1", closed_port()), deadline_s=3),
+    )
+    assert await loop.step(engine) == "promotion_repair"
+    assert await sponsor_of(engine, ids["live"]) is None
+    # The next pass is the sponsor conversation itself (Telegram is a closed port here).
+    assert (await loop.step(engine)).startswith("failed:")
 
 
 # --- the API and the CLI ----------------------------------------------------------------------------------
