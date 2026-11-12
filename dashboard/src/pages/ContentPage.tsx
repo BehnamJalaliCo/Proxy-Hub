@@ -45,11 +45,14 @@ import { mediaUrl } from "../lib/contentEngine";
 import { formatJalali, formatNumber, formatRelative, toFaDigits } from "../lib/format";
 import {
   blockedText,
+  contentDirty,
+  contentPreviewHtml,
   contentStatusInfo,
   createContent,
   excerpt,
   LIMITS,
   LINK_STATUS,
+  linkOpenTag,
   parseTgHtml,
   POST_STATE,
   postsThatFit,
@@ -57,7 +60,6 @@ import {
   ROLE_LABEL,
   sameSettings,
   setContentStatus,
-  titleLine,
   toDraft,
   updateContent,
   validateContent,
@@ -691,17 +693,40 @@ const TOOLBAR: { label: string; icon: ReactNode; open: string; close: string }[]
   { label: "کد", icon: <Code className="size-4" />, open: "<code>", close: "</code>" },
 ];
 
-function Editor({ item, onDone }: { item: ContentItem | null; onDone: () => void }) {
+function Editor({
+  item,
+  channelTag,
+  onDone,
+  onDirtyChange,
+}: {
+  item: ContentItem | null;
+  channelTag: string;
+  onDone: () => void;
+  /** Told on every edit whether closing now would lose something (the drawer then asks first). */
+  onDirtyChange: (dirty: boolean) => void;
+}) {
   const qc = useQueryClient();
-  const [title, setTitle] = useState(item?.title ?? "");
-  const [body, setBody] = useState(item?.body ?? "");
-  const [tags, setTags] = useState((item?.tags ?? []).join("، "));
+  const [title, setTitleRaw] = useState(item?.title ?? "");
+  const [body, setBodyRaw] = useState(item?.body ?? "");
+  const [tags, setTagsRaw] = useState((item?.tags ?? []).join("، "));
   const [link, setLink] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const area = useRef<HTMLTextAreaElement>(null);
   const { input, errors } = validateContent(title, body, tags);
   const shownLength = visibleLength(body);
+  const setTitle = (v: string) => {
+    setTitleRaw(v);
+    onDirtyChange(contentDirty(item, v, body, tags));
+  };
+  const setBody = (v: string) => {
+    setBodyRaw(v);
+    onDirtyChange(contentDirty(item, title, v, tags));
+  };
+  const setTags = (v: string) => {
+    setTagsRaw(v);
+    onDirtyChange(contentDirty(item, title, body, v));
+  };
 
   const wrap = (open: string, close: string) => {
     const el = area.current;
@@ -711,6 +736,14 @@ function Editor({ item, onDone }: { item: ContentItem | null; onDone: () => void
       el?.focus();
       el?.setSelectionRange(out.start, out.end);
     });
+  };
+
+  const linkTag = linkOpenTag(link);
+  // Also from Enter in the address field: there it must apply the link, never submit the form.
+  const applyLink = () => {
+    if (linkTag === null) return;
+    wrap(linkTag, "</a>");
+    setLink("");
   };
 
   const save = (status: "draft" | "approved" | null) => {
@@ -728,8 +761,9 @@ function Editor({ item, onDone }: { item: ContentItem | null; onDone: () => void
       .finally(() => setBusy(false));
   };
 
-  // As the panel composes it: the title line with one emoji (D48), then the body in a quote.
-  const previewHtml = `<b>${titleLine(title).replace(/</g, "&lt;")}</b>\n\n<blockquote>${body}</blockquote>`;
+  // As the panel composes it: the title line with one emoji (D48), then the body as plain text
+  // under it (the owner, 2026-11-07).
+  const previewHtml = contentPreviewHtml(title, body);
 
   return (
     <form
@@ -763,19 +797,19 @@ function Editor({ item, onDone }: { item: ContentItem | null; onDone: () => void
               dir="ltr"
               value={link}
               onChange={(e) => setLink(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  applyLink();
+                }
+              }}
+              inputMode="url"
+              enterKeyHint="done"
               placeholder="https://…"
               aria-label="نشانی لینک"
               className="h-9 min-w-0 flex-1 rounded-lg border border-line bg-surface px-2 text-left text-sm text-fg outline-none focus:border-brand"
             />
-            <IconButton
-              label="لینک روی متن انتخاب‌شده"
-              className="size-9"
-              disabled={!/^https?:\/\/\S+$/i.test(link.trim())}
-              onClick={() => {
-                wrap(`<a href="${link.trim().replace(/"/g, "%22")}">`, "</a>");
-                setLink("");
-              }}
-            >
+            <IconButton label="لینک روی متن انتخاب‌شده" className="size-9" disabled={linkTag === null} onClick={applyLink}>
               <Link2 className="size-4" />
             </IconButton>
           </div>
@@ -806,7 +840,7 @@ function Editor({ item, onDone }: { item: ContentItem | null; onDone: () => void
       </Field>
       <div className="flex flex-col gap-1.5">
         <span className="text-sm font-semibold text-fg">پیش‌نمایش بالای پست</span>
-        <TelegramBubble html={previewHtml} channel="@ipoxxo" />
+        <TelegramBubble html={previewHtml} channel={channelTag} />
       </div>
       <div className="sticky bottom-0 -mx-5 flex flex-wrap gap-2 border-t border-line bg-surface/95 px-5 py-3 backdrop-blur">
         {item ? (
@@ -904,10 +938,17 @@ function ItemRow({ item, index, onEdit }: { item: ContentItem; index: number; on
   );
 }
 
-function LibraryCard() {
+function LibraryCard({ channelTag }: { channelTag: string }) {
   const content = useContent();
   const [tab, setTab] = useState<Tab>("approved");
   const [editing, setEditing] = useState<ContentItem | "new" | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const close = () => {
+    setEditing(null);
+    setDirty(false);
+    setConfirmDiscard(false);
+  };
   const data = content.data;
   const items = (data?.items ?? []).filter((i) => tab === "all" || i.status === tab);
   const count = (t: Tab) => (data ? (t === "all" ? data.items.length : data.counts[t]) : 0);
@@ -956,14 +997,37 @@ function LibraryCard() {
       <Drawer
         open={editing !== null}
         onOpenChange={(v) => {
-          if (!v) setEditing(null);
+          // A tap on the dimmed area, Escape or the X: ask before throwing typed text away.
+          if (v) return;
+          if (dirty) setConfirmDiscard(true);
+          else close();
         }}
         title={editing === "new" ? "محتوای تازه" : "ویرایش محتوا"}
         description="عنوان، متن و برچسب‌ها؛ پیش‌نمایش پایین همان چیزی است که بالای پست میآید."
         icon={<FilePen className="size-5" />}
       >
-        {editing !== null ? <Editor key={editing === "new" ? "new" : editing.id} item={editing === "new" ? null : editing} onDone={() => setEditing(null)} /> : null}
+        {editing !== null ? (
+          <Editor
+            key={editing === "new" ? "new" : editing.id}
+            item={editing === "new" ? null : editing}
+            channelTag={channelTag}
+            onDone={close}
+            onDirtyChange={setDirty}
+          />
+        ) : null}
       </Drawer>
+      <ConfirmDialog
+        open={confirmDiscard}
+        onOpenChange={(v) => {
+          if (!v) setConfirmDiscard(false);
+        }}
+        title="تغییرات ذخیره نشده دور ریخته شود؟"
+        description="آنچه در این محتوا نوشته‌اید هنوز ذخیره نشده است. با «دور ریختن» از دست میرود؛ با «انصراف» به ویرایش برمیگردید."
+        confirmLabel="دور ریختن"
+        tone="danger"
+        icon={<FilePen className="size-6" />}
+        onConfirm={close}
+      />
     </Card>
   );
 }
@@ -1009,7 +1073,7 @@ export default function ContentPage() {
           </div>
           <OperatorSection />
           <RecentCard />
-          <LibraryCard />
+          <LibraryCard channelTag={s.channel_tag} />
         </div>
       ) : null}
     </>

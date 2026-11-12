@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   blockedText,
+  contentDirty,
+  contentPreviewHtml,
   contentStatusInfo,
   decodeEntities,
   excerpt,
+  linkOpenTag,
   parseTags,
   parseTgHtml,
   plainText,
@@ -198,5 +201,38 @@ describe("words", () => {
     expect(contentStatusInfo("weird").label).toBe("weird");
     // A post whose message was deleted in the channel: shown, not alerted (the panel never deletes).
     expect(POST_STATE.gone).toEqual({ label: "در کانال پاک شده", tone: "neutral" });
+  });
+});
+
+describe("the content editor", () => {
+  it("previews the body as plain text under the title, as compose_content does", () => {
+    const html = contentPreviewHtml("ترفند امروز", "خط اول <b>مهم</b>\n<blockquote>نقل</blockquote> پایان");
+    // The exact string panel/proxyhub/telegram/templates.py compose_content returns.
+    expect(html).toBe("<b>📡 ترفند امروز</b>\n\nخط اول <b>مهم</b>\nنقل پایان");
+    const hasQuote = (nodes: TgNode[]): boolean => nodes.some((n) => n.type === "el" && (n.tag === "blockquote" || hasQuote(n.children)));
+    expect(hasQuote(parseTgHtml(html))).toBe(false);
+    expect(contentPreviewHtml("ترفند", "<pre>x</pre>")).toBe("<b>📡 ترفند</b>\n\nx");
+    // The title is shown literally, as the server escapes it.
+    expect(plainText(parseTgHtml(contentPreviewHtml("R&amp;D <x>", "متن")))).toMatch(/^📡 R&amp;D <x>/);
+    expect(contentPreviewHtml("", "متن")).toBe("متن");
+    expect(contentPreviewHtml("عنوان", "  ")).toBe("<b>📡 عنوان</b>");
+  });
+
+  it("builds the link tag only for an http(s) address", () => {
+    expect(linkOpenTag("https://example.com/a")).toBe('<a href="https://example.com/a">');
+    expect(linkOpenTag("  http://x.ir  ")).toBe('<a href="http://x.ir">');
+    expect(linkOpenTag('https://x.ir/"q"')).toBe('<a href="https://x.ir/%22q%22">');
+    for (const bad of ["", "ftp://x.ir", "https://x .ir", "example.com"]) expect(linkOpenTag(bad), bad).toBeNull();
+  });
+
+  it("knows when closing would lose what was typed", () => {
+    expect(contentDirty(null, "", "", "")).toBe(false);
+    expect(contentDirty(null, "  ", "\n", " ")).toBe(false);
+    expect(contentDirty(null, "", "متن", "")).toBe(true);
+    const item = { title: "عنوان", body: "متن", tags: ["تلگرام", "امنیت"] };
+    expect(contentDirty(item, "عنوان", "متن", "تلگرام، امنیت")).toBe(false);
+    expect(contentDirty(item, "عنوان ۲", "متن", "تلگرام، امنیت")).toBe(true);
+    expect(contentDirty(item, "عنوان", "متن تازه", "تلگرام، امنیت")).toBe(true);
+    expect(contentDirty(item, "عنوان", "متن", "تلگرام")).toBe(true);
   });
 });
