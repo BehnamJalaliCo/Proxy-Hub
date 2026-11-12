@@ -45,7 +45,7 @@ from proxyhub.agent_api.desired import (
     set_telemt_node_config,
     set_user_sponsor_tag,
 )
-from proxyhub.agent_api.reports import ReportRejected, parse_report
+from proxyhub.agent_api.reports import ReportRejected, accumulate, parse_report
 from proxyhub.agent_api.sealing import SealError, load_seal_key, open_secret, seal_secret
 from proxyhub.agent_api.tokens import TokenRefused, issue_registration_token, token_digest
 from proxyhub.agent_api.validation import (
@@ -545,6 +545,31 @@ async def test_report_is_stored_as_aggregates(env: Env) -> None:
         n=node_id,
     )
     assert agent == [(True, '"' + "c" * 64 + '"', "3.5.16")]
+
+
+def test_a_counter_that_restarts_from_zero_accumulates() -> None:
+    assert accumulate(0, 0, 1000) == 1000
+    assert accumulate(1000, 1000, 1500) == 1500
+    assert accumulate(1500, 1500, 200) == 1700  # Telemt restarted: its counter began again
+
+
+async def test_telemt_bytes_add_up_across_telemt_restarts(env: Env) -> None:
+    """mtproto-agentapi:2. Telemt's per-user counter starts again from zero when Telemt restarts:
+    the proxy's total keeps what it had (last_total_octets stays the raw value)."""
+    node_id, fp = await registered(env)
+    async with env.maker()() as session:
+        await set_telemt_node_config(session, node_id, ports=[443], tls_domain="cdn.example.com")
+        await create_telemt_user(session, env.seal_key, node_id, "alice")
+        await session.commit()
+    for octets in (1000, 1500, 200):
+        body = report_body()
+        body["telemt"]["users"] = [{"name": "alice", "current_connections": 1, "total_octets": octets}]
+        resp = await env.client.post("/agent/v1/report", json=body, headers=env.headers(fp))
+        assert resp.status_code == 204, resp.text
+    users = await env.rows(
+        "SELECT last_total_octets, octets_total FROM telemt_users WHERE node_id = :n", n=node_id
+    )
+    assert users == [(200, 1700)]
 
 
 async def test_integral_numbers_are_accepted_for_float_fields(env: Env) -> None:

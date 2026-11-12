@@ -205,6 +205,16 @@ async def test_proxies_list_contract(client: AsyncClient, engine: AsyncEngine) -
     stale = (await client.get(BASE)).json()["proxies"][0]
     assert stale["key"] == first["key"] and stale["connections"] is None
     assert stale["stats_at"] is not None and stale["total_octets"] == 123456
+    # Telemt restarted (a port change, a reboot): its counter began again at 1000. The total keeps
+    # the 123456 it had (mtproto-agentapi:2).
+    await agent_reports(
+        engine,
+        one,
+        applied_etag=await current_etag(engine, await seal_key(), one),
+        users=[{"name": user_name_for(one), "current_connections": 2, "total_octets": 1000}],
+    )
+    again = (await client.get(BASE)).json()["proxies"][0]
+    assert (again["key"], again["total_octets"], again["connections"]) == (first["key"], 124456, 2)
 
 
 async def test_put_settings_saves_logs_and_the_loop_applies_them(

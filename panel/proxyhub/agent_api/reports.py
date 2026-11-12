@@ -127,6 +127,12 @@ def parse_report(data: Any) -> AgentReport:
         raise ReportRejected("schema") from None
 
 
+def accumulate(total: int, last: int, value: int) -> int:
+    """A cumulative total from a counter that restarts from zero (Telemt's per-user bytes start
+    again whenever Telemt restarts): add the growth, or the whole new value when it went down."""
+    return total + (value - last if value >= last else value)
+
+
 async def store_report(session: AsyncSession, node_id: uuid.UUID, report: AgentReport, now: datetime) -> int:
     """Store one report. Returns how many per-user rows went to ``mtproxy_stats``. The caller commits."""
     users = {
@@ -141,6 +147,8 @@ async def store_report(session: AsyncSession, node_id: uuid.UUID, report: AgentR
         if user is None:  # removed meanwhile, or never ours: nothing to attach it to
             continue
         user.last_current_connections = counters.current_connections
+        value = counters.total_octets
+        user.octets_total = accumulate(user.octets_total or 0, user.last_total_octets or 0, value)
         user.last_total_octets = counters.total_octets
         user.last_stats_at = now
         if user.registration_id is not None:

@@ -156,7 +156,7 @@ async def list_proxies(db: Db, seal_key: bytes, now: datetime) -> list[ProxyView
                 TelemtUser.enabled,
                 TelemtUser.ad_tag.label("user_ad_tag"),
                 TelemtUser.last_current_connections,
-                TelemtUser.last_total_octets,
+                TelemtUser.octets_total,
                 TelemtUser.last_stats_at,
                 TelemtNodeConfig.ports,
                 TelemtNodeConfig.tls_domain,
@@ -204,7 +204,8 @@ async def list_proxies(db: Db, seal_key: bytes, now: datetime) -> list[ProxyView
                 enabled=bool(r.enabled),
                 sponsor_tag_set=r.user_ad_tag is not None or r.node_ad_tag is not None,
                 connections=fresh_connections(r.last_current_connections, r.last_stats_at, now),
-                total_octets=r.last_total_octets,
+                # Across Telemt restarts (its own counter starts again from zero at each one).
+                total_octets=r.octets_total if r.last_stats_at is not None else None,
                 stats_at=r.last_stats_at,
                 live_at=r.live_at,
                 status=proxy_status(r.state, bool(r.enabled), r.live_at),
