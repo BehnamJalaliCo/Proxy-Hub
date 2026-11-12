@@ -253,6 +253,8 @@ def test_the_deployer_runs_the_installed_guard_before_deploying_from_main() -> N
     guard_at = text.index('"$guard" "$CHECKOUT" "$current" "$target" "$ETC/github-web-flow.gpg"')
     assert guard_at < text.index('log "deploying $target')
     assert '[ "$DEPLOY_BRANCH" = main ]' in text
-    assert "guard=/usr/local/sbin/proxyhub-verify-main" in text  # the trusted copy, not the target's
+    # The trusted copy, not the target's (the sandbox prefix is for tests; systemd sets none).
+    assert 'SBIN="$ROOT/usr/local/sbin"' in text and 'ROOT="${PROXYHUB_DEPLOY_ROOT:-}"' in text
+    assert 'guard="$SBIN/proxyhub-verify-main"' in text
     assert '[ -x "$guard" ] &&' in text  # a missing guard refuses (fail closed)
-    assert 'install -m 0755 "$CHECKOUT/deploy/verify_main.sh" /usr/local/sbin/proxyhub-verify-main' in text
+    assert 'install -m 0755 "$CHECKOUT/deploy/verify_main.sh" "$SBIN/proxyhub-verify-main"' in text

@@ -24,6 +24,7 @@
 | `BackupFailed`، `BackupTooOld`، `BackupMetricsMissing` | آخرین backup شکست خورده، یا آخرین backup موفق کهنه‌تر از ۲۶ ساعت است، یا backup اصلاً اجرا نشده است |
 | `RestoreTestFailing`، `RestoreTestTooOld` | آخرین آزمون بازگردانی شکست خورده، یا بیش از ۸ روز است که آزمون موفق نبوده است |
 | `MonitoringTargetDown`، `TextfileMetricsError` | بخشی از خود پشته‌ی پایش از کار افتاده است |
+| `DeployRefused`، `DeployFailed`، `DeployRollbackFailed` | deployer تازه‌ترین commit را رد کرد (ادغام امضاشده‌ی PR نبود)، یا مستقر کردنش شکست خورد و به نسخه‌ی قبلی برگشت، یا برگشت هم شکست خورد. تا استقرار سالم بعدی روشن میماند. |
 | `Watchdog` | همیشه روشن است. فقط به نگهبان بیرونی میرود. |
 
 متن هشدارها فارسی است، چون به مالک میرسد. هر قانون با `promtool test rules` آزمون واحد دارد (`prometheus/tests/panel_test.yml`)، و متن فارسی هم در همان آزمون سنجیده میشود.
