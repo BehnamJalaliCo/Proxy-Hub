@@ -1149,10 +1149,16 @@ class OperatorSession:
         return int(self._client.session.dc_id)
 
     async def resolve_channel(self, username: str, channel_id: int) -> ChannelRef:
-        """One of OUR public channels by its username; its id must be the configured one."""
-        found = await self._run(
-            self._client(functions.contacts.ResolveUsernameRequest(username=username.lstrip("@")))
-        )
+        """One of OUR public channels by its username; its id must be the configured one. A name
+        nobody holds any more (the channel's link changed) is ``channel_not_found`` too."""
+        try:
+            found = await self._run(
+                self._client(functions.contacts.ResolveUsernameRequest(username=username.lstrip("@")))
+            )
+        except MtpError as exc:
+            if exc.rpc in ("USERNAME_NOT_OCCUPIED", "USERNAME_INVALID"):
+                raise MtpError("channel_not_found", rpc=exc.rpc) from None
+            raise
         for chat in getattr(found, "chats", []):
             if (
                 isinstance(chat, types.Channel)

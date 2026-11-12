@@ -13,12 +13,14 @@ imitation of Telegram anywhere).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import socket
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from telethon import TelegramClient, errors, functions, types
@@ -589,3 +591,32 @@ def test_the_check_failed_alerts() -> None:
     other = messages.check_failed_alert("telegram_refused", "<X>")
     assert "&lt;X&gt;" in other and "<X>" not in other and "۳۰ دقیقه" in other
     assert "دوباره کار میکند" in messages.check_recovered_alert()
+
+
+class _Refusing:
+    """A client whose every request fails with ``error`` (what Telegram answered)."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def __call__(self, request: object) -> object:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "rpc"),
+    [
+        (errors.UsernameNotOccupiedError(None), "channel_not_found", "USERNAME_NOT_OCCUPIED"),
+        (errors.UsernameInvalidError(None), "channel_not_found", "USERNAME_INVALID"),
+        (errors.FloodWaitError(None, capture=30), "flood_wait", "FLOOD_WAIT"),
+    ],
+)
+async def test_a_channel_name_nobody_holds_is_channel_not_found(
+    error: Exception, code: str, rpc: str
+) -> None:
+    creds = ApiCredentials(api_id=123456, api_hash=SecretValue(secrets.token_hex(16)))
+    client: Any = _Refusing(error)
+    op = userclient.OperatorSession(client, creds, ClientOptions(), contextlib.ExitStack())
+    with pytest.raises(MtpError) as raised:
+        await op.resolve_channel("@our_old_name", 1234567890)
+    assert (raised.value.code, raised.value.rpc) == (code, rpc)
