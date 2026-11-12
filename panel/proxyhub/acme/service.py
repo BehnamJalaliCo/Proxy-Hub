@@ -288,7 +288,14 @@ async def _order(
             return await asyncio.to_thread(session.finalize, order, timeout=options.finalize_timeout)
         finally:
             if published:
-                await dns.clear()
+                try:
+                    await dns.clear()
+                except Exception as exc:
+                    # Never in place of the result: an issued certificate (its key exists only in
+                    # memory) or the order's own error. The next run removes what is left.
+                    log.warning(
+                        "acme: challenge cleanup failed (%s); the next run removes it", type(exc).__name__
+                    )
     finally:
         await asyncio.to_thread(session.close)
 

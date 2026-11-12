@@ -93,7 +93,7 @@ class AcmeReconciler(Reconciler):
             return
         engine = conn.engine
         now = datetime.now(UTC)
-        await self._forget_unused(conn, now)
+        await self._forget_unused(engine, now)
         zone = await active_zone(conn)
         leftovers = await zones_with_rows(conn, PURPOSE)
         due = (
@@ -119,28 +119,35 @@ class AcmeReconciler(Reconciler):
                     session_factory=self._session_factory,
                 )
 
-    async def _forget_unused(self, conn: AsyncConnection, now: datetime) -> None:
+    async def _forget_unused(self, engine: AsyncEngine, now: datetime) -> None:
         """Forget the certificate of a domain that Cloudflare no longer lists or that the pool
-        deleted (its names can never be served again)."""
-        rows = await cert_rows(conn)
-        if not rows:
-            return
-        zones = {
-            r.name: (r.status, r.pool_state)
-            for r in (await conn.execute(select(CfZone.name, CfZone.status, CfZone.pool_state))).all()
-        }
-        for row in rows:
-            status, pool_state = zones.get(row.domain, (GONE, PoolState.DELETED.value))
-            if status != GONE and pool_state in KEPT_STATES:
-                continue
-            if await forget(conn, row.domain):
-                await log_action(
-                    conn,
-                    actor=ACTOR,
-                    action="acme_certificate_forgotten",
-                    target=f"*.{row.domain}",
-                    dry_run=False,
-                    allowed=True,
-                    reasons=["zone_gone" if status == GONE else f"pool_{pool_state}"],
-                    result="certificate and key removed from the vault",
-                )
+        deleted (its names can never be served again).
+
+        Decided per NAME over every zone row of it: a domain re-added to Cloudflare gets a new zone
+        id, so an old gone row and the live one share the name, and the certificate stays while any
+        of them is listed and kept. Runs in its own transaction, committed before an order may start:
+        the order's first write is on the same certificate row, from another connection, and would
+        wait forever on a delete this loop's own open transaction had not committed."""
+        async with engine.begin() as db:
+            rows = await cert_rows(db)
+            if not rows:
+                return
+            zones: dict[str, list[tuple[str, str]]] = {}
+            for r in (await db.execute(select(CfZone.name, CfZone.status, CfZone.pool_state))).all():
+                zones.setdefault(r.name, []).append((r.status, r.pool_state))
+            for row in rows:
+                seen = zones.get(row.domain, [])
+                if any(status != GONE and pool_state in KEPT_STATES for status, pool_state in seen):
+                    continue
+                listed = sorted(pool_state for status, pool_state in seen if status != GONE)
+                if await forget(db, row.domain):
+                    await log_action(
+                        db,
+                        actor=ACTOR,
+                        action="acme_certificate_forgotten",
+                        target=f"*.{row.domain}",
+                        dry_run=False,
+                        allowed=True,
+                        reasons=[f"pool_{listed[0]}" if listed else "zone_gone"],
+                        result="certificate and key removed from the vault",
+                    )
