@@ -51,6 +51,8 @@ export const SERVICE_ACTION: Record<string, string> = {
   // the sponsor loop's own checks (proxyhub/sponsor/inventory.py, D63)
   "sponsor.promotion_repair": "تنظیم دوباره‌ی کانال اسپانسری که ‎@MTProxybot‎ نشان نمیداد",
   "sponsor.promotion_alert": "هشدار: ‎@MTProxybot‎ هنوز کانال اسپانسر درست را نشان نمیدهد",
+  // the domain's expected name servers, first taken from Cloudflare (proxyhub/cloudflare/delegation.py)
+  domain_delegation_baseline: "ثبت nameserverهای مورد انتظار دامنه از Cloudflare",
   // the login (proxyhub/auth): too many failures lock it for a while
   locked: "قفل موقت ورود پس از چند تلاش ناموفق",
   // a new Authenticator after a lost phone (proxyhub/auth)
@@ -165,6 +167,8 @@ export const SERVICE_REASON: Record<string, string> = {
   bot_cannot_delete: "ربات اجازه‌ی حذف پیام ندارد",
   bot_token_invalid: "توکن ربات پذیرفته نشد",
   channel_not_found: "کانال پیدا نشد",
+  // the domain's name servers
+  cloudflare_assigned: "nameserverهایی که Cloudflare داده است",
   // the content supervisor
   qc_rejects: "ردهای پشت سر هم ناظر",
   approve: "تأیید",
