@@ -71,7 +71,9 @@ DAILY = frozenset({"all_locations_closed"})
 DAY = timedelta(days=1)
 WEEKLY = frozenset({"account_server_limit_reached"})
 WEEK = timedelta(days=7)
-# can_delete refusals the code cannot fix (server_not_observed and the kill switch clear by themselves).
+# can_delete refusals the code cannot fix. The kill switch clears by itself, and so does
+# server_not_observed: a stale observation is refreshed, and a server Hetzner no longer has is
+# recognised on a fresh one (the planner's _server_gone) and its node closed.
 DELETE_BLOCKS = frozenset(
     {
         "label_managed_by_missing",
@@ -175,8 +177,9 @@ def _create_text(code: str, slots: list[int], plan: FleetPlan, snap: FleetSnapsh
             "اضافه کنید؛ جدول «دسترسی locationها از ایران» در صفحه‌ی nodeها نشان میدهد کدام باز بوده است."
         ),
         "spare_in_use": (
-            "چند جایگاه هم‌زمان سرور جایگزین میخواهند و جای خالی (سرور دهم) بیش از یک ساعت است در کار است. "
-            "ناوگان یکی‌یکی جایگزین میکند؛ اگر طول کشید، سقف تعداد node را یکی بالا ببرید."
+            "چند جایگاه هم‌زمان سرور جایگزین میخواهند و جای خالی (سرور دهم) بیش از یک ساعت است گرفته است. "
+            "ناوگان یکی‌یکی جایگزین میکند و بالا بردن سقف تعداد node این را تند نمیکند. اگر در صفحه‌ی "
+            "nodeها سروری مدت‌هاست ناسالم یا در حال حذف مانده، جای خالی را همان گرفته است."
         ),
     }
     return need + texts[code]

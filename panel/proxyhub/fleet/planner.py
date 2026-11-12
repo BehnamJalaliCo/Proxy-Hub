@@ -491,6 +491,18 @@ class _Planner:
         others = self._usable([loc for loc in locs if loc not in avoid])
         return sorted(others, key=lambda loc: (*self._spread_key(loc), self._rank(loc), locs.index(loc)))
 
+    def _server_gone(self, n: NodeSnapshot) -> bool:
+        """Hetzner no longer has the node's server (deleted outside the panel): a fresh look at ALL
+        servers of the account, taken after the server surely existed, does not list it. The guard
+        is green, so the server did not just lose its managed-by label (that locks the account)."""
+        if n.hetzner_id is None or (n.account_id, n.hetzner_id) in self.snap.servers:
+            return False
+        a = self.accounts_by_id.get(n.account_id)
+        if a is None or a.observed_at is None or not self._fresh(a) or a.guard_ok is not True:
+            return False
+        existed = [t for t in (n.ready_at, n.state_since) if t is not None]
+        return bool(existed) and a.observed_at > max(existed)
+
     def _repair_over(self, n: NodeSnapshot) -> bool:
         since = n.state_since or n.created_at
         return self.now - since > REPAIR_WINDOW
@@ -580,23 +592,26 @@ class _Planner:
             planner_reasons.append("account_not_usable")
         server: ServerView | None = None
         no_server = node.hetzner_id is None and node.state in (S.REQUESTED, S.CREATING, S.RETIRING)
+        gone = False
         if node.hetzner_id is None and not no_server:
             planner_reasons.append("no_hetzner_id")
         elif node.hetzner_id is not None:
             server = self.snap.servers.get((node.account_id, node.hetzner_id))
-            if server is None:
+            gone = server is None and self._server_gone(node)
+            if server is None and not gone:
                 planner_reasons.append("server_not_observed")
         gate_reasons: tuple[str, ...] = ()
-        # A node without any server (a request, or a create that never answered) is closed by the
-        # executor after its lookups by label: no delete gate is involved until a server is found.
-        gate_allowed = no_server
+        # A node without any server (a request, or a create that never answered, or a server Hetzner
+        # no longer has) is closed by the executor after its own live look, with no Hetzner delete:
+        # no delete gate is involved until a server is found, and then can_delete decides (rule 5).
+        gate_allowed = no_server or gone
         if server is not None:
             d = can_delete(
                 server, NodeRowView(node.account_id, node.hetzner_id, S.RETIRING.value), node.account_id
             )
             gate_reasons, gate_allowed = d.reasons, d.allowed
         reasons = planner_reasons + [r for r in gate_reasons if r not in planner_reasons]
-        context = {
+        context: dict[str, Any] = {
             "why": why,
             "node_id": node.id,
             "account_id": node.account_id,
@@ -605,6 +620,8 @@ class _Planner:
             "slot": node.slot,
             "location": node.location,
         }
+        if gone:
+            context["server_gone"] = True
         return PlannedAction(
             "delete", node.name, gate_allowed and not planner_reasons, tuple(reasons), context
         )
@@ -728,11 +745,13 @@ class _Planner:
                 reason = "replacement_in_progress" if blocked or sick or leaving else "slot_starting"
                 actions.append(self._none(target, reason, slot=slot))
             elif sick and not all(self._repair_over(n) for n in sick):
+                # A node whose server Hetzner no longer has will not recover: it leaves at once.
+                deletes.extend((n, "unhealthy") for n in sick if self._server_gone(n))
                 actions.append(self._none(target, "slot_unhealthy", slot=slot))
             else:
                 # Nothing serves and nothing is on its way: build one. A node that never served
-                # (failed boot) is not worth keeping while its replacement is built.
-                deletes.extend((n, "unhealthy") for n in sick if n.ready_at is None)
+                # (failed boot), or whose server is gone, is not worth keeping meanwhile.
+                deletes.extend((n, "unhealthy") for n in sick if n.ready_at is None or self._server_gone(n))
                 if self._backing_off(slot):
                     actions.append(self._none(target, "request_backoff", slot=slot))
                     continue

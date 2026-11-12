@@ -380,7 +380,9 @@ def test_delete_needs_label_and_live_observation() -> None:
     (d,) = [a for a in plan.actions if a.action == "delete"]
     assert not d.allowed and "label_managed_by_missing" in d.reasons
 
-    plan = plan_for(open_settings(), nodes=(retiring, *rest), servers={})
+    # The last look at the account is older than the node's step to retiring: it proves nothing.
+    just_now = dataclasses.replace(retiring, state_since=NOW - timedelta(seconds=10))
+    plan = plan_for(open_settings(), nodes=(just_now, *rest), servers={})
     (d,) = [a for a in plan.actions if a.action == "delete"]
     assert not d.allowed and "server_not_observed" in d.reasons
 
@@ -388,6 +390,68 @@ def test_delete_needs_label_and_live_observation() -> None:
     plan = plan_for(open_settings(), nodes=(retiring, *rest), servers=protected)
     (d,) = [a for a in plan.actions if a.action == "delete"]
     assert not d.allowed and "delete_protection_on" in d.reasons
+
+
+def dead(n: int, slot: int, *, since_min: float = 30, location: str | None = None) -> NodeSnapshot:
+    """An unhealthy slot node that served for days (its server may since have been deleted)."""
+    return dataclasses.replace(
+        node(n, slot=slot, state=NodeState.UNHEALTHY, location=location),
+        state_since=NOW - timedelta(minutes=since_min),
+    )
+
+
+def test_a_node_whose_server_hetzner_no_longer_has_is_retired() -> None:
+    """fleet:3: a server deleted outside the panel left its node unhealthy forever: every delete was
+    refused as server_not_observed, and the dead row held the spare, the account and the caps."""
+    rest = [node(i, slot=i) for i in range(2, 5)]
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in range(2, 5)}
+    settings_ = open_settings(target_slots=4)
+    full = (account(limit=4, servers_total=3),)  # the guard's fresh look: 3 servers, n1's is gone
+
+    def deletes(plan: FleetPlan) -> list[tuple[str, str, bool, tuple[str, ...]]]:
+        return [
+            (a.target, a.context["why"], a.allowed, a.reasons) for a in plan.actions if a.action == "delete"
+        ]
+
+    # (a) Full account, no replacement possible: the dead node leaves at once, so the slot can be built.
+    for since in (30, 5):  # past its repair window, and within it (it will not recover)
+        plan = plan_for(settings_, nodes=(dead(1, 1, since_min=since), *rest), servers=servers, accounts=full)
+        assert deletes(plan) == [("n1", "unhealthy", True, ())], since
+        (d,) = [a for a in plan.actions if a.action == "delete"]
+        assert d.context["server_gone"] is True
+    # (b) No proof that the server is gone: nothing changes.
+    for why, acc, n1 in (
+        ("stale look", account(limit=4, servers_total=3, observed_min_ago=40), dead(1, 1)),
+        (
+            "look before the node's last step",
+            account(limit=4, servers_total=3, observed_min_ago=20),
+            dead(1, 1, since_min=10),
+        ),
+        ("guard red", account(limit=4, servers_total=3, guard_ok=False), dead(1, 1)),
+    ):
+        plan = plan_for(settings_, nodes=(n1, *rest), servers=servers, accounts=(acc,))
+        assert not deletes(plan), why
+        settled = node(10, slot=1, location="nbg1", ready_min_ago=10)
+        plan = plan_for(settings_, nodes=(n1, settled, *rest), servers=servers, accounts=(acc,))
+        assert deletes(plan) and all(not a[2] and "server_not_observed" in a[3] for a in deletes(plan)), why
+    # (c) With room and a settled replacement the dead node leaves (it used to hold the spare forever).
+    settled = node(10, slot=1, location="nbg1", ready_min_ago=10)
+    plan = plan_for(
+        settings_,
+        nodes=(dead(1, 1), settled, *rest),
+        servers={**servers, ("acc-a", 1010): server(1010)},
+        accounts=(account(servers_total=4),),
+    )
+    assert deletes(plan) == [("n1", "unhealthy", True, ())]
+    # A server that is still there goes through the delete gate as always (rule 5).
+    plan = plan_for(
+        settings_,
+        nodes=(dead(1, 1), settled, *rest),
+        servers={**servers, ("acc-a", 1010): server(1010), ("acc-a", 1001): server(1001, managed=False)},
+        accounts=(account(servers_total=5),),
+    )
+    assert [d[:3] for d in deletes(plan)] == [("n1", "unhealthy", False)]
+    assert "label_managed_by_missing" in deletes(plan)[0][3]
 
 
 def test_orphan_server_is_reported_never_deleted() -> None:
