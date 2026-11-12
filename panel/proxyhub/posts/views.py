@@ -88,16 +88,19 @@ async def preview(db: AsyncConnection, now: datetime, h: links.Harvest) -> dict[
     )
     content_html = candidate.content_html() if candidate is not None else publisher.content_for(item)
     names = await operators.operator_labels(db, chosen, now)
+    hours = await publisher.validity_hours(db)
     media_row = await candidates.post_media(db, candidate) if candidate is not None else None
     rendered = None
     if media_row is not None and chosen:
         try:
-            rendered, chosen = publisher.fit_caption(content_html, chosen, tag, cfg.texts(), names)
+            rendered, chosen = publisher.fit_caption(
+                content_html, chosen, tag, cfg.texts(), names, validity_hours=hours
+            )
         except PostTooLong:
             media_row = None
     if rendered is None:
         media_row = None
-        rendered, chosen = publisher.fit(content_html, chosen, tag, cfg.texts(), names)
+        rendered, chosen = publisher.fit(content_html, chosen, tag, cfg.texts(), names, validity_hours=hours)
     where = await publisher.target(db, cfg)
     pack = await operator.emoji_map(db)
     return {
@@ -144,12 +147,14 @@ async def caption_budget(db: AsyncConnection, now: datetime, h: links.Harvest) -
     if not chosen:
         return None
     names = await operators.operator_labels(db, chosen, now)
+    hours = await publisher.validity_hours(db)
     try:
-        _, kept = publisher.fit_caption("", chosen, tag, cfg.texts(), names)
+        _, kept = publisher.fit_caption("", chosen, tag, cfg.texts(), names, validity_hours=hours)
     except PostTooLong:
         return 0
     views = publisher.views_for_new_post(kept, names)
-    longest = max(utf16_len(visible_text(post_tail(v, tag, cfg.texts()))) for v in later_states(views))
+    tails = [post_tail(v, tag, cfg.texts(), validity_hours=hours) for v in later_states(views)]
+    longest = max(utf16_len(visible_text(t)) for t in tails)
     return max(0, CAPTION_LIMIT - longest - 2)
 
 

@@ -273,6 +273,7 @@ const ACTION: Record<string, string> = {
   "telegram.pairing_cancelled": "باطل شدن کد اتصال تلگرام",
   "telegram.owner_paired": "وصل شدن چت مالک به ربات",
   "telegram.channel_set": "ثبت کانال تلگرام",
+  "telegram.channel_refreshed": "نام، عنوان یا اجازه‌های ربات در کانال عوض شده بود و به‌روز شد",
   "telegram.settings_set": "تغییر زمان‌بندی پست",
   "telegram.test_alert": "هشدار آزمایشی",
   "telegram.test_post": "پست آزمایشی",
@@ -310,6 +311,7 @@ const ACTION: Record<string, string> = {
   "posts.own_pack_chosen": "بسته‌ی اختصاصی کانال برای پست‌ها انتخاب شد",
   "posts.operator_not_sent": "پست حساب دوم برای کانال اصلی نرفت (انتشار اصلی خاموش شد)",
   "posts.operator_send_unknown": "معلوم نیست پست حساب دوم رفت یا نه (دوباره فرستاده نمیشود)",
+  "posts.bot_not_sent": "پست ربات برای کانال اصلی نرفت (انتشار اصلی خاموش شد)",
   // the content engine (D51)
   "content.source_added": "افزودن منبع محتوا",
   "content.source_updated": "تغییر منبع محتوا",

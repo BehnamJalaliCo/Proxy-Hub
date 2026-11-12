@@ -38,8 +38,10 @@ Fail closed:
   (``posts.poster_fallback``). A post to the MAIN channel whose main switch was turned off meanwhile
   is not sent at all (``main_disabled``).
 * A post whose outcome is unknown (the connection broke or timed out after the request was written,
-  or Telegram's answer has no message id) is **never sent again** (at most once, like the bot's: rule
-  6 makes a duplicate permanent): the job fails with ``ambiguous_send`` and the owner is told.
+  Telegram's answer has no message id, or a claim is still there at the next step because the
+  worker died between the claim and the record) is **never sent again** (at most once, like the
+  bot's: rule 6 makes a duplicate permanent): the job fails with ``ambiguous_send``, the event is
+  logged (``posts.operator_send_unknown``) and the owner is told.
 * An edit can only be made by the account itself: it is retried with the outbox's backoff and fails
   after :data:`~proxyhub.telegram.outbox.MAX_ATTEMPTS` (the publisher then backs off and finally tells
   the owner). While the kill switch is ON, or Telegram holds the account (FLOOD_WAIT: no new post goes
@@ -168,19 +170,26 @@ class Result:
 
 
 async def recover_interrupted(conn: AsyncConnection, now: datetime) -> int:
-    """Jobs still claimed by an earlier step whose outcome was never recorded: a post is failed and
-    never resent (at most once), an edit is tried again."""
+    """Jobs still claimed by an earlier step whose outcome was never recorded (the worker died
+    between the claim and the record): a post may be in the channel, so it is failed, never resent
+    (at most once) and the owner is told, as for any unknown outcome; an edit is tried again."""
     rows = (
         await conn.execute(
-            select(Outbox.id, Outbox.kind).where(
+            select(Outbox.id, Outbox.kind, Outbox.payload).where(
                 Outbox.done_at.is_(None), Outbox.last_error == store.SENDING, Outbox.kind.in_(operator.KINDS)
             )
         )
     ).all()
     for row in rows:
         if row.kind == operator.SEND:
-            await bot_outbox.finish_failed(
-                conn, row.id, now, "ambiguous_send: interrupted while sending; not resent"
+            role = row.payload.get("role") if isinstance(row.payload, dict) else None
+            await _post_unknown(
+                conn,
+                role if role in store.ROLES else "unknown",
+                row.id,
+                now,
+                "interrupted while sending; not resent",
+                ["ambiguous_send", "interrupted"],
             )
         else:
             await conn.execute(update(Outbox).where(Outbox.id == row.id).values(last_error="interrupted"))
@@ -486,18 +495,25 @@ async def _sent(conn: AsyncConnection, job: Job, target: Target, result: Result,
 
 async def _unknown(conn: AsyncConnection, job: Job, target: Target, now: datetime, why: str) -> str:
     """A post that may be in the channel: never sent again (at most once); the owner is told."""
-    await bot_outbox.finish_failed(conn, job.id, now, f"ambiguous_send: {why}")
+    await _post_unknown(conn, target.role, job.id, now, why, ["ambiguous_send"])
+    return "failed"
+
+
+async def _post_unknown(
+    conn: AsyncConnection, role: str, job_id: int, now: datetime, why: str, reasons: list[str]
+) -> None:
+    """Fail the post's job without sending it again, log it and alert the owner (see :func:`_unknown`)."""
+    await bot_outbox.finish_failed(conn, job_id, now, f"ambiguous_send: {why}")
     await log_action(
         conn,
         actor=ACTOR,
         action="posts.operator_send_unknown",
-        target=f"{target.role}:outbox:{job.id}",
+        target=f"{role}:outbox:{job_id}",
         dry_run=False,
         allowed=False,
-        reasons=["ambiguous_send"],
+        reasons=reasons,
     )
     await store.enqueue_owner_alert(conn, OPERATOR_POST_UNKNOWN_FA)
-    return "failed"
 
 
 async def record(conn: AsyncConnection, job: Job, target: Target, result: Result, now: datetime) -> str:

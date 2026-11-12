@@ -103,7 +103,7 @@ async def put_operator(admin: Admin, db: Db, request: Request) -> dict[str, Any]
     poster = value.get("poster", old.poster)
     if poster not in operator.POSTERS:
         raise _err("poster_invalid")
-    pack = old.emoji_pack
+    pack, auto = old.emoji_pack, old.auto
     if "pack_link" in value:
         link = value["pack_link"]
         if link is None or (isinstance(link, str) and not link.strip()):
@@ -115,7 +115,9 @@ async def put_operator(admin: Admin, db: Db, request: Request) -> dict[str, Any]
                 pack = operator.parse_pack_link(link)
             except operator.PackLinkInvalid as exc:
                 raise _err(exc.code) from None
-    new = operator.OperatorConfig(poster=poster, emoji_pack=pack)
+        # A pack the owner pasted stays; the panel's own pack may later give way to a newer own one.
+        auto = pack is not None and await own_pack.is_own(db, pack)
+    new = operator.OperatorConfig(poster=poster, emoji_pack=pack, auto=auto)
     if new != old:
         await operator.save_config(db, new)
         changed = {k: [v, new.as_json()[k]] for k, v in old.as_json().items() if new.as_json()[k] != v}

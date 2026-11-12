@@ -42,6 +42,7 @@ from proxyhub.links.contract import ProxyLink
 from proxyhub.posts import content, links, plan, publisher, views
 from proxyhub.posts import settings as posting
 from proxyhub.posts.poster import BotPoster
+from proxyhub.reality.settings import RealitySettings, save_reality_settings
 from proxyhub.reconcilers.publisher import PublisherReconciler
 from proxyhub.telegram import store
 from proxyhub.telegram.schedule import TEHRAN, QuietWindow
@@ -227,6 +228,35 @@ async def test_each_slot_once_gap_and_day_cap(engine: AsyncEngine, vault: Vault)
     assert len(await jobs(engine, "send_post")) == 2
 
 
+async def test_a_plan_changed_during_the_day_keeps_its_later_slots(engine: AsyncEngine, vault: Vault) -> None:
+    await ready_fleet(engine)
+    await setup_telegram(engine, vault)
+    await quiet(engine, [], interval=0)
+    await configure(engine, posts_per_day=20)
+    today = slot_time(0).astimezone(TEHRAN).date()
+    old = plan.day_plan(today, count=20, start=time(8), end=time(0), quiet=[])
+    for i in (0, 1, 3, 4):  # the morning under the old plan (slot 2 was missed)
+        assert await publish(engine, old[i].at + timedelta(seconds=30)) == "queued"
+        await deliver(engine, (await jobs(engine, "send_post"))[-1].id, message_id=60 + i)
+    last = old[4].at + timedelta(seconds=30)
+    # The owner lowers posts_per_day at noon: the new plan's slots after the last post have indexes
+    # the morning posts already hold, yet nothing was posted at their time.
+    await configure(engine, posts_per_day=10)
+    new = plan.day_plan(today, count=10, start=time(8), end=time(0), quiet=[])
+    later = [s for s in new if s.at > last and s.index in (0, 1, 3, 4)]
+    assert len(later) == 2
+    for n, slot in enumerate(later):
+        assert await publish(engine, slot.at + timedelta(seconds=30)) == "queued"
+        [made] = await rows(engine, "SELECT plan_slot, planned_at FROM posts ORDER BY id DESC LIMIT 1")
+        assert (made.plan_slot, made.planned_at) == (5 + n, slot.at)  # the next free index, its own time
+        await deliver(engine, (await jobs(engine, "send_post"))[-1].id, message_id=70 + n)
+        assert await publish(engine, slot.at + timedelta(minutes=1)) == "already_posted"
+    # A new slot at or before a morning post is covered by it: nothing goes twice.
+    earlier = [s for s in new if s.at <= last]
+    assert await publish(engine, earlier[-1].at + timedelta(seconds=30)) == "already_posted"
+    assert len(await jobs(engine, "send_post")) == 6
+
+
 async def test_no_post_window_and_waiting_post(engine: AsyncEngine, vault: Vault) -> None:
     await ready_fleet(engine)
     await setup_telegram(engine, vault)
@@ -242,6 +272,26 @@ async def test_no_post_window_and_waiting_post(engine: AsyncEngine, vault: Vault
     # The earlier post never left the outbox (bot paused): nothing more is queued.
     assert await publish(engine, slot_time(3)) == "waiting"
     assert len(await jobs(engine, "send_post")) == 1
+
+
+async def test_a_post_states_the_period_the_owner_set_for_configs(engine: AsyncEngine, vault: Vault) -> None:
+    await ready_fleet(engine, 1)
+    await setup_telegram(engine, vault)
+    async with engine.begin() as conn:  # the owner's Reality settings (D41): configs live 72 hours
+        await save_reality_settings(conn, RealitySettings(cap_hours=72))
+        shown = await views.preview(conn, slot_time(2), await links.harvest(conn, PROVIDERS))
+    assert "🔒 کانفیگ V2Ray — اعتبار ۷۲ ساعت\n" in shown["text"] and LOCK not in shown["text"]
+    now = slot_time(2)
+    await posted(engine, vault, now)
+    body = (await jobs(engine, "send_post"))[-1].payload["text"]
+    assert "🔒 کانفیگ V2Ray — اعتبار ۷۲ ساعت\n" in body and LOCK not in body
+    # The owner changes the period: a recent post gets one edit that states the new one.
+    async with engine.begin() as conn:
+        await save_reality_settings(conn, RealitySettings(cap_hours=24))
+    assert await refresh(engine, now + timedelta(minutes=1)) == 1
+    assert "🔒 کانفیگ V2Ray — اعتبار ۲۴ ساعت\n" in await edit_text(engine)
+    await deliver(engine, (await jobs(engine, "edit_post"))[-1].id, message_id=0)
+    assert await refresh(engine, now + timedelta(minutes=20)) == 0
 
 
 async def test_main_channel_only_when_turned_on(engine: AsyncEngine, vault: Vault) -> None:
@@ -557,8 +607,12 @@ async def test_a_missing_config_past_its_own_expiry_is_marked_expired(
 
     # While its provider returns it in a shape we refuse, the post waits, even past the end.
     assert await refresh(engine, later, [mtproto_provider, reality_refused]) == 0
-    # Its provider no longer lists the config at all, and the config's own end has passed.
-    assert await refresh(engine, later, [mtproto_provider]) == 1
+    # Its provider no longer lists the config at all, and the config's own end has passed: the post
+    # still waits out the grace first (a renewed config, D41, may be missing for a round).
+    grace = publisher.MISSING_GRACE
+    assert await refresh(engine, later, [mtproto_provider]) == 0
+    assert await refresh(engine, later + grace - timedelta(seconds=1), [mtproto_provider]) == 0
+    assert await refresh(engine, later + grace, [mtproto_provider]) == 1
     body = await edit_text(engine)
     assert (
         f"</a>{MARK}\n\n⌛️ زمان این کانفیگ تمام شد\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗" in body
@@ -566,6 +620,36 @@ async def test_a_missing_config_past_its_own_expiry_is_marked_expired(
     )
     got = {label: status for label, (status, _) in (await carried_links(engine, post_id)).items()}
     assert got == {"پروکسی ۱": "active", "ریلیتی ۱": "expired"}
+
+
+async def test_a_renewed_config_missing_for_a_round_stays_live(engine: AsyncEngine, vault: Vault) -> None:
+    nodes = await ready_fleet(engine, 1)
+    await setup_telegram(engine, vault)
+    now = slot_time(2)
+    post_id, _ = await posted(engine, vault, now)
+    stored = "SELECT expires_at FROM post_links WHERE kind = 'reality'"
+    [config] = await rows(engine, stored)
+    old = config.expires_at
+    # The Reality loop renews the config in place (D41): same key and link, a later end.
+    [node] = await rows(engine, "SELECT ready_at FROM nodes WHERE id = :n", n=nodes[0])
+    await set_node(engine, nodes[0], ready_at=node.ready_at + timedelta(hours=48))
+    assert await refresh(engine, now + timedelta(minutes=1)) == 0  # the post text does not change
+    assert (await rows(engine, stored))[0].expires_at == old + timedelta(hours=48)
+    # After the first end, its only node leaves it out of one harvest (Xray restarting): not ended.
+    t = old + timedelta(minutes=1)
+    assert await refresh(engine, t, [mtproto_provider, reality_unconfirmed]) == 0
+    assert await jobs(engine, "edit_post") == []
+    # Left out for the whole grace: paused, never expired (its stored end follows the renewal).
+    assert await refresh(engine, t + publisher.MISSING_GRACE, [mtproto_provider, reality_unconfirmed]) == 1
+    body = await edit_text(engine)
+    assert PAUSED_LINE in body and "تمام شد" not in body and node_vless_id(nodes[0]) not in body
+    assert {s for s, _ in (await carried_links(engine, post_id)).values()} == {"active"}
+    # Listed again: the post gets its config back.
+    await deliver(engine, (await jobs(engine, "edit_post"))[-1].id, message_id=0)
+    assert await refresh(engine, t + publisher.MISSING_GRACE + publisher.EDIT_MIN_GAP) == 1
+    body = await edit_text(engine)
+    assert node_vless_id(nodes[0]) in body and LOCK in body and "تمام شد" not in body
+    assert {v for v in (await carried_links(engine, post_id)).values()} == {("active", None)}
 
 
 async def test_no_edit_without_any_provider(engine: AsyncEngine, vault: Vault) -> None:

@@ -30,7 +30,8 @@ the link part stays short so news can sit above it):
   the competitor's grid: «همراه اول • همراه اول •», «پروکسی • پروکسی •»), so the rows line up;
   no-break spaces inside a word;
 * each VLESS config as ONE short line, «🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت» (the owner, 2026-11-07: the
-  period, not a day and a clock; :data:`CONFIG_VALIDITY_HOURS`), and under it
+  period, not a day and a clock: the Reality settings' ``cap_hours``, :data:`CONFIG_VALIDITY_HOURS`
+  when none is given), and under it
   each of its links (the config and, for a REALITY config, its XHTTP link) as a tiny label line
   ("TCP" / "XHTTP") over its OWN collapsed quote (``<blockquote expandable>``) that holds nothing but
   that link as inline code. One quote, one config: a tap on the code, or copying the quote, gives
@@ -384,8 +385,10 @@ TITLE_MARK: Final = "📡"
 # The one line above a config's quote (D48): «🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت».
 REALITY_MARK: Final = "🔒"
 REALITY_NAME: Final = "کانفیگ V2Ray"
-# A config's lifetime as the post states it: the default of proxyhub/reality/settings.py ``cap_hours``
-# (tests/test_posts_units.py keeps the two equal). A config that ends sooner shows its status mark.
+# A config's lifetime as the post states it when the caller gives none: the default of
+# proxyhub/reality/settings.py ``cap_hours`` (tests/test_posts_units.py keeps the two equal). The
+# publisher passes the stored ``cap_hours`` (``validity_hours``), which the owner can change. A config
+# that ends sooner shows its status mark.
 CONFIG_VALIDITY_HOURS: Final = 48
 # The line over the channel tag, under the link part (decision D50).
 SIGN_OFF: Final = "—"
@@ -405,6 +408,10 @@ PAUSED_LINE: Final = "⏸ فعلاً در دسترس نیست"
 # never used as a separator: next to Persian digits it reads as a zero ("۱ ·" looks like "۱۰"); the
 # words of the proxy grid are separated by a bullet with a space on each side (D48).
 LRM: Final = "\u200e"
+# Right-to-left mark: a Telegram client gives each line the direction of its first strong letter
+# (an emoji has none), so a Persian line whose first word is Latin ("API", "worker", "Redis") would
+# lay out left-to-right; with this mark in front it stays right-to-left.
+RLM: Final = "\u200f"
 MAX_LABEL_CHARS: Final = 32
 MAX_TITLE_CHARS: Final = 120
 MAX_VLESS_CHARS: Final = 2048
@@ -595,11 +602,12 @@ def _marker(variant: str | None) -> str | None:
     return variant if variant and _VARIANT_RE.fullmatch(variant) else None
 
 
-def reality_line(until: datetime | None) -> str:
+def reality_line(until: datetime | None, *, validity_hours: int = CONFIG_VALIDITY_HOURS) -> str:
     """The one line above a config's quote: «🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت» for a config with an
-    end (the period, not the end's day and clock: the owner, 2026-11-07)."""
+    end (the period, not the end's day and clock: the owner, 2026-11-07). ``validity_hours``: the
+    configs' period, the Reality settings' ``cap_hours``."""
     head = f"{REALITY_MARK} {REALITY_NAME}"
-    return f"{head} — اعتبار {fa_digits(CONFIG_VALIDITY_HOURS)} ساعت" if until is not None else head
+    return f"{head} — اعتبار {fa_digits(validity_hours)} ساعت" if until is not None else head
 
 
 def _labelled(variant: str | None, body: str) -> str:
@@ -635,7 +643,7 @@ def _config_groups(links: Sequence[PostLink]) -> list[list[PostLink]]:
     return groups
 
 
-def _config_group(group: Sequence[PostLink], texts: StatusTexts) -> str:
+def _config_group(group: Sequence[PostLink], texts: StatusTexts, *, validity_hours: int) -> str:
     """One config: its lock line (with the earliest end of its live links; a config and its XHTTP
     link end together), then each link under its label, a live one in its own collapsed quote, one
     that is not live as its status line outside any quote. With nothing live left: ONE status line
@@ -651,16 +659,24 @@ def _config_group(group: Sequence[PostLink], texts: StatusTexts) -> str:
         for x in group
     ]
     links = "\n\n".join(entries)
-    return f"{reality_line(min(ends) if ends else None)}\n{links}"
+    return f"{reality_line(min(ends) if ends else None, validity_hours=validity_hours)}\n{links}"
 
 
-def _reality_block(links: Sequence[PostLink], texts: StatusTexts) -> str:
+def _reality_block(links: Sequence[PostLink], texts: StatusTexts, *, validity_hours: int) -> str:
     """Every config of the post (D48 puts one in a new post; an older post may carry more), each as
     its line and its quote, in the order they were posted."""
-    return "\n\n".join(_config_group(group, texts) for group in _config_groups(links))
+    return "\n\n".join(
+        _config_group(group, texts, validity_hours=validity_hours) for group in _config_groups(links)
+    )
 
 
-def post_tail(links: Sequence[PostLink], channel_username: str, texts: StatusTexts) -> str:
+def post_tail(
+    links: Sequence[PostLink],
+    channel_username: str,
+    texts: StatusTexts,
+    *,
+    validity_hours: int = CONFIG_VALIDITY_HOURS,
+) -> str:
     """Everything under the content: the proxy grid, the configs, the closing line, then the share
     line (D62), «—» and the channel tag (D50)."""
     mtproto = [x for x in links if x.kind == "mtproto"]
@@ -669,7 +685,7 @@ def post_tail(links: Sequence[PostLink], channel_username: str, texts: StatusTex
     if mtproto:
         parts.append(_mtproto_block(mtproto))
     if reality:
-        parts.append(_reality_block(reality, texts))
+        parts.append(_reality_block(reality, texts, validity_hours=validity_hours))
     if links and all(x.dead for x in links):
         parts.append(ALL_DEAD_LINE)
     tag = html.escape(channel_tag(channel_username), quote=False)
@@ -704,11 +720,15 @@ def tail_always_fits(
     texts: StatusTexts | None = None,
     *,
     caption: bool = False,
+    validity_hours: int = CONFIG_VALIDITY_HOURS,
 ) -> bool:
     """The link part fits now AND in every later state (:func:`later_states`), so a status edit of
     the post can always show it, shortening only the content."""
     texts = texts or StatusTexts()
-    return all(fits(post_tail(v, channel_username, texts), caption=caption) for v in later_states(links))
+    return all(
+        fits(post_tail(v, channel_username, texts, validity_hours=validity_hours), caption=caption)
+        for v in later_states(links)
+    )
 
 
 def render_post(
@@ -718,12 +738,14 @@ def render_post(
     texts: StatusTexts | None = None,
     *,
     caption: bool = False,
+    validity_hours: int = CONFIG_VALIDITY_HOURS,
 ) -> RenderedPost:
     """content (optional) + link blocks + channel tag, within one message (4096) or, with
     ``caption``, within a media caption (:data:`CAPTION_LIMIT`). The content (and only the content)
-    is shortened when the whole does not fit; PostTooLong if the tail alone does not."""
+    is shortened when the whole does not fit; PostTooLong if the tail alone does not.
+    ``validity_hours``: the configs' period the lock line states (:func:`reality_line`)."""
     visible_max, html_max = _limits(caption)
-    tail = post_tail(links, channel_username, texts or StatusTexts())
+    tail = post_tail(links, channel_username, texts or StatusTexts(), validity_hours=validity_hours)
     if not fits(tail, caption=caption):
         raise PostTooLong("the link blocks and channel tag alone exceed one Telegram message or caption")
     if not content_html or not content_html.strip():

@@ -605,12 +605,38 @@ async def test_the_shared_pacing_the_lock_and_an_interrupted_send(
         assert requests == []
         [job] = await jobs(engine)
         assert job.last_error is None and job.done_at is None
-        # A claim left behind by a worker that died mid-send: never sent again.
+        # A claim left behind by a worker that died mid-send: never sent again, and the owner is told
+        # to look at the channel (the post may be there, with no status edits), as for any unknown
+        # outcome.
         async with engine.begin() as conn:
             await conn.execute(update(Outbox).where(Outbox.id == job_id).values(last_error=store.SENDING))
         assert await operator_outbox.process_one(real) == "idle"
-    [job] = await jobs(engine)
-    assert job.last_error.startswith("failed: ambiguous_send") and requests == []
+        assert await operator_outbox.process_one(real) == "idle"  # nothing sent, no second alert
+    [job, alert] = await jobs(engine)
+    assert job.id == job_id and job.last_error.startswith("failed: ambiguous_send") and requests == []
+    assert alert.kind == "alert" and "دوباره فرستاده نمیشود" in alert.payload["text"]
+    [logged] = await rows(
+        engine, "SELECT target, reasons FROM actions_log WHERE action = 'posts.operator_send_unknown'"
+    )
+    assert logged.target == f"test:outbox:{job_id}" and "interrupted" in logged.reasons["reasons"]
+
+
+async def test_an_interrupted_edit_is_tried_again_without_an_alert(
+    engine: AsyncEngine, vault: Vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await setup_operator(engine, vault)
+    job_id = await queue_operator_post(engine, vault)
+    with telegram_answers(monkeypatch, channel_answers(message_id=902)):
+        assert await operator_outbox.process_one(deps(engine, vault)) == "sent"
+    [cp] = await rows(engine, "SELECT id FROM channel_posts WHERE outbox_id = :j", j=job_id)
+    async with engine.begin() as conn:
+        edit = await OPERATOR.queue_edit(conn, channel_post_id=cp.id, text_html="<b>ویرایش</b>")
+        await conn.execute(update(Outbox).where(Outbox.id == edit).values(last_error=store.SENDING))
+        assert await operator_outbox.recover_interrupted(conn, datetime.now(UTC)) == 1
+    done = {j.id: j for j in await jobs(engine)}
+    assert done[edit].last_error == "interrupted" and done[edit].done_at is None
+    assert await jobs(engine, "alert") == []
+    assert await rows(engine, "SELECT id FROM actions_log WHERE action = 'posts.operator_send_unknown'") == []
 
 
 async def test_a_pack_for_another_link_is_never_used(

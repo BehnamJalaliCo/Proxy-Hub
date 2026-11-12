@@ -31,7 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from proxyhub.telegram.client import BotClient, NetworkError, RetryAfter, ServerError
 from proxyhub.telegram.schedule import TEHRAN
-from proxyhub.telegram.templates import MAX_MESSAGE_CHARS, fa_digits, utf16_len, visible_text
+from proxyhub.telegram.templates import MAX_MESSAGE_CHARS, RLM, fa_digits, utf16_len, visible_text
 from proxyhub.vault import SecretValue
 
 DEDUPE_WINDOW: Final = timedelta(minutes=5)
@@ -73,6 +73,8 @@ def _clock(at: datetime) -> str:
 
 
 def _alert_block(alert: AmAlert) -> str:
+    """One alert's lines, each starting with :data:`RLM`: a summary or description that starts with
+    a Latin word ("API پنل ...", "Prometheus بیش از ...") still reads right-to-left."""
     name = alert.labels.get("alertname", "")
     summary = (alert.annotations.get("summary") or name or "هشدار")[:MAX_SUMMARY_CHARS]
     if alert.status == "firing":
@@ -86,7 +88,7 @@ def _alert_block(alert: AmAlert) -> str:
         when = alert.ends_at if alert.ends_at and alert.ends_at.year > 1 else None
         suffix = f" (ساعت {_clock(when)})" if when else ""
         lines = [f"🟢 <b>{html.escape(summary, quote=False)}</b>{suffix}"]
-    return "\n".join(lines)
+    return "\n".join(RLM + line for line in "\n".join(lines).split("\n"))
 
 
 def _fits(message: str) -> bool:

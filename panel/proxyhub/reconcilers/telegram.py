@@ -9,8 +9,15 @@
 * ``telegram_api_watchdog``: GET http://api:8000/livez every 60 s; after 3 failures in a row a
   Persian alert goes DIRECTLY to the owner (bot token from the vault), and a recovery message when
   the API answers again.
+* ``telegram_channels``: once a day, each stored channel (``telegram.channels``) is read again
+  (getChat + the bot's own getChatMember), so a public @username or title the owner changed in
+  Telegram, or the bot's rights, do not stay as they were when the channel was set: the @name under
+  new posts and in new config names follows. Only a record that is still the same chat is
+  refreshed; its chat id never changes and nothing is dropped. A change is logged
+  (``telegram.channel_refreshed``); a new @username, or a right to post or edit that is gone, is told
+  to the owner once. A refused or failed read keeps the record and is tried again an hour later.
 
-All three hold their advisory lock without an open transaction while they talk to Telegram or
+All of them hold their advisory lock without an open transaction while they talk to Telegram or
 probe the API (a 25 s long poll or a slow send must not keep a transaction idle). The updates loop
 stops its long poll as soon as the worker is asked to stop (Docker's stop grace is 10 s); the
 updates of a cancelled poll stay on Telegram's side because the offset is not advanced.
@@ -20,9 +27,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Final
 
 import httpx
@@ -34,8 +42,24 @@ from proxyhub.fleet.actions import iso, log_action
 from proxyhub.reconcilers.base import Reconciler, lock_key
 from proxyhub.telegram import outbox, pairing, store
 from proxyhub.telegram.alerts import BotFactory, OwnerTarget, send_direct
-from proxyhub.telegram.client import BotClient, Conflict, TelegramError, Unauthorized, Update
-from proxyhub.telegram.messages import API_BACK_FA, API_DOWN_FA, PAIRED_FA
+from proxyhub.telegram.client import (
+    BadRequest,
+    BotClient,
+    Conflict,
+    Forbidden,
+    TelegramError,
+    Unauthorized,
+    Update,
+)
+from proxyhub.telegram.messages import (
+    API_BACK_FA,
+    API_DOWN_FA,
+    CHANNEL_RENAMED_FA,
+    CHANNEL_RIGHT_FA,
+    CHANNEL_RIGHTS_LOST_FA,
+    CHANNEL_ROLE_FA,
+    PAIRED_FA,
+)
 from proxyhub.vault import Vault, VaultError
 
 log = logging.getLogger(__name__)
@@ -336,3 +360,142 @@ class ApiWatchdogReconciler(Reconciler):
         log.warning("api watchdog: %s did not answer (%d in a row)", self.url, self.failures)
         if self.failures >= self.failures_to_alert and not self.alerted:
             self.alerted = await self.notify(engine, API_DOWN_FA)
+
+
+# --- the stored channels, read again once a day ----------------------------------------------------
+
+CHANNELS_EVERY: Final = timedelta(days=1)
+CHANNELS_RETRY: Final = timedelta(hours=1)  # after a refused or failed read
+CHANNEL_FIELDS: Final = ("username", "title", "can_post", "can_edit", "can_delete")
+
+
+def channels_due(state: dict[str, Any] | None, now: datetime) -> bool:
+    """Once a day, or an hour after a read that failed for some channel."""
+    at = state.get("at") if state else None
+    try:
+        last = datetime.fromisoformat(at) if isinstance(at, str) else None
+    except ValueError:
+        last = None
+    if state is None or last is None:
+        return True
+    return now - last >= (CHANNELS_RETRY if state.get("errors") else CHANNELS_EVERY)
+
+
+def channel_alerts(role: str, old: dict[str, Any], new: dict[str, Any]) -> list[str]:
+    """What the owner is told about one refreshed channel: a new @username, or a right to post or
+    edit that is gone. Only a change is told, so each is told once."""
+    where = CHANNEL_ROLE_FA.get(role, role)
+    out: list[str] = []
+    if old.get("username") != new["username"]:
+        out.append(
+            CHANNEL_RENAMED_FA.format(
+                role=where,
+                old=html.escape(str(old.get("username") or "—"), quote=False),
+                new=html.escape(str(new["username"]), quote=False),
+            )
+        )
+    for right in ("can_post", "can_edit"):
+        if old.get(right) is True and new[right] is not True:
+            out.append(CHANNEL_RIGHTS_LOST_FA.format(role=where, what=CHANNEL_RIGHT_FA[right]))
+    return out
+
+
+async def apply_channel_reads(
+    conn: AsyncConnection, reads: dict[str, dict[str, Any]], errors: dict[str, str], now: datetime
+) -> list[str]:
+    """Store the fresh reads (:func:`store.refresh_channel`), log and tell what changed, and record
+    this try. Returns the roles whose record changed."""
+    changed_roles: list[str] = []
+    for role, record in reads.items():
+        old = await store.refresh_channel(conn, role, record)
+        if old is None:  # the owner set another channel meanwhile, or removed it
+            continue
+        changed = [k for k in CHANNEL_FIELDS if old.get(k) != record[k]]
+        if not changed:
+            continue
+        changed_roles.append(role)
+        await log_action(
+            conn,
+            actor="telegram",
+            action="telegram.channel_refreshed",
+            target=f"{role}:{record['username']}",
+            dry_run=False,
+            allowed=True,
+            reasons=changed,
+            context={k: [old.get(k), record[k]] for k in changed},
+        )
+        for text_html in channel_alerts(role, old, record):
+            await store.enqueue_owner_alert(conn, text_html)
+    await store.put_setting(conn, store.KEY_CHANNELS_CHECK, {"at": iso(now), "errors": errors})
+    return changed_roles
+
+
+async def refresh_channels(
+    engine: AsyncEngine, vault: Vault, *, bot_factory: BotFactory, now: datetime
+) -> str:
+    """One daily read of the stored channels when due. Returns ``not_due``, ``no_bot``,
+    ``no_channel``, ``ok`` or ``failed`` (some channel could not be read; its record is kept)."""
+    async with engine.begin() as conn:
+        if not channels_due(await store.get_setting(conn, store.KEY_CHANNELS_CHECK), now):
+            return "not_due"
+        creds = await store.load_bot(conn, vault)
+        stored = await store.channels(conn)
+    if creds is None:
+        return "no_bot"
+    chats = {
+        role: channel["chat_id"]
+        for role, channel in stored.items()
+        if isinstance(channel.get("chat_id"), int) and not isinstance(channel.get("chat_id"), bool)
+    }
+    if not chats:
+        return "no_channel"
+    reads: dict[str, dict[str, Any]] = {}
+    errors: dict[str, str] = {}
+    try:
+        async with bot_factory(creds.token) as bot:  # no transaction is open while Telegram answers
+            for role, chat_id in chats.items():
+                try:
+                    chat = await bot.get_chat(chat_id)
+                    rights = await bot.get_chat_member(chat_id, creds.info.id)
+                except (BadRequest, Forbidden) as exc:  # e.g. the bot was removed from the channel
+                    errors[role] = type(exc).__name__
+                    continue
+                if chat.id != chat_id or chat.type != "channel":
+                    errors[role] = "not_the_channel"
+                    continue
+                reads[role] = store.channel_record(chat, rights, now)
+    except TelegramError as exc:
+        log.warning("telegram channels: read failed (%s)", type(exc).__name__)
+        errors.update({role: type(exc).__name__ for role in chats if role not in reads})
+    async with engine.begin() as conn:
+        await apply_channel_reads(conn, reads, errors, now)
+    return "failed" if errors else "ok"
+
+
+class TelegramChannelsReconciler(Reconciler):
+    name = "telegram_channels"
+    interval_seconds = 600.0
+
+    def __init__(
+        self, *, vault_factory: VaultFactory = Vault.from_config, bot_factory: BotFactory = BotClient
+    ) -> None:
+        self.vault = _VaultOnce(vault_factory)
+        self.bot_factory = bot_factory
+        self.last_outcome: str | None = None
+
+    async def run_once(self, conn: AsyncConnection) -> None:
+        raise NotImplementedError("this loop manages its own transactions (try_run_once)")
+
+    async def try_run_once(self, engine: AsyncEngine) -> bool:
+        async def step() -> None:
+            try:
+                vault = self.vault()
+            except VaultError as exc:
+                self.last_outcome = "vault_unavailable"
+                log.warning("telegram channels: vault unavailable (%s)", type(exc).__name__)
+                return
+            self.last_outcome = await refresh_channels(
+                engine, vault, bot_factory=self.bot_factory, now=store.now_utc()
+            )
+
+        return await run_locked(engine, self.name, step)

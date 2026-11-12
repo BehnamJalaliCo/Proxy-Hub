@@ -17,7 +17,9 @@ One job per step (:func:`process_one`), in three short transactions:
 1. **pick + claim**: the first due job whose chat may be written to now (pacing: 3 s per channel,
    1 s for the owner chat, never before a 429 ``retry_after``). A ``send_post`` to the MAIN channel
    inside a no-post window (D21) or sooner than ``post_interval_min`` after the last main post is
-   moved to the first allowed time instead (alerts and edits are never held back). The claim
+   moved to the first allowed time instead (alerts and edits are never held back); one whose main
+   switch (``main_enabled``) the owner turned off while it waited is not sent at all
+   (``main_disabled``, logged as ``posts.bot_not_sent``, as on the operator's path). The claim
    (``last_error = 'sending'``) is committed BEFORE the HTTP call.
 2. **send** to Telegram (no transaction open).
 3. **record**: on success the post is recorded in ``channel_posts`` with its ``message_id`` and the
@@ -58,6 +60,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from proxyhub.db.models import Outbox
 from proxyhub.db.models_content import ContentMedia
 from proxyhub.db.models_telegram import ChannelPost
+from proxyhub.fleet.actions import log_action
+from proxyhub.posts import settings as posts_settings
 from proxyhub.telegram import store
 from proxyhub.telegram.client import (
     BadRequest,
@@ -84,6 +88,7 @@ def message_gone(last_error: str | None) -> bool:
 
 
 KINDS: Final = ("send_post", "edit_post", "alert")
+ACTOR: Final = "telegram"
 MAX_ATTEMPTS: Final = 8
 UNAUTHORIZED_PAUSE: Final = timedelta(minutes=5)
 PICK_LIMIT: Final = 50
@@ -262,6 +267,22 @@ def _text(job: Job) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
+async def _main_disabled(conn: AsyncConnection, job: Job, now: datetime) -> str:
+    """A post to the MAIN channel whose main switch the owner turned off while it waited (a no-post
+    window, a 429, a paused bot) is not sent at all, as on the operator's path."""
+    await finish_failed(conn, job.id, now, "main_disabled: the owner turned main posting off")
+    await log_action(
+        conn,
+        actor=ACTOR,
+        action="posts.bot_not_sent",
+        target=f"main:outbox:{job.id}",
+        dry_run=False,
+        allowed=False,
+        reasons=["main_disabled"],
+    )
+    return "failed"
+
+
 async def _resolve(conn: AsyncConnection, job: Job, now: datetime) -> Target | str:
     """The chat for this job, or an outcome string after updating the job."""
     if _text(job) is None:
@@ -285,6 +306,8 @@ async def _resolve(conn: AsyncConnection, job: Job, now: datetime) -> Target | s
             return await retry_at(
                 conn, job, now + backoff(job.attempts + 1), "channel_not_set", counted=True, now=now
             )
+        if role == "main" and not (await posts_settings.load(conn)).main_enabled:
+            return await _main_disabled(conn, job, now)
         if role == "main" and job.payload.get("breaking") is not True:  # D56: breaking news goes now
             posting = await store.posting_settings(conn)
             later = next_post_time(

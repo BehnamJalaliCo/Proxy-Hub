@@ -33,6 +33,7 @@ from proxyhub.reconcilers.sponsor import SponsorReconciler
 from proxyhub.reconcilers.targets import TargetsReconciler
 from proxyhub.reconcilers.telegram import (
     ApiWatchdogReconciler,
+    TelegramChannelsReconciler,
     TelegramOutboxReconciler,
     TelegramUpdatesReconciler,
 )
@@ -52,6 +53,7 @@ def reconcilers() -> list[Reconciler]:
         TelegramUpdatesReconciler(),
         TelegramOutboxReconciler(),
         ApiWatchdogReconciler(),
+        TelegramChannelsReconciler(),  # daily: the stored @username, title and bot rights of our channels
         DnsReconciler(),  # net: no-op until a verified Cloudflare token and an active domain exist
         AcmeReconciler(),  # *.<active domain> certificate (Let's Encrypt DNS-01) for the ws_tls nodes
         ProbesReconciler(),  # P15: TLS handshakes from Iran decide (the live fleet burns on "blocked")
