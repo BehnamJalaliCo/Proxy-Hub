@@ -147,7 +147,8 @@ def box(tmp_path: Path) -> Sandbox:
     _write_exec(bin_dir / "sleep", f"#!/bin/sh\nexec {shutil.which('sleep')} 0.2\n")
     gitconfig = tmp_path / "gitconfig"
     gitconfig.write_text("[user]\n\tname = Dev\n\temail = dev@example.invalid\n[commit]\n\tgpgsign = false\n")
-    env = {k: v for k, v in os.environ.items() if k not in {"FORCE", "PROXYHUB_METRICS_DIR"}}
+    outside = {"FORCE", "PROXYHUB_METRICS_DIR", "AGENT_DOMAIN", "PANEL_DOMAIN", "REQUIRE_GITHUB_MERGE"}
+    env = {k: v for k, v in os.environ.items() if k not in outside}
     env |= {
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "PROXYHUB_DEPLOY_ROOT": str(root),
