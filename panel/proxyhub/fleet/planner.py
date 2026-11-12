@@ -16,15 +16,16 @@ Model (docs/10_IMPLEMENTATION_PLAN.md section 3.11):
   learned from Hetzner's ``resource_limit_exceeded``, is reached on a fresh observation), no
   replacement can ever be built while the burned nodes hold the room. A slot with no serving node
   then lets its BURNED nodes go first (``making_room``): blocked from Iran they serve nobody. Its
-  replacement is built by a later plan, once the room is free. Unhealthy nodes keep the D14 order.
+  replacement is built by a later plan, once the room is free, still in another location if one is
+  left. Unhealthy nodes keep the D14 order; a node whose server Hetzner no longer has leaves at once.
 * **A location the owner removed** (D60, 2026-11-07: Reality on the Finland server failed on MCI
   while the US ones worked): a slot whose serving nodes are all in a location no longer in the
   owner's list moves. Its replacement is built first in an allowed location, and the old node
   leaves once that one has settled (D14), as ``location_removed``. With every account full, the
   old node leaves first (``making_room_location``) and the slot is built again by a later plan, but
-  only ONE slot at a time and only while no other node is starting or leaving
-  (``location_move_waiting``): a removed location may hold several working nodes, and they must
-  not all go at once.
+  only if that plan could build it, only ONE slot at a time, and only while no other node is
+  starting or leaving and no slot a move emptied is still unbuilt (``location_move_waiting``): a
+  removed location may hold several working nodes, and they must not all go at once.
 * A slot whose last request was refused by the executor waits a little before asking again; a
   server that got a burned IP (proxyhub/fleet/ip_history.py) is retried in another location.
 * Locations (P15): only the owner's allowed ones (fleet settings), preferring those whose recent TLS
@@ -40,6 +41,7 @@ Model (docs/10_IMPLEMENTATION_PLAN.md section 3.11):
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from collections import defaultdict
@@ -653,14 +655,55 @@ class _Planner:
             and self.now - n.deleted_at < CREATION_WINDOW
         }
 
-    def _vacated_by_move(self, slot: int) -> bool:
-        """The last server that served this slot left as ``location_removed`` (D60). A refused
-        request or a server that never became ready since does not end the move; a slot that never
-        had a server (no history) is not part of one."""
+    def _served_history(self, slot: int) -> list[NodeSnapshot]:
+        """The slot's deleted nodes that once served, newest first. A refused request or a server
+        that never became ready is left out: it does not end what the last served node started."""
         served = [n for n in self._slot_history(slot) if n.ready_at is not None]
-        if not served:
-            return False
-        return max(served, key=lambda n: n.deleted_at or self.now).retire_reason == "location_removed"
+        return sorted(served, key=lambda n: n.deleted_at or self.now, reverse=True)
+
+    def _vacated_by_move(self, slot: int) -> bool:
+        """The last server that served this slot left as ``location_removed`` (D60). A slot that
+        never had a server (no history) is not part of a move."""
+        served = self._served_history(slot)
+        return bool(served) and served[0].retire_reason == "location_removed"
+
+    def _burned_since_served(self, slot: int) -> set[str]:
+        """Locations of the slot's nodes that burned and left since anything else last served it.
+        With every account full they leave before the replacement is planned (D57, ``making_room``),
+        and D14 still builds that replacement in another location, not where Iran blocked them."""
+        out: set[str] = set()
+        for n in self._served_history(slot):
+            if n.retire_reason != "burned":
+                break
+            out.add(n.location)
+        return out
+
+    def _rebuild_blocked(
+        self, slot: int, away: list[NodeSnapshot], avoid: set[str], prefer_not: set[str]
+    ) -> PlannedAction | None:
+        """D60 with every account full: would the slot be built again once ``away`` has left? The
+        creation is evaluated as the next plan will, with those nodes gone (counts and month cost).
+        Returns the blocked creation, or None when it would be allowed. Nothing it does counts
+        against the later slots of this plan."""
+        saved = self.run
+        trial = dataclasses.replace(
+            saved, per_account=dict(saved.per_account), per_location=dict(saved.per_location)
+        )
+        gone = {n.id for n in away}
+        for n in away:
+            trial.live_total -= 1
+            trial.fleet_live -= 1
+            trial.per_account[n.account_id] = trial.per_account.get(n.account_id, 0) - 1
+            trial.per_location[n.location] = trial.per_location.get(n.location, 0) - 1
+        after = [dataclasses.replace(n, deleted_at=self.now) if n.id in gone else n for n in self.snap.nodes]
+        items, _ = node_cost_items(after, self.prices, self.now)
+        trial.projected = projected_month_total(items, self.now) + (saved.projected - self.projected_start)
+        self.run = trial
+        try:
+            create = self._create(slot, "replace", avoid=avoid, prefer_not=prefer_not)
+        finally:
+            self.run = saved
+        return None if create.allowed else create
 
     @staticmethod
     def _none(target: str, reason: str, **context: Any) -> PlannedAction:
@@ -707,8 +750,13 @@ class _Planner:
                 elif self._backing_off(slot):
                     actions.append(self._none(target, "request_backoff", slot=slot))
                 elif self._no_room():
+                    avoid = {n.location for n in away + blocked + sick}
                     if moving or moved:
                         actions.append(self._none(target, "location_move_waiting", slot=slot))
+                    elif refused := self._rebuild_blocked(slot, away, avoid, self._burned_ip_locations(slot)):
+                        # The slot could not be built again (no open location, no price, a cap ...):
+                        # its node keeps serving, and the owner hears why where only he can help.
+                        actions.append(refused)
                     else:
                         deletes.extend((n, "location_removed") for n in away)
                         actions.append(self._none(target, "making_room_location", slot=slot))
@@ -762,8 +810,10 @@ class _Planner:
                     actions.append(self._none(target, "making_room", slot=slot))
                     continue
                 avoid = {n.location for n in blocked + sick}
-                prefer_not = {n.location for n in leaving} | self._burned_ip_locations(slot)
-                if blocked or sick or leaving:
+                # Soft: with only the burned location left, building there beats an empty slot.
+                burned = self._burned_since_served(slot)
+                prefer_not = {n.location for n in leaving} | self._burned_ip_locations(slot) | burned
+                if blocked or sick or leaving or burned:
                     actions.append(self._create(slot, "replace", avoid=avoid, prefer_not=prefer_not))
                 else:
                     actions.append(self._create(slot, "fill", prefer_not=prefer_not))
