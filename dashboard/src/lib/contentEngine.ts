@@ -470,6 +470,17 @@ export const QC_NUMBERS: { key: QcNumberKey; label: string; min: number; max: nu
   { key: "breaking_min_sources", label: "کمترین منبع جدا برای خبر فوری", min: 2, max: 5, hint: "", group: "breaking" },
 ];
 
+/** News older than this (by its own time) never goes back to the queue (MAX_AGE in
+ * panel/proxyhub/content/candidates.py; the server refuses with 409 not_editable). */
+export const REQUEUE_MAX_AGE_MS = 48 * 3_600_000;
+
+/** Whether «برگرداندن به صف» can still work: a rejected item only while its news is fresh. */
+export function canRequeue(c: Pick<Candidate, "status" | "published_at" | "created_at">, now: Date): boolean {
+  if (c.status !== "rejected") return true;
+  const when = Date.parse(c.published_at ?? c.created_at);
+  return !Number.isNaN(when) && now.getTime() - when <= REQUEUE_MAX_AGE_MS;
+}
+
 /** The settings form's identity: only the saved config. Storing or removing the API key, or a
  * refresh of the live fields (calls, bridge), must not remount it and drop unsaved changes. */
 export const qcFormKey = (view: Pick<QcView, "config">): string => JSON.stringify(view.config);

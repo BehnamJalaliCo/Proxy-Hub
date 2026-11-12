@@ -27,6 +27,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { errorMessage } from "../lib/api";
 import { cn } from "../lib/browser";
 import {
+  canRequeue,
   CATEGORY_LABEL,
   captionErrors,
   captionLength,
@@ -50,6 +51,7 @@ import { contentKeys, useQueue } from "../lib/contentEngineQueries";
 import { formatRelative, toFaDigits } from "../lib/format";
 import { postsKeys } from "../lib/postsQueries";
 import { toast } from "../lib/toast";
+import { useNow } from "../lib/useNow";
 
 const NOT_YET = {
   title: "صف بازبینی هنوز روی پنل فعال نشده",
@@ -157,6 +159,7 @@ function CandidateCard({ c, budget, index }: { c: Candidate; budget: number | nu
   const [body, setBody] = useState(c.body);
   const [busy, setBusy] = useState<string | null>(null);
   const [showSource, setShowSource] = useState(false);
+  const now = useNow(60_000, c.status === "rejected");
   const editable = c.status === "pending" || c.status === "approved";
   const dirty = title !== c.title || body !== c.body;
   const errors = captionErrors(title, body);
@@ -302,7 +305,7 @@ function CandidateCard({ c, budget, index }: { c: Candidate; budget: number | nu
               ذخیره
             </Button>
           ) : null}
-          {c.status === "approved" || c.status === "rejected" ? (
+          {(c.status === "approved" || c.status === "rejected") && canRequeue(c, now) ? (
             <Button
               variant="ghost"
               size="sm"
@@ -313,6 +316,9 @@ function CandidateCard({ c, budget, index }: { c: Candidate; budget: number | nu
             >
               برگرداندن به صف
             </Button>
+          ) : null}
+          {!canRequeue(c, now) ? (
+            <span className="self-center text-[0.82rem] leading-6 text-fg-faint">بیش از ۴۸ ساعت از این خبر گذشته است؛ دیگر به صف برنمیگردد.</span>
           ) : null}
           {c.status !== "rejected" ? (
             <Button

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   API_KEY_RE,
   bridgeState,
+  canRequeue,
   captionErrors,
   captionLength,
   CATEGORY_LABEL,
@@ -232,6 +233,17 @@ describe("the content supervisor (D52)", () => {
     const ours = new Map(QC_NUMBERS.map((f) => [f.key as string, [f.min, f.max]]));
     expect(ours).toEqual(server);
     for (const f of QC_NUMBERS) expect(f.key in CONFIG, f.key).toBe(true);
+  });
+
+  it("offers «back to the queue» for a rejected item only while its news is under 48 hours old", () => {
+    const now = new Date("2026-11-12T12:00:00Z");
+    const rejected = (published_at: string | null, created_at = "2026-11-12T00:00:00Z") => ({ status: "rejected" as const, published_at, created_at });
+    expect(canRequeue(rejected("2026-11-11T12:00:00Z"), now)).toBe(true); // 24 h
+    expect(canRequeue(rejected("2026-11-10T12:00:00Z"), now)).toBe(true); // exactly 48 h
+    expect(canRequeue(rejected("2026-11-10T11:59:00Z"), now)).toBe(false);
+    // By its own time (published_at), else when it was fetched, as the server counts it.
+    expect(canRequeue(rejected(null, "2026-11-09T00:00:00Z"), now)).toBe(false);
+    expect(canRequeue({ status: "approved", published_at: "2026-11-01T00:00:00Z", created_at: "2026-11-01T00:00:00Z" }, now)).toBe(true);
   });
 
   it("keeps unsaved settings when only the API key or the live fields change", () => {
