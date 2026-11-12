@@ -420,6 +420,20 @@ def test_looking_stops_when_the_target_is_not_exactly_one_button(
     assert isinstance(result, WalkStuck) and result.reason == reason
 
 
+def test_a_reply_that_is_not_the_screen_does_not_name_the_proxy() -> None:
+    """A toast or an error after the proxy's button names no address: the walk reports it as a
+    screen that does not name the proxy (the inventory then records an unreadable screen)."""
+    for reply in (seen(answer="Please try again later"), seen(msg("Sorry, something went wrong."))):
+        walk = MenuWalk(target(), remove=False)
+        walk.next(Step.SENT_MYPROXIES, listing(REAL_LABEL))
+        result = walk.next(Step.PRESSED_PROXY, reply)
+        assert isinstance(result, MenuSeen) and not result.names_proxy and result.channels == ()
+    walk = MenuWalk(target(), remove=False)
+    walk.next(Step.SENT_MYPROXIES, listing(REAL_LABEL))
+    real = walk.next(Step.PRESSED_PROXY, real_screen(f"{HOST}:{PORT}"))
+    assert isinstance(real, MenuSeen) and real.names_proxy and real.promoted_title is None
+
+
 def test_a_screen_of_another_proxy_stops_the_walk() -> None:
     walk = MenuWalk(target(), remove=False)
     walk.next(Step.SENT_MYPROXIES, listing(REAL_LABEL))

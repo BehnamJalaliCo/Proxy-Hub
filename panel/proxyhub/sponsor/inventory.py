@@ -16,7 +16,9 @@ titles were understood, and two proxies had never been read): an ``inventory`` o
 What a finished inventory read is then acted on (:func:`repair_promotions`): a live proxy whose
 screen names no sponsor, or another one, while the panel holds the wanted one as set, has its
 sponsor set again by the sponsor loop (at most once per :data:`REPAIR_GAP` each); if the next read
-still does not show it, the owner is told (at most once per :data:`ALERT_GAP` each).
+still does not show it, the owner is told (at most once per :data:`ALERT_GAP` each). A read taken
+before the sponsor was last set, or a reply that does not name the proxy (not its screen), is never
+acted on.
 
 The jobs:
 
@@ -764,6 +766,10 @@ async def _record_menu(
     same: bool,
 ) -> str:
     result = outcome.result
+    if isinstance(result, MenuSeen) and not result.names_proxy:
+        # Not the proxy's screen (a toast, an error text, the list again): a read error, never
+        # "no sponsor shown", which the promotion repair would act on.
+        result = WalkStuck(step=Step.PRESSED_PROXY, reason="menu_does_not_name_proxy", screens=result.screens)
     if isinstance(result, MenuSeen):
         channels = result.channels
         note = "shown" if len(channels) == 1 else ("several" if channels else "not_shown")
@@ -1121,6 +1127,15 @@ async def repair_promotions(engine: AsyncEngine, *, wanted: str, now: datetime) 
         for entry, found in zip(entries, mapped, strict=True):
             reg = found.regs[0] if found.regs else None
             if reg is None or reg.registration_id is None or not _since(entry.menu_read_at, job):
+                continue
+            if (
+                reg.promotion_set_at is not None
+                and entry.menu_read_at is not None
+                and entry.menu_read_at <= reg.promotion_set_at
+            ):
+                # The screen was read before the sponsor was last set (the sponsor loop goes first
+                # and may set it during the check): the next check, queued AUTO_AFTER after that
+                # set, reads it again and is the one acted on.
                 continue
             key = str(reg.registration_id)
             promotion = _promotion(entry, found, wanted, wanted_title)

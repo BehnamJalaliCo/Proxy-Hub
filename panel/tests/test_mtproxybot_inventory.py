@@ -15,6 +15,7 @@ import json
 import secrets
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -388,6 +389,8 @@ async def test_the_inventory_then_reads_the_sponsor_of_each_live_proxy(
         (seen_menu("customer_ch"), "other", "shown"),
         (seen_menu(), "not_shown", "not_shown"),
         (seen_menu("ipoxxo", "other"), "several", "several"),
+        # A reply that does not name the proxy is not its screen (a toast, an error): unread.
+        (seen_menu(names_proxy=False), "stuck", "stuck:menu_does_not_name_proxy"),
         (
             WalkResult(
                 result=WalkStuck(step=Step.SENT_MYPROXIES, reason="proxy_not_in_list", screens=(SCREEN,)),
@@ -925,8 +928,6 @@ async def test_the_panel_queues_the_promotion_check_by_itself(
 ) -> None:
     """2026-11-12: the sponsors the dashboard showed were five days old and two were never read. The
     check comes once a day, and soon after a sponsor was set; never after a job that got stuck."""
-    from dataclasses import replace
-
     ids = await seed(engine, seal_key)
     now = datetime.now(UTC)
     assert await due(engine, now)  # a live proxy, never checked
@@ -1035,6 +1036,62 @@ async def test_a_sponsor_the_bot_does_not_show_is_set_again_and_then_the_owner_i
     assert await repair() == [] and (await state_of(engine)).repairs == {}
     await run_inventory(engine, vault, seen_menu("ipoxxo", "other"))
     assert await repair() == [] and await sponsor_of(engine, live) == "ipoxxo"
+
+
+async def test_a_reply_that_is_not_the_proxys_screen_is_never_repaired(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """A toast or an error text after the proxy's button names no channel, but it is not the
+    screen saying "n/a": the sponsor is not set again and the owner is not alerted."""
+    ids = await seed(engine, seal_key)
+    await pair_owner(engine)
+    for _ in range(2):
+        await run_inventory(engine, vault, seen_menu(names_proxy=False))
+        assert await inventory.repair_promotions(engine, wanted="ipoxxo", now=datetime.now(UTC)) == []
+    assert await sponsor_of(engine, ids["live"]) == "ipoxxo"
+    assert await alerts(engine) == []
+
+
+async def test_a_screen_read_before_the_sponsor_was_set_again_is_not_acted_on(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """The sponsor loop goes first and may set a sponsor in the middle of a check, after that
+    proxy's screen was read: the read is older than the set, so it neither repairs nor alerts."""
+    ids = await seed(engine, seal_key)
+    await pair_owner(engine)
+    live = ids["live"]
+
+    async def check_with_a_set_in_between() -> inventory.Job:
+        await inventory.request_job(engine, inventory.INVENTORY, actor="cli", now=datetime.now(UTC))
+        await read_the_list(engine, vault, *ALL_LABELS)
+        await record(engine, await prepare(engine, vault), seen_menu())  # "n/a"
+        async with engine.begin() as db:
+            await db.execute(
+                text("UPDATE sponsor_flows SET promotion_set_at = now() WHERE registration_id = :i"),
+                {"i": live},
+            )
+        assert await inventory.step(deps(engine, vault)) == "mtproxybot:done"
+        return await job(engine)
+
+    finished = await check_with_a_set_in_between()
+    assert await inventory.repair_promotions(engine, wanted="ipoxxo", now=datetime.now(UTC)) == []
+    assert await sponsor_of(engine, live) == "ipoxxo"
+    assert (await state_of(engine)).repaired_job == finished.requested_at
+    assert "sponsor.promotion_repair" not in [a["action"] for a in await actions(engine)]
+
+    # Set again after a repair: an older read does not tell the owner that it did not help.
+    async with engine.begin() as db:
+        current = await inventory._locked_state(db)
+        repairs = {str(live): inventory.Repair(at=datetime.now(UTC))}
+        await inventory.save_state(db, replace(current, repairs=repairs))
+    await check_with_a_set_in_between()
+    assert await inventory.repair_promotions(engine, wanted="ipoxxo", now=datetime.now(UTC)) == []
+    assert await alerts(engine) == [] and str(live) in (await state_of(engine)).repairs
+
+    # A read taken after that set is acted on as before.
+    await run_inventory(engine, vault, seen_menu())
+    tomorrow = datetime.now(UTC) + inventory.REPAIR_GAP + timedelta(minutes=1)
+    assert await inventory.repair_promotions(engine, wanted="ipoxxo", now=tomorrow) == [f"{LIVE_HOST}:8443"]
 
 
 async def test_the_sponsor_loop_repairs_before_it_checks_again(
