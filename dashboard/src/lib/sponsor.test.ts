@@ -321,6 +321,8 @@ describe("@MTProxybot's own list", () => {
 
   it("flags a live proxy that does not show the wanted sponsor", () => {
     expect(botPromotionInfo(entry(), "ipoxxo")).toEqual({ tone: "success", text: "اسپانسر: ‎@ipoxxo‎" });
+    // Matched by the channel's title: no @name was read, and the wanted channel is shown, not «—».
+    expect(botPromotionInfo(entry({ sponsor_channel: null }), "ipoxxo")).toEqual({ tone: "success", text: "اسپانسر: ‎@ipoxxo‎" });
     const other = botPromotionInfo(entry({ promotion: "other", sponsor_channel: "someone" }), "ipoxxo");
     expect(other?.tone).toBe("danger");
     expect(other?.text).toMatch(/@someone.*@ipoxxo/);
