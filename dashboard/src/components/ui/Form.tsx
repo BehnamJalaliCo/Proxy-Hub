@@ -153,7 +153,11 @@ export function Toggle({
 }) {
   const auto = useId();
   const switchId = id ?? auto;
-  const on = { brand: "data-[state=checked]:bg-brand", danger: "data-[state=checked]:bg-danger", warning: "data-[state=checked]:bg-warning" }[tone];
+  const on = {
+    brand: "data-[state=checked]:bg-[linear-gradient(140deg,var(--ph-gold-1),var(--ph-gold-2)_46%,var(--ph-gold-3))] data-[state=checked]:ring-[var(--ph-gold-3)]/40",
+    danger: "data-[state=checked]:bg-danger",
+    warning: "data-[state=checked]:bg-warning",
+  }[tone];
   return (
     <div className="flex items-start justify-between gap-4">
       <label htmlFor={switchId} className="min-w-0 flex-1 cursor-pointer">
