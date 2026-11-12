@@ -803,9 +803,14 @@ def test_a_missing_link_is_unsure_first_then_paused_never_dead() -> None:
         assert shown.view.url is None
 
 
-def test_a_missing_link_past_its_own_expiry_is_expired() -> None:
-    for expires in (NOW, NOW - timedelta(minutes=1)):
-        shown = current_view(carried(expires_at=expires), harvest_of(), NOW)
+def test_a_missing_link_past_its_own_expiry_is_expired_only_after_the_grace() -> None:
+    # A renewed config (D41) can be left out of one harvest after its first end: unsure, not ended.
+    for expires in (NOW, NOW - timedelta(minutes=1), NOW - timedelta(hours=10)):
+        for since in (None, NOW - MISSING_GRACE + timedelta(seconds=1)):
+            shown = current_view(carried(expires_at=expires, missing_since=since), harvest_of(), NOW)
+            assert (shown.new_status, shown.view.status, shown.unsure) == (None, "paused", True)
+        gone = carried(expires_at=expires, missing_since=NOW - MISSING_GRACE)
+        shown = current_view(gone, harvest_of(), NOW)
         assert (shown.new_status, shown.view.status, shown.unsure) == ("expired", "expired", False)
 
 

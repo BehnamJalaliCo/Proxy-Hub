@@ -557,8 +557,12 @@ async def test_a_missing_config_past_its_own_expiry_is_marked_expired(
 
     # While its provider returns it in a shape we refuse, the post waits, even past the end.
     assert await refresh(engine, later, [mtproto_provider, reality_refused]) == 0
-    # Its provider no longer lists the config at all, and the config's own end has passed.
-    assert await refresh(engine, later, [mtproto_provider]) == 1
+    # Its provider no longer lists the config at all, and the config's own end has passed: the post
+    # still waits out the grace first (a renewed config, D41, may be missing for a round).
+    grace = publisher.MISSING_GRACE
+    assert await refresh(engine, later, [mtproto_provider]) == 0
+    assert await refresh(engine, later + grace - timedelta(seconds=1), [mtproto_provider]) == 0
+    assert await refresh(engine, later + grace, [mtproto_provider]) == 1
     body = await edit_text(engine)
     assert (
         f"</a>{MARK}\n\n⌛️ زمان این کانفیگ تمام شد\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗" in body
@@ -566,6 +570,36 @@ async def test_a_missing_config_past_its_own_expiry_is_marked_expired(
     )
     got = {label: status for label, (status, _) in (await carried_links(engine, post_id)).items()}
     assert got == {"پروکسی ۱": "active", "ریلیتی ۱": "expired"}
+
+
+async def test_a_renewed_config_missing_for_a_round_stays_live(engine: AsyncEngine, vault: Vault) -> None:
+    nodes = await ready_fleet(engine, 1)
+    await setup_telegram(engine, vault)
+    now = slot_time(2)
+    post_id, _ = await posted(engine, vault, now)
+    stored = "SELECT expires_at FROM post_links WHERE kind = 'reality'"
+    [config] = await rows(engine, stored)
+    old = config.expires_at
+    # The Reality loop renews the config in place (D41): same key and link, a later end.
+    [node] = await rows(engine, "SELECT ready_at FROM nodes WHERE id = :n", n=nodes[0])
+    await set_node(engine, nodes[0], ready_at=node.ready_at + timedelta(hours=48))
+    assert await refresh(engine, now + timedelta(minutes=1)) == 0  # the post text does not change
+    assert (await rows(engine, stored))[0].expires_at == old + timedelta(hours=48)
+    # After the first end, its only node leaves it out of one harvest (Xray restarting): not ended.
+    t = old + timedelta(minutes=1)
+    assert await refresh(engine, t, [mtproto_provider, reality_unconfirmed]) == 0
+    assert await jobs(engine, "edit_post") == []
+    # Left out for the whole grace: paused, never expired (its stored end follows the renewal).
+    assert await refresh(engine, t + publisher.MISSING_GRACE, [mtproto_provider, reality_unconfirmed]) == 1
+    body = await edit_text(engine)
+    assert PAUSED_LINE in body and "تمام شد" not in body and node_vless_id(nodes[0]) not in body
+    assert {s for s, _ in (await carried_links(engine, post_id)).values()} == {"active"}
+    # Listed again: the post gets its config back.
+    await deliver(engine, (await jobs(engine, "edit_post"))[-1].id, message_id=0)
+    assert await refresh(engine, t + publisher.MISSING_GRACE + publisher.EDIT_MIN_GAP) == 1
+    body = await edit_text(engine)
+    assert node_vless_id(nodes[0]) in body and LOCK in body and "تمام شد" not in body
+    assert {v for v in (await carried_links(engine, post_id)).values()} == {("active", None)}
 
 
 async def test_no_edit_without_any_provider(engine: AsyncEngine, vault: Vault) -> None:

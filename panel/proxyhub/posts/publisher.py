@@ -61,7 +61,10 @@ status (for days, longer than the edit window), but leave a live one out for a w
 restarts Xray, reports an error or its secret cannot be read. Such a link is remembered as missing
 (``post_links.missing_since``) and the post is left alone for :data:`MISSING_GRACE`; after that the
 post shows it as paused (label and a pause mark, no link) so the post's other changes can go out,
-and it gets its link back as soon as a provider lists it again. Nothing is edited when a provider
+and it gets its link back as soon as a provider lists it again. Only a link still missing after
+the grace whose stored end has passed is shown expired. That stored end (``post_links.expires_at``)
+follows the provider every round the link is listed: a Reality config renewed in place (D41) keeps
+its key and link and gets a later end, and the post shows it. Nothing is edited when a provider
 failed, none is registered, or one returned a link we refused. Posts are never deleted.
 """
 
@@ -757,7 +760,10 @@ async def _track_missing(
     db: AsyncConnection, carried: list[_Carried], h: links.Harvest, now: datetime
 ) -> list[_Carried]:
     """Remember since when each active link of a post is missing from a complete harvest, and
-    forget it once a provider lists it again. Returns the links with ``missing_since`` updated."""
+    forget it once a provider lists it again. An active link its provider lists as active takes
+    the provider's end: a renewed config (D41) keeps its key and link and gets a later end, so the
+    end stored when the post was made would otherwise end it too early. Returns the links with
+    ``missing_since`` and ``expires_at`` updated."""
     out: list[_Carried] = []
     for c in carried:
         missing = c.status == "active" and c.key not in h.links and c.key not in h.doubtful
@@ -765,6 +771,19 @@ async def _track_missing(
         if since != c.missing_since:
             await db.execute(update(PostLink).where(PostLink.id == c.id).values(missing_since=since))
             c = replace(c, missing_since=since)
+        current = h.links.get(c.key)
+        if (
+            c.status == "active"
+            and current is not None
+            and current.status == "active"
+            and current.expires_at != c.expires_at
+        ):
+            await db.execute(
+                update(PostLink)
+                .where(and_(PostLink.id == c.id, PostLink.status == "active"))
+                .values(expires_at=current.expires_at)
+            )
+            c = replace(c, expires_at=current.expires_at)
         out.append(c)
     return out
 
@@ -786,15 +805,19 @@ def _as(carried: _Carried, status: str) -> LinkView:
 
 def current_view(carried: _Carried, h: links.Harvest, now: datetime) -> Shown:
     """How a carried link shows now. Only a status its provider reports, or the link's own expiry,
-    ends it; a link missing from the harvest is unsure first, then paused (see the module doc)."""
+    ends it; a link missing from the harvest is unsure first, then paused (see the module doc).
+    The stored expiry of a missing link counts only after :data:`MISSING_GRACE`: a renewed config
+    (D41) left out of one harvest is still live."""
     if carried.status != "active":  # sticky: an ended link never comes back in a post
         return Shown(_as(carried, carried.status))
     current = h.links.get(carried.key)
     if current is None:
+        since = carried.missing_since or now
+        if now - since < MISSING_GRACE:
+            return Shown(_as(carried, "paused"), unsure=True)
         if carried.expires_at is not None and carried.expires_at <= now:
             return Shown(_as(carried, "expired"), new_status="expired")
-        since = carried.missing_since or now
-        return Shown(_as(carried, "paused"), unsure=now - since < MISSING_GRACE)
+        return Shown(_as(carried, "paused"))
     if current.status != "active":
         return Shown(_as(carried, current.status), new_status=current.status)
     if current.expires_at is not None and current.expires_at <= now:
