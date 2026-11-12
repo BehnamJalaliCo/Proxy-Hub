@@ -420,6 +420,77 @@ async def test_an_unknown_download_error_costs_a_try_not_the_round(
         assert (await eng.run_round()).media == {}
 
 
+async def _photo_item(
+    engine: AsyncEngine, source: sources.Source, ext: str, body: str, data: bytes, at: datetime
+) -> int:
+    """A candidate with a photo, its download saved (the engine's own path)."""
+    from proxyhub.content.media import check_for
+
+    async with engine.begin() as conn:
+        await candidates.store_items(
+            conn, source, [FetchedItem(ext, None, at, body, media=MediaRef("photo", f"https://cdn.example/{ext}.png"))], at
+        )  # fmt: skip
+        cid = int(
+            (
+                await conn.execute(
+                    text("SELECT id FROM content_candidates WHERE source_id = :s AND external_id = :e"),
+                    {"s": source.id, "e": ext},
+                )
+            ).scalar_one()
+        )
+        task = candidates.MediaTask(cid, "photo", f"https://cdn.example/{ext}.png")
+        await candidates.save_media(conn, task, check_for("photo", data), data, at)
+    return cid
+
+
+async def _status(engine: AsyncEngine, cid: int) -> tuple[str, int | None]:
+    async with engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status, duplicate_of FROM content_candidates WHERE id = :i"), {"i": cid}
+            )
+        ).one()
+    return str(row.status), row.duplicate_of
+
+
+async def test_a_posted_photo_is_still_known_after_its_file_is_gone(engine: AsyncEngine) -> None:
+    """The «same photo» gate (D52): a forward of a posted photo with a short caption (too short for
+    the text gate) is still a duplicate after the posted file was removed."""
+    a = await add(engine, "https://a.example/f.xml", "الف")
+    b = await add(engine, "https://b.example/f.xml", "ب")
+    photo = png(20, 20, seed=11)
+    first = await _photo_item(engine, a, "1", "عکس روز از تهران", photo, T0)
+    async with engine.begin() as conn:
+        await candidates.set_status(conn, first, "approved", T0)
+        await candidates.mark_used(conn, first, T0)
+        assert await candidates.drop_media(conn, T0 + timedelta(hours=2)) == 1
+        assert await candidates.media_bytes_total(conn) == 0
+    copy = await _photo_item(engine, b, "9", "عکس روز از تهران", photo, T0 + timedelta(hours=3))
+    assert await _status(engine, copy) == ("duplicate", first)
+
+
+async def test_a_sources_own_banner_on_other_news_is_not_a_duplicate(engine: AsyncEngine) -> None:
+    source = await add(engine, "https://a.example/f.xml", "الف")
+    other = await add(engine, "https://b.example/f.xml", "ب")
+    banner = png(20, 20, seed=12)
+    first = await _photo_item(engine, source, "1", NEWS, banner, T0)
+    second = await _photo_item(engine, source, "2", OTHER_NEWS, banner, T0 + timedelta(minutes=5))
+    assert await _status(engine, second) == ("pending", None)  # the channel's banner, other news
+    repost = await _photo_item(engine, source, "3", "عکس", banner, T0 + timedelta(minutes=6))
+    assert await _status(engine, repost) == ("pending", None)
+    # A repost with the same words (none here) is a duplicate; so is the same photo from another source.
+    again = await _photo_item(engine, source, "4", "عکس", banner, T0 + timedelta(minutes=7))
+    assert await _status(engine, again) == ("duplicate", repost)
+    carried = await _photo_item(
+        engine, other, "5", "متن دیگری درباره‌ی همین عکس", banner, T0 + timedelta(minutes=8)
+    )
+    assert await _status(engine, carried) == ("duplicate", first)
+    async with engine.connect() as conn:
+        assert await candidates.also_in(conn, [first, repost]) == {
+            first: ["ب"]
+        }  # its own repost is not «another source»
+
+
 async def test_a_source_removed_takes_only_its_unreviewed_candidates(engine: AsyncEngine) -> None:
     source = await add(engine, "https://news.example/a.xml")
     items = [

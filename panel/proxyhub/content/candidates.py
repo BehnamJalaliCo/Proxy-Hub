@@ -12,7 +12,10 @@ caption prefilled from it; the content supervisor's
 Claude review replaces it when it approves (proxyhub/content/supervisor.py, decision D52). A post
 whose cleaned text tells what a candidate of the last :data:`MAX_AGE` already tells (any source,
 :func:`~proxyhub.content.clean.similar`) is stored as ``duplicate`` of it and never shown in the
-queue; the original counts it as one more source.
+queue; the original counts it as one more source (another source only: a repost of its own source
+does not). So is a photo whose bytes a live candidate of the last :data:`MAX_AGE` had (its
+``media_sha256`` outlives the posted file), unless it is the same source's picture on other news
+(a channel's banner).
 
 **Statuses**: ``pending`` (in the queue) -> ``approved`` (waits for a post) -> ``used`` (posted; set by
 the publisher only). The content supervisor (decision D52, proxyhub/content/supervisor.py) approves or
@@ -42,6 +45,7 @@ from typing import Any, Final, Literal
 from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
+from sqlalchemy.orm import aliased
 
 from proxyhub.content import clean
 from proxyhub.content.items import FetchedItem
@@ -481,29 +485,57 @@ async def media_bytes_total(db: Db) -> int:
     return int((await db.execute(select(func.coalesce(func.sum(ContentMedia.size), 0)))).scalar_one())
 
 
+async def _photo_twin(db: Db, candidate_id: int, sha: str, now: datetime) -> int | None:
+    """The live candidate (pending, approved, or posted within :data:`MAX_AGE`) whose photo has the
+    same bytes and that tells the same news: from another source (the same photo, carried on), or
+    from this source with the same or a similar text (a repost). A source's own banner on different
+    news is not a twin. The hash outlives the posted file (``media_sha256``)."""
+    own = (
+        await db.execute(
+            select(ContentCandidate.source_id, ContentCandidate.norm_text).where(
+                ContentCandidate.id == candidate_id
+            )
+        )
+    ).first()
+    if own is None:
+        return None
+    when = func.coalesce(ContentCandidate.published_at, ContentCandidate.created_at)
+    twins = (
+        await db.execute(
+            select(ContentCandidate.id, ContentCandidate.source_id, ContentCandidate.norm_text)
+            .where(
+                ContentCandidate.media_sha256 == sha,
+                ContentCandidate.id != candidate_id,
+                ContentCandidate.status.in_(("pending", "approved", "used")),
+                when >= now - MAX_AGE,
+            )
+            .order_by(ContentCandidate.id)
+            .limit(20)
+        )
+    ).all()
+    for twin in twins:
+        if (
+            twin.source_id != own.source_id
+            or twin.norm_text == own.norm_text
+            or clean.similar(str(own.norm_text), str(twin.norm_text))
+        ):
+            return int(twin.id)
+    return None
+
+
 async def save_media(db: Db, task: MediaTask, info: MediaInfo, data: bytes, now: datetime) -> int | None:
-    """Store the downloaded file. A photo whose bytes another live candidate already has makes this
-    candidate a duplicate of that one (the same photo from two sources). Returns the media id."""
+    """Store the downloaded file. A photo another live candidate already had makes this candidate a
+    duplicate of that one (:func:`_photo_twin`: the same photo from two sources, or a repost).
+    Returns the media id."""
     sha = hashlib.sha256(data).hexdigest()
     role = "thumb" if task.role == "thumb" else "main"
     if task.role == "photo":
-        twin = (
-            await db.execute(
-                select(ContentMedia.candidate_id)
-                .join(ContentCandidate, ContentCandidate.id == ContentMedia.candidate_id)
-                .where(
-                    ContentMedia.sha256 == sha,
-                    ContentMedia.candidate_id != task.candidate_id,
-                    ContentCandidate.status.in_(("pending", "approved", "used")),
-                )
-                .limit(1)
-            )
-        ).first()
+        twin = await _photo_twin(db, task.candidate_id, sha, now)
         if twin is not None:
             await db.execute(
                 update(ContentCandidate)
                 .where(ContentCandidate.id == task.candidate_id, ContentCandidate.status == "pending")
-                .values(status="duplicate", duplicate_of=int(twin.candidate_id), updated_at=now)
+                .values(status="duplicate", duplicate_of=twin, updated_at=now)
             )
     media_id = (
         await db.execute(
@@ -528,7 +560,12 @@ async def save_media(db: Db, task: MediaTask, info: MediaInfo, data: bytes, now:
         await db.execute(
             update(ContentCandidate)
             .where(ContentCandidate.id == task.candidate_id)
-            .values(media_state="ready", media_error=None, updated_at=now)
+            .values(
+                media_state="ready",
+                media_error=None,
+                media_sha256=sha if task.role == "photo" else None,
+                updated_at=now,
+            )
         )
     return int(media_id.id) if media_id is not None else None
 
@@ -639,13 +676,19 @@ async def counts(db: Db) -> dict[str, int]:
 
 
 async def also_in(db: Db, candidate_ids: list[int]) -> dict[int, list[str]]:
-    """The other sources that gave the same news: candidate id -> their labels."""
+    """The other sources that gave the same news: candidate id -> their labels. A source's own
+    repost is not another source."""
     if not candidate_ids:
         return {}
+    original = aliased(ContentCandidate)
     rows = (
         await db.execute(
             select(ContentCandidate.duplicate_of, ContentCandidate.source_label)
-            .where(ContentCandidate.duplicate_of.in_(candidate_ids))
+            .join(original, original.id == ContentCandidate.duplicate_of)
+            .where(
+                ContentCandidate.duplicate_of.in_(candidate_ids),
+                ContentCandidate.source_id.is_distinct_from(original.source_id),
+            )
             .order_by(ContentCandidate.id)
         )
     ).all()
