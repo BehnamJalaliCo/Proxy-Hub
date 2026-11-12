@@ -227,6 +227,8 @@ def test_a_clean_approval_passes() -> None:
         ({"body": "زمین‌لرزه کرمان را لرزاند. تماس +98 912 345 6789"}, "phone"),
         ({"body": "زمین‌لرزه کرمان را لرزاند. برای خبرهای بیشتر عضو شوید"}, "signature"),
         ({"body": "زمین‌لرزه کرمان را لرزاند. 🆔 خبرها"}, "signature"),
+        ({"body": "زمین‌لرزه کرمان را لرزاند. کانال ما را دنبال کنید"}, "signature"),
+        ({"body": "زمین‌لرزه کرمان را لرزاند. عضو شو"}, "signature"),
         ({"body": "به گزارش BBC فارسی زمین‌لرزه کرمان را لرزاند."}, "source_name"),
         ({"body": "به گزارش ایران اینترنشنال زمین‌لرزه کرمان را لرزاند."}, "source_name"),
         ({"body": "خبرگزاری نمونه گزارش داد زمین‌لرزه کرمان را لرزاند."}, "source_name"),
@@ -244,6 +246,19 @@ def test_a_clean_approval_passes() -> None:
 def test_what_claude_writes_is_checked_again(over: dict[str, Any], expected: str | None) -> None:
     found = codes(answer(**over))
     assert found == ([] if expected is None else [expected]) or (expected in found), found
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"title": "🏛 عضو شورای شهر تهران از افزایش بودجه مترو خبر داد"},
+        {"body": "یک عضو شورای نگهبان گفت بررسی این طرح تا پایان هفته تمام میشود."},
+        {"body": "گروهی از مهاجران دیشب از کانال مانش گذشتند و به ساحل بریتانیا رسیدند."},
+        {"body": "یک کانال ماهواره‌ای تازه از امروز پخش برنامه‌هایش را آغاز کرد."},
+    ],
+)
+def test_ordinary_news_words_are_not_a_signature(over: dict[str, Any]) -> None:
+    assert codes(answer(**over)) == []
 
 
 def test_policy_flags_and_categories_override_an_approval() -> None:

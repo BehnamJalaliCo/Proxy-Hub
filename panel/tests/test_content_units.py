@@ -515,6 +515,39 @@ def test_links_mentions_tags_and_the_signature_go() -> None:
     assert clean.clean_source_text("‮متن‏ معکوس​") == "متن معکوس"
 
 
+@pytest.mark.parametrize(
+    ("text", "names", "expected"),
+    [
+        # The most topical news for this channel names two platforms: it is news, not a signature.
+        ("تلگرام و اینستاگرام رفع فیلتر شدند", (), "تلگرام و اینستاگرام رفع فیلتر شدند"),
+        ("واتساپ و اینستاگرام رفع فیلتر شدند\n@somehandle", (), "واتساپ و اینستاگرام رفع فیلتر شدند"),
+        ("🔴 فوری | عضویت ایران در بریکس رسمی شد", (), "🔴 فوری | عضویت ایران در بریکس رسمی شد"),
+        ("ایسنا: قیمت دلار کاهش یافت", ("isna", "ایسنا"), "ایسنا: قیمت دلار کاهش یافت"),
+        (
+            "خبر اول درباره چیزی مهم\nزلزله استان فارس را لرزاند",
+            ("farsna", "فارس"),
+            "خبر اول درباره چیزی مهم\nزلزله استان فارس را لرزاند",
+        ),
+        (
+            "وزیر ارتباطات گفت.\nاو افزود: رفع فیلتر تلگرام و واتساپ در دستور کار است.",
+            (),
+            "وزیر ارتباطات گفت.\nاو افزود: رفع فیلتر تلگرام و واتساپ در دستور کار است.",
+        ),
+        ("متن خبر\nعضو شورای شهر تهران گفت", (), "متن خبر\nعضو شورای شهر تهران گفت"),
+        # A signature still goes.
+        ("متن خبر\nکانال خبری فارس", ("farsna", "فارس"), "متن خبر"),
+        ("متن خبر\n📡 خبرگزاری ایسنا", ("isna", "ایسنا"), "متن خبر"),
+        ("متن خبر\nما را در اینستاگرام و تلگرام دنبال کنید", (), "متن خبر"),
+        ("متن خبر\nاینستاگرام و تلگرام", (), "متن خبر"),
+        ("عضو کانال ما شوید", (), ""),  # nothing but an invitation
+    ],
+)
+def test_the_signature_is_stripped_but_never_the_news(
+    text: str, names: tuple[str, ...], expected: str
+) -> None:
+    assert clean.clean_source_text(text, names) == expected
+
+
 def test_proxies_are_not_content_but_a_proxy_channels_news_is() -> None:
     """The owner (2026-11-07): proxy channels' news is good, their proxies are not ours to repost."""
     news = (
