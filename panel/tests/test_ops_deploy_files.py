@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
@@ -236,6 +237,82 @@ def test_alertmanager_runs_behind_the_redactor() -> None:
     assert "redact.awk" in (ALERTMANAGER / "Dockerfile").read_text(encoding="utf-8")
     safe_logs = (DEPLOY / "monitoring" / "safe_logs.sh").read_text(encoding="utf-8")
     assert "alertmanager/redact.awk" in safe_logs and "cat " not in safe_logs
+
+
+def test_the_telegram_fallback_shows_no_stale_description_for_a_resolved_alert() -> None:
+    """A resolved alert keeps its last firing annotations ("... the control loops do not run"):
+    only the firing branch may print the description (check_configs.sh renders it with amtool)."""
+    tmpl = (ALERTMANAGER / "telegram.tmpl").read_text(encoding="utf-8")
+    body = tmpl[tmpl.index("{{ range .Alerts -}}") :]
+    assert body.count(".Annotations.description") == 1
+    firing = body.index('{{ if eq .Status "firing" }}')
+    description = body.index(".Annotations.description")
+    assert firing < description < body.index("{{ else }}", firing)
+    assert body.count(".Annotations.summary") == 2  # both branches name the alert
+
+
+def _render_alertmanager(tmp_path: Path, token: str, chat_id: str, watchdog: str) -> tuple[int, str, Path]:
+    """Run the real entrypoint.sh with the host's POSIX sh, paths moved into tmp_path and amtool
+    left out (PROXYHUB_RENDER_ONLY=1): (exit code, output, the tmpfs secrets directory)."""
+    import shutil
+    import subprocess
+
+    sh = shutil.which("sh")
+    assert sh, "a POSIX sh is needed"
+    secrets, rundir = tmp_path / "secrets", tmp_path / "rundir"
+    secrets.mkdir(parents=True)
+    for name, value in (
+        ("alert_bot_token", token),
+        ("alert_chat_id", chat_id),
+        ("healthchecks_watchdog_url", watchdog),
+    ):
+        (secrets / name).write_text(value + "\n" if value else "", encoding="utf-8")
+    text = (ALERTMANAGER / "entrypoint.sh").read_text(encoding="utf-8")
+    for old, new in (
+        ("SECRETS=/run/secrets", f"SECRETS={secrets}"),
+        ("TPL=/etc/alertmanager/proxyhub/telegram.tmpl", f"TPL={ALERTMANAGER / 'telegram.tmpl'}"),
+        ("RUNDIR=/tmp/alertmanager", f"RUNDIR={rundir}"),
+        ('exec /bin/amtool check-config "$CONFIG"', "exit 0"),
+    ):
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    script = tmp_path / "entrypoint.sh"
+    script.write_text(text, encoding="utf-8")
+    done = subprocess.run(  # noqa: S603 - fixed argv: host sh and a copy of our own script
+        [sh, str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "PROXYHUB_RENDER_ONLY": "1"},
+        timeout=30,
+    )
+    return done.returncode, done.stdout + done.stderr, rundir / "secrets"
+
+
+@pytest.mark.parametrize("junk", ["0", "-", "no", "x", "true"])
+def test_short_junk_in_an_optional_secret_only_turns_that_receiver_off(tmp_path: Path, junk: str) -> None:
+    """'0' or 'no' is also text of the rendered config: the leak check refused to start Alertmanager
+    (and with it the panel webhook) although such a value is never used."""
+    code, out, copies = _render_alertmanager(tmp_path, junk, "-1001234567890", junk)
+    assert code == 0, out
+    assert "panel webhook: on; telegram receiver: off; external watchdog: off" in out
+    assert sorted(p.name for p in copies.iterdir()) == []  # copies of receivers that are off: removed
+
+
+def test_a_valid_telegram_receiver_is_still_on_and_checked(tmp_path: Path) -> None:
+    token = "123456:not-a-real-token-config-check-only"
+    code, out, copies = _render_alertmanager(tmp_path, token, "-1001234567890", "")
+    assert code == 0, out
+    assert "telegram receiver: on" in out
+    assert (copies / "alert_bot_token").read_text(encoding="utf-8") == token  # read by bot_token_file
+
+
+def test_a_chat_id_beyond_telegram_s_range_turns_telegram_off(tmp_path: Path) -> None:
+    """Telegram chat ids fit in 52 bits; 17+ digits can overflow Alertmanager's int64 chat_id."""
+    token = "123456:not-a-real-token-config-check-only"
+    code, out, _ = _render_alertmanager(tmp_path, token, "12345678901234567890", "")
+    assert code == 0 and "telegram receiver: off" in out, out
+    code, out, _ = _render_alertmanager(tmp_path / "ok", token, "-1001234567890123", "")
+    assert code == 0 and "telegram receiver: on" in out, out
 
 
 SECRETISH_ENV = re.compile(r"PASS(WORD)?|TOKEN|SECRET|API_?KEY|PRIVATE", re.IGNORECASE)

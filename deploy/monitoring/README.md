@@ -63,6 +63,6 @@
 - **بازگردانی واقعی پس از فاجعه** (روی سرور تازه با همان کلید): `age -d -i backup_age_key proxyhub-<stamp>.dump.age > db.dump` درون پوشه‌ی موقت `0700`، سپس `pg_restore --exit-on-error --single-transaction -U proxyhub -d proxyhub db.dump` در Postgres خالی پنل، و در پایان پاک کردن `db.dump`.
 
 ## بررسی‌ها
-- `bash deploy/monitoring/check_configs.sh`: همه‌ی تنظیم‌ها با همان imageهای قفل‌شده (promtool، آزمون واحد قانون‌ها، amtool برای هر پنج حالت گیرنده، آزمون واقعی نشت توکن در لاگ Alertmanager و توقف آرام آن، loki، alloy). حدود یک دقیقه طول میکشد.
+- `bash deploy/monitoring/check_configs.sh`: همه‌ی تنظیم‌ها با همان imageهای قفل‌شده (promtool، آزمون واحد قانون‌ها، amtool برای همه‌ی حالت‌های گیرنده، از جمله مقدار نادرست یا کوتاه و بی‌معنا، آزمون واقعی نشت توکن در لاگ Alertmanager و توقف آرام آن، loki، alloy). حدود یک دقیقه طول میکشد.
 - `sudo bash deploy/monitoring/safe_logs.sh <service> [lines] [project]`: لاگ یک سرویس با همه‌ی رمزها `<redacted>`؛ برای هر گزارشی.
 - `sudo bash deploy/monitoring/verify_stack.sh [project]`: روی پشته‌ی در حال اجرا. همه‌ی targetها `up`اند؛ قانون‌ها بار شده‌اند؛ Watchdog از Prometheus به Alertmanager میرسد؛ Grafana سالم است و فقط روی loopback است؛ Loki آماده است؛ لاگ پنل رسیده است، فقط از سه سرویس پنل و بی هیچ IP.
