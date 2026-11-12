@@ -447,6 +447,40 @@ async def test_a_review_that_cannot_be_recorded_costs_a_try(
         assert len(bridge.reviews()) == supervisor.MAX_TRIES
 
 
+async def test_a_candidate_that_makes_claude_code_fail_is_given_up_after_its_tries(
+    engine: AsyncEngine, sockdir: Path
+) -> None:
+    """A run that fails as claude_failed (what an older bridge reports for an image the API cannot
+    read) stays an outage for the cooldown and the alert, and also spends one of the candidate's
+    tries: the same candidate does not take every review of the slot and the daily cap."""
+    now = slot_time(1)
+    src = await source(engine, "newsfa", now - timedelta(hours=3))
+    first = await candidate(engine, src, NEWS[0], when=now - timedelta(hours=1), views=60_000, kind="photo")
+    second = await candidate(engine, src, NEWS[1], when=now - timedelta(hours=2), views=100)
+    clock = Clock(now)
+    async with StubBridge(sockdir / "bridge.sock") as bridge:
+        for n in range(supervisor.MAX_TRIES):
+            bridge.answers.append({"ok": False, "error": "claude_failed"})
+            clock.at = now + n * (supervisor.DEFAULT_COOLDOWN + timedelta(minutes=1))
+            out = await make(engine, sockdir, clock).run_round()
+            assert (out.action, out.candidate_id, out.review) == ("unavailable", first, "claude_failed")
+        failing = await one(engine, first)
+        assert (failing.status, failing.qc_tries, failing.qc_error, failing.qc_at) == (
+            "pending",
+            supervisor.MAX_TRIES,
+            "claude_failed",
+            None,
+        )
+        async with engine.connect() as conn:
+            assert first not in [p.id for p in await supervisor.eligible(conn, clock.at)]
+            state = await qc_settings.load_state(conn)
+        assert int(state.get("slot_calls") or 0) == 0 and state["unavailable_reason"] == "claude_failed"
+        bridge.says(answer())
+        clock.at += supervisor.DEFAULT_COOLDOWN + timedelta(minutes=1)
+        out = await make(engine, sockdir, clock).run_round()
+        assert (out.action, out.candidate_id) == ("reviewed", second)
+
+
 async def test_only_the_best_few_per_slot_reach_claude(engine: AsyncEngine, sockdir: Path) -> None:
     await configure(engine, per_slot=2)
     now = slot_time(1)

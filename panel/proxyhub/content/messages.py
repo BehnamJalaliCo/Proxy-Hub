@@ -119,6 +119,10 @@ QC_OUTCOMES_FA: Final[dict[str, str]] = {
     "rate_limited": "سقف مصرف اشتراک Claude فعلاً پر است؛ خودش باز میشود.",
     "timeout": "Claude در زمان مجاز جواب نداد.",
     "claude_failed": "اجرای Claude Code روی سرور ناموفق بود.",
+    "claude_bad_input": (
+        "Claude این درخواست را نپذیرفت (مثلاً تصویری که نمیتوانست بخواند)؛ مورد بعداً دوباره امتحان میشود."
+    ),
+    "claude_overloaded": "سرویس Claude فعلاً شلوغ یا در دسترس نیست؛ خودش دوباره امتحان میشود.",
     "claude_missing": "Claude Code برای کاربر پل نصب نیست.",
     "tools_present": "Claude Code ابزار داشت و پل اجرا را متوقف کرد.",
     "tools_unknown": "Claude Code فهرست ابزارهایش را نگفت و پل پاسخ را نپذیرفت.",

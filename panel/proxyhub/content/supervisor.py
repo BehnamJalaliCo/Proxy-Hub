@@ -120,6 +120,10 @@ DEFAULT_COOLDOWN: Final = timedelta(minutes=3)
 # error of the panel's own (the candidate is tried at most MAX_TRIES times), or a later try.
 VIDEO_REJECTS: Final = frozenset({"video_too_long", "video_unreadable", "video_unavailable"})
 VIDEO_ERRORS: Final = frozenset({"ffmpeg_missing", "frames_failed"})
+# A failed run that may be this candidate's doing (an older bridge reports an API 400 this way): it
+# is an outage for the cooldown and the alert, and it also spends one of the candidate's MAX_TRIES,
+# so one candidate cannot take every review of a slot and the daily cap.
+CHARGED_FAILURES: Final = frozenset({"claude_failed", "timeout"})
 
 Clock = Callable[[], datetime]
 HarvestFn = Callable[[AsyncConnection], Awaitable[links.Harvest]]
@@ -848,9 +852,17 @@ class Supervisor:
                 .values(qc_tries=ContentCandidate.qc_tries + 1, qc_error=review.outcome[:40], updated_at=now)
             )
             return
-        if review.outcome != "ok" and review.outcome not in UNUSABLE:  # Claude was not reached
+        if review.outcome != "ok" and review.outcome not in UNUSABLE:  # no answer from Claude
             out.action = "unavailable"
             self._unavailable(state, now, review.outcome)
+            if review.outcome in CHARGED_FAILURES:
+                await conn.execute(
+                    update(ContentCandidate)
+                    .where(ContentCandidate.id == pick.id)
+                    .values(
+                        qc_tries=ContentCandidate.qc_tries + 1, qc_error=review.outcome[:40], updated_at=now
+                    )
+                )
             return
         if slot:  # a breaking-news review (D56) is not one of the slot's
             state["slot_calls"] = int(state.get("slot_calls") or 0) + 1

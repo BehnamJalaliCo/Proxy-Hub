@@ -65,7 +65,15 @@ UNUSABLE: Final = frozenset({"refused", "empty", "too_long", "max_turns"})
 # Outcomes about our request (a bug or an odd image): the review ends, the candidate is tried again
 # later (at most 3 times) and is never approved by it.
 INPUT: Final = frozenset(
-    {"bad_image", "too_large", "bad_request", "bad_model", "api_bad_request", "api_too_large"}
+    {
+        "bad_image",
+        "too_large",
+        "bad_request",
+        "bad_model",
+        "api_bad_request",
+        "api_too_large",
+        "claude_bad_input",
+    }
 )
 # Attempts that certainly never reached Claude, so they spend no quota and count toward no cap.
 NOT_STARTED: Final = frozenset(
