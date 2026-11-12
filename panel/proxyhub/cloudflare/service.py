@@ -22,6 +22,7 @@ from typing import Any
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import distinct_on, insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
 from proxyhub.cloudflare import TOKEN_SECRET as TOKEN_SECRET  # re-exported (the vault entry name)
@@ -892,6 +893,14 @@ async def apply_plan(
                 )
             if exc.kind in ("rate_limited", "unavailable", "denied"):
                 report.stopped = True
+        except IntegrityError:
+            # A row of ours still holds this name (its record was not removed first): this change
+            # is skipped, the rest of the plan still runs. A create's row is written before any call.
+            report.failed.append(f"{change.op}:{change.name}")
+            async with _durable(engine) as db:
+                await _log_dns(
+                    db, actor, f"dns_{change.op}", change, allowed=True, result="failed: row_conflict"
+                )
     return report
 
 

@@ -12,6 +12,7 @@ import logging
 import secrets
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -267,6 +268,33 @@ def test_plan_is_stable_for_txt_quotes_and_case() -> None:
     assert plan_zone(ZONE_ID, [Desired("T.Example.com", "TXT", "proxy-hub test")], [rec], [row]) == []
 
 
+def test_plan_a_record_of_ours_renamed_in_cloudflare() -> None:
+    """slot1's record was renamed to foo by hand, its marker kept: it is deleted BEFORE slot1 is
+    created again (its row still holds slot1's name until then)."""
+    rec, row = ours("slot1.example.com", "203.0.113.1")
+    moved = remote("foo.example.com", "203.0.113.1", record_id=rec.id, comment=rec.comment)
+    changes = plan_zone(ZONE_ID, [Desired("slot1.example.com", "A", "203.0.113.1")], [moved], [row])
+    assert [(c.op, c.name, c.row) for c in changes] == [
+        ("delete", "foo.example.com", row),
+        ("create", "slot1.example.com", None),
+    ]
+    assert changes[0].remote == moved
+
+
+def test_plan_a_record_renamed_and_unmarked_is_foreign_and_only_our_row_goes() -> None:
+    rec, row = ours("slot1.example.com", "203.0.113.1")
+    moved = remote("foo.example.com", "203.0.113.1", record_id=rec.id, comment="edited by hand")
+    changes = plan_zone(ZONE_ID, [Desired("slot1.example.com", "A", "203.0.113.1")], [moved], [row])
+    assert [(c.op, c.name, c.row) for c in changes] == [
+        ("forget", "slot1.example.com", row),
+        ("create", "slot1.example.com", None),
+    ]
+    # The same name, unmarked: still a conflict, and the row is kept (nothing new here).
+    same = remote("slot1.example.com", "203.0.113.1", record_id=rec.id, comment="edited by hand")
+    changes = plan_zone(ZONE_ID, [Desired("slot1.example.com", "A", "203.0.113.1")], [same], [row])
+    assert [(c.op, c.name) for c in changes] == [("conflict", "slot1.example.com")]
+
+
 _names = st.sampled_from([f"slot{i}.example.com" for i in range(1, 6)] + ["www.example.com", "example.com"])
 _ips = st.sampled_from(["203.0.113.1", "203.0.113.2", "198.51.100.7"])
 
@@ -275,11 +303,29 @@ _ips = st.sampled_from(["203.0.113.1", "203.0.113.2", "198.51.100.7"])
 def _zone_state(draw: st.DrawFn) -> tuple[list[DnsRecord], list[OwnedRow], list[Desired]]:
     recs: list[DnsRecord] = []
     rows: list[OwnedRow] = []
+    kinds = [
+        "ours",
+        "foreign",
+        "marked_foreign",
+        "unmarked_with_row",
+        "pending",
+        "renamed",
+        "renamed_unmarked",
+    ]
     for _ in range(draw(st.integers(0, 8))):
-        kind = draw(st.sampled_from(["ours", "foreign", "marked_foreign", "unmarked_with_row", "pending"]))
+        kind = draw(st.sampled_from(kinds))
         name, ip = draw(_names), draw(_ips)
         ref = uuid.uuid4()
-        if kind == "foreign":
+        if kind != "foreign" and kind != "marked_foreign" and any(r.name == name for r in rows):
+            kind = "foreign"  # one row per name and type, as the database keeps it
+        if kind in ("renamed", "renamed_unmarked"):
+            # Our row holds ``name``; its record was renamed by hand (marker kept or removed).
+            other = draw(_names.filter(lambda n, name=name: n != name))
+            comment = managed_comment(ref) if kind == "renamed" else "edited by hand"
+            rec = remote(other, ip, comment=comment)
+            recs.append(rec)
+            rows.append(replace(row_for(rec, ref=ref), name=name))
+        elif kind == "foreign":
             recs.append(remote(name, ip, comment=draw(st.sampled_from([None, "owner", "managed-by=other"]))))
         elif kind == "marked_foreign":
             recs.append(remote(name, ip, comment=managed_comment(ref)))
@@ -316,6 +362,15 @@ def test_property_foreign_records_are_never_touched(
             assert all(owned_row(r, rows) is not None for r in recs if r.name == c.name)
     deleted = [c.remote.id for c in changes if c.op == "delete" and c.remote is not None]
     assert len(deleted) == len(set(deleted))
+    # A create never writes a new row while a row of ours still holds its name (unique key):
+    # that row is reused (pending) or removed earlier in the plan.
+    removed: set[uuid.UUID] = set()
+    for c in changes:
+        if c.op in ("forget", "delete") and c.row is not None:
+            removed.add(c.row.ref)
+        if c.op == "create" and c.row is None:
+            key = (c.name.lower(), c.type.upper())
+            assert not [r for r in rows if (r.name.lower(), r.type.upper()) == key and r.ref not in removed]
 
 
 # --- pool state machine --------------------------------------------------------------------------
@@ -993,3 +1048,82 @@ async def test_apply_plan_local_steps_refusals_and_crash_safe_create(engine: Asy
     assert ("dns_delete", False, "refused: not a record this panel manages") in log
     assert ("dns_create", True, "failed: unavailable") in log
     assert {"dns_sync", "dns_adopt", "dns_forget"} <= {x[0] for x in log}
+
+
+@pytest.mark.db
+async def test_a_renamed_record_is_removed_and_its_name_made_again(engine: AsyncEngine) -> None:
+    await add_zone(engine, ZONE_ID, "example.com", pool="active")
+    rec, row = ours("slot1.example.com", "203.0.113.1")
+    moved = remote("foo.example.com", "203.0.113.1", record_id=rec.id, comment=rec.comment)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO cf_records (id, zone_id, cf_record_id, name, type, content, ttl, proxied, "
+                "purpose) VALUES (:r, :z, :c, 'slot1.example.com', 'A', '203.0.113.1', 60, false, 'slot')"
+            ),
+            {"r": row.ref, "z": ZONE_ID, "c": rec.id},
+        )
+    made: list[str] = []
+
+    def answer(method: str, path: str) -> Answer:
+        if method == "GET":
+            return cf_ok(
+                [cf_record_json(moved.name, moved.content, record_id=moved.id, comment=moved.comment)]
+            )
+        if method == "DELETE":
+            return cf_ok({"id": path.rsplit("/", 1)[1]})
+        name = ["slot1.example.com", "slot2.example.com", "slot4.example.com"][len(made)]
+        made.append(name)
+        return cf_ok(cf_record_json(name, "203.0.113.9", comment="managed-by=proxy-hub"))
+
+    desired = [
+        Desired("slot1.example.com", "A", "203.0.113.9"),
+        Desired("slot2.example.com", "A", "203.0.113.9"),
+    ]
+    async with (
+        LocalCloudflare(answer) as cf_server,
+        cf_server.client(SecretValue(secrets.token_urlsafe(30))) as cf,
+    ):
+        report = await service.reconcile_zone(
+            engine, cf, ZONE_ID, desired, purpose="slot", actor="dns", max_api_calls=10
+        )
+        assert report.failed == [] and report.done == [
+            "delete:foo.example.com",
+            "create:slot1.example.com",
+            "create:slot2.example.com",
+        ]
+        # A create whose name a row of ours still holds is skipped; the rest of the plan goes on.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO cf_records (id, zone_id, name, type, content, ttl, proxied, purpose) "
+                    "VALUES (:r, :z, 'slot3.example.com', 'A', '203.0.113.3', 60, false, 'slot')"
+                ),
+                {"r": uuid.uuid4(), "z": ZONE_ID},
+            )
+        steps = [
+            Change(
+                "create",
+                ZONE_ID,
+                "slot3.example.com",
+                "A",
+                desired=Desired("slot3.example.com", "A", "203.0.113.9"),
+            ),
+            Change(
+                "create",
+                ZONE_ID,
+                "slot4.example.com",
+                "A",
+                desired=Desired("slot4.example.com", "A", "203.0.113.9"),
+            ),
+        ]
+        report = await service.apply_plan(
+            engine, cf, steps, [], purpose="slot", actor="dns", max_api_calls=10, known_conflicts=set()
+        )
+    assert report.failed == ["create:slot3.example.com"] and report.done == ["create:slot4.example.com"]
+    assert ("DELETE", f"/zones/{ZONE_ID}/dns_records/{rec.id}") in cf_server.requests
+    async with engine.connect() as conn:
+        names = (await conn.execute(text("SELECT name FROM cf_records ORDER BY name"))).scalars().all()
+    assert names == ["slot1.example.com", "slot2.example.com", "slot3.example.com", "slot4.example.com"]
+    log = [(a["action"], a["result"]) for a in await actions(engine)]
+    assert ("dns_create", "failed: row_conflict") in log

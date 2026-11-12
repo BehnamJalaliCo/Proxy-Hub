@@ -151,6 +151,10 @@ def _differs(remote: DnsRecord, want: Desired) -> bool:
     )
 
 
+def _key(item: DnsRecord | OwnedRow) -> tuple[str, str]:
+    return (item.name.lower(), item.type.upper())
+
+
 def _row_differs(row: OwnedRow, remote: DnsRecord) -> bool:
     return (row.content, row.ttl, row.proxied) != (remote.content, remote.ttl, remote.proxied)
 
@@ -168,6 +172,7 @@ def plan_zone(
 
     owned: dict[str, OwnedRow] = {}
     adopted_refs: set[uuid.UUID] = set()
+    renamed: list[tuple[DnsRecord, OwnedRow]] = []
     for rec in remote:
         row = owned_row(rec, rows)
         if row is None:
@@ -177,6 +182,9 @@ def plan_zone(
                 continue  # a second record claiming the same pending row is not ours
             adopted_refs.add(row.ref)
             changes.append(Change("adopt", zone_id, rec.name, rec.type, remote=rec, row=row))
+        elif _key(rec) != _key(row):
+            renamed.append((rec, row))  # ours, but renamed in Cloudflare: removed below
+            continue
         elif _row_differs(row, rec):
             changes.append(Change("sync", zone_id, rec.name, rec.type, remote=rec, row=row))
         owned[rec.id] = row
@@ -189,13 +197,28 @@ def plan_zone(
         elif row.cf_record_id is None and row.ref not in adopted_refs:
             pending_by_key[(row.name.lower(), row.type.upper())] = row
 
+    # A record of ours renamed in Cloudflare no longer sits at its row's name: its row would block
+    # the name being created again (one row per zone, name and type). Ours (marker kept): deleted
+    # first. Marker removed too: it is foreign now, so only our row is dropped.
+    retired: set[str] = set()
+    for rec, row in renamed:
+        retired.add(rec.id)
+        changes.append(Change("delete", zone_id, rec.name, rec.type, remote=rec, row=row))
+    by_record_id = {row.cf_record_id: row for row in rows if row.cf_record_id is not None}
+    for rec in remote:
+        row = by_record_id.get(rec.id)
+        if row is not None and rec.id not in owned and rec.id not in retired and _key(rec) != _key(row):
+            changes.append(Change("forget", zone_id, row.name, row.type, row=row))
+
     wanted: dict[tuple[str, str], Desired] = {}
     for d in desired:
         wanted.setdefault(d.key, d)
 
     for key, want in wanted.items():
         name, rtype = key
-        foreign_same_name = [r for r in remote if r.name == name and r.id not in owned]
+        foreign_same_name = [
+            r for r in remote if r.name == name and r.id not in owned and r.id not in retired
+        ]
         ours = [r for r in remote if r.id in owned and (r.name, r.type) == key]
         if foreign_same_name:
             changes.append(Change("conflict", zone_id, name, rtype, desired=want))
