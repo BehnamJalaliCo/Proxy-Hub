@@ -16,16 +16,19 @@ Measurement types used, and why:
   10.10.34.0/24 is the Iranian filter's hijack signature (docs/10 section 3.10).
 
 The control measurement is created first; the node measurements reuse ITS probes (Globalping's
-``locations: <measurement id>``), so every node result is paired with the control result of the
-very same probe. Rate-limit headers (``X-RateLimit-*``) are returned with every creation so the
-caller can stay inside the free hourly limit (250 tests per hour per IP without a token; every
-probe that runs a measurement is one test).
+``locations: <measurement id>``), and :func:`parse_http` pairs every node result with the control
+result of the very same probe (``paired``, from :func:`http_probe_ok`): a failure from a probe that
+did not reach the control itself, or that cannot be matched to one, says nothing about the node
+(no data), so a broken probe never makes its network "down". Rate-limit headers
+(``X-RateLimit-*``) are returned with every creation so the caller can stay inside the free hourly
+limit (250 tests per hour per IP without a token; every probe that runs a measurement is one test).
 """
 
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -34,7 +37,15 @@ from typing import Any, Self
 
 import httpx
 
-from proxyhub.probes.types import IRAN_NETWORKS_FA, Kind, Measurement, MeasurementStatus, NetworkObs, Role
+from proxyhub.probes.types import (
+    IRAN_NETWORKS_FA,
+    Kind,
+    Measurement,
+    MeasurementStatus,
+    NetworkObs,
+    ProbeId,
+    Role,
+)
 
 API_BASE = "https://api.globalping.io/v1"
 USER_AGENT = "proxy-hub-panel"
@@ -212,17 +223,65 @@ def _ms(timings: object, key: str) -> float | None:
     return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
+def probe_id(probe: Mapping[str, Any]) -> ProbeId:
+    """What tells one probe from another in a result: (asn, network, city, tags, latitude, longitude)."""
+    tags = probe.get("tags")
+    return (
+        probe.get("asn"),
+        probe.get("network"),
+        probe.get("city"),
+        tuple(str(t) for t in tags) if isinstance(tags, list) else (),
+        probe.get("latitude"),
+        probe.get("longitude"),
+    )
+
+
+def _results(raw: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    return [item for item in raw.get("results") or [] if isinstance(item, Mapping)]
+
+
+def _http_ok(result: Mapping[str, Any]) -> bool:
+    code = result.get("statusCode")
+    return result.get("status") == "finished" and isinstance(code, int) and not isinstance(code, bool)
+
+
+def http_probe_ok(raw: Mapping[str, Any]) -> list[tuple[ProbeId, bool]]:
+    """Per result of an ``http`` measurement, in order: its probe and whether it got an HTTP answer."""
+    return [(probe_id(item.get("probe") or {}), _http_ok(item.get("result") or {})) for item in _results(raw)]
+
+
+def _paired_ok(
+    items: Sequence[Mapping[str, Any]], paired: Sequence[tuple[ProbeId, bool]]
+) -> list[bool | None]:
+    """Each node result's own control result: by position when both lists name the same probes in
+    the same order, else by probe where that probe appears once in the control; None: no match."""
+    ids = [probe_id(item.get("probe") or {}) for item in items]
+    if len(ids) == len(paired) and all(i == p for i, (p, _) in zip(ids, paired, strict=True)):
+        return [ok for _, ok in paired]
+    seen = Counter(p for p, _ in paired)
+    once = {p: ok for p, ok in paired if seen[p] == 1}
+    return [once.get(i) for i in ids]
+
+
 def parse_http(
-    raw: Mapping[str, Any], requested_asns: Sequence[int] = (), expected_ip: str | None = None
+    raw: Mapping[str, Any],
+    requested_asns: Sequence[int] = (),
+    expected_ip: str | None = None,
+    paired: Sequence[tuple[ProbeId, bool]] | None = None,
 ) -> list[NetworkObs]:
     """An ``http`` (HTTPS, HEAD) measurement -> one entry per network. ``ok``: the probe got an HTTP
     status (so TCP and the TLS handshake worked); ``fail``: the test failed because of the target
     (a timeout, a reset, a TLS error); everything else (the probe's own failure, an unusable DNS
-    answer, a name that resolved to another address than ``expected_ip``) gives no data."""
+    answer, a name that resolved to another address than ``expected_ip``) gives no data.
+
+    ``paired``: the control's :func:`http_probe_ok`, when these probes were reused from it. A target
+    failure then counts only from a probe that reached the control itself; from any other probe
+    (one that failed the control, or that cannot be matched) it gives no data (``control_not_ok``).
+    A handshake that worked always counts."""
     acc: dict[str, NetworkObs] = {}
-    for item in raw.get("results") or []:
-        if not isinstance(item, Mapping):
-            continue
+    items = _results(raw)
+    control = _paired_ok(items, paired) if paired is not None else None
+    for i, item in enumerate(items):
         probe, result = item.get("probe") or {}, item.get("result") or {}
         key, asn, name = _probe_key(probe)
         status = result.get("status")
@@ -231,7 +290,7 @@ def parse_http(
         code = result.get("statusCode")
         if expected_ip is not None and isinstance(resolved, str) and resolved != expected_ip:
             obs = NetworkObs(key, name, asn, nodata=1, detail={"failure": "resolved_elsewhere"})
-        elif status == "finished" and isinstance(code, int) and not isinstance(code, bool):
+        elif _http_ok(result):
             tls = result.get("tls")
             obs = NetworkObs(
                 key,
@@ -246,6 +305,14 @@ def parse_http(
                     "tls": str(tls.get("protocol"))[:16] if isinstance(tls, Mapping) else None,
                 },
             )
+        elif (
+            status == "failed"
+            and result.get("failureSource") == "target"
+            and isinstance(resolved, str)
+            and control is not None
+            and control[i] is not True
+        ):
+            obs = NetworkObs(key, name, asn, nodata=1, detail={"failure": "control_not_ok"})
         elif status == "failed" and result.get("failureSource") == "target" and isinstance(resolved, str):
             obs = NetworkObs(
                 key,
@@ -410,8 +477,10 @@ class GlobalpingClient:
         requested_asns: Sequence[int],
         expected_ip: str | None = None,
         node_id: Any = None,
+        paired: Sequence[tuple[ProbeId, bool]] | None = None,
     ) -> tuple[Measurement, str | None]:
-        """Create, wait, parse. Returns the measurement and its Globalping id (for probe reuse)."""
+        """Create, wait, parse. Returns the measurement and its Globalping id (for probe reuse).
+        ``paired``: for ``https`` on a control's reused probes, that control's ``probe_ok``."""
         at = datetime.now(UTC)
         created = await self.create(body)
         if created.status != "ok" or created.id is None:
@@ -426,10 +495,12 @@ class GlobalpingClient:
             ), created.id
         # With reused probes the same ASNs are missing as in the control: list them too.
         asns = requested_asns
+        probe_ok: tuple[tuple[ProbeId, bool], ...] = ()
         if kind == "dns":
             networks = parse_dns(raw, expected_ip, asns)
         elif kind == "https":
-            networks = parse_http(raw, asns, expected_ip)
+            networks = parse_http(raw, asns, expected_ip, paired)
+            probe_ok = tuple(http_probe_ok(raw))
         else:
             networks = parse_ping(raw, asns)
         # A partial result after a timeout still counts for the probes that finished.
@@ -447,6 +518,7 @@ class GlobalpingClient:
                 note="partial" if status == "timeout" else None,
                 networks=tuple(networks),
                 node_id=node_id,
+                probe_ok=probe_ok,
             ),
             created.id,
         )

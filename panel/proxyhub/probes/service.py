@@ -74,7 +74,7 @@ from proxyhub.probes.globalping import (
     tcp_body,
 )
 from proxyhub.probes.settings import ProbeSettings
-from proxyhub.probes.types import Measurement, MeasurementStatus
+from proxyhub.probes.types import Measurement, MeasurementStatus, ProbeId
 from proxyhub.probes.verdict import (
     SOURCES,
     TLS_SOURCE,
@@ -374,6 +374,8 @@ async def run_cycle(
                                 t.tls_host,
                                 port,
                                 tls_asns,
+                                # The control's own probes: pair each result with its control result.
+                                tls_ctrl.probe_ok if tls_where == tls_ctrl_id else None,
                             ),
                         )
                     )
@@ -464,6 +466,7 @@ async def _gp(
     target: str,
     port: int | None,
     asns: Sequence[int],
+    paired: Sequence[tuple[ProbeId, bool]] | None = None,
 ) -> Measurement:
     measurement, _ = await gp.run(
         body,
@@ -474,6 +477,7 @@ async def _gp(
         requested_asns=asns,
         expected_ip=t.ip if kind in ("dns", "https") else None,
         node_id=t.node_id,
+        paired=paired,
     )
     return measurement
 
