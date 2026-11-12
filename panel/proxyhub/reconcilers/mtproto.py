@@ -5,16 +5,19 @@ leaving service).
 
 It only writes the panel's own desired state; the node agents pull it. No external API, no cost, so
 it does not wait for the kill switch, and it never creates or deletes a server (rules 5 and 8).
+Once an hour (every tick while a backlog remains) it also removes agent report rows older than
+REPORT_RETENTION (proxyhub/agent_api/reports.py), in batches.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
+from proxyhub.agent_api.reports import PRUNE_BATCH, prune_reports
 from proxyhub.mtproto.keys import SealKeyUnavailable, load_proxy_seal_key
 from proxyhub.mtproto.policy import PolicyOutcome, apply_policy
 from proxyhub.mtproto.settings import MtprotoSettings, SettingsCorrupt, load_settings
@@ -22,6 +25,8 @@ from proxyhub.posts import settings as posting
 from proxyhub.reconcilers.base import Reconciler
 
 log = logging.getLogger(__name__)
+
+PRUNE_EVERY = timedelta(hours=1)
 
 
 class MtprotoReconciler(Reconciler):
@@ -36,8 +41,20 @@ class MtprotoReconciler(Reconciler):
         self.seal_key_loader = seal_key_loader
         self.clock = clock
         self.last_outcome: PolicyOutcome | None = None
+        self._last_prune: datetime | None = None
+        self._prune_backlog = False
+
+    async def _prune(self, conn: AsyncConnection, now: datetime) -> None:
+        if not self._prune_backlog and self._last_prune is not None and now - self._last_prune < PRUNE_EVERY:
+            return
+        self._last_prune = now
+        removed = await prune_reports(conn, now)
+        self._prune_backlog = removed >= PRUNE_BATCH
+        if removed:
+            log.info("mtproto: removed %d agent report rows past their retention", removed)
 
     async def run_once(self, conn: AsyncConnection) -> None:
+        await self._prune(conn, datetime.now(UTC))  # retention is wall-clock time
         settings: MtprotoSettings | None
         try:
             settings = await load_settings(conn)

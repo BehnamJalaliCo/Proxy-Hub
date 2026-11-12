@@ -10,12 +10,12 @@ document is scanned for anything shaped like an IPv4/IPv6 address before it is e
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
-from typing import Annotated, Any, Literal
+from datetime import datetime, timedelta
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete, select, update
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from proxyhub.agent_api.validation import (
     ERROR_CODE,
@@ -125,6 +125,25 @@ def parse_report(data: Any) -> AgentReport:
         return AgentReport.model_validate(data)
     except ValueError:  # pydantic.ValidationError is a ValueError
         raise ReportRejected("schema") from None
+
+
+# docs/07_DATA_MODEL.md: the per-node report rows (one a minute per node) are kept a short while;
+# every reader takes only a node's newest one (the node executor, the MTProto policy, the fleet).
+REPORT_RETENTION: Final = timedelta(days=7)
+PRUNE_BATCH: Final = 20_000
+
+
+async def prune_reports(db: AsyncConnection | AsyncSession, now: datetime, batch: int = PRUNE_BATCH) -> int:
+    """Delete up to ``batch`` ``agent_node_reports`` rows older than :data:`REPORT_RETENTION`, so a
+    first run on a long backlog never holds one long transaction. Returns how many went."""
+    old = (
+        select(AgentNodeReport.id)
+        .where(AgentNodeReport.at < now - REPORT_RETENTION)
+        .limit(batch)
+        .scalar_subquery()
+    )
+    result = await db.execute(delete(AgentNodeReport).where(AgentNodeReport.id.in_(old)))
+    return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
 
 def accumulate(total: int, last: int, value: int) -> int:
