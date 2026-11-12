@@ -5,16 +5,16 @@
   row, so the same photo from another source is still found to be a duplicate for 48 hours.
   Filled here from the photos still stored.
 
-Revision ID: 0034_content_media_sha
-Revises: 0033_reality_traffic
+Revision ID: 0035_content_media_sha
+Revises: 0034_api_admin_devices
 Create Date: 2026-11-12 10:00:00
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0034_content_media_sha"
-down_revision = "0033_reality_traffic"
+revision = "0035_content_media_sha"
+down_revision = "0034_api_admin_devices"
 branch_labels = None
 depends_on = None
 
