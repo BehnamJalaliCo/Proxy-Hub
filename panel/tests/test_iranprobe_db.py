@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-from test_net_probes import real_cycle, target_of
+from test_net_probes import real_cycle, target_of, xray
 from test_net_support import (
     clean_net_tables,
     make_node,
@@ -125,6 +125,8 @@ async def test_rounds_score_the_locations_the_fleet_plans_with(engine: AsyncEngi
     fsn = await make_node(engine, state="ready", ipv4="203.0.113.70")
     hel = await make_node(engine, state="ready", ipv4="203.0.113.71")
     await set_location(engine, hel, "hel1")
+    for node_id in (fsn, hel):
+        await xray(engine, node_id)  # their agents report 443 up: the rounds count
     for node_id, ip, location, up in (
         (fsn, "203.0.113.70", "fsn1", False),
         (hel, "203.0.113.71", "hel1", True),

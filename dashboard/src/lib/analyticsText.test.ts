@@ -160,6 +160,10 @@ describe("sentences", () => {
     expect(sourcesSentence([{ key: "tracking:1", kind: "tracking", name: "کانال الف", joins: 120, leaves: 9, net: 111 }])).toBe(
       "بیشترین عضو تازه در ۳۰ روز اخیر از «کانال الف» آمد (۱۲۰ نفر، ۹ نفرشان رفته‌اند).",
     );
+    // The chart range's counts are named by their own period, not always 30 days.
+    const src = { key: "tracking:1", kind: "tracking" as const, name: "کانال الف", joins: 12, leaves: 1, net: 11 };
+    expect(sourcesSentence([src], 7)).toContain("در ۷ روز اخیر");
+    expect(sourcesSentence([src], 90)).toContain("در ۹۰ روز اخیر");
   });
 
   it("says when there is no user data yet", () => {

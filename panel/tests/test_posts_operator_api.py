@@ -24,7 +24,7 @@ from proxyhub.api.deps import require_admin
 from proxyhub.api.routes_mtproxy_account import get_client_options, get_lock_wait_s, get_vault
 from proxyhub.mtproxy import store as mtp_store
 from proxyhub.mtproxy.userclient import ClientOptions, Endpoint
-from proxyhub.posts import operator
+from proxyhub.posts import operator, own_pack
 from proxyhub.reconcilers.base import lock_key
 from proxyhub.vault import Vault
 
@@ -124,6 +124,35 @@ async def test_the_bot_is_the_default_and_the_owner_switches(
     same = await client.put(BASE, json={"poster": "bot"})
     assert same.status_code == 200
     assert len(await rows(engine, "SELECT id FROM actions_log WHERE action = 'posts.operator_set'")) == 2
+
+
+async def test_a_pasted_pack_is_the_owners_and_the_panels_own_pack_stays_its_own(
+    client: AsyncClient, engine: AsyncEngine
+) -> None:
+    own = "ipoxxo_v2_by_proxyhub_test_bot"
+
+    async def config() -> operator.OperatorConfig:
+        async with engine.connect() as conn:
+            return await operator.load_config(conn)
+
+    async with engine.begin() as conn:
+        await own_pack.save_state(conn, own_pack.PackState(name=own, title="@ipoxxo", owner_id=1))
+    try:
+        assert (
+            await client.put(BASE, json={"pack_link": f"https://t.me/addemoji/{EMOJI_SET}"})
+        ).status_code == 200
+        assert await config() == operator.OperatorConfig(emoji_pack=EMOJI_SET, auto=False)
+        # «use this pack» on the Content page: the panel's own pack, which a newer own pack may replace
+        await client.put(BASE, json={"pack_link": f"https://t.me/addemoji/{own}"})
+        assert await config() == operator.OperatorConfig(emoji_pack=own, auto=True)
+        await client.put(BASE, json={"poster": "operator"})  # the pack and its origin stay
+        assert await config() == operator.OperatorConfig(poster="operator", emoji_pack=own, auto=True)
+        await client.put(BASE, json={"pack_link": f"https://t.me/addemoji/{EMOJI_SET}"})
+        await client.put(BASE, json={"poster": "bot"})
+        assert await config() == operator.OperatorConfig(emoji_pack=EMOJI_SET, auto=False)
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM settings WHERE key = 'posts.own_pack'"))
 
 
 @pytest.mark.parametrize(

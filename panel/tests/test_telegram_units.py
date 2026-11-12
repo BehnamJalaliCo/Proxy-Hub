@@ -17,7 +17,8 @@ import pytest
 import yaml
 from test_telegram_support import BOT_API_ERRORS, closed_port_bot, random_token
 
-from proxyhub.telegram import pairing
+from proxyhub.reconcilers.telegram import channel_alerts, channels_due
+from proxyhub.telegram import pairing, store
 from proxyhub.telegram.client import (
     ALLOWED_METHODS,
     CAN_REMOVE_POSTS_FLAG,
@@ -695,7 +696,7 @@ def test_worker_runs_the_telegram_loops_without_reading_the_key_early() -> None:
     from proxyhub.worker import reconcilers
 
     loops = {r.name: r for r in reconcilers()}  # no master key file here: nothing reads it yet
-    assert {"telegram_updates", "telegram_outbox", "telegram_api_watchdog"} <= set(loops)
+    assert {"telegram_updates", "telegram_outbox", "telegram_api_watchdog", "telegram_channels"} <= set(loops)
     watchdog = loops["telegram_api_watchdog"]
     assert isinstance(watchdog, ApiWatchdogReconciler)
     assert (watchdog.interval_seconds, watchdog.url, watchdog.failures_to_alert) == (
@@ -703,3 +704,45 @@ def test_worker_runs_the_telegram_loops_without_reading_the_key_early() -> None:
         "http://api:8000/livez",
         3,
     )
+
+
+# --- the stored channels, read again once a day (proxyhub/reconcilers/telegram.py) ----------------
+
+
+def test_a_channel_record_has_one_shape() -> None:
+    now = datetime(2026, 11, 12, 10, 0, tzinfo=UTC)
+    admin = MemberRights(status="administrator", can_post=True, can_edit=False, can_remove=True)
+    public = store.channel_record(
+        ChatInfo(id=-1001, type="channel", title="Ipoxxo", username="ipoxxo"), admin, now
+    )
+    assert public == {
+        "chat_id": -1001,
+        "username": "@ipoxxo",
+        "title": "Ipoxxo",
+        "can_post": True,
+        "can_edit": False,
+        "can_delete": True,
+        "checked_at": "2026-11-12T10:00:00Z",
+    }
+    private = store.channel_record(ChatInfo(id=-1002, type="channel", title=None, username=None), admin, now)
+    assert (private["username"], private["title"]) == ("-1002", "")
+
+
+def test_the_channels_are_read_once_a_day_and_an_hour_after_a_failure() -> None:
+    now = datetime(2026, 11, 12, 10, 0, tzinfo=UTC)
+    assert channels_due(None, now) and channels_due({"at": "not a time"}, now)
+    ok = {"at": (now - timedelta(hours=23)).isoformat(), "errors": {}}
+    assert not channels_due(ok, now) and channels_due(ok, now + timedelta(hours=1))
+    failed = {"at": (now - timedelta(minutes=59)).isoformat(), "errors": {"main": "Forbidden"}}
+    assert not channels_due(failed, now) and channels_due(failed, now + timedelta(minutes=1))
+
+
+def test_the_owner_is_told_a_new_username_or_a_lost_right_once() -> None:
+    old = {"chat_id": -1001, "username": "@ipoxxo", "title": "a", "can_post": True, "can_edit": True}
+    assert channel_alerts("main", old, {**old, "title": "b"}) == []  # a new title is only logged
+    [renamed] = channel_alerts("main", old, {**old, "username": "@newname"})
+    assert "کانال اصلی" in renamed and "‎@ipoxxo‎" in renamed and "‎@newname‎" in renamed
+    lost = channel_alerts("test", old, {**old, "can_post": False, "can_edit": False})
+    assert len(lost) == 2 and all("کانال آزمایشی" in t for t in lost)
+    assert "ارسال پیام" in lost[0] and "ویرایش پیام" in lost[1]
+    assert channel_alerts("main", {**old, "can_post": False}, {**old, "can_post": False}) == []

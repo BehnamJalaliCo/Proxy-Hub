@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from proxyhub.agent_api.reports import ReportRejected, parse_report
 from proxyhub.reality.keys import new_key_pair, new_short_id, public_from_private
-from proxyhub.reality.links import config_name, flag, vless_url
+from proxyhub.reality.links import config_name, flag, serving_location, vless_url
 from proxyhub.reality.policy import (
     ActiveConfig,
     creation_due,
@@ -178,6 +178,29 @@ def _node(**over: Any) -> NodeView:
     }
     base.update(over)
     return NodeView(**base)
+
+
+def test_a_slot_links_flag_is_the_server_its_dns_name_points_at() -> None:
+    """reality:2. Slot 3 moved from hel1 to hil; its config was made on the hel1 node. The flag
+    follows the node the slot's DNS name points at, also while no node of the slot is READY."""
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(status="active", slot=3, host="slot3.example.com", location="hel1")
+    hours = lambda h: NOW - timedelta(hours=h)  # noqa: E731
+    hil = _node(slot=3, location="hil", state="unhealthy", ready_at=hours(1), created_at=hours(2))
+    assert serving_location(row, [hil]) == "hil"
+    burned_hel = _node(slot=3, location="hel1", state="burned", ready_at=hours(30), created_at=hours(31))
+    assert serving_location(row, [burned_hel, hil]) == "hil"
+    ready_nbg = _node(slot=3, location="nbg1", state="ready", ready_at=hours(30), created_at=hours(31))
+    assert serving_location(row, [ready_nbg, hil]) == "nbg1"  # READY first, as DNS ranks it
+    # Same ready_at: the newer server wins, as in DNS.
+    twin = _node(slot=3, location="fsn1", state="unhealthy", ready_at=hours(1), created_at=hours(1))
+    assert serving_location(row, [hil, twin]) == "fsn1"
+    gone = _node(slot=3, location="hil", state="retiring")
+    other_slot = _node(slot=4, location="hil")
+    assert serving_location(row, [gone, other_slot]) == "hel1"  # nothing serves the slot: its own
+    ip_row = SimpleNamespace(status="active", slot=3, host="203.0.113.10", location="hel1")
+    assert serving_location(ip_row, [hil]) == "hel1"  # an IP link leads to its own server
 
 
 def _status(node: NodeView, **over: Any) -> StatusView:

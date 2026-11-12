@@ -1,7 +1,7 @@
 // Node list helpers (pure, unit-tested): order, the one test node, agent health and readable
 // node events. Node addresses are our own servers' (rule 7 is about end users: none here).
 
-import { formatJalali, formatNumber } from "./format";
+import { formatEur, formatJalali, formatNumber } from "./format";
 import { nodeStateInfo, reasonLabel, transitionReasonLabel, type Tone } from "./labels";
 import type { NodeAgent, NodeEventItem, NodeInfo } from "./types";
 
@@ -71,6 +71,24 @@ const DETAIL_KEY: Record<string, string> = {
   dry_run: "حالت خشک",
   allowed: "مجاز",
   error: "خطا",
+  // the fleet's request (fleet/live.py), a test node's request (nodes/service.py), the agent
+  // (agent_api/identity.py), a burned IP (nodes/executor.py) and the burn verdict (fleet/live.py)
+  slot: "جایگاه",
+  need: "نوع درخواست",
+  account_name: "حساب",
+  avoid: "جاهای کنارگذاشته",
+  match: "تطبیق",
+  agent_version: "نسخه‌ی عامل",
+  telemt_version: "نسخه‌ی telemt",
+  price_monthly_eur: "قیمت ماهانه",
+  projected_month_eur: "برآورد این ماه",
+  verdict_at: "زمان حکم",
+};
+
+/** Persian words of a few detail values. */
+const DETAIL_VALUE: Record<string, Record<string, string>> = {
+  need: { fill: "پر کردن جایگاه", replace: "جایگزینی" },
+  match: { ip: "همان IP", prefix24: "همان بازه‌ی /24" },
 };
 
 /** Keys shown elsewhere in the row (or never). */
@@ -81,9 +99,14 @@ function valueText(key: string, v: unknown): string | null {
   if (typeof v === "boolean") return v ? "بله" : "خیر";
   if (typeof v === "number") return key === "hetzner_id" ? String(v) : formatNumber(v);
   if (typeof v === "string") {
+    const word = DETAIL_VALUE[key]?.[v];
+    if (word) return word;
     if (key === "not_after" && !Number.isNaN(Date.parse(v))) return formatJalali(v, "date");
+    if (key.endsWith("_at") && !Number.isNaN(Date.parse(v))) return formatJalali(v, "datetime");
+    if (key.endsWith("_eur")) return formatEur(v);
     return v;
   }
+  if (Array.isArray(v) && v.every((x) => typeof x === "string")) return v.length > 0 ? v.join("، ") : null;
   try {
     return JSON.stringify(v);
   } catch {

@@ -33,7 +33,7 @@ from test_analytics_support import (
     random_link,
     server_json,
 )
-from test_analytics_units import broadcast_stats, usage_block
+from test_analytics_units import broadcast_stats, moves_today, usage_block
 from test_fleet_support import assert_absent_from_database, clean_fleet_tables, make_vault
 from test_mtproxy_support import clean as clean_mtproxy
 from test_mtproxy_support import seed_connected
@@ -420,6 +420,9 @@ async def test_usage_agg_is_stored_folded_and_runs_add_up(engine: AsyncEngine) -
         u = await report.usage(conn, now)
     assert u["has_data"] and u["days"][-1]["unique_users"] == 1300  # max of the runs of one node
     assert u["by_country"][0]["key"] == "IR" and u["per_user_mb"]["p50"] == pytest.approx(35.5)
+    # Both runs counted the same 1200 Iranian users: once, as in the daily total; bytes add up.
+    ir = u["by_country"][0]
+    assert (ir["user_days"], ir["avg_daily_users"], ir["bytes"]) == (1200, 1200.0, 2 * 10**10)
     assert {p["ref"] for p in u["proxies"]} == {"u_main1", "rl_de1"}
     assert sum(h["bytes"] for h in u["heatmap"]) == 2 * (2 * 10**8 + 13 * 10**9)
     # The database itself refuses a bucket of fewer than 3 users that is not "other".
@@ -601,14 +604,7 @@ async def test_summary_and_series_numbers(engine: AsyncEngine) -> None:
     (srv,) = s["servers"]
     assert srv["name"] == "fsn-1" and srv["traffic_pct"] == pytest.approx(2.5) and srv["state"] == "ready"
     assert s["channel"]["main"]["members"] == 1234
-    assert (s["channel"]["main"]["joins_today"], s["channel"]["main"]["leaves_today"]) in (
-        (3, 1),
-        (0, 0),
-        (1, 0),
-        (2, 0),
-        (2, 1),
-        (3, 0),
-    )
+    assert (s["channel"]["main"]["joins_today"], s["channel"]["main"]["leaves_today"]) == moves_today(now)
     assert s["channel"]["main"]["net_7d"] == 2
     assert {(t["kind"], t["joins"], t["leaves"]) for t in s["top_sources"]} == {
         ("folder", 1, 0),
@@ -651,8 +647,11 @@ async def test_migration_round_trip_single_head_and_no_drift(engine: AsyncEngine
     script = ScriptDirectory.from_config(cfg)
     (head,) = script.get_heads()  # one head; the round-3 merge builds on 0016
     assert "0016_analytics" in {rev.revision for rev in script.walk_revisions("base", head)}
-    await asyncio.to_thread(downgrade, "0010_domains")
-    tables = await rows(engine, "SELECT tablename FROM pg_tables WHERE tablename LIKE 'analytics_%'")
-    assert tables == []
-    await asyncio.to_thread(migrate, "head")
-    await asyncio.to_thread(command.check, cfg)
+    try:
+        await asyncio.to_thread(downgrade, "0010_domains")
+        tables = await rows(engine, "SELECT tablename FROM pg_tables WHERE tablename LIKE 'analytics_%'")
+        assert tables == []
+        await asyncio.to_thread(migrate, "head")
+        await asyncio.to_thread(command.check, cfg)
+    finally:
+        await asyncio.to_thread(migrate, "head")  # the next tests need the whole schema

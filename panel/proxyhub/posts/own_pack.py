@@ -18,7 +18,9 @@ its emoji. So the bot makes our own pack from the drawings in proxyhub/posts/emo
   a fixed hour; any other failure is tried again an hour later.
 * Once the pack has every drawing, it becomes the one the operator poster uses
   (``posts.operator.emoji_pack``, proxyhub/posts/operator.py) when the owner has chosen none, or when
-  the posts still use an OLDER version of this same pack. With it, the emoji ids the bot just read
+  the posts still use an OLDER version of this same pack, or an own pack the panel made under an
+  earlier main-channel or bot username (``posts.operator.auto``: the pack in use is the panel's own,
+  so its title, the old @username, must not stay). With it, the emoji ids the bot just read
   are stored as the poster's pack (``posts.operator.pack``), so no post goes out without them; the
   operator account reads the pack again at its next check. A pack the owner pasted is never
   replaced.
@@ -39,7 +41,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Final
 
@@ -246,20 +248,36 @@ async def target(db: tg_store.Db) -> Target | str:
     )
 
 
+async def is_own(db: tg_store.Db, name: str) -> bool:
+    """``name`` is the pack this panel makes or made (its state's name, or the name it makes now)."""
+    state = await load_state(db)
+    if state is not None and operator.same_pack(state.name, name):
+        return True
+    found = await target(db)
+    return isinstance(found, Target) and operator.same_pack(found.name, name)
+
+
 async def choose(db: tg_store.Db, found: Target, state: PackState, now: datetime) -> bool:
     """Make the COMPLETE pack ``state`` (named ``found.name``) the operator poster's pack when the
-    owner has chosen none, or when the poster still uses an older version of it; then also store its
-    emoji ids as the poster's pack, so posts keep their animated emoji through the switch. An older
-    version is only left once the new one's ids cover every drawing. A pack the owner pasted stays."""
+    owner has chosen none, or when the poster still uses an older own pack: an older version of it,
+    or one the panel made under an earlier channel or bot name (``auto``); then also store its emoji
+    ids as the poster's pack, so posts keep their animated emoji through the switch. An older pack
+    is only left once the new one's ids cover every drawing. A pack the owner pasted stays."""
     config = await operator.load_config(db)
     old = config.emoji_pack
-    replacing = old is not None and any(operator.same_pack(old, n) for n in found.older)
+    if operator.same_pack(old, found.name):
+        if not config.auto:  # our own pack, set before the flag existed or by the owner's click
+            await operator.save_config(db, replace(config, auto=True))
+        return False
+    replacing = old is not None and (config.auto or any(operator.same_pack(old, n) for n in found.older))
     if old is not None and not replacing:
         return False
     ids = emoji_ids(state)
     if replacing and ids is None:
         return False
-    await operator.save_config(db, operator.OperatorConfig(poster=config.poster, emoji_pack=found.name))
+    await operator.save_config(
+        db, operator.OperatorConfig(poster=config.poster, emoji_pack=found.name, auto=True)
+    )
     if ids is not None:
         # attempted_at None: the operator account reads the pack again at its next check.
         await operator.save_pack(
@@ -407,13 +425,16 @@ async def _talk(bot_factory: BotFactory, token: SecretValue, found: Target) -> T
 
 
 async def status(db: tg_store.Db) -> dict[str, Any]:
-    """The pack for the Content page. ``replaces``: the older version of this pack the posts still
-    use while this one is being made (they move over by themselves once it is complete)."""
+    """The pack for the Content page. ``replaces``: the older own pack the posts still use while this
+    one is being made (an older version, or one made under an earlier channel or bot name); they
+    move over by themselves once it is complete."""
     state = await load_state(db)
     found = await target(db)
     config = await operator.load_config(db)
     older = found.older if isinstance(found, Target) else ()
     replaces = next((n for n in older if operator.same_pack(config.emoji_pack, n)), None)
+    if replaces is None and config.auto and isinstance(found, Target):
+        replaces = None if operator.same_pack(config.emoji_pack, found.name) else config.emoji_pack
     if state is not None and operator.same_pack(state.name, replaces):
         replaces = None  # the new version's first step has not run yet
     if state is None:

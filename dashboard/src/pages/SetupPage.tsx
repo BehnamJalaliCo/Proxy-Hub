@@ -28,7 +28,7 @@ import * as api from "../lib/endpoints";
 import { groupSecret, toFaDigits } from "../lib/format";
 import { keys, useSetupStatus } from "../lib/queries";
 import type { SetupBegin } from "../lib/types";
-import { isTotp, normalizeTotp, passwordError, passwordScore, usernameError } from "../lib/validation";
+import { isSetupLinkDead, isTotp, normalizeTotp, passwordError, passwordScore, usernameError } from "../lib/validation";
 
 /** The setup link is /setup#<token>. The fragment never reaches a server or a log. */
 function readTokenFromHash(): string {
@@ -101,6 +101,7 @@ export default function SetupPage() {
   const [codes, setCodes] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [fatal, setFatal] = useState<string | null>(null);
+  const [beginErr, setBeginErr] = useState<string | null>(null);
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -117,6 +118,7 @@ export default function SetupPage() {
   const begin = () => {
     setBusy(true);
     setFatal(null);
+    setBeginErr(null);
     api
       .setupBegin(token)
       .then((res) => {
@@ -124,7 +126,10 @@ export default function SetupPage() {
         setStep("app");
       })
       .catch((err: unknown) => {
-        setFatal(isApiError(err) ? err.messageFa : "اتصال به پنل برقرار نشد.");
+        // Only a dead link ends here; a network drop or a restarting panel can be tried again
+        // with the same link (it is still in memory, and starting does not use it up).
+        if (isSetupLinkDead(err)) setFatal(err.messageFa);
+        else setBeginErr(isApiError(err) ? err.messageFa : "اتصال به پنل برقرار نشد.");
       })
       .finally(() => setBusy(false));
   };
@@ -172,7 +177,7 @@ export default function SetupPage() {
   let body: ReactNode;
   if (status.isPending) {
     body = <SkeletonLines lines={4} />;
-  } else if (status.isError && step === "intro") {
+  } else if (status.isLoadingError && step === "intro") {
     body = <ErrorState error={status.error} onRetry={() => void status.refetch()} compact />;
   } else if (status.data?.setup_required === false && step !== "codes") {
     body = (
@@ -211,7 +216,7 @@ export default function SetupPage() {
           {step === "intro" ? (
             <motion.div key="intro" {...slide} className="flex flex-col gap-5">
               <div className="flex items-center gap-3">
-                <span className="grid size-12 place-items-center rounded-2xl bg-[linear-gradient(135deg,var(--ph-brand),var(--ph-brand-2))] text-white">
+                <span className="grid size-12 place-items-center rounded-2xl ph-gold">
                   <Rocket className="size-6" />
                 </span>
                 <div>
@@ -231,6 +236,11 @@ export default function SetupPage() {
                   </li>
                 ))}
               </ul>
+              {beginErr ? (
+                <p role="alert" className="rounded-2xl bg-danger-soft p-3 text-sm leading-7 text-danger">
+                  {beginErr} لینک هنوز معتبر است؛ دوباره «شروع راه‌اندازی» را بزنید.
+                </p>
+              ) : null}
               <Button size="lg" block loading={busy} onClick={begin} icon={<ShieldCheck className="size-5" />}>
                 شروع راه‌اندازی
               </Button>
@@ -264,7 +274,7 @@ export default function SetupPage() {
                 <div className="flex w-full min-w-0 flex-1 flex-col gap-3">
                   <a
                     href={enrollment.totp_uri}
-                    className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-[linear-gradient(110deg,var(--ph-brand),var(--ph-brand-2))] px-4 font-semibold text-white shadow-[0_8px_24px_-10px_var(--ph-brand)]"
+                    className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl ph-cta px-4 font-semibold"
                   >
                     <Smartphone className="size-5" />
                     افزودن به Authenticator همین گوشی

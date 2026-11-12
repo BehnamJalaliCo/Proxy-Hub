@@ -41,7 +41,8 @@ CLEAN_SQL = (
     "DELETE FROM channel_posts",
     "DELETE FROM outbox",
     "DELETE FROM telegram_pacing",
-    "DELETE FROM settings WHERE key LIKE 'telegram.%' OR key LIKE 'posting%' OR key = 'fleet'",
+    # 'reality': its cap_hours is the period a post states over each config.
+    "DELETE FROM settings WHERE key LIKE 'telegram.%' OR key LIKE 'posting%' OR key IN ('fleet', 'reality')",
     "DELETE FROM secrets WHERE name LIKE 'telegram:%'",
     "DELETE FROM actions_log",
     "DELETE FROM content_items WHERE origin = 'owner'",

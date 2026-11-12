@@ -52,6 +52,11 @@ class NetworkObs:
         return self.ok + self.fail + self.nodata > 0
 
 
+# One Globalping probe, as its result describes it (the same probe reused by a later measurement
+# carries the same description): (asn, network, city, tags, latitude, longitude).
+ProbeId = tuple[Any, ...]
+
+
 @dataclass(frozen=True)
 class Measurement:
     source: Source
@@ -65,3 +70,6 @@ class Measurement:
     note: str | None = None
     networks: tuple[NetworkObs, ...] = ()
     node_id: Any = None  # uuid.UUID for role 'node'
+    # ``https`` from Globalping: per probe, in result order, whether it got an HTTP answer. Not
+    # stored; a control's list pairs each node result with the same probe's control result.
+    probe_ok: tuple[tuple[ProbeId, bool], ...] = ()

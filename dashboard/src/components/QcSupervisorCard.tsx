@@ -19,6 +19,7 @@ import {
   parseCount,
   parseWords,
   QC_NUMBERS,
+  qcFormKey,
   removeApiKey,
   saveQc,
   setApiKey,
@@ -130,6 +131,18 @@ function Settings({ view }: { view: QcView }) {
     for (const [k, v] of parsed) if (typeof v === "number") next[k] = v;
     act("save", saveQc(next), "تنظیمات ناظر ذخیره شد");
   };
+  const numberField = (f: (typeof QC_NUMBERS)[number]) => (
+    <Field key={f.key} label={f.label} htmlFor={`qc-${f.key}`} hint={f.hint || undefined} error={errors[f.key] ?? null}>
+      <TextInput
+        id={`qc-${f.key}`}
+        inputMode="numeric"
+        latin
+        value={numbers[f.key]}
+        onChange={(e) => setNumbers((x) => ({ ...x, [f.key]: e.target.value }))}
+        invalid={Boolean(errors[f.key])}
+      />
+    </Field>
+  );
   const toggleCategory = (c: string) =>
     setCfg((x) => ({
       ...x,
@@ -175,18 +188,19 @@ function Settings({ view }: { view: QcView }) {
         />
       </Field>
       <div className="grid gap-3 sm:grid-cols-2">
-        {QC_NUMBERS.map((f) => (
-          <Field key={f.key} label={f.label} htmlFor={`qc-${f.key}`} hint={f.hint || undefined} error={errors[f.key] ?? null}>
-            <TextInput
-              id={`qc-${f.key}`}
-              inputMode="numeric"
-              latin
-              value={numbers[f.key]}
-              onChange={(e) => setNumbers((x) => ({ ...x, [f.key]: e.target.value }))}
-              invalid={Boolean(errors[f.key])}
-            />
-          </Field>
-        ))}
+        {QC_NUMBERS.filter((f) => f.group === undefined).map(numberField)}
+      </div>
+      <div className="flex flex-col gap-3 rounded-2xl bg-surface-2 p-3.5">
+        <p className="text-sm font-semibold text-fg">خبر فوری (D56)</p>
+        <Toggle
+          checked={cfg.breaking_enabled}
+          onCheckedChange={(v) => setCfg((x) => ({ ...x, breaking_enabled: v }))}
+          label="خبر فوری بی‌درنگ برود"
+        />
+        <p className="text-[0.82rem] leading-6 text-fg-faint">
+          فقط در حالت «{MODE_LABEL.auto}» کار میکند. خبر فوری بیرون از برنامه‌ی روز و در ساعت‌های بی‌پست هم به کانال اصلی میرود.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">{QC_NUMBERS.filter((f) => f.group === "breaking").map(numberField)}</div>
       </div>
       <Field
         label="دسته‌های مجاز"
@@ -306,7 +320,7 @@ export function QcSupervisorCard() {
       <div className="flex flex-col gap-3 p-4 sm:p-5">
         {query.isPending ? (
           <Skeleton className="h-28 rounded-2xl" />
-        ) : query.isError ? (
+        ) : query.isLoadingError ? (
           <LoadError error={query.error} onRetry={() => void query.refetch()} notYet={NOT_YET} />
         ) : view ? (
           <>
@@ -328,7 +342,7 @@ export function QcSupervisorCard() {
                   exit={{ height: 0, opacity: 0 }}
                   className="overflow-hidden"
                 >
-                  <Settings key={JSON.stringify(view.config) + String(view.api_key_set)} view={view} />
+                  <Settings key={qcFormKey(view)} view={view} />
                 </motion.div>
               ) : null}
             </AnimatePresence>

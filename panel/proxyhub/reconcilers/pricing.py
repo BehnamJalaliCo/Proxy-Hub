@@ -2,6 +2,10 @@
 
 Hetzner raised prices twice in 2026, so nothing is hard-coded: the planner and the budget only
 ever use the offers stored here. A changed or vanished price is written to actions_log.
+
+No transaction stays open across a Hetzner call: each account's offers are stored and committed in
+their own short transaction (the offers' foreign key would otherwise hold a lock on the account row,
+and an owner's drain or retire of it would wait for the next account's call).
 """
 
 from __future__ import annotations
@@ -12,8 +16,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from functools import partial
 
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from proxyhub.accounts.hetzner_io import HetznerFailure, LiveOffer, call_hetzner, read_offers
 from proxyhub.accounts.service import PriceChange, store_offers
@@ -22,7 +26,7 @@ from proxyhub.db.models import HetznerAccount
 from proxyhub.db.models_fleet import HetznerOffer
 from proxyhub.fleet.actions import log_action
 from proxyhub.hetzner.client import HetznerReader
-from proxyhub.reconcilers.base import Reconciler
+from proxyhub.reconcilers.base import Reconciler, lock_key
 from proxyhub.vault import SecretValue, Vault, hcloud_secret_name
 
 log = logging.getLogger(__name__)
@@ -97,33 +101,51 @@ class PricingReconciler(Reconciler):
             return True
         return fetched_at is None or now - fetched_at >= PRICING_INTERVAL
 
-    async def run_once(self, conn: AsyncConnection) -> None:
+    async def run_once(self, conn: AsyncConnection) -> None:  # pragma: no cover - not used
+        raise NotImplementedError("PricingReconciler manages its own transactions (try_run_once)")
+
+    async def try_run_once(self, engine: AsyncEngine) -> bool:
+        async with engine.connect() as lock_conn:
+            got = (
+                await lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": lock_key(self.name)})
+            ).scalar_one()
+            if not got:
+                return False
+            try:
+                await self._run(engine)
+            finally:
+                await lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key(self.name)})
+                await lock_conn.commit()
+        return True
+
+    async def _run(self, engine: AsyncEngine) -> None:
         now = datetime.now(UTC)
-        due = [(i, n) for i, n, f in await accounts_with_fetch_time(conn) if self.is_due(i, f, now)]
+        async with engine.connect() as conn:
+            due = [(i, n) for i, n, f in await accounts_with_fetch_time(conn) if self.is_due(i, f, now)]
         if not due:
             return
         vault = self._vault_factory()
         reader_factory = self._reader_factory
         for account_id, account_name in due:
             self._fetched_since_start.add(account_id)
-            # One account per savepoint, as in the account guard: one bad account never undoes
-            # the prices stored for the others.
+            # One account at a time, as in the account guard: one bad account never undoes the
+            # prices stored for the others.
             try:
-                async with conn.begin_nested():
-                    await self._fetch_one(conn, vault, reader_factory, account_id, account_name, now)
+                await self._fetch_one(engine, vault, reader_factory, account_id, account_name, now)
             except Exception as exc:
                 log.warning("pricing for %s: internal error %s", account_name, type(exc).__name__)
 
     async def _fetch_one(
         self,
-        conn: AsyncConnection,
+        engine: AsyncEngine,
         vault: Vault,
         reader_factory: Callable[[str], HetznerReader],
         account_id: uuid.UUID,
         account_name: str,
         now: datetime,
     ) -> None:
-        token = await vault.get(conn, hcloud_secret_name(account_id))
+        async with engine.connect() as conn:  # a read, closed before the Hetzner call
+            token = await vault.get(conn, hcloud_secret_name(account_id))
         if token is None:
             log.warning("pricing: account %s has no token in the vault", account_name)
             return
@@ -132,5 +154,6 @@ class PricingReconciler(Reconciler):
         except HetznerFailure as failure:
             log.warning("pricing for %s failed: %s", account_name, failure)
             return
-        changes = await store_offers(conn, account_id, offers, now)
-        await log_price_changes(conn, account_id, account_name, changes)
+        async with engine.begin() as conn:
+            changes = await store_offers(conn, account_id, offers, now)
+            await log_price_changes(conn, account_id, account_name, changes)

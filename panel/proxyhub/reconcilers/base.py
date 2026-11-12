@@ -1,16 +1,45 @@
-"""Control-loop base: each loop runs under a Postgres advisory lock, so two workers never act twice."""
+"""Control-loop base: each loop runs under a Postgres advisory lock, so two workers never act twice.
+
+Each loop also records how its passes go in ``settings['worker.loop.<name>']`` (``ok_at`` of the
+last pass that finished, ``failures`` in a row since, ``error_at``, its interval), in its own short
+transaction: a pass rolled back never counts as a success. The heartbeat only says the worker
+process lives; this says each loop does its work. /internal/metrics exports the age of ``ok_at``
+and an alert fires when a loop stops finishing passes (one that raises every time, or hangs).
+"""
 
 from __future__ import annotations
 
 import abc
 import asyncio
 import logging
+import math
+import time
 import zlib
+from typing import Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 log = logging.getLogger(__name__)
+
+LOOP_KEY_PREFIX: Final = "worker.loop."
+RECORD_EVERY_S: Final = 60.0  # a success is written at most this often (always after a failure)
+
+_RECORD_OK = (
+    "INSERT INTO settings (key, value, updated_at) VALUES (:k, jsonb_build_object('ok_at', now(), "
+    "'failures', 0, 'interval_s', CAST(:i AS double precision), 'max_backoff_s', "
+    "CAST(:m AS double precision)), now()) "
+    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()"
+)
+_RECORD_FAILED = (
+    "INSERT INTO settings (key, value, updated_at) VALUES (:k, jsonb_build_object('failures', 1, "
+    "'error_at', now(), 'interval_s', CAST(:i AS double precision), 'max_backoff_s', "
+    "CAST(:m AS double precision)), now()) "
+    "ON CONFLICT (key) DO UPDATE SET value = settings.value || jsonb_build_object('failures', "
+    "COALESCE((settings.value->>'failures')::int, 0) + 1, 'error_at', now(), "
+    "'interval_s', CAST(:i AS double precision), 'max_backoff_s', CAST(:m AS double precision)), "
+    "updated_at = now()"
+)
 
 
 def lock_key(name: str) -> int:
@@ -45,17 +74,38 @@ class Reconciler(abc.ABC):
 
     async def loop(self, engine: AsyncEngine, stop: asyncio.Event) -> None:
         backoff = self.interval_seconds
+        recorded_at, failing = -math.inf, False
         while not stop.is_set():
             try:
-                await self.try_run_once(engine)
+                ran = await self.try_run_once(engine)
                 backoff = self.interval_seconds
             except Exception:
-                log.exception("reconciler %s failed; retrying in %.0fs", self.name, backoff)
                 backoff = min(backoff * 2, self.max_backoff_seconds)
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=backoff)
-            except TimeoutError:
-                pass
+                log.exception("reconciler %s failed; retrying in %.0fs", self.name, backoff)
+                await self.record_outcome(engine, ok=False)
+                failing = True
+            else:
+                # Nothing is written when another worker holds the lock (this one did no work).
+                if ran and (failing or time.monotonic() - recorded_at >= RECORD_EVERY_S):
+                    await self.record_outcome(engine, ok=True)
+                    recorded_at, failing = time.monotonic(), False
+            await self.pause(stop, backoff)
+
+    async def pause(self, stop: asyncio.Event, seconds: float) -> None:
+        """The wait between passes (ends early when the worker stops)."""
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=seconds)
+        except TimeoutError:
+            pass
+
+    async def record_outcome(self, engine: AsyncEngine, *, ok: bool) -> None:
+        """Best effort, in its own transaction: a database outage must not stop the loop itself."""
+        params = {"k": LOOP_KEY_PREFIX + self.name, "i": self.interval_seconds, "m": self.max_backoff_seconds}
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(_RECORD_OK if ok else _RECORD_FAILED), params)
+        except Exception as exc:
+            log.warning("reconciler %s: outcome not recorded (%s)", self.name, type(exc).__name__)
 
 
 class Heartbeat(Reconciler):

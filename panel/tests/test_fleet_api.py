@@ -143,7 +143,70 @@ async def test_settings_defaults_have_no_budget_cap(client: AsyncClient) -> None
         "target_slots": 9,
         "allowed_server_types": ["cpx02"],
         "locations": ["fsn1", "nbg1", "hel1"],
+        "updated_at": None,  # never saved yet
     }
+
+
+async def test_settings_put_refuses_a_stale_form(client: AsyncClient, engine: AsyncEngine) -> None:
+    """A tab open since yesterday must not turn dry-run off again or put back an older budget cap
+    the owner lowered meanwhile on the phone (lost update); only the kill switch was kept before."""
+    first = (await client.get("/api/settings/fleet")).json()
+    assert first["updated_at"] is None
+    form = {k: v for k, v in first.items() if k != "updated_at"}
+    r = await client.put(
+        "/api/settings/fleet",
+        json={**form, "dry_run": False, "budget_cap_eur": "150", "expected_updated_at": None},
+    )
+    assert r.status_code == 200, r.text
+    laptop = r.json()  # the laptop tab keeps this, with its stamp
+    assert laptop["updated_at"] is not None
+    assert (await client.get("/api/settings/fleet")).json() == laptop
+
+    phone = (await client.get("/api/settings/fleet")).json()
+    r = await client.put(
+        "/api/settings/fleet",
+        json={**phone, "dry_run": True, "budget_cap_eur": "50", "expected_updated_at": phone["updated_at"]},
+    )
+    assert r.status_code == 200, r.text
+    after_phone = r.json()
+    assert after_phone["updated_at"] != laptop["updated_at"]
+
+    # Next morning the laptop adds a location and saves the form it read before the phone's change.
+    stale = {**laptop, "locations": ["fsn1", "hel1", "ash"], "expected_updated_at": laptop["updated_at"]}
+    r = await client.put("/api/settings/fleet", json=stale)
+    assert r.status_code == 409
+    assert r.json()["error"] == "settings_changed" and r.json()["message_fa"]
+    assert (await client.get("/api/settings/fleet")).json() == after_phone  # dry-run and 50 EUR stay
+    r = await client.put("/api/settings/fleet", json={**stale, "expected_updated_at": None})
+    assert r.status_code == 409  # "never saved" is stale too once a row exists
+
+    # A kill-switch change moves the stamp as well, and hands out the new one.
+    r = await client.post("/api/kill-switch", json={"on": False})
+    assert r.status_code == 200 and r.json()["updated_at"] not in (None, after_phone["updated_at"])
+    switched = r.json()["updated_at"]
+    fresh = {**after_phone, "locations": ["fsn1", "ash"]}
+    before_switch = after_phone["updated_at"]
+    r = await client.put("/api/settings/fleet", json={**fresh, "expected_updated_at": before_switch})
+    assert r.status_code == 409
+    r = await client.put("/api/settings/fleet", json={**fresh, "expected_updated_at": switched})
+    assert r.status_code == 200, r.text
+    assert r.json()["locations"] == ["fsn1", "ash"] and r.json()["kill_switch"] is False
+
+    # Without the field a PUT is saved as before (older clients, scripts).
+    r = await client.put("/api/settings/fleet", json={**form, "budget_cap_eur": "60"})
+    assert r.status_code == 200 and r.json()["budget_cap_eur"] == "60.00"
+
+    for bad in ("yesterday", "2026-11-12T10:00:00", 1731400000, ["x"]):
+        r = await client.put("/api/settings/fleet", json={**form, "expected_updated_at": bad})
+        assert r.status_code == 422, bad
+        assert r.json()["error"] == "invalid_settings"
+        assert r.json()["fields"] == [{"loc": ["expected_updated_at"], "type": "datetime_parsing"}]
+
+    async with engine.connect() as conn:
+        saves = (
+            await conn.execute(text("SELECT count(*) FROM actions_log WHERE action = 'settings_update'"))
+        ).scalar_one()
+    assert saves == 4  # the refused PUTs changed and logged nothing
 
 
 async def test_settings_update_validates_and_logs(client: AsyncClient, engine: AsyncEngine) -> None:
@@ -196,11 +259,12 @@ async def test_settings_update_validates_and_logs(client: AsyncClient, engine: A
 
 async def test_kill_switch(client: AsyncClient, engine: AsyncEngine) -> None:
     r = await client.post("/api/kill-switch", json={"on": False})
-    assert r.status_code == 200 and r.json() == {"kill_switch": False}
+    assert r.status_code == 200 and r.json()["kill_switch"] is False
+    assert r.json()["updated_at"] == (await client.get("/api/settings/fleet")).json()["updated_at"]
     assert (await client.get("/api/settings/fleet")).json()["kill_switch"] is False
     assert (await client.get("/api/overview")).json()["kill_switch"] is False
     r = await client.post("/api/kill-switch", json={"on": True})
-    assert r.json() == {"kill_switch": True}
+    assert r.json()["kill_switch"] is True
     assert (await client.get("/api/settings/fleet")).json()["budget_cap_eur"] is None  # nothing else changed
     r = await client.post("/api/kill-switch", json={"on": "yes"})
     assert r.status_code == 422 and r.json()["error"] == "invalid_input"
@@ -227,7 +291,7 @@ async def test_kill_switch_on_works_even_with_corrupt_settings(
     assert r.status_code == 500 and r.json()["error"] == "settings_corrupt"
     assert (await client.post("/api/kill-switch", json={"on": False})).status_code == 500
     r = await client.post("/api/kill-switch", json={"on": True})
-    assert r.status_code == 200 and r.json() == {"kill_switch": True}
+    assert r.status_code == 200 and r.json()["kill_switch"] is True
     assert (await client.get("/api/settings/fleet")).json()["kill_switch"] is True
 
 

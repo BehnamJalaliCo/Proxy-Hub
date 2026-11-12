@@ -33,7 +33,9 @@ statements, so its counts are exactly what the purge would remove at that moment
    24 hours (the longest gap setting) and than the cutoff, planned for a day before yesterday
    (Tehran), whose send and last edit are done, with their ``post_links``; and ``channel_posts`` of
    role ``test`` that belong to such a post (or to no post at all), with no edit waiting. A row in
-   the main channel's chat is never taken, whatever its role says.
+   the main channel's chat is never taken, whatever its role says. The row with the highest message
+   id of its chat stays: it is how the test-channel cleaning knows how far to sweep
+   (proxyhub/cleanup/test_channel.py ``highest_known_id``).
 5. **Finished outbox jobs** (``done_at`` before the cutoff) that no post, channel post or analytics
    alert refers to (the publisher finds a post's message and its last edit through them).
 
@@ -278,6 +280,7 @@ _TEST_CHANNEL_POSTS = _sql(
     "SELECT cp.id FROM channel_posts cp",
     "WHERE cp.role = 'test' AND cp.chat_id IS DISTINCT FROM :main_chat",
     "AND cp.created_at < :post_cutoff AND (cp.last_edited_at IS NULL OR cp.last_edited_at < :cutoff)",
+    "AND cp.message_id < (SELECT max(c2.message_id) FROM channel_posts c2 WHERE c2.chat_id = cp.chat_id)",
     "AND (cp.outbox_id IS NULL",
     "OR NOT EXISTS (SELECT 1 FROM posts p WHERE p.outbox_id = cp.outbox_id)",
     "OR EXISTS (SELECT 1 FROM posts p WHERE p.outbox_id = cp.outbox_id AND p.id = ANY(:post_ids)))",

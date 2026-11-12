@@ -214,15 +214,30 @@ def config_name(prefix: str, location: str, config_id: int) -> str:
 
 
 def serving_location(row: Any, nodes: list[NodeView]) -> str:
-    """Where an active config's link leads now: a slot name link to the slot's newest ready node
-    (its DNS name follows that node), else the config's own server's location."""
+    """Where an active config's link leads now (D60). A slot name link: the node the slot's DNS name
+    points at, ranked as proxyhub/cloudflare/service.py ``desired_slot_records`` ranks them (READY
+    first, then the newest ready_at, then the newest created_at) among the slot's nodes that still
+    serve; so a slot whose only node is briefly unhealthy keeps the flag of that node, never of the
+    server the config was first made on. Otherwise (an IP link, an ended config, no serving node):
+    the config's own server's location."""
     if row.status != "active" or row.slot is None or is_ip_host(row.host):
         return str(row.location)
-    ready = [n for n in nodes if n.slot == row.slot and NodeState(n.state) == NodeState.READY]
-    if not ready:
+    serving = [
+        n for n in nodes if n.slot == row.slot and n.ipv4 is not None and NodeState(n.state) in SERVE_STATES
+    ]
+    if not serving:
         return str(row.location)
-    newest = max(ready, key=lambda n: (n.ready_at or datetime.min.replace(tzinfo=UTC), str(n.id)))
-    return newest.location
+    epoch = datetime.min.replace(tzinfo=UTC)
+    dns = max(
+        serving,
+        key=lambda n: (
+            n.state == NodeState.READY.value,
+            n.ready_at or epoch,
+            n.created_at or epoch,
+            str(n.id),
+        ),
+    )
+    return dns.location
 
 
 def _xhttp_confirmed(row: Any, scope_nodes: list[NodeView], statuses: dict[uuid.UUID, StatusView]) -> bool:

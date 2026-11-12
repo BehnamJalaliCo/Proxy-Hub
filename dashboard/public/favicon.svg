@@ -1,15 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#7c6cff"/>
-      <stop offset="1" stop-color="#22c3e6"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2a261c"/>
+      <stop offset="1" stop-color="#0a0a0c"/>
+    </linearGradient>
+    <linearGradient id="au" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6e6bb"/>
+      <stop offset=".5" stop-color="#dfc07a"/>
+      <stop offset="1" stop-color="#b98f3c"/>
     </linearGradient>
   </defs>
-  <rect width="64" height="64" rx="16" fill="url(#g)"/>
-  <circle cx="32" cy="32" r="7" fill="#fff"/>
-  <circle cx="16" cy="18" r="4.5" fill="#fff" fill-opacity=".85"/>
-  <circle cx="48" cy="18" r="4.5" fill="#fff" fill-opacity=".85"/>
-  <circle cx="16" cy="46" r="4.5" fill="#fff" fill-opacity=".85"/>
-  <circle cx="48" cy="46" r="4.5" fill="#fff" fill-opacity=".85"/>
-  <path d="M19 21l9 8M45 21l-9 8M19 43l9-8M45 43l-9-8" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-opacity=".85"/>
+  <rect x="1.25" y="1.25" width="61.5" height="61.5" rx="16" fill="url(#bg)" stroke="url(#au)" stroke-width="1.5"/>
+  <path d="M20 22l8 7M44 22l-8 7M20 42l8-7M44 42l-8-7" stroke="url(#au)" stroke-width="2.6" stroke-linecap="round" stroke-opacity=".9"/>
+  <circle cx="32" cy="32" r="6.5" fill="url(#au)"/>
+  <circle cx="17" cy="19" r="4" fill="url(#au)"/>
+  <circle cx="47" cy="19" r="4" fill="url(#au)"/>
+  <circle cx="17" cy="45" r="4" fill="url(#au)"/>
+  <circle cx="47" cy="45" r="4" fill="url(#au)"/>
 </svg>

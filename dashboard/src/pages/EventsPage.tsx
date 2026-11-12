@@ -14,7 +14,7 @@ import { actionLabel, actorLabel } from "../lib/labels";
 import { useEventPages } from "../lib/queries";
 import type { AuditEvent } from "../lib/types";
 
-const labelOf = (e: AuditEvent) => `${actionLabel(e.action)} ${actorLabel(e.actor)}`;
+const labelOf = (e: AuditEvent) => `${actionLabel(e.action, e.target)} ${actorLabel(e.actor)}`;
 
 export default function EventsPage() {
   const pages = useEventPages();
@@ -106,7 +106,7 @@ export default function EventsPage() {
             <SkeletonLines lines={6} />
           </Card>
         </div>
-      ) : pages.isError ? (
+      ) : pages.isLoadingError ? (
         <Card>
           <ErrorState error={pages.error} onRetry={() => void pages.refetch()} />
         </Card>

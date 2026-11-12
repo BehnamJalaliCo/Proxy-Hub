@@ -185,3 +185,128 @@ func TestRefusedCachedStateIsNotApplied(t *testing.T) {
 		t.Fatal("a refused desired state produced a Telemt config")
 	}
 }
+
+// telemtAgent starts an agent on dir's state with the cached Telemt document, the given service
+// commands and Telemt's metrics on a closed port (Telemt is not answering).
+func telemtAgent(t *testing.T, dir string, reload, restart string, now *time.Time) *Agent {
+	t.Helper()
+	cfg := &config.Config{
+		PanelURL: "http://" + closedPort(t), NodeID: node, CAFile: filepath.Join(dir, "ca.pem"),
+		TokenFile: filepath.Join(dir, "token"), StateDir: filepath.Join(dir, "state"),
+		TelemtConfig: filepath.Join(dir, "telemt.toml"), TelemtDataDir: "/var/lib/telemt",
+		MetricsListen:  closedPort(t),
+		ReloadCommand:  []string{"/bin/sh", "-c", reload},
+		RestartCommand: []string{"/bin/sh", "-c", restart},
+	}
+	if _, err := os.Stat(cfg.DesiredFile()); os.IsNotExist(err) {
+		cached, _ := json.Marshal(cachedDesired{ETag: `"` + strings.Repeat("b", 64) + `"`, Body: json.RawMessage(cachedDoc)})
+		if err := os.WriteFile(cfg.DesiredFile(), cached, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, err := New(cfg, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.now = func() time.Time { return *now }
+	return a
+}
+
+// lines counts the commands a fake service command recorded.
+func lines(path string) int {
+	data, _ := os.ReadFile(path)
+	return strings.Count(string(data), "\n")
+}
+
+// A restart that failed is kept in local.json: an agent that starts again before it succeeded still
+// restarts Telemt onto the file in place, instead of reporting the new state as applied.
+func TestFailedTelemtRestartSurvivesAnAgentRestart(t *testing.T) {
+	dir := t.TempDir()
+	writeIdentity(t, dir)
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	a := telemtAgent(t, dir, "exit 1", "exit 1", &now)
+	if err := a.Apply(t.Context()); err == nil || a.applyErr != "service_failed" {
+		t.Fatalf("apply %v, code %q", err, a.applyErr)
+	}
+	if data, _ := os.ReadFile(a.cfg.UsageFile()); !strings.Contains(string(data), `"telemt_pending":2`) {
+		t.Fatalf("the pending restart is not in local.json: %s", data)
+	}
+	restarts := filepath.Join(dir, "restarts")
+	b := telemtAgent(t, dir, "exit 1", "echo r >> "+restarts, &now)
+	if err := b.Apply(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if lines(restarts) != 1 || b.appliedETag != `"`+strings.Repeat("b", 64)+`"` || b.applyErr != "" {
+		t.Fatalf("restarts %d, applied %q, code %q", lines(restarts), b.appliedETag, b.applyErr)
+	}
+	if data, _ := os.ReadFile(b.cfg.UsageFile()); strings.Contains(string(data), "telemt_pending") {
+		t.Fatalf("the done restart stayed in local.json: %s", data)
+	}
+	if err := b.Apply(t.Context()); err != nil || lines(restarts) != 1 {
+		t.Fatalf("apply %v, restarts %d", err, lines(restarts))
+	}
+}
+
+// systemd does not start a Telemt that exited cleanly: one whose metrics have not answered for
+// downRestart is restarted by the agent, at most that often. A shorter gap restarts nothing.
+func TestTelemtThatStoppedIsRestarted(t *testing.T) {
+	dir := t.TempDir()
+	writeIdentity(t, dir)
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	restarts := filepath.Join(dir, "restarts")
+	a := telemtAgent(t, dir, "exit 1", "echo r >> "+restarts, &now)
+	if err := a.Apply(t.Context()); err != nil || lines(restarts) != 1 {
+		t.Fatalf("first apply %v, restarts %d", err, lines(restarts))
+	}
+	cycle := func(d time.Duration) {
+		t.Helper()
+		now = now.Add(d)
+		a.Scrape(t.Context())
+		if err := a.Apply(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cycle(15 * time.Second) // not answering from now on
+	cycle(downRestart - time.Second)
+	if lines(restarts) != 1 {
+		t.Fatalf("restarted before Telemt was down for %v: %d", downRestart, lines(restarts))
+	}
+	cycle(time.Second)
+	if lines(restarts) != 2 {
+		t.Fatalf("a Telemt that does not answer was not restarted: %d", lines(restarts))
+	}
+	cycle(downRestart - time.Second)
+	if lines(restarts) != 2 {
+		t.Fatalf("restarted again within %v: %d", downRestart, lines(restarts))
+	}
+	cycle(time.Second)
+	if lines(restarts) != 3 {
+		t.Fatalf("no second restart: %d", lines(restarts))
+	}
+	// Answering again: nothing more.
+	a.telemtUp, a.telemtDownSince = true, time.Time{}
+	now = now.Add(time.Hour)
+	if err := a.Apply(t.Context()); err != nil || lines(restarts) != 3 {
+		t.Fatalf("apply %v, restarts %d", err, lines(restarts))
+	}
+}
+
+// A reload fails on a Telemt that is not running; the next cycle restarts it instead of repeating
+// the reload forever.
+func TestFailedTelemtReloadBecomesARestart(t *testing.T) {
+	dir := t.TempDir()
+	writeIdentity(t, dir)
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	reloads, restarts := filepath.Join(dir, "reloads"), filepath.Join(dir, "restarts")
+	a := telemtAgent(t, dir, "echo l >> "+reloads+"; exit 1", "echo r >> "+restarts, &now)
+	if err := a.Apply(t.Context()); err != nil || lines(restarts) != 1 {
+		t.Fatalf("first apply %v, restarts %d", err, lines(restarts))
+	}
+	a.doc.Telemt.Users[1].Enabled = false // users only: a reload would do
+	if err := a.Apply(t.Context()); err == nil || a.applyErr != "service_failed" || lines(reloads) != 1 {
+		t.Fatalf("apply %v, code %q, reloads %d", err, a.applyErr, lines(reloads))
+	}
+	if err := a.Apply(t.Context()); err != nil || lines(restarts) != 2 || lines(reloads) != 1 || a.applyErr != "" {
+		t.Fatalf("apply %v, restarts %d, reloads %d, code %q", err, lines(restarts), lines(reloads), a.applyErr)
+	}
+}

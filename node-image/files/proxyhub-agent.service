@@ -38,4 +38,7 @@ SystemCallArchitectures=native
 UMask=0077
 
 [Install]
-WantedBy=multi-user.target
+# Not multi-user.target: Ubuntu's cloud-final.service is After=multi-user.target, so a unit ordered
+# after it but wanted by multi-user.target makes an ordering cycle on every later boot, and systemd
+# breaks it by dropping this unit's start. cloud-init.target is itself After=multi-user.target.
+WantedBy=cloud-init.target

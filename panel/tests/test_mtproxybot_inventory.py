@@ -15,6 +15,7 @@ import json
 import secrets
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -311,6 +312,55 @@ async def test_old_registrations_whose_rows_are_gone_are_found_from_what_the_pan
     assert prepared.live_tags == frozenset({LIVE_TAG})
 
 
+async def test_a_proxy_whose_rows_are_gone_is_removed_through_its_real_screen(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """Its list button names no port and no row of ours is left at its address: the walk names it
+    by the ports the panel uses, so its own screen ("Proxy <host:8443> ...") is not read as another
+    proxy's and the cleanup does not get stuck on it."""
+    from test_mtproxybot_list import REAL_CONFIRM, REAL_CONFIRM_TEXT, real_screen
+
+    from proxyhub.sponsor.botlist import MenuWalk
+    from proxyhub.sponsor.conversation import Press
+
+    ip, label = "203.0.113.77", "203.0.113.77 1a1b1c1d"
+    await seed(engine, seal_key)
+    async with engine.begin() as db:
+        await db.execute(
+            text(
+                "INSERT INTO ip_history (ip, prefix24, location, first_seen_at) "
+                "VALUES (:ip, '203.0.113.0/24', 'hel1', now())"
+            ),
+            {"ip": ip},
+        )
+    await enable_removal(engine)
+    await inventory.request_job(engine, inventory.CLEANUP, actor="admin:owner", now=datetime.now(UTC))
+    await read_the_list(engine, vault, LIVE_LABEL, label)
+    prepared = await prepare(engine, vault)
+    assert prepared.plan.kind == "remove" and prepared.plan.entry is not None
+    assert prepared.plan.entry.address == ip and 8443 in prepared.ports
+    assert prepared.plan.mapped is not None and prepared.plan.mapped.note == "no_record"
+    to = inventory.walk_target(prepared, prepared.plan.entry, prepared.plan.mapped)
+    assert f"{ip}:8443" in to.words
+    walk = MenuWalk(to, remove=True)
+    confirm_text = REAL_CONFIRM_TEXT.replace(LIVE_HOST, ip)
+    replies_in_order = [
+        (Step.SENT_MYPROXIES, REAL_LIST_HEADER, ((BotButton(label, b"p:0"),),)),
+        (Step.PRESSED_PROXY, real_screen(f"{ip}:8443").text, ((BotButton("Delete proxy", b"d"),),)),
+        (Step.PRESSED_REMOVE, confirm_text, ((BotButton(REAL_CONFIRM, b"y"),),)),
+    ]
+    for step, reply, rows in replies_in_order:
+        message = BotMessage(id=300, outgoing=False, text=reply, edit_date=None, buttons=rows)
+        assert isinstance(walk.next(step, Observation(messages=(message,))), Press), step
+    success = BotMessage(id=301, outgoing=False, text="Success!", edit_date=None, buttons=())
+    done = walk.next(Step.PRESSED_CONFIRM, Observation(messages=(success,)))
+    assert isinstance(done, Removed) and done.confirmed
+    assert await record(engine, prepared, WalkResult(result=done, messages_sent=4)) == "mtproxybot:removed"
+    await record(engine, await prepare(engine, vault), WalkResult(result=list_read(LIVE_LABEL)))
+    assert await inventory.step(deps(engine, vault)) == "mtproxybot:done"
+    assert (await job(engine)).state == "done"
+
+
 async def test_the_inventory_then_reads_the_sponsor_of_each_live_proxy(
     engine: AsyncEngine, vault: Vault, seal_key: bytes
 ) -> None:
@@ -339,6 +389,8 @@ async def test_the_inventory_then_reads_the_sponsor_of_each_live_proxy(
         (seen_menu("customer_ch"), "other", "shown"),
         (seen_menu(), "not_shown", "not_shown"),
         (seen_menu("ipoxxo", "other"), "several", "several"),
+        # A reply that does not name the proxy is not its screen (a toast, an error): unread.
+        (seen_menu(names_proxy=False), "stuck", "stuck:menu_does_not_name_proxy"),
         (
             WalkResult(
                 result=WalkStuck(step=Step.SENT_MYPROXIES, reason="proxy_not_in_list", screens=(SCREEN,)),
@@ -435,6 +487,12 @@ async def enable_removal(engine: AsyncEngine) -> None:
         observation = {"result": inventory.OBSERVED_OK, "address": DEAD_IP}
         await inventory.save_state(db, inventory.BotListState(removal_enabled=True, observation=observation))
         assert state.job is None
+
+
+async def finish_job(engine: AsyncEngine, final: str, at: datetime, reason: str | None = None) -> None:
+    """The open job ends as the job code ends it (:func:`proxyhub.sponsor.inventory._finish`)."""
+    async with engine.begin() as db:
+        await inventory._finish(db, await inventory._locked_state(db), final, reason, at)
 
 
 async def test_removal_removes_only_dead_proxies_then_reads_the_list_again(
@@ -686,8 +744,6 @@ async def test_the_panel_queues_the_cleanup_by_itself_after_a_node_is_gone(
 ) -> None:
     """P30 (2026-11-07): with removal on, a deleted node's proxy is cleaned up with no owner button:
     once its registration has waited AUTO_AFTER, at most once per AUTO_GAP, never after a stuck job."""
-    from dataclasses import replace
-
     from test_sponsor_support import TelemtUsersProvider
 
     from proxyhub.reconcilers.sponsor import SponsorReconciler
@@ -719,18 +775,11 @@ async def test_the_panel_queues_the_cleanup_by_itself_after_a_node_is_gone(
     async with engine.connect() as db:
         assert not await inventory.auto_cleanup_due(db, later)  # a job is open
 
-    async def finish(state: str, at: datetime) -> None:
-        async with engine.begin() as db:
-            current = await inventory._locked_state(db)
-            assert current.job is not None
-            await inventory.save_state(
-                db, replace(current, job=replace(current.job, state=state, finished_at=at))
-            )
-
-    await finish(inventory.DONE, now)
+    await finish_job(engine, inventory.DONE, now)
     async with engine.connect() as db:
-        # The registration is older than that job: nothing new to clean up, even after the gap.
+        # The registration is older than that cleanup: nothing new to clean up, ever.
         assert not await inventory.auto_cleanup_due(db, now + inventory.AUTO_GAP + timedelta(hours=1))
+        assert not await inventory.auto_cleanup_due(db, now + inventory.CHECK_RETRY + timedelta(hours=1))
     async with engine.begin() as db:
         await db.execute(
             text("UPDATE mtproxy_registrations SET updated_at = now() WHERE id = :i"), {"i": ids["dead"]}
@@ -738,9 +787,119 @@ async def test_the_panel_queues_the_cleanup_by_itself_after_a_node_is_gone(
     async with engine.connect() as db:
         assert not await inventory.auto_cleanup_due(db, later)  # gone after it, but within the gap
         assert await inventory.auto_cleanup_due(db, now + inventory.AUTO_GAP + timedelta(minutes=1))
-    await finish(inventory.STUCK, now)
+    await finish_job(engine, inventory.STUCK, now)
     async with engine.connect() as db:
         assert not await inventory.auto_cleanup_due(db, now + timedelta(days=1))  # the owner looks first
+
+
+async def test_a_promotion_check_does_not_hide_a_dead_proxy_from_the_automatic_cleanup(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """D63 queues inventories too: one that ran just after a node went (its sponsor check, the daily
+    one) must not count as the cleanup of that node's proxy. A cleanup that did not finish done is
+    offered again CHECK_RETRY later, and the promotion check is not starved meanwhile."""
+    from test_sponsor_support import TelemtUsersProvider
+
+    from proxyhub.reconcilers.sponsor import SponsorReconciler
+
+    ids = await seed(engine, seal_key)
+    await seed_connected(engine, vault, port=closed_port(), mtproxybot_id=BOT_ID)
+    await enable_removal(engine)
+    now = datetime.now(UTC)
+    gone_at = now - timedelta(hours=3)
+    async with engine.begin() as db:
+        await db.execute(
+            text("UPDATE mtproxy_registrations SET updated_at = :t WHERE id = :i"),
+            {"t": gone_at, "i": ids["dead"]},
+        )
+        # Another proxy's sponsor was set an hour ago: the next promotion check is due.
+        await db.execute(
+            text("UPDATE sponsor_flows SET promotion_set_at = :t WHERE registration_id = :i"),
+            {"t": now - timedelta(hours=1), "i": ids["live"]},
+        )
+    # The promotion check queued before the cleanup was due, and finished after the node went.
+    queued_at = gone_at - timedelta(minutes=2)
+    await inventory.request_job(engine, inventory.INVENTORY, actor=inventory.AUTO_ACTOR, now=queued_at)
+    await finish_job(engine, inventory.DONE, gone_at + timedelta(minutes=8))
+    async with engine.connect() as db:
+        assert await inventory.auto_cleanup_due(db, now)
+    loop = SponsorReconciler(
+        vault_factory=lambda: vault,
+        provider=lambda: TelemtUsersProvider(seal_key),
+        options=ClientOptions(endpoint=Endpoint("127.0.0.1", closed_port()), deadline_s=3),
+    )
+    assert await loop.step(engine) == "cleanup_queued"
+    cleanup = await job(engine)
+    assert cleanup.requested_at is not None
+    assert (await state_of(engine)).cleanup_queued_at == cleanup.requested_at
+
+    # It ends failed: not again within the hours after it (the check goes first), again later.
+    t = cleanup.requested_at
+    await finish_job(engine, inventory.FAILED, t + timedelta(minutes=3), "no_reply")
+    gap = t + inventory.AUTO_GAP + timedelta(minutes=5)
+    async with engine.connect() as db:
+        assert not await inventory.auto_cleanup_due(db, gap)
+        assert await inventory.auto_inventory_due(db, gap)
+        assert await inventory.auto_cleanup_due(db, t + inventory.CHECK_RETRY + timedelta(minutes=1))
+    # Done: what it covered is never offered again.
+    retry_at = t + inventory.CHECK_RETRY + timedelta(minutes=1)
+    await inventory.request_job(engine, inventory.CLEANUP, actor=inventory.AUTO_ACTOR, now=retry_at)
+    await finish_job(engine, inventory.DONE, retry_at + timedelta(minutes=5), "nothing_to_remove")
+    state = await state_of(engine)
+    assert state.cleaned_at == retry_at and state.cleanup_queued_at == retry_at
+    async with engine.connect() as db:
+        assert not await inventory.auto_cleanup_due(db, retry_at + timedelta(days=2))
+
+
+@pytest.mark.parametrize("actor", [inventory.AUTO_ACTOR, "admin:owner"])
+async def test_an_automatic_job_stuck_on_the_list_tells_the_owner_once(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes, actor: str
+) -> None:
+    """No automatic job starts again after a stuck one (D63): with nobody watching the page, the
+    owner is told. A job the owner started is in front of them already."""
+    from proxyhub.sponsor.messages import LIST_REASON_FA
+
+    await seed(engine, seal_key)
+    await pair_owner(engine)
+    await inventory.request_job(engine, inventory.INVENTORY, actor=actor, now=datetime.now(UTC))
+    stuck = WalkStuck(step=Step.SENT_MYPROXIES, reason="unexpected_reply", screens=(SCREEN,))
+    got = await record(
+        engine, await prepare(engine, vault), WalkResult(result=stuck, last_step=Step.SENT_MYPROXIES)
+    )
+    assert got == "mtproxybot:stuck:unexpected_reply" and (await job(engine)).state == "stuck"
+    sent = await alerts(engine)
+    if actor != inventory.AUTO_ACTOR:
+        assert sent == []
+        return
+    (alert,) = sent
+    assert "وارسی خودکار" in alert and LIST_REASON_FA["unexpected_reply"] in alert
+    assert await inventory.step(deps(engine, vault)) == "idle"
+    assert not await due(engine, datetime.now(UTC) + timedelta(days=1))
+    assert len(await alerts(engine)) == 1
+
+
+async def test_an_automatic_cleanup_stuck_tells_the_owner_once(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    await seed(engine, seal_key)
+    await pair_owner(engine)
+    await enable_removal(engine)
+    # Refused on the list read: the automatic cleanup's own alert.
+    await inventory.request_job(engine, inventory.CLEANUP, actor=inventory.AUTO_ACTOR, now=datetime.now(UTC))
+    refused = WalkResult(error="request_not_allowed", attempted_step=Step.SENT_MYPROXIES)
+    got = await record(engine, await prepare(engine, vault), refused)
+    assert got == "mtproxybot:stuck:request_not_allowed"
+    (alert,) = await alerts(engine)
+    assert "پاک‌سازی خودکار" in alert
+    # Stuck on a removal: the removal's alert, and only that one.
+    await inventory.request_job(engine, inventory.CLEANUP, actor=inventory.AUTO_ACTOR, now=datetime.now(UTC))
+    await read_the_list(engine, vault, *ALL_LABELS)
+    prepared = await prepare(engine, vault)
+    assert prepared.plan.kind == "remove"
+    stuck = WalkStuck(step=Step.PRESSED_REMOVE, reason="no_confirm_button", screens=(SCREEN,))
+    await record(engine, prepared, WalkResult(result=stuck, last_step=Step.PRESSED_REMOVE))
+    sent = await alerts(engine)
+    assert len(sent) == 2 and DEAD_IP in sent[1] and "پاک کردن پروکسی‌های مرده" in sent[1]
 
 
 # --- the promotion check the panel queues, and what it does with it (decision D63) -------------------------
@@ -769,8 +928,6 @@ async def test_the_panel_queues_the_promotion_check_by_itself(
 ) -> None:
     """2026-11-12: the sponsors the dashboard showed were five days old and two were never read. The
     check comes once a day, and soon after a sponsor was set; never after a job that got stuck."""
-    from dataclasses import replace
-
     ids = await seed(engine, seal_key)
     now = datetime.now(UTC)
     assert await due(engine, now)  # a live proxy, never checked
@@ -879,6 +1036,62 @@ async def test_a_sponsor_the_bot_does_not_show_is_set_again_and_then_the_owner_i
     assert await repair() == [] and (await state_of(engine)).repairs == {}
     await run_inventory(engine, vault, seen_menu("ipoxxo", "other"))
     assert await repair() == [] and await sponsor_of(engine, live) == "ipoxxo"
+
+
+async def test_a_reply_that_is_not_the_proxys_screen_is_never_repaired(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """A toast or an error text after the proxy's button names no channel, but it is not the
+    screen saying "n/a": the sponsor is not set again and the owner is not alerted."""
+    ids = await seed(engine, seal_key)
+    await pair_owner(engine)
+    for _ in range(2):
+        await run_inventory(engine, vault, seen_menu(names_proxy=False))
+        assert await inventory.repair_promotions(engine, wanted="ipoxxo", now=datetime.now(UTC)) == []
+    assert await sponsor_of(engine, ids["live"]) == "ipoxxo"
+    assert await alerts(engine) == []
+
+
+async def test_a_screen_read_before_the_sponsor_was_set_again_is_not_acted_on(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """The sponsor loop goes first and may set a sponsor in the middle of a check, after that
+    proxy's screen was read: the read is older than the set, so it neither repairs nor alerts."""
+    ids = await seed(engine, seal_key)
+    await pair_owner(engine)
+    live = ids["live"]
+
+    async def check_with_a_set_in_between() -> inventory.Job:
+        await inventory.request_job(engine, inventory.INVENTORY, actor="cli", now=datetime.now(UTC))
+        await read_the_list(engine, vault, *ALL_LABELS)
+        await record(engine, await prepare(engine, vault), seen_menu())  # "n/a"
+        async with engine.begin() as db:
+            await db.execute(
+                text("UPDATE sponsor_flows SET promotion_set_at = now() WHERE registration_id = :i"),
+                {"i": live},
+            )
+        assert await inventory.step(deps(engine, vault)) == "mtproxybot:done"
+        return await job(engine)
+
+    finished = await check_with_a_set_in_between()
+    assert await inventory.repair_promotions(engine, wanted="ipoxxo", now=datetime.now(UTC)) == []
+    assert await sponsor_of(engine, live) == "ipoxxo"
+    assert (await state_of(engine)).repaired_job == finished.requested_at
+    assert "sponsor.promotion_repair" not in [a["action"] for a in await actions(engine)]
+
+    # Set again after a repair: an older read does not tell the owner that it did not help.
+    async with engine.begin() as db:
+        current = await inventory._locked_state(db)
+        repairs = {str(live): inventory.Repair(at=datetime.now(UTC))}
+        await inventory.save_state(db, replace(current, repairs=repairs))
+    await check_with_a_set_in_between()
+    assert await inventory.repair_promotions(engine, wanted="ipoxxo", now=datetime.now(UTC)) == []
+    assert await alerts(engine) == [] and str(live) in (await state_of(engine)).repairs
+
+    # A read taken after that set is acted on as before.
+    await run_inventory(engine, vault, seen_menu())
+    tomorrow = datetime.now(UTC) + inventory.REPAIR_GAP + timedelta(minutes=1)
+    assert await inventory.repair_promotions(engine, wanted="ipoxxo", now=tomorrow) == [f"{LIVE_HOST}:8443"]
 
 
 async def test_the_sponsor_loop_repairs_before_it_checks_again(

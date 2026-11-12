@@ -300,17 +300,8 @@ async def put_channel(
     other = (await store.channels(db)).get("test" if body.role == "main" else "main")
     if other is not None and other.get("chat_id") == chat.id:
         raise _err("channel_in_use", 400)
-    now = store.now_utc()
-    username = f"@{chat.username}" if chat.username else str(chat.id)
-    channel = {
-        "chat_id": chat.id,
-        "username": username,
-        "title": chat.title or "",
-        "can_post": rights.can_post,
-        "can_edit": rights.can_edit,
-        "can_delete": rights.can_remove,
-        "checked_at": iso(now),
-    }
+    channel = store.channel_record(chat, rights, store.now_utc())
+    username = channel["username"]
     await store.save_channel(db, body.role, channel)
     await log_action(
         db,

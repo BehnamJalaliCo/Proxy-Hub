@@ -18,9 +18,11 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from test_fleet_live_support import closed_port
-from test_net_support import clean_net_tables
+from test_net_support import cf_zone_json, clean_net_tables
 
 from proxyhub.cloudflare import delegation as dg
+from proxyhub.cloudflare import service
+from proxyhub.cloudflare.client import parse_zone
 from proxyhub.cloudflare.delegation import (
     DelegationRound,
     DohClient,
@@ -331,6 +333,75 @@ async def test_a_standby_already_lost_is_never_promoted(engine: AsyncEngine) -> 
     out = await look(engine, ZA, GONE, t + timedelta(minutes=32))
     assert out.replacement == "c.com"
     assert await pools(engine) == {"a.com": "none", "b.com": "standby", "c.com": "active"}
+
+
+def _listed(zone_id: str, name: str, pair: tuple[str, ...], status: str = "active") -> Any:
+    raw = cf_zone_json(zone_id, name, status)
+    raw["name_servers"] = list(pair)
+    return parse_zone(raw)
+
+
+async def baseline(engine: AsyncEngine, zone_id: str) -> list[str] | None:
+    async with engine.connect() as conn:
+        value = (
+            await conn.execute(
+                text("SELECT baseline_ns FROM domain_delegation_state WHERE zone_id = :z"), {"z": zone_id}
+            )
+        ).scalar_one_or_none()
+    return sorted(value) if value else None
+
+
+@pytest.mark.db
+async def test_a_wrong_learned_pair_is_corrected_from_cloudflare_and_the_domain_comes_back(
+    engine: AsyncEngine,
+) -> None:
+    """The first lookup still saw the pair of the Cloudflare account the domain came from (a
+    resolver's cache): that pair was learned, and every correct answer then read ns_changed."""
+    t = await world(engine)
+    old_account = NsAnswer(0, ("elliott.ns.cloudflare.com", "hera.ns.cloudflare.com"))
+    assert (await look(engine, ZA, old_account, t)).verdict == "ok"
+    await look(engine, ZA, OK, t + timedelta(minutes=40))
+    lost = await look(engine, ZA, OK, t + timedelta(minutes=80))
+    assert lost.taken_out and (await pools(engine))["a.com"] == "none"
+    # The hourly zone list carries the pair Cloudflare assigned: it becomes the expected one.
+    async with engine.begin() as conn:
+        await service.store_zones(
+            conn, [_listed(ZA, "a.com", CF_PAIR), _listed(ZB, "b.com", CF_PAIR)], {ZA: True, ZB: True}, t
+        )
+    assert await baseline(engine, ZA) == list(CF_PAIR)
+    async with engine.connect() as conn:
+        logged = (
+            (
+                await conn.execute(
+                    text("SELECT target FROM actions_log WHERE action = 'domain_delegation_baseline'")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert logged == ["a.com"]  # changed from a learned pair; b.com had none yet
+    assert not (await look(engine, ZA, OK, t + timedelta(minutes=120))).restored
+    back = await look(engine, ZA, OK, t + timedelta(minutes=151))
+    assert back.restored and (await pools(engine))["a.com"] == "standby"
+
+
+@pytest.mark.db
+async def test_cloudflares_pair_is_not_replaced_by_a_lookup_or_an_odd_list(engine: AsyncEngine) -> None:
+    t = await world(engine)
+    async with engine.begin() as conn:
+        await service.store_zones(conn, [_listed(ZA, "a.com", CF_PAIR)], {ZA: True}, t)
+    other_account = NsAnswer(0, ("elliott.ns.cloudflare.com", "hera.ns.cloudflare.com"))
+    assert (await look(engine, ZA, other_account, t + timedelta(minutes=1))).result == "ns_changed"
+    assert await baseline(engine, ZA) == list(CF_PAIR)
+    # Cloudflare lists no pair, a pair that is not Cloudflare's, or the zone is not active yet.
+    for listed in (
+        _listed(ZA, "a.com", ()),
+        _listed(ZA, "a.com", ("ns1.parking.example", "ns2.parking.example")),
+        _listed(ZA, "a.com", ("elliott.ns.cloudflare.com", "hera.ns.cloudflare.com"), status="pending"),
+    ):
+        async with engine.begin() as conn:
+            await service.store_zones(conn, [listed], {ZA: True}, t)
+        assert await baseline(engine, ZA) == list(CF_PAIR)
 
 
 @pytest.mark.db

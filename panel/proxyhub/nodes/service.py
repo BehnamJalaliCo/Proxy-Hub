@@ -34,14 +34,16 @@ from proxyhub.fleet.costs import money, node_cost_items
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
 from proxyhub.fleet.planner import (
     OBSERVATION_MAX_AGE,
-    OFFER_MAX_AGE,
     AccountSnapshot,
     counts_as_creation,
     effective_server_limit,
+    prices_stale,
+    projection_prices,
 )
 from proxyhub.fleet.settings_store import SettingsCorrupt, load_fleet_settings
 from proxyhub.fleet.snapshot import load_accounts, load_nodes, load_offers
 from proxyhub.hetzner.client import HetznerReader, _delete_protected
+from proxyhub.mtproto.service import CONNECTIONS_FRESH_FOR
 from proxyhub.nodes.settings import get_live_settings
 from proxyhub.nodes.transitions import event, lock_node, transition
 from proxyhub.reconcilers.base import lock_key
@@ -212,13 +214,11 @@ async def evaluate_create(
 
     nodes = [n for n in await load_nodes(db, now) if exclude_node is None or n.id != str(exclude_node)]
     stored_offers = await load_offers(db)
-    prices = {
-        (ao.account_id, ao.offer.server_type, ao.offer.location): ao.offer.price for ao in stored_offers
-    }
-    items, missing = node_cost_items(nodes, prices, now)
+    accounts = await load_accounts(db)
+    items, missing = node_cost_items(nodes, projection_prices(stored_offers, accounts), now)
     if missing:
         reasons.append("projection_incomplete")
-    if any(ao.fetched_at is not None and now - ao.fetched_at > OFFER_MAX_AGE for ao in stored_offers):
+    if prices_stale(stored_offers, accounts, nodes, now):
         reasons.append("prices_stale")
     offers_by_account: dict[str, list[LiveOffer]] = {}
     for ao in stored_offers:
@@ -230,7 +230,6 @@ async def evaluate_create(
     if not locations:
         reasons.append("no_location_configured")
 
-    accounts = await load_accounts(db)
     if account_id is not None:
         candidates = [a for a in accounts if a.id == str(account_id)]
     else:
@@ -242,6 +241,18 @@ async def evaluate_create(
 
     def fresh(a: AccountSnapshot) -> bool:
         return a.observed_at is not None and now - a.observed_at <= OBSERVATION_MAX_AGE
+
+    live_nodes = [n for n in nodes if n.state in LIVE_STATES]
+
+    def has_room(a: AccountSnapshot) -> bool:
+        """Below its learned server limit, as the planner's placement asks (youngest account first,
+        the next one when it is full). With a live look the account is fixed (the executor's own
+        re-check), and ``can_create`` checks the limit."""
+        if live is not None:
+            return True
+        limit = effective_server_limit(a, now)
+        in_a = sum(1 for n in live_nodes if n.account_id == a.id)
+        return limit is None or max(a.servers_total or 0, in_a) + 1 <= limit
 
     chosen: AccountSnapshot | None = None
     chosen_loc: str | None = locations[0] if locations else None
@@ -256,8 +267,8 @@ async def evaluate_create(
             )
             if offer is None:
                 continue
-            good = live.guard_ok if live is not None else (fresh(a) and a.guard_ok is True)
-            if good:
+            green = live.guard_ok if live is not None else (fresh(a) and a.guard_ok is True)
+            if green and has_room(a):
                 chosen, chosen_loc, chosen_offer = a, loc, offer
                 break
             if fallback is None:
@@ -275,7 +286,6 @@ async def evaluate_create(
     if chosen is not None and live is None and not fresh(chosen):
         reasons.append("account_observation_stale")
 
-    live_nodes = [n for n in nodes if n.state in LIVE_STATES]
     in_account = sum(1 for n in live_nodes if chosen is not None and n.account_id == chosen.id)
     if chosen is not None:
         if live is not None:
@@ -467,8 +477,10 @@ async def request_retire(
     if settings.kill_switch:
         reasons.append("kill_switch_on")
     if not reasons and node.state == NodeState.RETIRING.value:
+        # Already on its way out. The rollback expires ``node``: reading it again would be lazy IO
+        # outside the async greenlet (MissingGreenlet, a 500 for an idempotent request).
         await db.rollback()
-        return node.state  # already on its way out
+        return NodeState.RETIRING.value
     account_id, hetzner_id, seen_state, name = node.account_id, node.hetzner_id, node.state, node.name
     await db.rollback()  # no transaction (and no row lock) is held across a Hetzner call
 
@@ -537,7 +549,7 @@ async def list_nodes(db: AsyncSession, now: datetime) -> list[dict[str, Any]]:
     """GET /api/nodes: every node not deleted, plus the ones deleted within the last week."""
     connections = (
         select(TelemtUser.node_id, func.sum(TelemtUser.last_current_connections).label("conns"))
-        .where(TelemtUser.last_stats_at.is_not(None))
+        .where(TelemtUser.last_stats_at >= now - CONNECTIONS_FRESH_FOR)  # a last count is not "now"
         .group_by(TelemtUser.node_id)
         .subquery()
     )

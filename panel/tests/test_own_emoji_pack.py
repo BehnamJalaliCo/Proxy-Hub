@@ -584,7 +584,7 @@ async def test_a_ready_pack_becomes_the_posters_pack_only_when_the_owner_chose_n
     async with engine.begin() as conn:
         await operator.save_config(conn, operator.OperatorConfig(poster="operator", emoji_pack=None))
     assert await own_pack.ensure(engine, vault, now=NOW, bot_factory=closed_port_bot()) == "not_due"
-    assert await _config(engine) == operator.OperatorConfig(poster="operator", emoji_pack=PACK)
+    assert await _config(engine) == operator.OperatorConfig(poster="operator", emoji_pack=PACK, auto=True)
     async with engine.connect() as conn:
         chosen = (
             await conn.execute(text("SELECT target FROM actions_log WHERE action = 'posts.own_pack_chosen'"))
@@ -667,7 +667,7 @@ async def test_new_drawings_are_a_new_pack_built_beside_the_old_one_and_taken_ov
             ),
         )
     assert await own_pack.ensure(engine, vault, now=NOW, bot_factory=closed_port_bot()) == "not_due"
-    assert await _config(engine) == operator.OperatorConfig(poster="operator", emoji_pack=PACK)
+    assert await _config(engine) == operator.OperatorConfig(poster="operator", emoji_pack=PACK, auto=True)
     new_map = await _emoji_map(engine)
     assert new_map["📡"] == 9_000 and new_map[emoji_key("⏸️")] == 9_000 + full.index("⏸️")
     assert len(new_map) == len(full)
@@ -691,6 +691,73 @@ async def test_new_drawings_are_a_new_pack_built_beside_the_old_one_and_taken_ov
         await operator.save_config(conn, operator.OperatorConfig(poster="operator", emoji_pack=EMOJI_SET))
     assert await own_pack.ensure(engine, vault, now=NOW, bot_factory=closed_port_bot()) == "not_due"
     assert (await _config(engine)).emoji_pack == EMOJI_SET
+
+
+OLD_NAME_PACK = f"oldname_v{emoji_art.ART_VERSION}_by_proxyhub_test_bot"  # the main channel was @oldname
+
+
+async def _renamed(engine: AsyncEngine, vault: Vault, *, auto: bool) -> list[tuple[str, str]]:
+    """The main channel was renamed: posts use the complete pack made for its old @username, and the
+    pack for the new name (@ipoxxo) is complete with every id. Returns the new pack's ids."""
+    await fleet_kill_switch(engine, on=False)
+    await setup_telegram(engine, vault, test=True, main=True, owner=True)
+    full = tuple(a.alt for a in emoji_art.ART)
+    new_ids = [(str(7_000 + n), alt) for n, alt in enumerate(full)]
+    async with engine.begin() as conn:
+        await operator.save_config(
+            conn, operator.OperatorConfig(poster="operator", emoji_pack=OLD_NAME_PACK, auto=auto)
+        )
+        await own_pack.save_state(
+            conn,
+            own_pack.PackState(name=PACK, title="@ipoxxo", owner_id=OWNER, alts=full[:3], checked_at=NOW),
+        )
+        shown = await own_pack.status(conn)
+    # While the new pack is being made, the Content page says the posts move over by themselves.
+    assert shown["replaces"] == (OLD_NAME_PACK if auto else None)
+    async with engine.begin() as conn:
+        await own_pack.save_state(
+            conn,
+            own_pack.PackState(
+                name=PACK, title="@ipoxxo", owner_id=OWNER, alts=full, entries=tuple(new_ids), checked_at=NOW
+            ),
+        )
+    assert await own_pack.ensure(engine, vault, now=NOW, bot_factory=closed_port_bot()) == "not_due"
+    return new_ids
+
+
+@pytest.mark.db
+async def test_a_pack_the_panel_made_for_an_old_channel_name_gives_way_to_the_new_one(
+    engine: AsyncEngine, vault: Vault
+) -> None:
+    new_ids = await _renamed(engine, vault, auto=True)
+    assert await _config(engine) == operator.OperatorConfig(poster="operator", emoji_pack=PACK, auto=True)
+    async with engine.connect() as conn:
+        pack = await operator.load_pack(conn)
+        shown = await own_pack.status(conn)
+    assert pack is not None and pack.short_name == PACK
+    assert [(str(i), alt) for i, alt in pack.entries] == new_ids
+    assert shown["replaces"] is None
+
+
+@pytest.mark.db
+async def test_a_pack_the_owner_pasted_stays_after_a_rename(engine: AsyncEngine, vault: Vault) -> None:
+    await _renamed(engine, vault, auto=False)
+    assert await _config(engine) == operator.OperatorConfig(poster="operator", emoji_pack=OLD_NAME_PACK)
+
+
+@pytest.mark.db
+async def test_the_panels_own_pack_in_use_is_marked_as_its_own(engine: AsyncEngine, vault: Vault) -> None:
+    """A row written before the flag existed (or by the owner's click on «use this pack»)."""
+    await fleet_kill_switch(engine, on=False)
+    await setup_telegram(engine, vault, test=True, main=True, owner=True)
+    full = tuple(a.alt for a in emoji_art.ART)
+    async with engine.begin() as conn:
+        await store.put_setting(conn, operator.KEY, {"poster": "operator", "emoji_pack": PACK})
+        await own_pack.save_state(
+            conn, own_pack.PackState(name=PACK, title="@ipoxxo", owner_id=OWNER, alts=full, checked_at=NOW)
+        )
+    assert await own_pack.ensure(engine, vault, now=NOW, bot_factory=closed_port_bot()) == "not_due"
+    assert await _config(engine) == operator.OperatorConfig(poster="operator", emoji_pack=PACK, auto=True)
 
 
 @pytest.mark.db

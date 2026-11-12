@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import socket
+import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -10,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from hcloud import Client
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from test_fleet_support import clean_fleet_tables, live_offers, make_vault, new_token, server
@@ -17,6 +22,7 @@ from test_fleet_support import clean_fleet_tables, live_offers, make_vault, new_
 from proxyhub.accounts import service
 from proxyhub.accounts.hetzner_io import Verification, summarize_servers
 from proxyhub.fleet.settings_store import save_fleet_settings
+from proxyhub.hetzner.client import HetznerReader
 from proxyhub.nodes.settings import get_live_settings
 from proxyhub.reconcilers.account_guard import AccountGuardReconciler
 from proxyhub.reconcilers.fleet import PLAN_RETENTION, FleetReconciler
@@ -146,6 +152,36 @@ async def test_stale_stored_prices_block_creations(engine: AsyncEngine, tmp_path
     plan = await q(engine, "SELECT actions FROM fleet_plans ORDER BY id DESC LIMIT 1")
     assert isinstance(plan, list) and len(plan) == 9
     assert all(not a["allowed"] and "prices_stale" in a["reasons"] for a in plan)
+
+
+@pytest.mark.parametrize("state", ["retired", "locked"])
+async def test_old_prices_of_a_retired_or_locked_account_block_nothing(
+    engine: AsyncEngine, tmp_path: Path, state: str
+) -> None:
+    """sweep-stuck:1: the pricing loop never refreshes such an account, so its stored offers age
+    forever. The planner and the executor's gate both ignore their age (one shared helper)."""
+    from proxyhub.nodes.service import evaluate_create
+
+    vault = make_vault(tmp_path)
+    old = await add_account(engine, vault, "nodes-old-account")
+    await add_account(engine, vault, "nodes-new-account")
+    await set_settings(engine, OPEN)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE hetzner_accounts SET state = :s WHERE id = :a"), {"s": state, "a": old}
+        )
+        await conn.execute(
+            text("UPDATE hetzner_offers SET fetched_at = now() - interval '7 hours' WHERE account_id = :a"),
+            {"a": old},
+        )
+    assert await FleetReconciler().try_run_once(engine)
+    plan = await q(engine, "SELECT actions FROM fleet_plans ORDER BY id DESC LIMIT 1")
+    assert isinstance(plan, list) and len(plan) == 9
+    assert [a["allowed"] for a in plan] == [True] * 3 + [False] * 6  # budget and rate caps, as before
+    assert not any("prices_stale" in a["reasons"] for a in plan)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        ev = await evaluate_create(session, datetime.now(UTC), location="fsn1")
+    assert ev.allowed and ev.account_name == "nodes-new-account", ev.reasons
 
 
 async def test_dry_run_false_with_the_kill_switch_on_still_plans_dry(
@@ -281,6 +317,83 @@ async def test_account_guard_one_broken_account_does_not_undo_the_others(
         "JOIN hetzner_account_observations o ON o.account_id = a.id",
     )
     assert rows == {"damaged": [False, "internal:VaultDecryptError"], "no-token-2": [False, "token_missing"]}
+
+
+@contextlib.contextmanager
+def silent_hetzner() -> Iterator[tuple[HetznerReader, list[socket.socket]]]:
+    """A REAL hcloud client whose endpoint is a local socket that accepts and never answers (how a
+    hanging API behaves; nothing imitates Hetzner's answers, D10)."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(8)
+    sock.settimeout(0.2)
+    held: list[socket.socket] = []
+    stop = threading.Event()
+
+    def accept() -> None:
+        while not stop.is_set():
+            with contextlib.suppress(OSError):
+                held.append(sock.accept()[0])
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    reader = HetznerReader("0" * 64)
+    endpoint = f"http://127.0.0.1:{sock.getsockname()[1]}/v1"
+    reader._client = Client(token="0" * 64, api_endpoint=endpoint, timeout=(2, 2))
+    reader._client._client._retry_max_retries = 0  # one attempt (hcloud retries a timeout 5 times)
+    try:
+        yield reader, held
+    finally:
+        stop.set()
+        thread.join(2)
+        for c in held:
+            c.close()
+        sock.close()
+
+
+async def test_account_guard_commits_each_account_before_the_next_hetzner_call(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    """sweep-concurrency:6: the guard ran every account in one transaction, so account A's result
+    (and a LOCKED decision) stayed uncommitted and its rows locked while account B's Hetzner call
+    ran (up to 90 s); the executor's own write of A's observation waited behind it."""
+    vault = make_vault(tmp_path)
+    slow = await add_account(engine, vault, "slow-account")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE hetzner_account_observations SET checked_at = now() - interval '1 hour'")
+        )
+        first = (
+            await conn.execute(
+                text(
+                    "INSERT INTO hetzner_accounts (id, name, token_secret_name, state) "
+                    "VALUES (gen_random_uuid(), 'no-token-first', 'hcloud:z', 'active') RETURNING id"
+                )
+            )
+        ).scalar_one()
+    with silent_hetzner() as (reader, held):
+        guard = AccountGuardReconciler(vault_factory=lambda: vault, reader_factory=lambda _t: reader)
+        task = asyncio.create_task(guard.try_run_once(engine))
+        for _ in range(100):  # until the slow account's call is waiting on Hetzner
+            if held:
+                break
+            await asyncio.sleep(0.05)
+        assert held and not task.done()
+        async with engine.connect() as conn:
+            seen = (
+                await conn.execute(
+                    text(
+                        "SELECT ok, error FROM hetzner_account_observations WHERE account_id = :a "
+                        "FOR UPDATE NOWAIT"
+                    ),
+                    {"a": first},
+                )
+            ).all()
+        assert [tuple(r) for r in seen] == [(False, "token_missing")]
+        assert await task
+    assert (
+        await q(engine, "SELECT ok FROM hetzner_account_observations WHERE account_id = :a", a=slow) is False
+    )
 
 
 async def test_pricing_one_broken_account_does_not_stop_the_loop(engine: AsyncEngine, tmp_path: Path) -> None:

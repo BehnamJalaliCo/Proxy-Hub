@@ -402,8 +402,10 @@ def text_addresses(text: str) -> set[str]:
 
 
 def names_other_proxy(text: str, words: frozenset[str]) -> bool:
-    """The text names an address that is not one of ``words`` (a screen of another proxy)."""
-    return bool(text_addresses(text) - words)
+    """The text names an address that is not one of ``words`` (a screen of another proxy). The
+    "Promoted channel: <title>" line is left out: a channel's title is free text (P26), and a
+    dotted word in it ("Shop.ir") is no proxy address. A title holds no newline, so only it goes."""
+    return bool(text_addresses(_PROMOTED.sub("", text)) - words)
 
 
 def shown_channels(text: str) -> list[str]:

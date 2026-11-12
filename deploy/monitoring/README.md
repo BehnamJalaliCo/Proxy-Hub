@@ -19,11 +19,13 @@
 |---|---|
 | `PanelApiDown` | Prometheus بیش از ۲ دقیقه از API متریک نگرفته است |
 | `WorkerHeartbeatStale` | ضربان worker کهنه‌تر از ۹۰ ثانیه (همان عدد `/healthz`؛ یک تست هر دو را برابر نگه میدارد) |
+| `ReconcilerStalled` | یکی از چرخه‌های کنترل worker بیش از سه برابر فاصله‌ی خودش به‌اضافه‌ی ۱۵ دقیقه هیچ دوری را تمام نکرده است (۵ دقیقه)، در حالی که ضربان worker تازه است |
 | `PanelDatabaseDown`، `PanelRedisDown` | API بیش از ۱ دقیقه به Postgres یا Redis وصل نشده است |
 | `DiskAlmostFull` | بیش از ۸۵٪ دیسک پر است (۵ دقیقه) |
 | `BackupFailed`، `BackupTooOld`، `BackupMetricsMissing` | آخرین backup شکست خورده، یا آخرین backup موفق کهنه‌تر از ۲۶ ساعت است، یا backup اصلاً اجرا نشده است |
 | `RestoreTestFailing`، `RestoreTestTooOld` | آخرین آزمون بازگردانی شکست خورده، یا بیش از ۸ روز است که آزمون موفق نبوده است |
 | `MonitoringTargetDown`، `TextfileMetricsError` | بخشی از خود پشته‌ی پایش از کار افتاده است |
+| `DeployRefused`، `DeployFailed`، `DeployRollbackFailed` | deployer تازه‌ترین commit را رد کرد (ادغام امضاشده‌ی PR نبود)، یا مستقر کردنش شکست خورد و به نسخه‌ی قبلی برگشت، یا برگشت هم شکست خورد. تا استقرار سالم بعدی روشن میماند. |
 | `Watchdog` | همیشه روشن است. فقط به نگهبان بیرونی میرود. |
 
 متن هشدارها فارسی است، چون به مالک میرسد. هر قانون با `promtool test rules` آزمون واحد دارد (`prometheus/tests/panel_test.yml`)، و متن فارسی هم در همان آزمون سنجیده میشود.
@@ -50,7 +52,8 @@
 - فقط کانتینرهایی که برچسب `io.proxyhub.logs=panel` دارند (`migrate`، `api`، `worker`) فرستاده میشوند. داکر این برچسب را در هر خط لاگ مینویسد، و Alloy هر خط بی آن را دور میریزد. از node و کاربر هیچ لاگی به این سرور نمیآید.
 - پیش از فرستادن، هر نشانی IPv4 و IPv6 در متن به `<ip>` تبدیل میشود. خط‌های دسترسی `/internal/metrics`، `/livez` و `/healthz` هم دور ریخته میشوند.
 - Alloy سوکت داکر ندارد (که برابر root است). فقط `/var/lib/docker/containers` را فقط‌خواندنی میبیند، با کاربر root و بی هیچ capability.
-- لاگ سرویس‌های پنل (`migrate`، `api`، `worker`) و شش سرویس پایش چرخش دارد (`max-size` برابر 20m، ۵ فایل). `postgres`، `redis` و `caddy` هنوز با پیش‌فرض داکر‌اند و **چرخش ندارند**. افزودن `logging: *logging` به آن‌ها کار هماهنگ‌کننده است، چون آن سه کانتینر را در deploy بعدی از نو میسازد.
+- لاگ همه‌ی کانتینرها چرخش دارد (`max-size` برابر 20m، ۵ فایل): سرویس‌های پنل (`migrate`، `api`، `worker`)، شش سرویس پایش، و `postgres`، `redis` و `caddy`. این سه آخری برچسب `io.proxyhub.logs` ندارند، پس Alloy لاگشان را نمیفرستد. (افزودن چرخش به آن سه، هر سه را یک بار در deploy بعدی از نو ساخت.)
+- deployer پس از هر استقرار سالم، imageهای کهنه‌ی `proxyhub/panel:<commit>` را پاک میکند. image در حال کار و image نسخه‌ی قبلی (برای برگشت) میمانند.
 
 ## backup (پوشه‌ی `deploy/backup/`)
 - **روزانه** (`proxyhub-backup.timer`، ساعت 02:47 UTC): `pg_dump` درون کانتینر postgres. dump و شمارش ردیف همه‌ی جدول‌ها از **یک snapshot** گرفته میشوند. خروجی با `age` و کلید عمومی `/etc/proxy-hub/backup_age_recipient` رمز میشود و در `/var/lib/proxy-hub/backups/` میماند. ۱۴ نسخه‌ی آخر نگه داشته میشوند. نسخه‌ی رمزنشده هرگز روی دیسک میزبان نوشته نمیشود.
@@ -61,6 +64,6 @@
 - **بازگردانی واقعی پس از فاجعه** (روی سرور تازه با همان کلید): `age -d -i backup_age_key proxyhub-<stamp>.dump.age > db.dump` درون پوشه‌ی موقت `0700`، سپس `pg_restore --exit-on-error --single-transaction -U proxyhub -d proxyhub db.dump` در Postgres خالی پنل، و در پایان پاک کردن `db.dump`.
 
 ## بررسی‌ها
-- `bash deploy/monitoring/check_configs.sh`: همه‌ی تنظیم‌ها با همان imageهای قفل‌شده (promtool، آزمون واحد قانون‌ها، amtool برای هر پنج حالت گیرنده، آزمون واقعی نشت توکن در لاگ Alertmanager و توقف آرام آن، loki، alloy). حدود یک دقیقه طول میکشد.
+- `bash deploy/monitoring/check_configs.sh`: همه‌ی تنظیم‌ها با همان imageهای قفل‌شده (promtool، آزمون واحد قانون‌ها، amtool برای همه‌ی حالت‌های گیرنده، از جمله مقدار نادرست یا کوتاه و بی‌معنا، آزمون واقعی نشت توکن در لاگ Alertmanager و توقف آرام آن، loki، alloy). حدود یک دقیقه طول میکشد.
 - `sudo bash deploy/monitoring/safe_logs.sh <service> [lines] [project]`: لاگ یک سرویس با همه‌ی رمزها `<redacted>`؛ برای هر گزارشی.
 - `sudo bash deploy/monitoring/verify_stack.sh [project]`: روی پشته‌ی در حال اجرا. همه‌ی targetها `up`اند؛ قانون‌ها بار شده‌اند؛ Watchdog از Prometheus به Alertmanager میرسد؛ Grafana سالم است و فقط روی loopback است؛ Loki آماده است؛ لاگ پنل رسیده است، فقط از سه سرویس پنل و بی هیچ IP.

@@ -74,8 +74,14 @@ loki.process "panel_only" {
 		replace    = "<ip>"
 	}
 
+	// IPv6. Only the address (the capture group) is replaced. RE2 has no lookbehind, so a consumed
+	// leading boundary keeps SQL casts readable ("$1::UUID", "id::text", ")::date" in tracebacks):
+	// no letter, digit, "_", "$" or ")" right before, except a %-escape ("%5B") or a backslash
+	// escape ("\n") in front of it. ":", "[", "=", quotes and spaces are boundaries, so "ip:2a01::1"
+	// and "[2001:db8::1]:443" are still redacted. No trailing boundary, so in "2a01::1,2a01::2" both
+	// are. A leading "::" needs one hex group after it ("::1", not "::int").
 	stage.replace {
-		expression = `((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,7}:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?|::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?)`
+		expression = `(?:^|[^0-9A-Za-z_$)]|%[0-9A-Fa-f]{2}|\\[nrt])((?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,7}:(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?|::[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})`
 		replace    = "<ip>"
 	}
 

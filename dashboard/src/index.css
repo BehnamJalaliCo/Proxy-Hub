@@ -4,38 +4,67 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /* Design tokens. Components use the semantic names below, never raw colours, so light and dark stay
-   in step. Brand: violet -> cyan. */
+   in step.
+
+   The look (2026-11-12): "noir and champagne". Dark is obsidian with warm ivory text and a
+   champagne-gold accent; light is ivory paper with ink text and a bronze accent. Gold is the BRAND
+   and never a state: warnings are a saturated orange, far from it in hue and chroma, and always
+   carry an icon or a label.
+   - brand / brand-strong / brand-2: the accent as TEXT, icons and thin strokes (readable on the
+     surface of its theme).
+   - gold-1..3: the metal gradient for filled marks (the active nav tile, hero icons), always with
+     ink on it (class .ph-gold).
+   - cta-*: the primary button (class .ph-cta): espresso with champagne text on ivory, champagne
+     with ink text on obsidian.
+   - on-brand / on-success / on-danger: text on a filled tone of that theme.
+   Contrast (WCAG): every text tone is >= 4.5:1 on the card surface and on its own soft badge, and
+   fg-faint >= 4.2:1 on surface-3 (hints only). */
 :root {
-  --ph-bg: #f4f5fb;
-  --ph-bg-glow-1: rgb(124 108 255 / 0.16);
-  --ph-bg-glow-2: rgb(34 195 230 / 0.12);
-  --ph-surface: #ffffff;
-  --ph-surface-2: #f6f7fc;
-  --ph-surface-3: #eceef7;
-  --ph-line: #e4e7f2;
-  --ph-line-strong: #cfd4e6;
-  --ph-fg: #121528;
-  --ph-fg-muted: #565d7e;
-  --ph-fg-faint: #858ba8;
-  --ph-brand: #6a5af9;
-  --ph-brand-strong: #5443ee;
-  --ph-brand-2: #1aa9d6;
-  --ph-brand-soft: rgb(106 90 249 / 0.1);
-  --ph-on-brand: #ffffff;
-  --ph-success: #0f9d6b;
-  --ph-success-soft: rgb(15 157 107 / 0.11);
-  --ph-warning: #c27c00;
-  --ph-warning-soft: rgb(217 138 0 / 0.13);
-  --ph-danger: #dc3d4b;
-  --ph-danger-soft: rgb(220 61 75 / 0.11);
-  --ph-info: #2b74e4;
-  --ph-info-soft: rgb(43 116 228 / 0.11);
-  --ph-shadow-card: 0 1px 2px rgb(18 21 40 / 0.04), 0 10px 30px -14px rgb(18 21 40 / 0.16);
-  --ph-shadow-pop: 0 18px 50px -12px rgb(18 21 40 / 0.28);
-  --ph-ring: rgb(106 90 249 / 0.38);
-  --ph-chart-grid: #e7e9f3;
-  /* Chart series (identity), validated with the dataviz palette checks for this surface:
-     slot 1 blue, slot 2 orange, slot 3 aqua; all-pairs CVD dE >= 9.2. */
+  --ph-bg: #f4f1e9;
+  --ph-bg-glow-1: rgb(201 162 77 / 0.17);
+  --ph-bg-glow-2: rgb(120 108 84 / 0.09);
+  --ph-surface: #fffdf9;
+  --ph-surface-hi: #ffffff;
+  --ph-surface-2: #f8f5ee;
+  --ph-surface-3: #efeadf;
+  --ph-line: #e8e2d4;
+  --ph-line-strong: #d6cdb9;
+  --ph-fg: #17140e;
+  --ph-fg-muted: #5c564a;
+  --ph-fg-faint: #736d60;
+  --ph-brand: #7c5c15;
+  --ph-brand-strong: #634910;
+  --ph-brand-2: #b8923e;
+  --ph-brand-soft: rgb(176 136 46 / 0.12);
+  --ph-on-brand: #fffdf9;
+  --ph-gold-1: #f3e0ae;
+  --ph-gold-2: #d6b266;
+  --ph-gold-3: #a98330;
+  --ph-on-gold: #1a1304;
+  --ph-cta-bg: linear-gradient(180deg, #2e281c 0%, #17130c 100%);
+  --ph-cta-fg: #f3dfab;
+  --ph-cta-shadow: 0 1px 0 rgb(255 255 255 / 0.1) inset, 0 12px 26px -14px rgb(23 19 12 / 0.6);
+  --ph-sheen: rgb(184 146 62 / 0.5);
+  --ph-glass: rgb(255 253 249 / 0.78);
+  --ph-success: #08704b;
+  --ph-success-soft: rgb(8 112 75 / 0.11);
+  --ph-on-success: #ffffff;
+  --ph-warning: #a14c05;
+  --ph-warning-soft: rgb(214 110 20 / 0.12);
+  --ph-danger: #be2b3e;
+  --ph-danger-soft: rgb(190 43 62 / 0.1);
+  --ph-on-danger: #ffffff;
+  --ph-info: #2360c4;
+  --ph-info-soft: rgb(35 96 196 / 0.1);
+  --ph-shadow-card: 0 1px 2px rgb(40 32 12 / 0.04), 0 16px 36px -20px rgb(40 32 12 / 0.2);
+  --ph-shadow-pop: 0 28px 64px -18px rgb(40 32 12 / 0.34);
+  --ph-ring: rgb(176 136 46 / 0.4);
+  --ph-chart-grid: #ebe5d8;
+  --ph-pattern: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='72'%20height='72'%20viewBox='0%200%2064%2064'%20fill='none'%20stroke='%238a671c'%20stroke-width='.7'%3E%3Cpath%20d='M18%2018h28v28H18zM32%2012.2%2051.8%2032%2032%2051.8%2012.2%2032zM32%200v12.2M32%2051.8V64M0%2032h12.2M51.8%2032H64M0%2014%2014%200M50%200l14%2014M64%2050%2050%2064M14%2064%200%2050'/%3E%3C/svg%3E");
+  --ph-pattern-opacity: 0.2;
+  /* Chart series (identity), checked with the dataviz palette validator on this surface (#fffdf9):
+     slot 1 blue, slot 2 orange, slot 3 aqua; adjacent CVD dE >= 9.2. Aqua is 2.8:1 on the surface,
+     so every chart that uses it has a legend and labels. */
   --ph-series-1: #2a78d6;
   --ph-series-2: #eb6834;
   --ph-series-3: #1baf7a;
@@ -43,35 +72,49 @@
 }
 
 :root[data-theme="dark"] {
-  --ph-bg: #080a13;
-  --ph-bg-glow-1: rgb(124 108 255 / 0.2);
-  --ph-bg-glow-2: rgb(34 195 230 / 0.12);
-  --ph-surface: #0f1220;
-  --ph-surface-2: #141829;
-  --ph-surface-3: #1b2035;
-  --ph-line: rgb(255 255 255 / 0.075);
-  --ph-line-strong: rgb(255 255 255 / 0.14);
-  --ph-fg: #e8eaf8;
-  --ph-fg-muted: #a0a6c4;
-  --ph-fg-faint: #6e7596;
-  --ph-brand: #8b7dff;
-  --ph-brand-strong: #a093ff;
-  --ph-brand-2: #3dd0f0;
-  --ph-brand-soft: rgb(139 125 255 / 0.14);
-  --ph-on-brand: #ffffff;
-  --ph-success: #34d399;
-  --ph-success-soft: rgb(52 211 153 / 0.13);
-  --ph-warning: #fbbf24;
-  --ph-warning-soft: rgb(251 191 36 / 0.13);
-  --ph-danger: #fb7185;
-  --ph-danger-soft: rgb(251 113 133 / 0.13);
-  --ph-info: #60a5fa;
-  --ph-info-soft: rgb(96 165 250 / 0.13);
-  --ph-shadow-card: 0 1px 0 rgb(255 255 255 / 0.03) inset, 0 12px 32px -16px rgb(0 0 0 / 0.7);
-  --ph-shadow-pop: 0 24px 60px -12px rgb(0 0 0 / 0.75);
-  --ph-ring: rgb(139 125 255 / 0.5);
-  --ph-chart-grid: rgb(255 255 255 / 0.07);
-  /* Same three hues stepped for the dark surface (#0f1220): all-pairs CVD dE >= 9.4, >= 3:1. */
+  --ph-bg: #070708;
+  --ph-bg-glow-1: rgb(227 197 127 / 0.11);
+  --ph-bg-glow-2: rgb(120 140 190 / 0.05);
+  --ph-surface: #101012;
+  --ph-surface-hi: #161619;
+  --ph-surface-2: #17171a;
+  --ph-surface-3: #202024;
+  --ph-line: rgb(255 238 204 / 0.085);
+  --ph-line-strong: rgb(255 238 204 / 0.17);
+  --ph-fg: #f5f1e8;
+  --ph-fg-muted: #ada79a;
+  --ph-fg-faint: #8b8578;
+  --ph-brand: #e3c57f;
+  --ph-brand-strong: #f1dca6;
+  --ph-brand-2: #c39a48;
+  --ph-brand-soft: rgb(227 197 127 / 0.12);
+  --ph-on-brand: #1a1304;
+  --ph-gold-1: #f6e6bb;
+  --ph-gold-2: #dfc07a;
+  --ph-gold-3: #b98f3c;
+  --ph-on-gold: #1a1304;
+  --ph-cta-bg: linear-gradient(180deg, #f4e2b3 0%, #dcbb70 55%, #c59c49 100%);
+  --ph-cta-fg: #1a1304;
+  --ph-cta-shadow: 0 1px 0 rgb(255 255 255 / 0.45) inset, 0 12px 30px -14px rgb(227 197 127 / 0.55);
+  --ph-sheen: rgb(246 230 187 / 0.42);
+  --ph-glass: rgb(13 13 15 / 0.76);
+  --ph-success: #45d394;
+  --ph-success-soft: rgb(69 211 148 / 0.12);
+  --ph-on-success: #04150d;
+  --ph-warning: #ff9a4a;
+  --ph-warning-soft: rgb(255 154 74 / 0.13);
+  --ph-danger: #f66d80;
+  --ph-danger-soft: rgb(246 109 128 / 0.13);
+  --ph-on-danger: #1d0409;
+  --ph-info: #74abff;
+  --ph-info-soft: rgb(116 171 255 / 0.13);
+  --ph-shadow-card: 0 1px 0 rgb(255 238 204 / 0.05) inset, 0 26px 50px -30px rgb(0 0 0 / 0.95);
+  --ph-shadow-pop: 0 32px 72px -18px rgb(0 0 0 / 0.88);
+  --ph-ring: rgb(227 197 127 / 0.45);
+  --ph-chart-grid: rgb(255 238 204 / 0.07);
+  --ph-pattern: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='72'%20height='72'%20viewBox='0%200%2064%2064'%20fill='none'%20stroke='%23e3c57f'%20stroke-width='.7'%3E%3Cpath%20d='M18%2018h28v28H18zM32%2012.2%2051.8%2032%2032%2051.8%2012.2%2032zM32%200v12.2M32%2051.8V64M0%2032h12.2M51.8%2032H64M0%2014%2014%200M50%200l14%2014M64%2050%2050%2064M14%2064%200%2050'/%3E%3C/svg%3E");
+  --ph-pattern-opacity: 0.13;
+  /* The same three hues stepped for the dark surface (#101012): adjacent CVD dE >= 9.4, >= 3:1. */
   --ph-series-1: #3987e5;
   --ph-series-2: #d95926;
   --ph-series-3: #199e70;
@@ -84,6 +127,7 @@
 
   --color-bg: var(--ph-bg);
   --color-surface: var(--ph-surface);
+  --color-surface-hi: var(--ph-surface-hi);
   --color-surface-2: var(--ph-surface-2);
   --color-surface-3: var(--ph-surface-3);
   --color-line: var(--ph-line);
@@ -96,12 +140,16 @@
   --color-brand-2: var(--ph-brand-2);
   --color-brand-soft: var(--ph-brand-soft);
   --color-on-brand: var(--ph-on-brand);
+  --color-gold: var(--ph-gold-2);
+  --color-on-gold: var(--ph-on-gold);
   --color-success: var(--ph-success);
   --color-success-soft: var(--ph-success-soft);
+  --color-on-success: var(--ph-on-success);
   --color-warning: var(--ph-warning);
   --color-warning-soft: var(--ph-warning-soft);
   --color-danger: var(--ph-danger);
   --color-danger-soft: var(--ph-danger-soft);
+  --color-on-danger: var(--ph-on-danger);
   --color-info: var(--ph-info);
   --color-info-soft: var(--ph-info-soft);
   --color-series-1: var(--ph-series-1);
@@ -164,12 +212,20 @@
     -webkit-text-size-adjust: 100%;
     text-rendering: optimizeLegibility;
     -webkit-tap-highlight-color: transparent;
+    scrollbar-color: var(--ph-line-strong) transparent;
+    scrollbar-width: thin;
   }
 
   body {
     @apply bg-bg font-sans text-fg antialiased;
     min-height: 100dvh;
     font-feature-settings: "ss01";
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
   }
 
   ::selection {
@@ -179,6 +235,27 @@
   :focus-visible {
     outline: 2px solid var(--ph-brand);
     outline-offset: 2px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--ph-line-strong);
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* A grid item may shrink below its content (a chart, a long address): without this a single wide
+     child made whole cards wider than a phone (/stats, /sponsor, /sources). Zero specificity, so any
+     min-w-* utility still wins. */
+  :where(.grid) > * {
+    min-width: 0;
   }
 
   /* Tokens, secrets, IDs and codes are Latin text inside a right-to-left page. */
@@ -203,19 +280,86 @@
 }
 
 @layer components {
-  /* Soft brand glow behind every page. */
+  /* Behind every page: two soft lights and a faint eight-point star lattice that fades out below
+     the top of the screen. */
   .ph-backdrop {
+    position: relative;
+    isolation: isolate;
     background:
-      radial-gradient(60rem 30rem at 100% -10%, var(--ph-bg-glow-1), transparent 60%),
-      radial-gradient(50rem 26rem at -10% 0%, var(--ph-bg-glow-2), transparent 60%),
+      radial-gradient(64rem 30rem at 100% -12%, var(--ph-bg-glow-1), transparent 62%),
+      radial-gradient(52rem 26rem at -10% 0%, var(--ph-bg-glow-2), transparent 60%),
       var(--ph-bg);
+  }
+  /* Absolute (not fixed): a fixed, masked layer under the glass panels is not painted below the
+     first screen by Chromium on a tall page. The lattice belongs to the top of the page anyway. */
+  .ph-backdrop::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: min(100%, 64rem);
+    z-index: -1;
+    pointer-events: none;
+    background-image: var(--ph-pattern);
+    background-size: 72px 72px;
+    opacity: var(--ph-pattern-opacity);
+    -webkit-mask-image: radial-gradient(120% 90% at 85% 0%, #000 0%, transparent 72%);
+    mask-image: radial-gradient(120% 90% at 85% 0%, #000 0%, transparent 72%);
+  }
+
+  /* The card material: a surface lit from above, a hairline, and a thin sheen on its top edge. */
+  .ph-card {
+    position: relative;
+    border: 1px solid var(--ph-line);
+    background: linear-gradient(180deg, var(--ph-surface-hi) 0%, var(--ph-surface) 42%);
+    box-shadow: var(--ph-shadow-card);
+  }
+  .ph-card::after {
+    content: "";
+    position: absolute;
+    inset-inline: 12%;
+    top: 0;
+    height: 1px;
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent, var(--ph-sheen), transparent);
+    opacity: 0.55;
+  }
+
+  /* Glass panels: the sidebar, the phone's top bar and its dock. */
+  .ph-glass {
+    background: var(--ph-glass);
+    -webkit-backdrop-filter: blur(22px) saturate(1.3);
+    backdrop-filter: blur(22px) saturate(1.3);
+  }
+
+  /* A filled gold mark with ink on it (the active nav tile, hero icons). */
+  .ph-gold {
+    color: var(--ph-on-gold);
+    background: linear-gradient(140deg, var(--ph-gold-1) 0%, var(--ph-gold-2) 46%, var(--ph-gold-3) 100%);
+    box-shadow:
+      0 1px 0 rgb(255 255 255 / 0.5) inset,
+      0 -1px 0 rgb(0 0 0 / 0.12) inset,
+      0 10px 24px -12px var(--ph-gold-3);
+  }
+
+  /* The primary button. */
+  .ph-cta {
+    color: var(--ph-cta-fg);
+    background: var(--ph-cta-bg);
+    box-shadow: var(--ph-cta-shadow);
   }
 
   .ph-gradient-text {
-    background: linear-gradient(100deg, var(--ph-brand), var(--ph-brand-2));
+    background: linear-gradient(100deg, var(--ph-brand-strong), var(--ph-brand) 45%, var(--ph-brand-2));
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
+  }
+
+  /* A hairline that fades out at both ends. */
+  .ph-rule {
+    height: 1px;
+    border: 0;
+    background: linear-gradient(90deg, transparent, var(--ph-line-strong), transparent);
   }
 
   .ph-skeleton {
@@ -229,7 +373,7 @@
     animation: var(--animate-shimmer);
   }
 
-  /* A rotating gradient ring for the hero card. */
+  /* A slowly turning gold edge for the hero card. */
   .ph-glow-border {
     position: relative;
     isolation: isolate;
@@ -244,18 +388,18 @@
     padding: 1px;
     background: conic-gradient(
       from var(--ph-angle, 0deg),
-      var(--ph-brand),
-      var(--ph-brand-2),
-      transparent 40%,
-      transparent 60%,
-      var(--ph-brand)
+      var(--ph-gold-1),
+      var(--ph-gold-3),
+      transparent 38%,
+      transparent 62%,
+      var(--ph-gold-1)
     );
     -webkit-mask:
       linear-gradient(#000 0 0) content-box,
       linear-gradient(#000 0 0);
     -webkit-mask-composite: xor;
     mask-composite: exclude;
-    animation: ph-angle 8s linear infinite;
+    animation: ph-angle 10s linear infinite;
   }
 }
 

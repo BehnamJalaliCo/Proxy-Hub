@@ -4,13 +4,18 @@
 # Migrations must stay backward compatible (expand/contract), because code can roll back.
 set -euo pipefail
 
-ETC=/etc/proxy-hub
-STATE=/var/lib/proxy-hub
-CHECKOUT=/opt/proxy-hub
+# Tests only (panel/tests/test_ops_deployer.py): PROXYHUB_DEPLOY_ROOT puts every host path below
+# under a sandbox directory. systemd sets neither variable, so the real paths are used.
+ROOT="${PROXYHUB_DEPLOY_ROOT:-}"
+ETC="$ROOT/etc/proxy-hub"
+STATE="$ROOT/var/lib/proxy-hub"
+CHECKOUT="$ROOT/opt/proxy-hub"
+SBIN="$ROOT/usr/local/sbin"
 HEALTH_URL=http://127.0.0.1:8000/healthz
-HEALTH_DEADLINE_S=180
+HEALTH_DEADLINE_S="${PROXYHUB_DEPLOY_HEALTH_DEADLINE_S:-180}"
+DNS_NAME='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
 
-exec 9>/run/proxyhub-deploy.lock
+exec 9>"$ROOT/run/proxyhub-deploy.lock"
 flock -n 9 || exit 0
 
 # shellcheck source=/dev/null
@@ -57,25 +62,48 @@ caddy_inputs_hash() {
     | sha256sum | cut -d" " -f1
 }
 
+# wait_healthy <up_done>: /healthz answers 200 AND reports a worker heartbeat written after "compose
+# up" returned ($SECONDS then). By that time the previous worker container is stopped, so its last
+# heartbeat (fresh for 90 s) cannot vouch for a new worker that dies at start. SECONDS counts whole
+# seconds and the age is cut to whole seconds, so "age + 2 <= elapsed" is strictly after up_done.
 wait_healthy() {
-  local end=$((SECONDS + HEALTH_DEADLINE_S))
+  local up_done="$1" end=$((SECONDS + HEALTH_DEADLINE_S)) body age last="no answer"
+  local age_re='"worker_heartbeat_age_s":[[:space:]]*-?([0-9]+)'
   while [ $SECONDS -lt $end ]; do
-    if curl -fsS --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then return 0; fi
+    if body="$(curl -fsS --max-time 5 "$HEALTH_URL" 2>/dev/null)"; then
+      if [[ "$body" =~ $age_re ]]; then
+        age=$((10#${BASH_REMATCH[1]}))
+        if [ $((age + 2)) -le $((SECONDS - up_done)) ]; then return 0; fi
+        last="no worker heartbeat since the deploy yet (last one ${age}s ago)"
+      else
+        last="no worker heartbeat age in the answer"
+      fi
+    else
+      last="/healthz did not answer 200"
+    fi
     sleep 5
   done
+  log "health: $last"
   return 1
 }
 
 # Called as "if deploy_commit ...", where bash ignores errexit: every step checks its own status,
 # so a failed build or pull (e.g. a registry 429) is a failed deploy, never a silent "ok".
+# deploy_commit <commit> [rollback]: a rollback goes back to a commit that ran here before, so its
+# migrations are applied, and the failed commit may have migrated the database past what it knows:
+# its migrate service is not run (scale 0; api and worker then do not wait for it).
 deploy_commit() {
-  local commit="$1"
+  local commit="$1" mode="${2:-deploy}"
   git -C "$CHECKOUT" checkout --quiet --detach "$commit" || return 1
   if [ -f "$CHECKOUT/deploy/ensure_secrets.sh" ]; then bash "$CHECKOUT/deploy/ensure_secrets.sh" || return 1; fi
   export PROXYHUB_GIT_COMMIT="$commit"
+  # Caddy serves PANEL_DOMAIN as its site address: a malformed value would crash-loop Caddy while
+  # the health check (API on loopback) still passes.
+  if [ -n "${PANEL_DOMAIN:-}" ] && ! [[ "$PANEL_DOMAIN" =~ $DNS_NAME ]]; then
+    log "PANEL_DOMAIN must be a lower-case DNS name"; return 1
+  fi
   if [ -n "${AGENT_DOMAIN:-}" ]; then
-    if ! [[ "$AGENT_DOMAIN" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] \
-      || [ "$AGENT_DOMAIN" = "${PANEL_DOMAIN:-}" ]; then
+    if ! [[ "$AGENT_DOMAIN" =~ $DNS_NAME ]] || [ "$AGENT_DOMAIN" = "${PANEL_DOMAIN:-}" ]; then
       log "AGENT_DOMAIN must be a lower-case DNS name other than PANEL_DOMAIN"; return 1
     fi
     # Without PANEL_DOMAIN Caddy (edge profile) does not run, so no node could ever register and a
@@ -86,7 +114,12 @@ deploy_commit() {
   fi
   compose build --quiet || { log "compose build failed"; return 1; }
   if [ -n "${AGENT_DOMAIN:-}" ]; then export_agent_ca || return 1; fi
-  compose up -d --remove-orphans || { log "compose up failed"; return 1; }
+  if [ "$mode" = rollback ]; then
+    compose up -d --remove-orphans --scale migrate=0 || { log "compose up failed"; return 1; }
+  else
+    compose up -d --remove-orphans || { log "compose up failed"; return 1; }
+  fi
+  local up_done=$SECONDS
   # Caddy's files are bind-mounted and its admin API is off: restart Caddy when any of them changed.
   if [ -n "${PANEL_DOMAIN:-}" ]; then
     local caddy_hash
@@ -96,24 +129,53 @@ deploy_commit() {
       echo "$caddy_hash" > "$STATE/caddyfile_hash"
     fi
   fi
-  wait_healthy
+  wait_healthy "$up_done"
 }
 
-# node-exporter textfile: 1 while the newest commit of main was refused by the merge guard.
-write_guard_metric() {
-  local dir="${PROXYHUB_METRICS_DIR:-/var/lib/proxy-hub/metrics}" tmp
+# node-exporter textfile: the outcome of the last run that did something (refused by the merge
+# guard, failed, deployed). Runs that change nothing leave it alone, so a refusal or a failure stays
+# visible (DeployRefused, DeployFailed, DeployRollbackFailed) until a good deploy clears it.
+# write_deploy_metric <refused> <failed> <rollback_failed>, each 0 or 1.
+write_deploy_metric() {
+  local dir="${PROXYHUB_METRICS_DIR:-$STATE/metrics}" tmp
   [ -d "$dir" ] || return 0
   tmp="$(mktemp "$dir/.proxyhub_deploy.prom.XXXXXX")"
   cat >"$tmp" <<PROM
 # HELP proxyhub_deploy_refused 1 if the newest commit was refused: not a GitHub-signed PR merge.
 # TYPE proxyhub_deploy_refused gauge
 proxyhub_deploy_refused $1
-# HELP proxyhub_deploy_guard_timestamp_seconds When the merge guard last ran.
+# HELP proxyhub_deploy_failed 1 if the newest commit failed to deploy (build or health check).
+# TYPE proxyhub_deploy_failed gauge
+proxyhub_deploy_failed $2
+# HELP proxyhub_deploy_rollback_failed 1 if the rollback after that failure failed too.
+# TYPE proxyhub_deploy_rollback_failed gauge
+proxyhub_deploy_rollback_failed $3
+# HELP proxyhub_deploy_guard_timestamp_seconds When the deployer last recorded an outcome.
 # TYPE proxyhub_deploy_guard_timestamp_seconds gauge
 proxyhub_deploy_guard_timestamp_seconds $(date +%s)
 PROM
   chmod 0644 "$tmp"
   mv -f "$tmp" "$dir/proxyhub_deploy.prom"
+}
+
+# A failed (or refused) commit is recorded with the deploy.env it was tried with.
+record_failed() {
+  echo "$target" > "$STATE/failed_commit"
+  echo "$cfg_hash" > "$STATE/failed_config_hash"
+}
+
+# Every deploy builds and tags proxyhub/panel:<commit>, and nothing else removes old ones: keep the
+# image now running and the rollback target, remove the other tags. No -f: Docker refuses to remove
+# an image that a container still uses. A failed cleanup never fails a deploy.
+prune_old_images() {
+  local keep="$1" previous="$2" tags tag
+  tags="$(docker image ls proxyhub/panel --format '{{.Tag}}')" || return 1
+  for tag in $tags; do
+    case "$tag" in
+      "$keep" | "$previous" | "<none>") continue ;;
+    esac
+    docker image rm "proxyhub/panel:$tag" >/dev/null 2>&1 || log "kept image proxyhub/panel:${tag:0:12} (in use?)"
+  done
 }
 
 git -C "$CHECKOUT" fetch --quiet origin "$DEPLOY_BRANCH"
@@ -123,23 +185,34 @@ current="$(cat "$STATE/deployed_commit" 2>/dev/null || echo none)"
 cfg_hash="$(sha256sum "$ETC/deploy.env" | cut -d" " -f1)"
 deployed_cfg="$(cat "$STATE/deployed_config_hash" 2>/dev/null || echo none)"
 failed="$(cat "$STATE/failed_commit" 2>/dev/null || echo none)"
+# State written by an older deployer has no failed_config_hash: assume the deployed deploy.env.
+failed_cfg="$(cat "$STATE/failed_config_hash" 2>/dev/null || echo "$deployed_cfg")"
 
 if [ "${FORCE:-0}" != 1 ]; then
   [ "$target" = "$current" ] && [ "$cfg_hash" = "$deployed_cfg" ] && exit 0
-  [ "$target" = "$failed" ] && [ "$cfg_hash" = "$deployed_cfg" ] && exit 0  # no retry of a known-bad commit
+  # No retry of a known-bad commit; a deploy.env edit (it can be the cause) gives it one new try.
+  [ "$target" = "$failed" ] && [ "$cfg_hash" = "$failed_cfg" ] && exit 0
 fi
 
 # Protected main without GitHub Pro (D31/D36): from main, only pull-request merges made and signed
 # by GitHub are deployed (deploy/verify_main.sh, installed copy from the last good deploy). A commit
 # pushed straight to main is refused, recorded as failed (no retry) and raised as an alert.
 if [ "$DEPLOY_BRANCH" = main ] || [ "${REQUIRE_GITHUB_MERGE:-0}" = 1 ]; then
-  guard=/usr/local/sbin/proxyhub-verify-main
+  guard="$SBIN/proxyhub-verify-main"
   if [ -x "$guard" ] && "$guard" "$CHECKOUT" "$current" "$target" "$ETC/github-web-flow.gpg"; then
-    write_guard_metric 0
+    :
   else
-    echo "$target" > "$STATE/failed_commit"
-    write_guard_metric 1
-    log "REFUSED: $target is not a GitHub-signed pull-request merge on $DEPLOY_BRANCH; nothing deployed"
+    record_failed
+    write_deploy_metric 1 0 0
+    # Still fail closed without the guard or its key, but name that cause: "not a signed merge"
+    # would send an operator looking for a push to main that never happened.
+    if [ ! -x "$guard" ]; then
+      log "REFUSED: the merge guard $guard is not installed (run deploy/install.sh); nothing deployed"
+    elif [ ! -s "$ETC/github-web-flow.gpg" ]; then
+      log "REFUSED: GitHub's signing key $ETC/github-web-flow.gpg is missing (run deploy/install.sh); nothing deployed"
+    else
+      log "REFUSED: $target is not a GitHub-signed pull-request merge on $DEPLOY_BRANCH; nothing deployed"
+    fi
     exit 1
   fi
 fi
@@ -148,23 +221,41 @@ log "deploying $target (current: $current)"
 if deploy_commit "$target"; then
   echo "$target" > "$STATE/deployed_commit"
   echo "$cfg_hash" > "$STATE/deployed_config_hash"
-  rm -f "$STATE/failed_commit"
-  install -m 0755 "$CHECKOUT/deploy/deployer.sh" /usr/local/sbin/proxyhub-deploy
-  install -m 0755 "$CHECKOUT/deploy/verify_main.sh" /usr/local/sbin/proxyhub-verify-main
+  rm -f "$STATE/failed_commit" "$STATE/failed_config_hash"
+  write_deploy_metric 0 0 0
+  install -m 0755 "$CHECKOUT/deploy/deployer.sh" "$SBIN/proxyhub-deploy"
+  install -m 0755 "$CHECKOUT/deploy/verify_main.sh" "$SBIN/proxyhub-verify-main"
   install -m 0644 "$CHECKOUT/deploy/known_hosts.github" "$ETC/known_hosts"
   # The Claude bridge (D52), only where P22 installed it: refresh its copy from this good commit.
   # Never fails a deploy: the panel falls back to the content bank while the bridge is away.
   if [ -f "$CHECKOUT/deploy/claude-bridge/install.sh" ]; then
     bash "$CHECKOUT/deploy/claude-bridge/install.sh" --update || log "claude bridge refresh failed"
   fi
+  prune_old_images "$target" "$current" || log "old image cleanup failed"
   log "ok: $target is healthy"
 else
-  echo "$target" > "$STATE/failed_commit"
+  record_failed
   log "FAILED: $target not healthy within ${HEALTH_DEADLINE_S}s"
   compose logs --no-color --tail 80 api worker migrate 2>&1 | sed 's/^/  | /' || true
+  rollback_failed=0
   if [ "$current" != none ]; then
     log "rolling back to $current"
-    if deploy_commit "$current"; then log "rollback ok"; else log "ROLLBACK FAILED"; fi
+    if deploy_commit "$current" rollback; then
+      # It runs with this deploy.env now: an edit of deploy.env cannot be rolled back.
+      echo "$cfg_hash" > "$STATE/deployed_config_hash"
+      if [ "$current" = "$target" ]; then
+        # Only deploy.env changed and the second try is healthy: that is a good deploy.
+        rm -f "$STATE/failed_commit" "$STATE/failed_config_hash"
+        write_deploy_metric 0 0 0
+        log "ok: $target is healthy on the second try"
+        exit 0
+      fi
+      log "rollback ok"
+    else
+      log "ROLLBACK FAILED"
+      rollback_failed=1
+    fi
   fi
+  write_deploy_metric 0 1 "$rollback_failed"
   exit 1
 fi

@@ -139,6 +139,12 @@ export interface QcConfig {
   source_min: number;
   source_max_reject_pct: number;
   alert_after_hours: number;
+  /** D56: breaking news goes out at once, outside the day plan and in no-post hours too. */
+  breaking_enabled: boolean;
+  breaking_per_day: number;
+  breaking_gap_minutes: number;
+  breaking_max_age_min: number;
+  breaking_min_sources: number;
 }
 
 export interface BridgeHealth {
@@ -422,10 +428,15 @@ export type QcNumberKey =
   | "source_window"
   | "source_min"
   | "source_max_reject_pct"
-  | "alert_after_hours";
+  | "alert_after_hours"
+  | "breaking_per_day"
+  | "breaking_gap_minutes"
+  | "breaking_max_age_min"
+  | "breaking_min_sources";
 
-/** The supervisor's numbers as the dashboard edits them (ranges mirror the server's). */
-export const QC_NUMBERS: { key: QcNumberKey; label: string; min: number; max: number; hint: string }[] = [
+/** The supervisor's numbers as the dashboard edits them (ranges mirror the server's; the
+ * "breaking" ones are shown under their own heading). */
+export const QC_NUMBERS: { key: QcNumberKey; label: string; min: number; max: number; hint: string; group?: "breaking" }[] = [
   { key: "bridge_daily_cap", label: "سقف روزانه‌ی اشتراک", min: 0, max: 500, hint: "بررسی با اشتراک Claude در هر ۲۴ ساعت." },
   { key: "api_daily_cap", label: "سقف روزانه‌ی کلید API", min: 0, max: 500, hint: "بررسی با کلید API در هر ۲۴ ساعت." },
   { key: "per_slot", label: "نامزد برای هر پست", min: 1, max: 10, hint: "بهترین‌ها به ترتیب امتیاز؛ بیشتر از این به Claude نمیرود." },
@@ -446,7 +457,33 @@ export const QC_NUMBERS: { key: QcNumberKey; label: string; min: number; max: nu
     max: 48,
     hint: "فقط وقتی Claude یا همه‌ی منبع‌ها از کار افتاده‌اند.",
   },
+  { key: "breaking_per_day", label: "خبر فوری در ۲۴ ساعت", min: 0, max: 20, hint: "۰ یعنی هیچ خبر فوری‌ای نمیرود.", group: "breaking" },
+  { key: "breaking_gap_minutes", label: "فاصله‌ی دو خبر فوری (دقیقه)", min: 5, max: 240, hint: "", group: "breaking" },
+  {
+    key: "breaking_max_age_min",
+    label: "خبر فوری تا چند دقیقه پس از اولین انتشار",
+    min: 10,
+    max: 120,
+    hint: "از زمان اولین منبعی که آن را گفت.",
+    group: "breaking",
+  },
+  { key: "breaking_min_sources", label: "کمترین منبع جدا برای خبر فوری", min: 2, max: 5, hint: "", group: "breaking" },
 ];
+
+/** News older than this (by its own time) never goes back to the queue (MAX_AGE in
+ * panel/proxyhub/content/candidates.py; the server refuses with 409 not_editable). */
+export const REQUEUE_MAX_AGE_MS = 48 * 3_600_000;
+
+/** Whether «برگرداندن به صف» can still work: a rejected item only while its news is fresh. */
+export function canRequeue(c: Pick<Candidate, "status" | "published_at" | "created_at">, now: Date): boolean {
+  if (c.status !== "rejected") return true;
+  const when = Date.parse(c.published_at ?? c.created_at);
+  return !Number.isNaN(when) && now.getTime() - when <= REQUEUE_MAX_AGE_MS;
+}
+
+/** The settings form's identity: only the saved config. Storing or removing the API key, or a
+ * refresh of the live fields (calls, bridge), must not remount it and drop unsaved changes. */
+export const qcFormKey = (view: Pick<QcView, "config">): string => JSON.stringify(view.config);
 
 /** A whole number in [min, max] typed in Persian or Latin digits, or an error (Persian). */
 export function parseCount(raw: string, min: number, max: number): number | string {

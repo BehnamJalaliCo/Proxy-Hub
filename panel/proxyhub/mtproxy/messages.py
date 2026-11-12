@@ -16,6 +16,10 @@ ERRORS_FA: Final[dict[str, str]] = {
     ),
     "phone_format": ("شماره‌ی حساب دوم را کامل، با + و کد کشور وارد کنید (مثلاً با ‎+44‎ یا ‎+98‎ شروع میشود)."),
     "code_format": "کد ورودی را که تلگرام فرستاده وارد کنید: فقط رقم‌ها (معمولاً ۵ رقم).",
+    "code_word_format": (
+        "این بار کد ورود یک کلمه یا یک عبارت است که با پیامک آمده؛ آن را همان‌طور که در پیامک نوشته شده "
+        "وارد کنید (فقط حرف و رقم و فاصله)."
+    ),
     "password_format": "رمز دومرحله‌ای حساب دوم را وارد کنید (حداکثر ۲۵۶ نویسه).",
     # Telegram's answers
     "api_id_invalid": (
@@ -113,3 +117,40 @@ def session_ended_alert(reason: str) -> str:
         "تا ورود دوباره، پنل به این حساب دسترسی ندارد. برای وصل کردن دوباره، از صفحه‌ی «تلگرام» داشبورد "
         "دوباره وارد شوید."
     )
+
+
+# Check failures that will not pass by themselves: a new login, for the api_id ones with a new app.
+_NEEDS_NEW_LOGIN: Final = frozenset({"session_unreadable", "session_missing"})
+_NEEDS_NEW_API_ID: Final = frozenset({"api_id_invalid", "api_id_published"})
+
+
+def check_failed_alert(code: str, rpc: str | None) -> str:
+    """The owner alert (HTML) when the session check fails for a reason that does not pass at once
+    (the account moved to ``error``). Sent once per cause; the check keeps running every 30 minutes."""
+    shown = html.escape(f"{code} / {rpc}" if rpc else code)
+    if code in _NEEDS_NEW_API_ID:
+        todo = (
+            "این معمولاً خودبه‌خود درست نمیشود: در my.telegram.org یک برنامه‌ی تازه بسازید، در صفحه‌ی "
+            "«تلگرام» داشبورد «قطع اتصال» را بزنید و با api_id تازه دوباره وارد شوید."
+        )
+    elif code in _NEEDS_NEW_LOGIN:
+        todo = (
+            "اگر بررسی بعدی هم درست نشد، در صفحه‌ی «تلگرام» داشبورد «قطع اتصال» را بزنید و دوباره وارد شوید."
+        )
+    else:
+        todo = (
+            "اگر چند بررسی پشت سر هم درست نشد، در صفحه‌ی «تلگرام» داشبورد «قطع اتصال» را بزنید و "
+            "دوباره وارد شوید."
+        )
+    return (
+        "⚠️ <b>حساب عملیاتی ‎@MTProxybot‎ فعلاً کار نمیکند</b>\n"
+        f"بررسی خودکار نشست ناموفق بود (<code>{shown}</code>). تا درست شود، ثبت اسپانسر، پست با حساب دوم، "
+        "آمار کانال و خواندن منبع‌ها با این حساب متوقف است.\n"
+        f"پنل هر {fa_digits(30)} دقیقه دوباره بررسی میکند و اگر علت برطرف شود، حساب خودش دوباره وصل میشود. "
+        f"{todo}"
+    )
+
+
+def check_recovered_alert() -> str:
+    """The owner alert (HTML) when a check passes again after the account was in ``error``."""
+    return "✅ <b>حساب عملیاتی ‎@MTProxybot‎ دوباره کار میکند</b>\nبررسی خودکار نشست موفق بود؛ کاری لازم نیست."

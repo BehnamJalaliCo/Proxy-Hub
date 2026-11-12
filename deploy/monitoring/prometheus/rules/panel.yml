@@ -31,6 +31,19 @@ groups:
             | reReplaceAll "0" "۰" | reReplaceAll "1" "۱" | reReplaceAll "2" "۲" | reReplaceAll "3" "۳" | reReplaceAll "4" "۴"
             | reReplaceAll "5" "۵" | reReplaceAll "6" "۶" | reReplaceAll "7" "۷" | reReplaceAll "8" "۸" | reReplaceAll "9" "۹" | reReplaceAll "[.]" "٫" }} پیش بوده است{{ end }} (حد مجاز ۹۰ ثانیه). چرخه‌های کنترل اجرا نمیشوند.
 
+      # One worker loop no longer finishes passes (raises every time, or hangs) while the heartbeat,
+      # its own loop, stays fresh. Slack: three intervals plus 15 minutes (long passes, backoff).
+      - alert: ReconcilerStalled
+        expr: |
+          proxyhub_reconciler_last_success_age_seconds
+            > 3 * proxyhub_reconciler_interval_seconds + 900
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "چرخه‌ی کنترل {{ $labels.name }} در worker پنل کارش را تمام نمیکند"
+          description: "چرخه‌ی {{ $labels.name }} مدتی است هیچ دوری را با موفقیت تمام نکرده است (هر بار خطا میدهد یا گیر کرده). جزئیات در لاگ worker است."
+
       - alert: PanelDatabaseDown
         expr: proxyhub_db_up == 0
         for: 1m
@@ -164,6 +177,29 @@ groups:
             سرور تازه‌ترین commit شاخه‌ی main را اجرا نکرد، چون ادغام امضاشده‌ی یک PR در گیت‌هاب نبود.
             ممکن است کسی مستقیم روی main کد فرستاده باشد. نسخه‌ی قبلی همچنان در حال کار است.
             جزئیات: journalctl -u proxyhub-deployer.service
+
+      # The newest commit failed its build or health check and the deployer went back to the previous
+      # one. It does not try that commit again by itself, so main is not what runs until the next merge.
+      - alert: DeployFailed
+        expr: proxyhub_deploy_failed == 1 and proxyhub_deploy_rollback_failed == 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "استقرار شکست خورد: تازه‌ترین commit اجرا نمیشود"
+          description: >-
+            سرور نتوانست تازه‌ترین commit شاخه‌ی main را مستقر کند (ساخت یا آزمون سلامت آن شکست خورد) و به نسخه‌ی قبلی برگشت.
+            نسخه‌ی قبلی همچنان در حال کار است. همین commit خودبه‌خود دوباره امتحان نمیشود؛ با ادغام بعدی، استقرار دوباره امتحان میشود.
+            جزئیات: journalctl -u proxyhub-deployer.service
+
+      - alert: DeployRollbackFailed
+        expr: proxyhub_deploy_rollback_failed == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "استقرار شکست خورد و برگشت به نسخه‌ی قبلی هم نشد"
+          description: >-
+            تازه‌ترین commit شاخه‌ی main مستقر نشد، و برگشت به نسخه‌ی سالم قبلی هم شکست خورد.
+            ممکن است پنل یا worker از کار افتاده باشد. جزئیات: journalctl -u proxyhub-deployer.service
 
   - name: proxyhub-watchdog
     rules:

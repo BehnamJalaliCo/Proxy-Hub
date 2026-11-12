@@ -8,8 +8,9 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from hypothesis import given, settings
@@ -24,9 +25,13 @@ from test_net_support import (
     GP_HTTPS_PANEL_443,
     GP_HTTPS_PANEL_8443,
     GP_HTTPS_PANEL_BLOCKED,
+    HTTP_OK_GITHUB_RIGHTEL,
+    HTTP_OK_PANEL_ARVAN,
     HTTP_RESET_ARVAN,
     HTTP_TLS_TIMEOUT_RIGHTEL_443,
+    MCI_PROBE,
     PANEL_IP,
+    RIGHTEL_PROBE,
     deep,
     gp_https,
 )
@@ -35,7 +40,15 @@ from proxyhub.fleet.alerts import DAILY, findings
 from proxyhub.fleet.locations import CLASS_RANK, ReachRow, aggregate, classify, location_classes, reach_json
 from proxyhub.fleet.planner import FleetSnapshot, build_plan
 from proxyhub.probes import service
-from proxyhub.probes.globalping import RateLimit, https_body, location_asns, parse_http
+from proxyhub.probes.globalping import (
+    Created,
+    GlobalpingClient,
+    RateLimit,
+    http_probe_ok,
+    https_body,
+    location_asns,
+    parse_http,
+)
 from proxyhub.probes.service import Target, node_network_states, tls_cost, tls_fit
 from proxyhub.probes.settings import ProbeLocation, ProbeSettings
 from proxyhub.probes.types import Measurement, NetworkObs
@@ -265,6 +278,172 @@ def test_tls_budget() -> None:
     assert tls_fit(nine, 5, RateLimit(250, 25, window), T0, reserve=10) == 1
     assert tls_fit([target(1, (443,)), *nine], 5, RateLimit(250, 10, window), T0) == 1  # one port: 5
     assert service.probes_used(tls(443, {"a": "up", "b": "down", "c": "nodata"})) == 3
+    # probes:4: an allowance read from the TLS control's own creation headers has already paid for
+    # the control; only the nodes are counted against it.
+    one, nine1 = [target(1, (443,))], [target(i, (443,)) for i in range(9)]
+    assert tls_fit(one, 5, RateLimit(250, 7, window), T0) == 0
+    assert tls_fit(one, 5, RateLimit(250, 7, window), T0, control_paid=True) == 1
+    assert tls_fit(nine1, 5, RateLimit(250, 45, window), T0, control_paid=True) == 9
+    assert tls_fit(nine1, 5, RateLimit(250, 44, window), T0, control_paid=True) == 8
+
+
+class HeaderGlobalping(GlobalpingClient):
+    """Globalping as its API answers: every creation's X-RateLimit-Remaining already has that
+    measurement's tests taken off; every measurement finishes on five probes."""
+
+    def __init__(self, remaining: int) -> None:
+        super().__init__(base_url="http://127.0.0.1:9")
+        self.remaining = remaining
+        self.created: list[str] = []
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def create(self, body: Mapping[str, Any]) -> Created:
+        self.remaining -= 5
+        self.last_rate = RateLimit(250, self.remaining, datetime.now(UTC) + timedelta(minutes=30))
+        self.created.append(str(body["target"]))
+        return Created("ok", f"m{len(self.created)}", self.last_rate)
+
+    async def wait(self, measurement_id: str) -> tuple[Any, dict[str, Any] | None]:
+        results = [(MCI_PROBE, HTTP_OK_GITHUB_RIGHTEL)] * 3 + [(RIGHTEL_PROBE, HTTP_OK_GITHUB_RIGHTEL)] * 2
+        return "ok", gp_https(measurement_id, "x", 443, results, at="2026-11-05T16:15:37.146Z")
+
+
+# --- probes:3: every node result is paired with the same probe's control result -----------------
+
+MCI_A, MCI_B = MCI_PROBE, {**MCI_PROBE, "city": "Tehran", "tags": ["eyeball-network", "u-other"]}
+RIGHTEL_C, RIGHTEL_D = RIGHTEL_PROBE, {**RIGHTEL_PROBE, "city": "Karaj", "latitude": 35.84}
+GITHUB_TIMEOUT = {**HTTP_TLS_TIMEOUT_RIGHTEL_443, "resolvedAddress": "140.82.121.4"}
+# Recorded shape of a flaky Iranian probe (tests/test_net_support.py): the probe's own timeout.
+INTERNAL_TIMEOUT = {
+    "status": "failed",
+    "failureSource": "internal",
+    "rawOutput": "The measurement timed out.",
+}
+Results = list[tuple[dict[str, Any], dict[str, Any]]]
+# On the node: the probes that reached the control give nothing, the broken ones fail.
+NODE_BROKEN: Results = [
+    (MCI_A, INTERNAL_TIMEOUT),
+    (MCI_B, HTTP_TLS_TIMEOUT_RIGHTEL_443),
+    (RIGHTEL_C, INTERNAL_TIMEOUT),
+    (RIGHTEL_D, HTTP_TLS_TIMEOUT_RIGHTEL_443),
+]
+NODE_CLOSED: Results = [
+    (probe, HTTP_TLS_TIMEOUT_RIGHTEL_443) for probe in (MCI_A, MCI_B, RIGHTEL_C, RIGHTEL_D)
+]
+
+
+def paired_control() -> Measurement:
+    """github.com: A and C answer, B and D (broken probes) time out on the control itself."""
+    raw = gp_https(
+        "ctrl",
+        "github.com",
+        443,
+        [(MCI_A, HTTP_OK_GITHUB_RIGHTEL), (MCI_B, GITHUB_TIMEOUT), (RIGHTEL_C, HTTP_OK_GITHUB_RIGHTEL),
+         (RIGHTEL_D, GITHUB_TIMEOUT)],
+        at="2026-11-05T16:15:37.146Z",
+    )  # fmt: skip
+    return Measurement(
+        "globalping", "https", "control", "github.com", 443, "ok", T0, ref="ctrl",
+        networks=tuple(parse_http(raw, KEY_ASNS)), probe_ok=tuple(http_probe_ok(raw)),
+    )  # fmt: skip
+
+
+def paired_node(
+    results: list[tuple[dict[str, Any], dict[str, Any]]], control: Measurement | None
+) -> Measurement:
+    raw = gp_https("node", "slot1.example.com", 443, results, at="2026-11-05T16:16:08.167Z")
+    paired = control.probe_ok if control is not None else None
+    return Measurement(
+        "globalping", "https", "node", "slot1.example.com", 443, "ok", T0, ref="node",
+        networks=tuple(parse_http(raw, KEY_ASNS, PANEL_IP, paired)),
+    )  # fmt: skip
+
+
+def test_a_probe_that_failed_the_control_never_makes_its_network_down() -> None:
+    """The auditor's scenario: the probes that reached github.com give nothing on the node, the
+    broken ones fail on it as they failed the control. Per network that read "down" (blocked after
+    two rounds); per probe it says nothing."""
+    control = paired_control()
+    assert {n.network_key for n in control.networks if n.state == "up"} == set(KEYS)
+    results = NODE_BROKEN
+    unpaired = observe_tls([paired_node(results, None)], control, KEYS)
+    assert unpaired.state == "unreachable"  # what the merge per network concluded before
+    node = paired_node(results, control)
+    assert all(n.state == "nodata" for n in node.networks if n.network_key in KEYS)
+    assert {n.detail["failure"] for n in node.networks if n.network_key in KEYS} == {"internal"}
+    obs = observe_tls([node], control, KEYS)
+    assert obs.state == "invalid" and obs.reason == "no_valid_networks"
+    rounds = [RoundObs(T0, {"https": obs}), RoundObs(T0 + timedelta(minutes=30), {"https": obs})]
+    assert decide(rounds, now=T0 + timedelta(minutes=31), sources=TLS_SOURCES)[0] == "unknown"
+    # In another order the results are matched by probe; still nothing wrong is concluded.
+    shuffled = paired_node(results[::-1], control)
+    assert observe_tls([shuffled], control, KEYS).reason == "no_valid_networks"
+
+
+def test_a_probe_that_passed_the_control_and_fails_the_node_is_down() -> None:
+    control = paired_control()
+    results = NODE_CLOSED
+    node = paired_node(results, control)
+    by_key = {n.network_key: n for n in node.networks}
+    assert (by_key["asn:197207"].fail, by_key["asn:197207"].nodata) == (1, 1)  # A counts, B does not
+    assert observe_tls([node], control, KEYS).state == "unreachable"
+    # A handshake that worked always counts, even from a probe that failed the control.
+    ok_from_b = paired_node([(MCI_B, {**HTTP_OK_PANEL_ARVAN}), *results[2:]], control)
+    assert {n.network_key: n.state for n in ok_from_b.networks}["asn:197207"] == "up"
+    # A probe the control does not know (another one, or a list that cannot be matched): no data.
+    stranger = {**MCI_PROBE, "city": "Shiraz"}
+    lone = paired_node([(stranger, HTTP_TLS_TIMEOUT_RIGHTEL_443)], control)
+    assert {n.network_key: n.detail.get("failure") for n in lone.networks}["asn:197207"] == "control_not_ok"
+
+
+def test_probe_ok_lists_each_result_in_order() -> None:
+    raw = gp_https(
+        "ctrl", "github.com", 443, [(MCI_A, HTTP_OK_GITHUB_RIGHTEL), (MCI_B, GITHUB_TIMEOUT)],
+        at="2026-11-05T16:15:37.146Z",
+    )  # fmt: skip
+    (a, a_ok), (b, b_ok) = http_probe_ok(raw)
+    assert (a_ok, b_ok) == (True, False) and a != b and a[0] == b[0] == 197207
+
+
+async def test_a_cycle_pairs_node_results_with_the_control_probes() -> None:
+    """run_cycle hands the control's per-probe results to every node measurement on its probes."""
+
+    class Paired(HeaderGlobalping):
+        async def wait(self, measurement_id: str) -> tuple[Any, dict[str, Any] | None]:
+            if measurement_id == "m1":  # the control
+                results = [(MCI_A, HTTP_OK_GITHUB_RIGHTEL), (MCI_B, GITHUB_TIMEOUT),
+                           (RIGHTEL_C, HTTP_OK_GITHUB_RIGHTEL), (RIGHTEL_D, GITHUB_TIMEOUT)]  # fmt: skip
+            else:
+                results = NODE_BROKEN
+            return "ok", gp_https(measurement_id, "x", 443, results, at="2026-11-05T16:15:37.146Z")
+
+    gp = Paired(200)
+    s = ProbeSettings().model_copy(update={"checkhost": False})
+    t = Target(uuid.uuid4(), "n1", PANEL_IP, 8443, None, "schedule", None, "hel1", (443,))
+    result = await service.run_cycle([t], s, gp_factory=lambda: gp)
+    assert result is not None and result.tls_control is not None
+    (node,) = [m for m in result.nodes if m.kind == "https"]
+    assert all(n.state == "nodata" for n in node.networks if n.network_key in KEYS)
+    assert observe_tls([node], result.tls_control, KEYS).state == "invalid"
+
+
+async def test_a_cycle_measures_the_node_its_paid_control_left_room_for() -> None:
+    """probes:4. 12 tests left, 5 probes: control 5 + node 5 fit. After the control the headers say
+    7, which still covers the node's 5; the control is not charged a second time."""
+    gp = HeaderGlobalping(12)
+    s = ProbeSettings().model_copy(update={"checkhost": False})
+    t = target(1, (443,))
+    window = datetime.now(UTC) + timedelta(minutes=30)
+    result = await service.run_cycle(
+        [t], s, gp_factory=lambda: gp, gp_rate=RateLimit(250, 12, window), tls_probes=5
+    )
+    assert result is not None and result.measured == [t]
+    assert gp.created[:2] == [s.tls_control_host, t.tls_host]
 
 
 # --- location scores and the planner -------------------------------------------------------------------

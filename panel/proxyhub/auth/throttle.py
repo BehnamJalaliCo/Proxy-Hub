@@ -8,6 +8,11 @@ Global: 50 failures within 15 minutes, across all usernames, lock every login fo
 doubling up to 1 hour. The cap is lower than per username on purpose: anyone on the internet can
 trip the global counter, and the owner must never be shut out for a whole day by strangers.
 
+Known device: a browser that once logged in carries a device cookie (``admin_devices``). Its
+logins skip the global and the username counters, which anyone can keep tripped at no cost, and
+count on a counter of their own with the per-username policy. Without a valid cookie nothing
+changes.
+
 Rows are keyed by an HMAC of the username (master-key subkey), so a password typed into the
 username box by mistake is never stored in a readable form.
 """
@@ -15,8 +20,9 @@ username box by mistake is never stored in a readable form.
 from __future__ import annotations
 
 import math
+import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from sqlalchemy import delete, or_, select
@@ -28,6 +34,10 @@ from proxyhub.db.models_auth import AuthThrottle
 
 GLOBAL_KEY = "global"
 PRUNE_AFTER = timedelta(days=2)
+# The stored level stops here; every policy reaches its max_lock long before (USER at 8, GLOBAL at 3).
+MAX_LOCK_LEVEL = 64
+# 15 minutes x 2**20 is far above any max_lock and far inside timedelta's range.
+_MAX_DOUBLINGS = 20
 
 
 @dataclass(frozen=True)
@@ -40,8 +50,10 @@ class LockPolicy:
     level_reset_after: timedelta
 
     def lock_duration(self, level: int) -> timedelta:
-        factor: int = 2 ** max(level - 1, 0)
-        return min(self.base_lock * factor, self.max_lock)
+        """Doubling from base_lock up to max_lock. The exponent is clamped before multiplying: from
+        level 38 on, base_lock * 2**(level-1) overflows timedelta and the failure was never counted."""
+        doublings = min(max(level - 1, 0), _MAX_DOUBLINGS)
+        return min(self.base_lock * (1 << doublings), self.max_lock)
 
 
 USER_POLICY = LockPolicy(
@@ -60,6 +72,7 @@ GLOBAL_POLICY = LockPolicy(
     max_lock=timedelta(hours=1),
     level_reset_after=timedelta(hours=24),
 )
+DEVICE_POLICY = replace(USER_POLICY, scope="device")
 
 
 @dataclass(frozen=True)
@@ -72,6 +85,10 @@ class LockEvent:
 
 def user_key(username: str) -> str:
     return "u:" + keyed_digest("throttle-username", username)
+
+
+def device_key(device_id: uuid.UUID) -> str:
+    return f"d:{device_id}"
 
 
 async def ensure_rows(session: AsyncSession, keys: Sequence[str]) -> None:
@@ -113,7 +130,7 @@ def register_failure(row: AuthThrottle, policy: LockPolicy, now: datetime) -> Lo
     level = row.lock_level
     if previous_end is None or now - previous_end > policy.level_reset_after:
         level = 0
-    level += 1
+    level = min(level + 1, MAX_LOCK_LEVEL)
     duration = policy.lock_duration(level)
     row.lock_level = level
     row.locked_until = now + duration

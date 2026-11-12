@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Validate every monitoring config with the SAME pinned images the stack runs (no network needed
 # besides pulling them): Prometheus config + rules + rule unit tests, Alertmanager config in all
-# rendered variants (Telegram on/off x watchdog on/off, malformed), a REAL runtime check that the
-# Telegram bot token never reaches the Alertmanager log, a REAL delivery of an alert to the panel
-# webhook (http://api:8000/internal/alerts/alertmanager), Loki config, Alloy config.
+# rendered variants (Telegram on/off x watchdog on/off, malformed, short junk), the Telegram message
+# template, a REAL runtime check that the Telegram bot token never reaches the Alertmanager log, a
+# REAL delivery of an alert to the panel webhook (http://api:8000/internal/alerts/alertmanager), Loki
+# config, Alloy config.
 # Usage: bash deploy/monitoring/check_configs.sh
 # Image overrides (e.g. a registry mirror of the same digest): PROXYHUB_PROMETHEUS_IMAGE,
 # PROXYHUB_ALERTMANAGER_IMAGE, PROXYHUB_LOKI_IMAGE, PROXYHUB_ALLOY_IMAGE, PROXYHUB_PYTHON_IMAGE.
@@ -51,8 +52,12 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT  # replaced by cleanup() once the leak check can leave a container
 chmod 0755 "$work"
 # variant | expected receivers line. "malformed" must fall back to the panel webhook alone, never
-# half-on. The panel webhook (receiver "owner") is on in every variant.
-for spec in "none|off;off" "telegram|on;off" "watchdog|off;on" "both|on;on" "malformed|off;off"; do
+# half-on. The panel webhook (receiver "owner") is on in every variant. "placeholder": short junk
+# such as "0" or "no" is also text of the rendered config; it must not stop Alertmanager from
+# starting (the copy of a receiver that is off is removed before the leak check). "longchatid": a
+# chat id beyond 16 digits would overflow Alertmanager's int64.
+for spec in "none|off;off" "telegram|on;off" "watchdog|off;on" "both|on;on" "malformed|off;off" \
+  "placeholder|off;off" "longchatid|off;off"; do
   variant="${spec%%|*}"
   want="${spec#*|}"
   want="panel webhook: on; telegram receiver: ${want%%;*}; external watchdog: ${want#*;}"
@@ -73,6 +78,15 @@ for spec in "none|off;off" "telegram|on;off" "watchdog|off;on" "both|on;on" "mal
     echo "@not_numeric" > "$sec/alert_chat_id"
     echo "http://plain-http.example/ping" > "$sec/healthchecks_watchdog_url"
   fi
+  if [ "$variant" = placeholder ]; then
+    echo "0" > "$sec/alert_bot_token"
+    echo "-1001234567890" > "$sec/alert_chat_id"
+    echo "no" > "$sec/healthchecks_watchdog_url"
+  fi
+  if [ "$variant" = longchatid ]; then
+    echo "123456:not-a-real-token-config-check-only" > "$sec/alert_bot_token"
+    echo "12345678901234567890" > "$sec/alert_chat_id"
+  fi
   chmod -R a+rX "$sec"
   if out="$(run \
     -v "$MON/alertmanager:/etc/alertmanager/proxyhub:ro" \
@@ -89,6 +103,51 @@ for spec in "none|off;off" "telegram|on;off" "watchdog|off;on" "both|on;on" "mal
     fail=1
   fi
 done
+
+# The Telegram fallback message, rendered by amtool with the real template. A resolved alert keeps the
+# annotations of its last firing evaluation, so it must show only its summary, never the description
+# that says the problem is still there; a firing alert shows both.
+template_check() {
+  local dir="$work/template" out
+  mkdir -p "$dir"
+  cat >"$dir/mixed.json" <<'JSON'
+{"receiver": "owner", "status": "firing", "externalURL": "http://alertmanager:9093",
+ "groupLabels": {"alertname": "TemplateCheck"}, "commonLabels": {}, "commonAnnotations": {},
+ "alerts": [
+  {"status": "firing", "labels": {"alertname": "TemplateCheck"},
+   "annotations": {"summary": "summary-of-firing", "description": "description-of-firing"}},
+  {"status": "resolved", "labels": {"alertname": "TemplateCheck"},
+   "annotations": {"summary": "summary-of-resolved", "description": "stale-description-of-resolved"}}]}
+JSON
+  cat >"$dir/resolved.json" <<'JSON'
+{"receiver": "owner", "status": "resolved", "externalURL": "http://alertmanager:9093",
+ "groupLabels": {"alertname": "TemplateCheck"}, "commonLabels": {}, "commonAnnotations": {},
+ "alerts": [
+  {"status": "resolved", "labels": {"alertname": "TemplateCheck"},
+   "annotations": {"summary": "summary-of-resolved", "description": "stale-description-of-resolved"}}]}
+JSON
+  chmod -R a+rX "$dir"
+  render() {
+    run -v "$MON/alertmanager:/etc/alertmanager/proxyhub:ro" -v "$dir:/data:ro" --entrypoint /bin/amtool "$AM" \
+      template render --template.glob=/etc/alertmanager/proxyhub/telegram.tmpl \
+      --template.text='{{ template "proxyhub.telegram.message" . }}' --template.data="/data/$1"
+  }
+  if ! out="$(render mixed.json 2>&1)" || ! grep -q 'summary-of-firing' <<<"$out" ||
+    ! grep -q 'description-of-firing' <<<"$out" || ! grep -q 'summary-of-resolved' <<<"$out" ||
+    grep -q 'stale-description-of-resolved' <<<"$out"; then
+    echo "FAIL telegram template (firing and resolved alerts in one group)"
+    echo "$out" | tail -20 | sed 's/^/  | /'
+    return 1
+  fi
+  if ! out="$(render resolved.json 2>&1)" || ! grep -q 'برطرف شد' <<<"$out" ||
+    ! grep -q 'summary-of-resolved' <<<"$out" || grep -q 'stale-description-of-resolved' <<<"$out"; then
+    echo "FAIL telegram template (resolved group)"
+    echo "$out" | tail -20 | sed 's/^/  | /'
+    return 1
+  fi
+  echo "PASS telegram template: a resolved alert shows its summary, not its stale description"
+}
+template_check || fail=1
 
 # Rule 3 at RUNTIME, not just in the rendered config: Alertmanager v0.34.2 logs the full Telegram API
 # URL (".../bot<TOKEN>/sendMessage") whenever a send fails. Start the real entrypoint with a random

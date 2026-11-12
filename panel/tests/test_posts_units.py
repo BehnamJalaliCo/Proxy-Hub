@@ -247,7 +247,13 @@ def test_a_config_line_states_its_period_not_its_end() -> None:
     for end in (datetime(2026, 11, 5, 23, 0, tzinfo=UTC), datetime(2026, 11, 8, 9, 0, tzinfo=UTC)):
         text = render_post(None, [rl(1, expires=end)], "@ipoxxo").text
         assert text.startswith(f"{LINE}\n") and "ساعت ۰" not in text.split("\n", 1)[0]
-    assert CONFIG_VALIDITY_HOURS == RealitySettings().cap_hours  # the line tells the configs' real period
+    # The line tells the configs' real period: the Reality settings' cap_hours, which the owner can
+    # change; 48 (the default cap_hours) only when the caller gives none.
+    assert CONFIG_VALIDITY_HOURS == RealitySettings().cap_hours
+    end = datetime(2026, 11, 8, 9, 0, tzinfo=UTC)
+    for hours, shown in ((24, "۲۴"), (72, "۷۲"), (720, "۷۲۰")):
+        text = render_post(None, [rl(1, expires=end)], "@ipoxxo", validity_hours=hours).text
+        assert text.startswith(f"🔒 کانفیگ V2Ray — اعتبار {shown} ساعت\n")
     # A config that never ends: the line without a period.
     assert render_post(None, [rl(1)], "@ipoxxo").text.startswith(f"🔒 کانفیگ V2Ray\n{QUOTE}<code>")
 
@@ -803,9 +809,14 @@ def test_a_missing_link_is_unsure_first_then_paused_never_dead() -> None:
         assert shown.view.url is None
 
 
-def test_a_missing_link_past_its_own_expiry_is_expired() -> None:
-    for expires in (NOW, NOW - timedelta(minutes=1)):
-        shown = current_view(carried(expires_at=expires), harvest_of(), NOW)
+def test_a_missing_link_past_its_own_expiry_is_expired_only_after_the_grace() -> None:
+    # A renewed config (D41) can be left out of one harvest after its first end: unsure, not ended.
+    for expires in (NOW, NOW - timedelta(minutes=1), NOW - timedelta(hours=10)):
+        for since in (None, NOW - MISSING_GRACE + timedelta(seconds=1)):
+            shown = current_view(carried(expires_at=expires, missing_since=since), harvest_of(), NOW)
+            assert (shown.new_status, shown.view.status, shown.unsure) == (None, "paused", True)
+        gone = carried(expires_at=expires, missing_since=NOW - MISSING_GRACE)
+        shown = current_view(gone, harvest_of(), NOW)
         assert (shown.new_status, shown.view.status, shown.unsure) == ("expired", "expired", False)
 
 

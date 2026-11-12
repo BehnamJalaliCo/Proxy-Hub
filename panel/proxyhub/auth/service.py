@@ -1,4 +1,4 @@
-"""Auth business logic: setup, login, sessions, recovery codes.
+"""Auth business logic: setup, login, sessions, recovery codes, a new Authenticator.
 
 Every function takes the request's ``AsyncSession`` and ends its own transaction (commit or
 rollback) before returning or raising, so failure counters and audit rows are saved even when the
@@ -8,6 +8,7 @@ status codes and Persian messages.
 
 from __future__ import annotations
 
+import base64
 import logging
 import uuid
 from dataclasses import dataclass
@@ -26,7 +27,7 @@ from proxyhub.auth.passwords import (
     password_problem,
     verify_password_async,
 )
-from proxyhub.auth.secretbox import open_sealed, seal
+from proxyhub.auth.secretbox import DecryptError, open_sealed, seal
 from proxyhub.auth.tokens import (
     new_recovery_codes,
     new_token,
@@ -34,6 +35,7 @@ from proxyhub.auth.tokens import (
     token_hash,
 )
 from proxyhub.db.models_auth import (
+    AdminDevice,
     AdminEnrollment,
     AdminRecoveryCode,
     AdminSession,
@@ -46,12 +48,16 @@ from proxyhub.reconcilers.base import lock_key
 log = logging.getLogger("proxyhub.auth")
 
 SETUP_TOKEN_TTL = timedelta(minutes=60)
+REENROLL_TTL = SETUP_TOKEN_TTL  # a new Authenticator must be confirmed within the same hour
 SESSION_IDLE_TIMEOUT = timedelta(hours=12)
 SESSION_ABSOLUTE_TIMEOUT = timedelta(days=7)
 SESSION_TOUCH_INTERVAL = timedelta(seconds=60)
 MAX_ACTIVE_SESSIONS = 20
 MAX_ENROLLMENTS_PER_TOKEN = 20
 SESSION_HISTORY_KEEP = timedelta(days=30)
+# A known browser (device cookie) unused for this long is forgotten; each login renews it.
+DEVICE_IDLE_TIMEOUT = timedelta(days=180)
+MAX_DEVICES = 20
 USER_AGENT_MAX_CHARS = 160
 SETUP_LOCK_KEY = lock_key("auth.setup")
 
@@ -88,12 +94,27 @@ class SetupFinished:
     username: str
     recovery_codes: list[str]
     session: NewSession
+    device_token: str  # the device cookie value: handed to the browser, never logged or stored
 
 
 @dataclass(frozen=True)
 class LoginOk:
     username: str
     session: NewSession
+    device_token: str  # a new device cookie, or the presented one (renewed)
+
+
+@dataclass(frozen=True)
+class TotpReenrollBegin:
+    pending: str  # the new secret sealed to this session; only the finish step can open it
+    totp_uri: str
+    totp_secret: str
+
+
+@dataclass(frozen=True)
+class NewRecoveryCodes:
+    recovery_codes: list[str]
+    device_token: str  # the other browsers are no longer known devices; this one is, anew
 
 
 @dataclass(frozen=True)
@@ -297,9 +318,10 @@ async def setup_finish(
     setup_token.used_at = now
     await session.execute(delete(AdminEnrollment).where(AdminEnrollment.setup_token_id == setup_token.id))
     new_session = _create_session(session, user_id, user_agent, now)
+    device_token = _issue_device(session, user_id, now)
     audit.record(session, "setup_completed", target=name)
     await session.commit()
-    return SetupFinished(username=name, recovery_codes=codes, session=new_session)
+    return SetupFinished(username=name, recovery_codes=codes, session=new_session, device_token=device_token)
 
 
 # --- login ---------------------------------------------------------------------------------
@@ -331,6 +353,52 @@ def _create_session(
     )
     session.add(row)
     return NewSession(token=token, session_id=row.id, expires_at=row.expires_at)
+
+
+def _issue_device(session: AsyncSession, user_id: uuid.UUID, now: datetime) -> str:
+    """A new known device for the browser of this request; returns its cookie value."""
+    token = new_token()
+    digest = token_hash(token)
+    assert digest is not None
+    session.add(AdminDevice(user_id=user_id, token_hash=digest, created_at=now, last_used_at=now))
+    return token
+
+
+async def _known_device(
+    session: AsyncSession, cookie_value: str | None, username: str, now: datetime
+) -> AdminDevice | None:
+    """The live device behind ``cookie_value`` if it belongs to ``username``. Any other cookie,
+    forged, expired or another account's, is treated exactly like no cookie."""
+    if not cookie_value:
+        return None
+    digest = token_hash(cookie_value)
+    if digest is None:
+        return None
+    stmt = (
+        select(AdminDevice)
+        .join(AdminUser, AdminUser.id == AdminDevice.user_id)
+        .where(
+            AdminDevice.token_hash == digest,
+            AdminUser.username == username,
+            AdminDevice.last_used_at > now - DEVICE_IDLE_TIMEOUT,
+        )
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _tidy_devices(session: AsyncSession, user_id: uuid.UUID, now: datetime) -> None:
+    """Keep the MAX_DEVICES most recently used browsers and forget idle ones."""
+    keep = (
+        select(AdminDevice.id)
+        .where(AdminDevice.user_id == user_id, AdminDevice.last_used_at > now - DEVICE_IDLE_TIMEOUT)
+        .order_by(AdminDevice.last_used_at.desc(), AdminDevice.created_at.desc())
+        .limit(MAX_DEVICES)
+    )
+    await session.execute(
+        delete(AdminDevice)
+        .where(AdminDevice.user_id == user_id, AdminDevice.id.not_in(keep))
+        .execution_options(synchronize_session=False)
+    )
 
 
 def _active_session_filter(now: datetime) -> tuple[ColumnElement[bool], ...]:
@@ -377,22 +445,39 @@ async def login(
     recovery_code: str | None,
     user_agent: str | None,
     presented_cookie: str | None = None,
+    presented_device: str | None = None,
     now: datetime | None = None,
 ) -> LoginOk:
-    """Username + password + (TOTP code or one recovery code). Generic error on any mistake."""
+    """Username + password + (TOTP code or one recovery code). Generic error on any mistake.
+
+    A browser with a device cookie of this username is throttled on its own counter only: the
+    global and the username counters can be kept tripped by anyone, for free, and must not shut
+    the owner out (throttle.py). Without a valid device cookie both counters apply as before.
+    """
     now = now or utcnow()
     name = normalize_username(username)
     format_ok = is_valid_username(name)
-    ukey = throttle.user_key(name) if format_ok else None
-    await throttle.ensure_rows(session, [throttle.GLOBAL_KEY] + ([ukey] if ukey else []))
-    # Holding the username row for the whole attempt serialises attempts on one username, so
-    # parallel requests cannot squeeze in more guesses than the threshold allows.
-    user_row = await throttle.load(session, ukey, for_update=True) if ukey else None
-    global_row = await throttle.load(session, throttle.GLOBAL_KEY, for_update=False)
-    wait = max(throttle.retry_after_s(user_row, now), throttle.retry_after_s(global_row, now))
+    device = await _known_device(session, presented_device, name, now) if format_ok else None
+    # The counter this attempt is held to: the known device's own, or the username's.
+    user_row: AuthThrottle | None
+    if device is not None:
+        dkey = throttle.device_key(device.id)
+        await throttle.ensure_rows(session, [dkey])
+        # Held for the whole attempt: this browser's parallel attempts run one at a time.
+        user_row = await throttle.load(session, dkey, for_update=True)
+        wait = throttle.retry_after_s(user_row, now)
+    else:
+        ukey = throttle.user_key(name) if format_ok else None
+        await throttle.ensure_rows(session, [throttle.GLOBAL_KEY] + ([ukey] if ukey else []))
+        # Holding the username row for the whole attempt serialises attempts on one username, so
+        # parallel requests cannot squeeze in more guesses than the threshold allows.
+        user_row = await throttle.load(session, ukey, for_update=True) if ukey else None
+        global_row = await throttle.load(session, throttle.GLOBAL_KEY, for_update=False)
+        wait = max(throttle.retry_after_s(user_row, now), throttle.retry_after_s(global_row, now))
     if wait:
         await session.rollback()
         raise AuthError("locked", retry_after_s=wait)
+    device_reason = "known" if device is not None else "none"
 
     user = None
     if format_ok:
@@ -430,7 +515,12 @@ async def login(
         factor = "unknown_user" if user is None else ("password" if not password_ok else "second_factor")
         target = user.username if user is not None else None
         await _record_failure(
-            session, user_row, now, target=target, reasons={"factor": factor, "method": method}
+            session,
+            user_row,
+            now,
+            target=target,
+            reasons={"factor": factor, "method": method, "device": device_reason},
+            known_device=device is not None,
         )
 
     assert user is not None
@@ -447,16 +537,32 @@ async def login(
         if old is not None and old.user_id == user.id and old.revoked_at is None:
             old.revoked_at = now
     new_session = _create_session(session, user.id, user_agent, now)
+    if device is not None and presented_device is not None:
+        device_token = presented_device
+        await session.execute(
+            update(AdminDevice)
+            .where(AdminDevice.id == device.id)
+            .values(last_used_at=now)
+            .execution_options(synchronize_session=False)
+        )
+    else:
+        device_token = _issue_device(session, user.id, now)
     await session.flush()
     await _tidy_sessions(session, user.id, now)
+    await _tidy_devices(session, user.id, now)
     if code_row is not None:
         code_row.used_at = now
         await session.flush()
         remaining = await _unused_recovery_codes(session, user.id)
         audit.record(session, "recovery_used", target=user.username, reasons={"remaining": remaining})
-    audit.record(session, "login_ok", target=user.username, reasons={"method": method})
+    audit.record(
+        session,
+        "login_ok",
+        target=user.username,
+        reasons={"method": method, "device": "known" if device is not None else "new"},
+    )
     await session.commit()
-    return LoginOk(username=user.username, session=new_session)
+    return LoginOk(username=user.username, session=new_session, device_token=device_token)
 
 
 async def _record_failure(
@@ -466,20 +572,27 @@ async def _record_failure(
     *,
     target: str | None,
     reasons: dict[str, str],
+    known_device: bool = False,
 ) -> NoReturn:
-    """Count the failure (username and global), audit it, commit, and raise the right error."""
+    """Count the failure, audit it, commit, and raise the right error. ``user_row`` is the
+    username's counter, or the known device's own counter: a known device's failures never count
+    on the global row, so the owner's typos cannot help a stranger lock everyone out."""
     events = []
-    if user_row is not None:
-        events.append(throttle.register_failure(user_row, throttle.USER_POLICY, now))
-    global_row = await throttle.load(session, throttle.GLOBAL_KEY, for_update=True)
-    events.append(throttle.register_failure(global_row, throttle.GLOBAL_POLICY, now))
+    if known_device:
+        assert user_row is not None
+        events.append(throttle.register_failure(user_row, throttle.DEVICE_POLICY, now))
+    else:
+        if user_row is not None:
+            events.append(throttle.register_failure(user_row, throttle.USER_POLICY, now))
+        global_row = await throttle.load(session, throttle.GLOBAL_KEY, for_update=True)
+        events.append(throttle.register_failure(global_row, throttle.GLOBAL_POLICY, now))
     audit.record(session, "login_failed", target=target, allowed=False, reasons=reasons)
     locks = [e for e in events if e is not None]
     for event in locks:
         audit.record(
             session,
             "locked",
-            target=target if event.scope == "user" else None,
+            target=target if event.scope != "global" else None,
             allowed=False,
             reasons={
                 "scope": event.scope,
@@ -621,8 +734,11 @@ async def account_info(session: AsyncSession, user_id: uuid.UUID) -> AccountInfo
 
 async def regenerate_recovery_codes(
     session: AsyncSession, identity: ResolvedSession, totp_code: str, now: datetime | None = None
-) -> list[str]:
-    """New set of 10 codes (old ones die). Needs a fresh TOTP code, throttled like a login."""
+) -> NewRecoveryCodes:
+    """New set of 10 codes (old ones die). Needs a fresh TOTP code, throttled like a login.
+
+    The owner's security reset: every other browser stops being a known device as well (they log
+    in under the global and username counters again); this browser gets a new device cookie."""
     now = now or utcnow()
     ukey = throttle.user_key(identity.username)
     await throttle.ensure_rows(session, [ukey])
@@ -637,34 +753,172 @@ async def regenerate_recovery_codes(
     secret = open_sealed(user.totp_secret_enc, _totp_context(user.id)).decode()
     step = totp.match_step(secret, totp_code, user.totp_last_step, now)
     if step is None:
-        event = throttle.register_failure(user_row, throttle.USER_POLICY, now)
-        audit.record(
+        await _refuse_owner_action(
             session,
-            "recovery_regenerate_failed",
+            user_row,
+            now,
+            action="recovery_regenerate_failed",
             target=user.username,
-            allowed=False,
             reasons={"factor": "totp"},
+            code="totp_invalid",
         )
-        if event is not None:
-            audit.record(
-                session,
-                "locked",
-                target=user.username,
-                allowed=False,
-                reasons={
-                    "scope": event.scope,
-                    "level": event.level,
-                    "lock_s": int(event.duration.total_seconds()),
-                },
-            )
-        await session.commit()
-        if event is not None:
-            raise AuthError("locked", retry_after_s=int(event.duration.total_seconds()))
-        raise AuthError("totp_invalid")
     user.totp_last_step = step
     user.updated_at = now
     await session.execute(delete(AdminRecoveryCode).where(AdminRecoveryCode.user_id == user.id))
     codes = _store_new_recovery_codes(session, user.id, now)
+    await session.execute(delete(AdminDevice).where(AdminDevice.user_id == user.id))
+    device_token = _issue_device(session, user.id, now)
     audit.record(session, "recovery_codes_regenerated", target=user.username, reasons={"count": len(codes)})
     await session.commit()
-    return codes
+    return NewRecoveryCodes(recovery_codes=codes, device_token=device_token)
+
+
+async def _refuse_owner_action(
+    session: AsyncSession,
+    user_row: AuthThrottle,
+    now: datetime,
+    *,
+    action: str,
+    target: str,
+    reasons: dict[str, str],
+    code: str,
+) -> NoReturn:
+    """A logged-in owner's failed proof: counted on the username like a wrong login, audited,
+    committed, then refused (``locked`` once the count reaches a lock)."""
+    event = throttle.register_failure(user_row, throttle.USER_POLICY, now)
+    audit.record(session, action, target=target, allowed=False, reasons=reasons)
+    if event is not None:
+        audit.record(
+            session,
+            "locked",
+            target=target,
+            allowed=False,
+            reasons={
+                "scope": event.scope,
+                "level": event.level,
+                "lock_s": int(event.duration.total_seconds()),
+            },
+        )
+    await session.commit()
+    if event is not None:
+        raise AuthError("locked", retry_after_s=int(event.duration.total_seconds()))
+    raise AuthError(code)
+
+
+# --- a new Authenticator (lost phone) -----------------------------------------------------------
+
+
+def _reenroll_context(identity: ResolvedSession) -> str:
+    return f"admin-reenroll:{identity.user_id}:{identity.session_id}"
+
+
+def totp_reenroll_begin(identity: ResolvedSession, now: datetime | None = None) -> TotpReenrollBegin:
+    """A fresh TOTP secret for a new Authenticator. Nothing is stored: the secret travels back in
+    ``pending``, sealed to this session with its issue time, and is checked by the finish step."""
+    now = now or utcnow()
+    secret = totp.new_secret()
+    blob = seal(f"{int(now.timestamp())}:{secret}".encode(), _reenroll_context(identity))
+    pending = base64.urlsafe_b64encode(blob).decode().rstrip("=")
+    return TotpReenrollBegin(pending=pending, totp_uri=totp.provisioning_uri(secret), totp_secret=secret)
+
+
+def _open_pending(pending: str, identity: ResolvedSession, now: datetime) -> str | None:
+    """The new secret in ``pending`` if this session made it less than an hour ago."""
+    try:
+        blob = base64.urlsafe_b64decode(pending + "=" * (-len(pending) % 4))
+        issued, secret = open_sealed(blob, _reenroll_context(identity)).decode().split(":", 1)
+        issued_at = datetime.fromtimestamp(int(issued), UTC)
+    except (DecryptError, ValueError):
+        return None
+    if not timedelta(0) <= now - issued_at <= REENROLL_TTL:
+        return None
+    return secret
+
+
+async def totp_reenroll_finish(
+    session: AsyncSession,
+    identity: ResolvedSession,
+    *,
+    pending: str,
+    new_code: str,
+    password: str,
+    totp_code: str | None,
+    recovery_code: str | None,
+    now: datetime | None = None,
+) -> NewRecoveryCodes:
+    """Replace the Authenticator. Proof: the password, a code of the current Authenticator or an
+    unused recovery code (the phone may be gone), and a code of the new one. On success the old
+    secret, every recovery code, every other session and every known device are gone; the owner
+    gets 10 new codes. Throttled on the username like a login; one generic error for any mistake."""
+    now = now or utcnow()
+    ukey = throttle.user_key(identity.username)
+    await throttle.ensure_rows(session, [ukey])
+    user_row = await throttle.load(session, ukey, for_update=True)
+    wait = throttle.retry_after_s(user_row, now)
+    if wait:
+        await session.rollback()
+        raise AuthError("locked", retry_after_s=wait)
+    user = (
+        await session.execute(select(AdminUser).where(AdminUser.id == identity.user_id).with_for_update())
+    ).scalar_one()
+    password_ok = await verify_password_async(user.password_hash, password)
+    old_step: int | None = None
+    code_row: AdminRecoveryCode | None = None
+    method = "none"
+    if totp_code and totp_code.strip():
+        method = "totp"
+        old_secret = open_sealed(user.totp_secret_enc, _totp_context(user.id)).decode()
+        old_step = totp.match_step(old_secret, totp_code, user.totp_last_step, now)
+    elif recovery_code and recovery_code.strip():
+        method = "recovery"
+        digest = recovery_code_hash(recovery_code)
+        if digest is not None:
+            code_row = (
+                await session.execute(
+                    select(AdminRecoveryCode)
+                    .where(
+                        AdminRecoveryCode.user_id == user.id,
+                        AdminRecoveryCode.code_hash == digest,
+                        AdminRecoveryCode.used_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+    new_secret = _open_pending(pending, identity, now)
+    new_step = totp.match_step(new_secret, new_code, None, now) if new_secret is not None else None
+    if not password_ok or (old_step is None and code_row is None) or new_step is None:
+        if not password_ok:
+            factor = "password"
+        elif old_step is None and code_row is None:
+            factor = "second_factor"
+        else:
+            factor = "new_code" if new_secret is not None else "pending"
+        await _refuse_owner_action(
+            session,
+            user_row,
+            now,
+            action="totp_reenroll_failed",
+            target=user.username,
+            reasons={"factor": factor, "method": method},
+            code="reenroll_invalid",
+        )
+    assert new_secret is not None and new_step is not None
+    user.totp_secret_enc = seal(new_secret.encode(), _totp_context(user.id))
+    user.totp_last_step = new_step
+    user.updated_at = now
+    await session.execute(delete(AdminRecoveryCode).where(AdminRecoveryCode.user_id == user.id))
+    codes = _store_new_recovery_codes(session, user.id, now)
+    await session.execute(
+        update(AdminSession)
+        .where(
+            AdminSession.user_id == user.id,
+            AdminSession.id != identity.session_id,
+            AdminSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+    )
+    await session.execute(delete(AdminDevice).where(AdminDevice.user_id == user.id))
+    device_token = _issue_device(session, user.id, now)
+    audit.record(session, "totp_reenrolled", target=user.username, reasons={"method": method})
+    await session.commit()
+    return NewRecoveryCodes(recovery_codes=codes, device_token=device_token)

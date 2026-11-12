@@ -19,7 +19,7 @@ import {
   certificateState,
   draftFrom,
   formatBytes,
-  freshEveryHours,
+  freshText,
   meterTone,
   parseDraft,
   REALITY_STATUS,
@@ -76,10 +76,9 @@ function Stat({ icon, label, value, format, note, i }: { icon: ReactNode; label:
 
 function Summary({ s }: { s: RealitySummary }) {
   const t = s.totals;
-  const every = freshEveryHours(s.settings);
   return (
     <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
-      <Stat i={0} icon={<Zap className="size-4" />} label="کانفیگ فعال" value={t.active} format={(n) => formatNumber(Math.round(n))} note={`هر node یک کانفیگ تازه در هر ${formatNumber(every, 1)} ساعت`} />
+      <Stat i={0} icon={<Zap className="size-4" />} label="کانفیگ فعال" value={t.active} format={(n) => formatNumber(Math.round(n))} note={freshText(s.settings)} />
       <Stat i={1} icon={<ServerCog className="size-4" />} label="nodeهای Xray روشن" value={t.nodes_up} format={(n) => formatNumber(Math.round(n))} note={`از ${formatNumber(t.nodes_enabled)} node که Xray دارند`} />
       <Stat i={2} icon={<HardDrive className="size-4" />} label="مصرف همه‌ی کانفیگ‌ها" value={t.used_bytes} format={formatBytes} note="جمع ترافیک؛ به هیچ کاربری وصل نیست" />
       <Stat
@@ -135,10 +134,10 @@ function LinkRow({ label, listed, url, active }: { label: string; listed: boolea
   );
 }
 
-function ConfigItem({ c, now }: { c: RealityConfig; now: Date }) {
+function ConfigItem({ c, now, settings }: { c: RealityConfig; now: Date; settings: RealitySettingsView }) {
   const st = REALITY_STATUS[c.status];
   const active = c.status === "active";
-  const u = usage(c, now);
+  const u = usage(c, now, settings);
   const left = Math.max(0, (new Date(c.expires_at).getTime() - now.getTime()) / 1000);
   const xhttp = c.xhttp;
   return (
@@ -183,7 +182,7 @@ function ConfigItem({ c, now }: { c: RealityConfig; now: Date }) {
   );
 }
 
-function ConfigsCard({ configs }: { configs: RealityConfig[] }) {
+function ConfigsCard({ configs, settings }: { configs: RealityConfig[]; settings: RealitySettingsView }) {
   const now = useNow(30_000);
   const { current, ended } = splitEnded(sortConfigs(configs), isEndedConfig);
   return (
@@ -203,14 +202,14 @@ function ConfigsCard({ configs }: { configs: RealityConfig[] }) {
         ) : (
           <ul className="flex flex-col gap-2.5">
             {current.map((c) => (
-              <ConfigItem key={c.id} c={c} now={now} />
+              <ConfigItem key={c.id} c={c} now={now} settings={settings} />
             ))}
           </ul>
         )}
         <EndedSection count={ended.length} hint="زمان یا حجمشان تمام شد یا سرورشان کنار رفت." action={<PurgeEndedButton />}>
           <ul className="flex flex-col gap-2.5">
             {ended.map((c) => (
-              <ConfigItem key={c.id} c={c} now={now} />
+              <ConfigItem key={c.id} c={c} now={now} settings={settings} />
             ))}
           </ul>
         </EndedSection>
@@ -441,7 +440,7 @@ function SettingsCard({ initial, defaults }: { initial: RealitySettingsView; def
           <Field
             label="کانفیگ فعال برای هر node"
             htmlFor="r-per"
-            hint={settings ? `یعنی یک کانفیگ تازه هر ${formatNumber(freshEveryHours(settings), 1)} ساعت در هر node.` : "۱ تا ۲۰."}
+            hint={settings ? `یعنی ${freshText(settings)}.` : "۱ تا ۲۰."}
             error={shown("configs_per_node")}
           >
             <TextInput id="r-per" inputMode="numeric" latin value={draft.configs_per_node} onChange={(e) => set("configs_per_node", e.target.value)} invalid={Boolean(shown("configs_per_node"))} />
@@ -540,7 +539,7 @@ export default function RealityPage() {
           <Skeleton className="h-72 rounded-3xl lg:col-span-7" />
           <Skeleton className="h-72 rounded-3xl lg:col-span-5" />
         </div>
-      ) : q.isError ? (
+      ) : q.isLoadingError ? (
         <Card>
           <LoadError
             error={q.error}
@@ -555,7 +554,7 @@ export default function RealityPage() {
         <div className="flex flex-col gap-4 sm:gap-5">
           <Summary s={s} />
           <div className="grid gap-4 sm:gap-5 lg:grid-cols-12">
-            <ConfigsCard configs={s.configs} />
+            <ConfigsCard configs={s.configs} settings={s.settings} />
             <NodesCard nodes={s.nodes} settings={s.settings} cert={s.certificate} />
             <SettingsCard key={JSON.stringify(s.settings)} initial={s.settings} defaults={s.defaults} />
           </div>

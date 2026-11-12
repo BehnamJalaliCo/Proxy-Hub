@@ -117,6 +117,7 @@ class ContentCandidate(Base):
         UniqueConstraint("source_id", "external_id", name="uq_content_candidates_source_external"),
         Index("ix_content_candidates_status_created", "status", "created_at"),
         Index("ix_content_candidates_source_qc", "source_id", "qc_at"),
+        Index("ix_content_candidates_media_sha256", "media_sha256"),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     source_id: Mapped[int | None] = mapped_column(
@@ -143,6 +144,8 @@ class ContentCandidate(Base):
     media_state: Mapped[str] = mapped_column(String(8), nullable=False, server_default="none")
     media_error: Mapped[str | None] = mapped_column(String(40))
     media_tries: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # The photo's sha256 (migration 0034): it outlives the file, for the «same photo» gate.
+    media_sha256: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

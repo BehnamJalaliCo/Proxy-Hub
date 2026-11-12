@@ -6,7 +6,10 @@ Non-secret state lives in ``settings`` under these keys:
 =====================  ==================================================================
 ``telegram.bot``       ``{"id", "username", "set_at"}`` of the bot whose token is in the vault
 ``telegram.owner``     ``{"chat_id", "paired_at"}``: the owner's private chat (not a secret)
-``telegram.channels``  ``{"main"?: Channel, "test"?: Channel}`` with the bot's rights in each
+``telegram.channels``  ``{"main"?: Channel, "test"?: Channel}`` with the bot's rights in each,
+                       read when the owner sets a channel and again once a day
+                       (proxyhub/reconcilers/telegram.py, ``telegram_channels``)
+``telegram.channels_check``  ``{"at", "errors": {role: error}}``: that daily read's last try
 ``telegram.posting``   ``{"quiet_windows": [{"start","end"}], "post_interval_min"}`` (D21)
 ``telegram.updates``   ``{"bot_id", "offset", "last_poll_at", "error"}`` of the getUpdates loop
 ``telegram.health``    ``{"error", "at"}``: last bot-wide problem (e.g. the token was revoked)
@@ -33,6 +36,7 @@ from proxyhub.db.models import Outbox, Setting
 from proxyhub.db.models_telegram import ChannelPost, TelegramPacing, TelegramPairing
 from proxyhub.fleet.actions import iso
 from proxyhub.telegram import pairing
+from proxyhub.telegram.client import ChatInfo, MemberRights
 from proxyhub.telegram.schedule import QuietWindow
 from proxyhub.vault import SecretValue, Vault, secret_exists
 
@@ -42,6 +46,7 @@ BOT_SECRET: Final = "telegram:bot"  # noqa: S105 - the vault NAME of the token, 
 KEY_BOT: Final = "telegram.bot"
 KEY_OWNER: Final = "telegram.owner"
 KEY_CHANNELS: Final = "telegram.channels"
+KEY_CHANNELS_CHECK: Final = "telegram.channels_check"
 KEY_POSTING: Final = "telegram.posting"
 KEY_UPDATES: Final = "telegram.updates"
 KEY_HEALTH: Final = "telegram.health"
@@ -261,6 +266,38 @@ async def save_channel(db: Db, role: str, channel: dict[str, Any]) -> None:
     current = await channels(db)
     current[role] = channel
     await put_setting(db, KEY_CHANNELS, current)
+
+
+def channel_record(chat: ChatInfo, rights: MemberRights, now: datetime) -> dict[str, Any]:
+    """A stored channel (``telegram.channels``) from getChat and the bot's own getChatMember: the same
+    shape when the owner sets the channel and when the daily read refreshes it. ``username`` is the
+    public ``@name``, or the numeric id of a channel without one."""
+    return {
+        "chat_id": chat.id,
+        "username": f"@{chat.username}" if chat.username else str(chat.id),
+        "title": chat.title or "",
+        "can_post": rights.can_post,
+        "can_edit": rights.can_edit,
+        "can_delete": rights.can_remove,
+        "checked_at": iso(now),
+    }
+
+
+async def refresh_channel(db: Db, role: str, record: dict[str, Any]) -> dict[str, Any] | None:
+    """Store a fresh read of ``role``'s channel (:func:`channel_record`), only while the stored one is
+    still that chat (the owner may have set another meanwhile; the row is locked for the check). The
+    chat id is never changed and a record is never dropped. Returns the record it replaced, or None
+    when nothing was stored."""
+    row = (
+        await db.execute(select(Setting.value).where(Setting.key == KEY_CHANNELS).with_for_update())
+    ).first()
+    value = dict(row[0]) if row is not None and isinstance(row[0], dict) else {}
+    old = value.get(role)
+    if not isinstance(old, dict) or old.get("chat_id") != record.get("chat_id"):
+        return None
+    value[role] = {**old, **record}
+    await put_setting(db, KEY_CHANNELS, value)
+    return dict(old)
 
 
 def public_channel(channel: dict[str, Any] | None) -> dict[str, Any] | None:

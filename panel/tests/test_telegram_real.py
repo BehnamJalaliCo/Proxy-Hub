@@ -28,7 +28,7 @@ from test_telegram_support import LiveApi, all_logs, assert_no_token, clean_tele
 from proxyhub.api.deps import require_admin
 from proxyhub.api.routes_telegram import get_bot_factory, get_vault, render_test_post
 from proxyhub.config import read_secret_file
-from proxyhub.reconcilers.telegram import ApiWatchdogReconciler
+from proxyhub.reconcilers.telegram import ApiWatchdogReconciler, TelegramChannelsReconciler
 from proxyhub.telegram import outbox, store
 from proxyhub.telegram.alerts import ALERT_DEDUPER, ALERT_TARGETS
 from proxyhub.telegram.client import BadRequest, BotClient
@@ -237,3 +237,29 @@ async def test_api_watchdog_tells_the_owner_and_then_the_recovery(engine: AsyncE
     await dog.try_run_once(engine)
     assert dog.alerted is False  # and "API پنل دوباره در دسترس است"
     await api.stop()
+
+
+@pytest.mark.db
+async def test_the_daily_read_refreshes_the_stored_test_channel(engine: AsyncEngine, vault: Vault) -> None:
+    token, channel = _token(), _channel()
+    async with BotClient(token) as bot:
+        me = await bot.get_me()
+        chat = await bot.get_chat(channel)
+        rights = await bot.get_chat_member(chat.id, me.id)
+    old = {"chat_id": chat.id, "username": "@renamed_meanwhile", "title": "old", "can_post": True,
+           "can_edit": True, "can_delete": True, "checked_at": "2026-11-01T00:00:00Z"}  # fmt: skip
+    async with engine.begin() as conn:
+        now = datetime.now(UTC)
+        await store.save_bot(
+            conn, vault, info=store.BotInfo(id=me.id, username=me.username), token=SecretValue(token), now=now
+        )
+        await store.save_channel(conn, "test", old)
+        await store.save_channel(conn, "main", {**old, "chat_id": -1000000000001})  # not ours: refused
+    loop = TelegramChannelsReconciler(vault_factory=lambda: vault)
+    assert await loop.try_run_once(engine) and loop.last_outcome == "failed"  # main could not be read
+    async with engine.connect() as conn:
+        stored = await store.channels(conn)
+    fresh = stored["test"]
+    assert fresh["chat_id"] == chat.id and fresh["checked_at"] > old["checked_at"]
+    assert fresh == store.channel_record(chat, rights, datetime.fromisoformat(fresh["checked_at"]))
+    assert stored["main"] == {**old, "chat_id": -1000000000001}  # kept as it was

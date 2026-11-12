@@ -15,8 +15,9 @@ What the panel does here: a strict schema (unknown fields refused, strict types,
 the whole report was already scanned for anything IP-shaped by ``proxyhub.agent_api.reports``), the
 fold rule enforced again, percentiles dropped below :data:`MIN_USERS` users, and an upsert keyed by
 (node, agent run, day[, hour, proxy] / [dimension, key]). Counters are cumulative within one agent
-run (``boot_id``), so a later report of the same run replaces the earlier one, and two runs on one
-day add up.
+run (``boot_id``), so a later report of the same run replaces the earlier one. Across two runs on
+one day, byte counters add up, but user counts do not (a restarted agent counts the same people
+again under a new salt): the report takes the larger run's users (proxyhub/analytics/report.py).
 """
 
 from __future__ import annotations

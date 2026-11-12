@@ -11,10 +11,13 @@
   - hashtags: a line of hashtags only (a source's tag line) is dropped; a hashtag of the source's own
     name is dropped; any other hashtag inside a sentence keeps its word (``#فوری`` -> ``فوری``,
     ``#جام_جهانی`` -> ``جام جهانی``), so the sentence still reads;
-  - the source's signature is stripped: among the last lines, a short line that names the source
-    (its label or username), invites to join or follow (``عضو شوید``, ``🆔``, ``join`` ...) or lists
-    two or more platforms (``اینستاگرام | تلگرام``; one platform name alone is news, not a
-    signature), and every line left with no letter or digit after the steps above (``➖➖➖``);
+  - the source's signature is stripped: among the last lines, a short line that is mostly the
+    source's name (its label or username as a whole word, with at most two other words:
+    ``📡 خبرگزاری ایسنا``), invites to join or follow (``عضو شوید``, ``🆔``, ``join`` ...) or is a
+    list of two or more platforms and nothing else (``اینستاگرام | تلگرام``; a sentence that names
+    platforms, ``تلگرام و اینستاگرام رفع فیلتر شدند``, is news), and every line left with no
+    letter or digit after the steps above (``➖➖➖``). Stripping never empties the text: the only
+    line left goes only when it is nothing but an invitation;
   - direction marks and invisible characters are removed (the zero-width non-joiner of Persian
     words stays); spaces and empty lines are collapsed;
   - **proxies are not content** (the owner, 2026-11-07: proxy channels' news is good, their proxies
@@ -57,14 +60,18 @@ _HASHTAG = re.compile(r"(?<![\w#])#([\w‌]+)")
 _INVISIBLE = re.compile("[​‎‏‪-‮⁠⁦-⁩؜﻿­]")
 _SPACES = re.compile(r"[ \t  -   　]+")
 _HAS_WORD = re.compile(r"[^\W_]")  # a letter or a digit, in any script
-_JOIN_WORDS = re.compile(
-    r"(?i)عضو\s*شو|عضویت|جوین|بپیوندید|دنبال\s*کنید|کانال\s*ما|لینک\s*کانال|🆔|"
-    r"\bjoin\b|\bsubscribe\b|\bfollow\s+us\b"
+# An invitation to join or follow, as a channel signs off. Whole words only: «عضو شورای»,
+# «کانال مانش» and «عضویت ایران در …» are ordinary words in news.
+_INVITATION = re.compile(
+    r"(?i)عضو\s*شو(?:ید|یم|ین)?(?!\w)|جوین|بپیوندید|دنبال\s*کنید|کانال\s*ما(?:ن)?(?!\w)|"
+    r"لینک\s*کانال|🆔|\bjoin\b|\bsubscribe\b|\bfollow\s+us\b"
 )
 _PLATFORMS = re.compile(
     r"(?i)instagram|اینستاگرام|youtube|یوتیوب|twitter|توییتر|توئیتر|telegram|تلگرام|facebook|فیسبوک|"
     r"aparat|آپارات|whatsapp|واتساپ|website|وبسایت|وب‌سایت"
 )
+_LIST_WORDS: Final = frozenset({"و", "یا", "and", "or"})  # what may join a list of platforms
+SIGNATURE_NAME_WORDS: Final = 2  # other words a line may have and still be the source's name
 _SENTENCE_END = re.compile(r"[.!?؟؛…](?=\s)")
 # A proxy link or config: MTProto (tg:// and t.me / telegram.me), the Xray/V2Ray family and its kin,
 # and a bare MTProto secret parameter.
@@ -181,13 +188,27 @@ def _only_hashtags(line: str) -> bool:
     return bool(words) and all(w.startswith("#") for w in words)
 
 
+def _names_line(line: str, names: list[str]) -> bool:
+    """The line is mostly a source's name: the name as a whole word, and at most
+    :data:`SIGNATURE_NAME_WORDS` other words (``کانال خبری فارس``, not ``زلزله استان فارس را لرزاند``)."""
+    text = norm_text_keep_all(line)
+    for name in names:
+        norm = norm_text_keep_all(name)
+        pattern = re.compile(rf"(?<!\w){re.escape(norm)}(?!\w)") if norm else None
+        if pattern is not None and pattern.search(text):
+            return len(_words(pattern.sub(" ", text))) <= SIGNATURE_NAME_WORDS
+    return False
+
+
 def _is_signature(line: str, names: list[str]) -> bool:
     if len(line) > SIGNATURE_MAX_CHARS:
         return False
-    low = line.lower()
-    if any(n in low for n in names) or _JOIN_WORDS.search(line):
+    if _INVITATION.search(line) or _names_line(line, names):
         return True
-    return len(_PLATFORMS.findall(line)) >= 2  # "اینستاگرام | تلگرام | یوتیوب": a list of pages
+    # "اینستاگرام | تلگرام | یوتیوب": a list of pages, nothing else
+    platforms = _PLATFORMS.findall(line)
+    rest = _words(_PLATFORMS.sub(" ", line))
+    return len(platforms) >= 2 and all(w in _LIST_WORDS for w in rest)
 
 
 def _words(text: str) -> list[str]:
@@ -245,6 +266,8 @@ def clean_source_text(text: str, source_names: Iterable[str] = ()) -> str:
             continue
         if not _is_signature(last, names):
             break
+        if not any(line.strip() for line in lines[:-1]) and not _INVITATION.search(last):
+            break  # never the whole text: a short headline may name the source or two platforms
         lines.pop()
         seen += 1
     return tidy("\n".join(lines))
@@ -334,13 +357,6 @@ def norm_text_keep_all(text: str) -> str:
     letters, digits and case, for matching a name or a word inside a caption."""
     t = _DIACRITICS.sub("", text.translate(_LETTERS)).lower()
     return " ".join(_NON_WORD.sub(" ", t).split())
-
-
-# An invitation to join or follow, as a channel signs off (narrower than _JOIN_WORDS: «عضویت» and
-# a list of platforms are ordinary words in news).
-_INVITATION = re.compile(
-    r"(?i)عضو\s*شو|جوین|بپیوندید|دنبال\s*کنید|کانال\s*ما|لینک\s*کانال|🆔|\bjoin\b|\bsubscribe\b|\bfollow\s+us\b"
-)
 
 
 def looks_like_signature(text: str) -> bool:

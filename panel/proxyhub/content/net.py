@@ -25,8 +25,9 @@ page, a feed) and from addresses THOSE pages name (photo and video URLs). None o
   (proxyhub/content/telegram_preview.py, rss.py) and keep plain text and checked URLs only.
 
 Errors are :class:`FetchError` with a short code (``blocked_address``, ``too_big``, ``http_404``,
-``timeout`` ...); the dashboard shows the code's Persian text (proxyhub/content/messages.py). Their
-text never holds the fetched content.
+``timeout`` ...), whatever went wrong on the way (a malformed redirect, a TLS alert in the middle of
+the body); the dashboard shows the code's Persian text (proxyhub/content/messages.py). Their text
+never holds the fetched content.
 """
 
 from __future__ import annotations
@@ -84,7 +85,8 @@ class FetchError(Exception):
 
 def check_url(url: str) -> str:
     """``url`` if it is an https URL on port 443 to a public-looking DNS name, else FetchError
-    (``bad_url``). Fragments are dropped."""
+    (``bad_url``). Fragments are dropped. The result (percent-encoded, so it can be longer than the
+    input) is at most :data:`MAX_URL_CHARS` too: it is what gets stored."""
     if not isinstance(url, str) or not url or len(url) > MAX_URL_CHARS or any(c.isspace() for c in url):
         raise FetchError("bad_url")
     try:
@@ -101,7 +103,10 @@ def check_url(url: str) -> str:
         raise FetchError("bad_url")
     path = quote(parts.path or "/", safe=_URL_SAFE)
     query = f"?{quote(parts.query, safe=_URL_SAFE + '?')}" if parts.query else ""
-    return f"https://{host}{path}{query}"
+    checked = f"https://{host}{path}{query}"
+    if len(checked) > MAX_URL_CHARS:
+        raise FetchError("bad_url")
+    return checked
 
 
 def valid_hostname(host: str) -> bool:
@@ -328,7 +333,11 @@ class SafeHttp:
                     result = await self._one(current, limit=limit, accept=accept)
                     if isinstance(result, Fetched):
                         return result
-                    current = check_url(urljoin(current, result))
+                    try:
+                        target = urljoin(current, result)
+                    except ValueError:  # a malformed Location ("https://[")
+                        raise FetchError("bad_redirect") from None
+                    current = check_url(target)
         except TimeoutError:
             raise FetchError("timeout") from None
         raise FetchError("too_many_redirects")
@@ -376,6 +385,10 @@ class SafeHttp:
             cause = exc.__cause__ or exc.__context__
             raise FetchError("tls_failed" if isinstance(cause, ssl.SSLError) else "connect_failed") from None
         except (httpcore.ProtocolError, httpcore.NetworkError, httpcore.UnsupportedProtocol):
+            raise FetchError("connect_failed") from None
+        except TimeoutError:
+            raise FetchError("timeout") from None
+        except (ssl.SSLError, OSError):  # a TLS alert or a socket error while the body is read
             raise FetchError("connect_failed") from None
 
 

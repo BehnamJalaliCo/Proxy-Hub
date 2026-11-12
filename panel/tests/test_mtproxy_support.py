@@ -75,6 +75,7 @@ async def seed_pending(
     port: int,
     now: datetime | None = None,
     step: str = "code",
+    via: str = "app",
 ) -> store.PendingLogin:
     now = now or datetime.now(UTC)
     login_id = secrets.token_hex(8)
@@ -86,7 +87,7 @@ async def seed_pending(
         phone_code_hash=SecretValue(secrets.token_hex(9)),
     )
     await store.put_pending(redis, vault, pending)
-    row = state.code_sent(login_id=login_id, phone_masked=MASKED, via="app", length=5, now=now)
+    row = state.code_sent(login_id=login_id, phone_masked=MASKED, via=via, length=5, now=now)
     if step == "password":
         row = state.password_needed(row, now)
     async with engine.begin() as conn:

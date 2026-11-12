@@ -12,7 +12,8 @@ Every round (a minute), with no transaction open while the network answers:
    proxyhub/content/telegram_account.py) on one connection for the round, under the account's
    lock, every 10 minutes; while the account is not usable (not connected, kill switch, vault)
    its web preview is read instead, and while the account is busy or Telegram asked it to wait,
-   the source waits for a later round;
+   the source's next read moves to the end of the wait (or :data:`WAIT_RETRY` later), with no
+   error, so the round's places go to the sources that can be read (an RSS feed is not starved);
 3. **media**: up to :data:`MEDIA_PER_ROUND` files are downloaded (approved videos first, then
    photos and video thumbnails of the queue), each checked by its real bytes
    (proxyhub/content/media.py), while the stored total stays under :data:`MEDIA_STORE_MAX`. A
@@ -43,6 +44,7 @@ from proxyhub.content.net import MEDIA_DEADLINE_S, FetchError, SafeHttp
 from proxyhub.content.plugins import PLUGINS, SourcePlugin
 from proxyhub.content.telegram_account import (
     ACCOUNT_FETCH_EVERY,
+    ACCOUNT_WAIT,
     USE_PREVIEW,
     AccountRead,
     AccountReader,
@@ -59,6 +61,7 @@ ACCOUNT_MEDIA_PER_ROUND: Final = 4
 SUPERVISOR_LOCK_WAIT_S: Final = 30.0
 MEDIA_STORE_MAX: Final = 300 * 1024 * 1024
 PRUNE_EVERY: Final = timedelta(hours=1)
+WAIT_RETRY: Final = timedelta(minutes=1)  # a Telegram source the account could not read now
 # Download errors no retry can fix.
 FINAL_ERRORS: Final = frozenset(
     {"too_big", "bad_url", "blocked_address", "bad_content_type", "http_404", "http_410", "media_gone"}
@@ -72,6 +75,12 @@ _LIMIT: Final = {
 
 HttpFactory = Callable[[], SafeHttp]
 Clock = Callable[[], datetime]
+
+
+class AccountWait(FetchError):
+    """A file only the operator account can download, while the account cannot be used (D55: the
+    kill switch, busy, a flood wait ...). The panel's state, not the file's: it is tried later and
+    costs the candidate no try (the content supervisor, proxyhub/content/supervisor.py)."""
 
 
 async def fresh_video_url(
@@ -104,11 +113,17 @@ async def fetch_media(
         if found is None:
             raise FetchError("bad_url")
         if account is None:
-            raise FetchError("account_unavailable")
+            raise AccountWait("account_unavailable")
         async with account.connect({found[0]}, wait_s=SUPERVISOR_LOCK_WAIT_S) as read:
             if read is None:
-                raise FetchError(account.last_unavailable or "account_unavailable")
-            return await read.download(task.url, task.role)
+                code = account.last_unavailable or "account_unavailable"
+                raise AccountWait(code) if code in ACCOUNT_WAIT else FetchError(code)
+            try:
+                return await read.download(task.url, task.role)
+            except FetchError as exc:
+                if read.stopped:  # a flood wait began during the download
+                    raise AccountWait(exc.code) from None
+                raise
     url = await fresh_video_url(http, task, plugins) if task.role == "video" else task.url
     fetched = await http.get(
         url, limit=_LIMIT[task.role], accept=_ACCEPT[task.role], deadline_s=MEDIA_DEADLINE_S
@@ -165,6 +180,11 @@ class Engine:
                         result.waiting.update({s.id: reason for s in by_account})
                 else:
                     stored_bytes = await self._account_round(read, by_account, stored_bytes, result)
+            if result.waiting:
+                hold = self.account.hold_until
+                until = max(self.clock() + WAIT_RETRY, hold or now)
+                async with self.engine.begin() as conn:
+                    await sources.defer(conn, result.waiting.keys(), now, until)
         async with self.http_factory() as http:
             for source in others:
                 result.read[source.id] = await self._read(http, source)
@@ -234,7 +254,13 @@ class Engine:
             code = exc.code
         except Exception as exc:  # a parser bug must not stop the loop, nor print fetched text
             log.error("content: reading source %d failed (%s)", source.id, type(exc).__name__)
-        return await self._store(source, items, code, every)
+        if items is None:  # a database that is really down still stops the round (the loop backs off)
+            return await self._store(source, None, code, every)
+        try:
+            return await self._store(source, items, code, every)
+        except Exception as exc:  # one source's items must not stop the round; its transaction is gone
+            log.error("content: storing source %d failed (%s)", source.id, type(exc).__name__)
+            return await self._store(source, None, "internal", every)
 
     async def _store(
         self, source: sources.Source, items: list[FetchedItem] | None, code: str, every: timedelta
@@ -257,18 +283,24 @@ class Engine:
     async def _save_download(
         self, task: candidates.MediaTask, fetching: Awaitable[tuple[media.MediaInfo, bytes]]
     ) -> tuple[str, int]:
+        """Await one download and store it. An error of a kind the panel does not know (in the fetch
+        or in storing) counts as one of the file's tries (``internal``) instead of ending the round."""
         try:
             info, body = await fetching
+            async with self.engine.begin() as conn:
+                if await candidates.get(conn, task.candidate_id) is None:
+                    return "gone", 0
+                await candidates.save_media(conn, task, info, body, self.clock())
         except FetchError as exc:
             await self._failed(task, exc.code, final=exc.code in FINAL_ERRORS)
             return exc.code, 0
         except media.MediaRefused as exc:
             await self._failed(task, exc.code, final=True)
             return exc.code, 0
-        async with self.engine.begin() as conn:
-            if await candidates.get(conn, task.candidate_id) is None:
-                return "gone", 0
-            await candidates.save_media(conn, task, info, body, self.clock())
+        except Exception as exc:  # the type only: a message could carry fetched text
+            log.error("content: media of candidate %d failed (%s)", task.candidate_id, type(exc).__name__)
+            await self._failed(task, "internal", final=False)
+            return "internal", 0
         return "ok", len(body)
 
     async def _failed(self, task: candidates.MediaTask, code: str, *, final: bool) -> None:

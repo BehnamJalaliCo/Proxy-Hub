@@ -8,17 +8,23 @@ Each check gives a short code (Persian in the dashboard, proxyhub/content/messag
 * **shape**: ``title_empty``, ``title_too_long``, ``title_emoji`` (exactly one emoji, at the very
   start), ``body_too_long``, ``caption_too_long`` (title line + body over the media caption's room),
   ``control_chars``;
-* **nothing that leads elsewhere**: ``link`` (http(s), www, t.me, tg:, a bare domain), ``mention``
-  (any ``@``), ``hashtag``, ``phone`` (eight or more digits in a row, Persian digits included),
-  ``signature`` (an invitation to join or follow, a list of platforms, 🆔), ``source_name`` (the
-  name or username of any of the owner's sources);
+* **nothing that leads elsewhere**: ``link`` (http(s), www, t.me, tg:, any Latin ``name.tld``:
+  Telegram makes every bare domain a link), ``mention`` (any ``@``), ``hashtag``, ``phone`` (eight
+  or more digits, single spaces or hyphens between them allowed, Persian digits included; except a
+  range of two years such as ۱۴۰۵-۱۴۰۶), ``signature`` (an invitation to join or follow, 🆔),
+  ``source_name`` (the name or username of any of the owner's sources);
 * **language**: ``not_persian`` (fewer than 80% of the letters are Persian/Arabic script);
 * **the owner's words**: ``forbidden_word``.
+
+Names and words are matched with invisible characters removed too (a zero-width character inside
+``BBC`` must not hide it), and the title loses the same invisible and direction characters as the
+body.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final
@@ -32,16 +38,20 @@ from proxyhub.telegram.templates import utf16_len, visible_text
 
 PERSIAN_SHARE: Final = 0.8
 MIN_LETTERS: Final = 6
+# Any Latin name.tld (x.com, youtu.be, winbet.pro): ASCII lookarounds, not \b, so a domain glued to
+# a Persian word is caught too.
 _URL = re.compile(
     r"(?i)https?:|\bwww\.|\b(?:t|telegram)\.(?:me|dog)\b|\btg:|"
-    r"\b[a-z0-9-]{2,63}\.(?:com|net|org|ir|io|me|co|info|news|tv|app|xyz|site|online|link|ly|gl|to|cc|biz|"
-    r"uk|de|fr|ru|tr|ai|live|store|shop|vip|top|club)\b"
+    r"(?<![a-z0-9-])[a-z0-9][a-z0-9-]{0,62}(?:\.[a-z0-9-]{1,63})*\.(?:xn--[a-z0-9-]{2,59}|[a-z]{2,24})"
+    r"(?![a-z0-9-])"
 )
 _HASHTAG = re.compile(r"#[\w‌]")
 _DIGITS: Final = str.maketrans(
     {**{chr(0x06F0 + i): str(i) for i in range(10)}, **{chr(0x0660 + i): str(i) for i in range(10)}}
 )
 _PHONE = re.compile(r"(?:\+|00)?\d(?:[ \-]?\d){7,}")
+_YEAR = r"(?:1[34]\d\d|19\d\d|20\d\d)"
+_YEAR_PAIR = re.compile(rf"{_YEAR}[ \-]{_YEAR}")  # a school year or a season: ۱۴۰۵-۱۴۰۶
 _CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 _SPACES = re.compile(r"\s+")
 
@@ -58,9 +68,36 @@ def persian_share(text: str) -> float:
     return sum(1 for c in letters if _persian_letter(c)) / len(letters)
 
 
+_ZWNJ: Final = "\u200c"
+_FILLERS: Final = frozenset({0x034F, 0x115F, 0x1160, 0x3164, 0xFFA0})
+
+
+def _invisible(c: str) -> bool:
+    """A character that shows nothing: a format character (the Persian ZWNJ aside, it splits
+    words), a variation selector, the combining grapheme joiner, a Hangul filler."""
+    o = ord(c)
+    return c != _ZWNJ and (
+        unicodedata.category(c) == "Cf" or o in _FILLERS or 0xFE00 <= o <= 0xFE0F or 0xE0100 <= o <= 0xE01EF
+    )
+
+
+def visible(text: str) -> str:
+    return "".join(c for c in text if not _invisible(c))
+
+
 def normalized(text: str) -> str:
-    """Lower case, Arabic letter forms and digits unified, ZWNJ and punctuation as spaces."""
+    """Lower case, Arabic letter forms and digits unified, invisible characters removed, ZWNJ and
+    punctuation as spaces."""
+    return _spaced(visible(text))
+
+
+def _spaced(text: str) -> str:
+    """Like :func:`normalized`, but an invisible character splits the word as punctuation does."""
     return " ".join(clean.norm_text_keep_all(text).split())
+
+
+def _has_phone(text: str) -> bool:
+    return any(not _YEAR_PAIR.fullmatch(m.group()) for m in _PHONE.finditer(text))
 
 
 def _has_name(text_norm: str, name_norm: str) -> bool:
@@ -89,7 +126,7 @@ class Caption:
 
 
 def tidy_caption(verdict: Verdict) -> Caption:
-    title = _SPACES.sub(" ", verdict.title).strip()
+    title = _SPACES.sub(" ", clean.tidy(verdict.title)).strip()
     body = clean.tidy(verdict.body)
     return Caption(title, body)
 
@@ -133,16 +170,16 @@ def check(
         codes.append("mention")
     if _HASHTAG.search(both) or "＃" in both:
         codes.append("hashtag")
-    if _PHONE.search(both.translate(_DIGITS)):
+    if _has_phone(both.translate(_DIGITS)):
         codes.append("phone")
     if clean.looks_like_signature(both):
         codes.append("signature")
-    text_norm = normalized(both)
-    if any(_has_name(text_norm, name) for name in names):
+    texts = (normalized(both), _spaced(both))  # either way of reading an invisible character
+    if any(_has_name(t, name) for name in names for t in texts):
         codes.append("source_name")
     if persian_share(both) < PERSIAN_SHARE:
         codes.append("not_persian")
     words = [normalized(w) for w in config.forbidden_words]
-    if any(w and w in text_norm for w in words):
+    if any(w and w in t for w in words for t in texts):
         codes.append("forbidden_word")
     return codes

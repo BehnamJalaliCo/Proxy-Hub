@@ -119,6 +119,7 @@ export const FORBIDDEN_PORTS: ReadonlyMap<number, string> = new Map([
   [2083, "پورت ۲۰۸۳ مال VLESS + XHTTP روی همه‌ی nodeهاست."],
   [9090, "پورت ۹۰۹۰ مال آمار داخلی Telemt است."],
   [9091, "پورت ۹۰۹۱ مال API داخلی Telemt است."],
+  [10085, "پورت ۱۰۰۸۵ مال API داخلی Xray است و فایروال node آن را میبندد."],
 ]);
 
 export interface MtprotoDraft {

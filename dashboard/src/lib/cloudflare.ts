@@ -4,7 +4,7 @@
 // The server decides; these only explain.
 
 import { formatDurationSeconds, formatJalali, formatNumber, formatRelative } from "./format";
-import { checkStatusText, deleteBlockedText, deleteWaitText, POOL_ORDER, poolStateInfo, type Tone } from "./labels";
+import { checkStatusText, deleteBlockedText, deleteWaitText, errorCodeText, POOL_ORDER, poolStateInfo, type Tone } from "./labels";
 import type { CfStatus, CfZone, DomainCheck, PoolState } from "./types";
 
 /** A Persian hint if the pasted text cannot be an API token (null if it looks right). Never echoes it. */
@@ -17,6 +17,20 @@ export function cfTokenProblem(raw: string): string | null {
 }
 
 /** Active first, then standby, unused, filtered, retired, deleted; by name within a group. */
+/** What the hourly re-check found, under the token badge. A token that no longer passes stops
+ * every DNS change, so the owner is told why and that slot names stay where they are. An outage
+ * of Cloudflare itself keeps the token verified (it is not the token's fault): only a soft note. */
+export function tokenStateNote(s: Pick<CfStatus, "token_set" | "verified" | "error">): { tone: "danger" | "warning"; text: string } | null {
+  if (!s.token_set) return null;
+  if (!s.verified) {
+    const why =
+      (s.error && s.error !== "cf_unavailable" ? errorCodeText(s.error) : undefined) ?? "توکن ذخیره‌شده در آخرین وارسی پذیرفته نشد.";
+    return { tone: "danger", text: `${why} تا ثبت توکن درست، نام‌های DNS جابه‌جا نمیشوند.` };
+  }
+  if (s.error === "cf_unavailable") return { tone: "warning", text: "آخرین وارسی: پاسخ Cloudflare به دست نیامد؛ توکن هنوز وارسی‌شده است." };
+  return null;
+}
+
 export function sortZones(zones: CfZone[]): CfZone[] {
   const rank = (z: CfZone) => {
     const i = POOL_ORDER.indexOf(z.pool_state);

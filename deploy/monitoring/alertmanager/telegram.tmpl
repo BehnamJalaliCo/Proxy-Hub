@@ -1,8 +1,11 @@
-{{/* Telegram message to the owner (Persian; parse_mode HTML, so every value is HTML-escaped). */}}
+{{/* Telegram message to the owner (Persian; parse_mode HTML, so every value is HTML-escaped).
+A resolved alert keeps the annotations of its last firing evaluation, so its description still says
+the problem is there: it shows only its summary, as the panel's own renderer does. */}}
 {{ define "proxyhub.telegram.message" -}}
 {{ if eq .Status "firing" }}<b>هشدار Proxy-Hub</b>{{ else }}<b>برطرف شد (Proxy-Hub)</b>{{ end }}
 {{ range .Alerts -}}
-{{ if eq .Status "firing" }}●{{ else }}○{{ end }} <b>{{ .Annotations.summary | html }}</b>
+{{ if eq .Status "firing" }}● <b>{{ .Annotations.summary | html }}</b>
 {{ .Annotations.description | html }}
-{{ end -}}
+{{ else }}○ <b>{{ .Annotations.summary | html }}</b>
+{{ end }}{{ end -}}
 {{- end }}

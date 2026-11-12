@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
   API_KEY_RE,
   bridgeState,
+  canRequeue,
   captionErrors,
   captionLength,
   CATEGORY_LABEL,
@@ -13,6 +16,7 @@ import {
   parseCount,
   parseWords,
   QC_NUMBERS,
+  qcFormKey,
   qcVerdict,
   qualityText,
   sizeText,
@@ -184,6 +188,11 @@ const CONFIG: QcView["config"] = {
   source_min: 10,
   source_max_reject_pct: 80,
   alert_after_hours: 6,
+  breaking_enabled: true,
+  breaking_per_day: 5,
+  breaking_gap_minutes: 20,
+  breaking_max_age_min: 30,
+  breaking_min_sources: 2,
 };
 
 const view = (over: Partial<QcView> = {}): QcView => ({
@@ -211,6 +220,38 @@ describe("the content supervisor (D52)", () => {
   it("names every category and flag in Persian", () => {
     for (const label of [...Object.values(CATEGORY_LABEL), ...Object.values(FLAG_LABEL)]) expect(label).toMatch(PERSIAN);
     for (const f of QC_NUMBERS) expect(f.label).toMatch(PERSIAN);
+  });
+
+  it("edits every number of the server's settings, with the server's ranges (D56 included)", () => {
+    // Field(default=..., ge=..., le=...) of every int setting in panel/proxyhub/content/qc_settings.py.
+    const src = readFileSync(fileURLToPath(new URL("../../../panel/proxyhub/content/qc_settings.py", import.meta.url)), "utf8");
+    const server = new Map(
+      [...src.matchAll(/^ {4}(\w+): int = Field\(default=\d+, ge=(\d+), le=(\d+)\)/gm)].map((m) => [m[1] ?? "", [Number(m[2]), Number(m[3])]]),
+    );
+    server.delete("timeout_s"); // set by the panel, not on the form
+    expect(server.has("breaking_per_day")).toBe(true);
+    const ours = new Map(QC_NUMBERS.map((f) => [f.key as string, [f.min, f.max]]));
+    expect(ours).toEqual(server);
+    for (const f of QC_NUMBERS) expect(f.key in CONFIG, f.key).toBe(true);
+  });
+
+  it("offers «back to the queue» for a rejected item only while its news is under 48 hours old", () => {
+    const now = new Date("2026-11-12T12:00:00Z");
+    const rejected = (published_at: string | null, created_at = "2026-11-12T00:00:00Z") => ({ status: "rejected" as const, published_at, created_at });
+    expect(canRequeue(rejected("2026-11-11T12:00:00Z"), now)).toBe(true); // 24 h
+    expect(canRequeue(rejected("2026-11-10T12:00:00Z"), now)).toBe(true); // exactly 48 h
+    expect(canRequeue(rejected("2026-11-10T11:59:00Z"), now)).toBe(false);
+    // By its own time (published_at), else when it was fetched, as the server counts it.
+    expect(canRequeue(rejected(null, "2026-11-09T00:00:00Z"), now)).toBe(false);
+    expect(canRequeue({ status: "approved", published_at: "2026-11-01T00:00:00Z", created_at: "2026-11-01T00:00:00Z" }, now)).toBe(true);
+  });
+
+  it("keeps unsaved settings when only the API key or the live fields change", () => {
+    expect(qcFormKey(view({ api_key_set: false }))).toBe(qcFormKey(view({ api_key_set: true })));
+    expect(qcFormKey(view({ calls_24h: { bridge: 9, api: 1 }, last_outcome_at: "2026-11-12T08:00:00Z" }))).toBe(qcFormKey(view()));
+    // A saved change of the config still re-reads the form.
+    expect(qcFormKey(view({ config: { ...CONFIG, mode: "review" } }))).not.toBe(qcFormKey(view()));
+    expect(qcFormKey(view({ config: { ...CONFIG, breaking_enabled: false } }))).not.toBe(qcFormKey(view()));
   });
 
   it("says how Claude can be reached", () => {

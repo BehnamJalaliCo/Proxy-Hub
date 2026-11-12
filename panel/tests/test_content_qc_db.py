@@ -51,6 +51,7 @@ from test_posts_support import PROVIDERS, clean_posts_tables, jobs, rows, setup_
 
 from proxyhub.api.deps import require_admin
 from proxyhub.content import candidates, media, qc_settings, sources, supervisor
+from proxyhub.content import engine as content_engine
 from proxyhub.content.claude_backends import VAULT_NAME
 from proxyhub.content.frames import Sampler
 from proxyhub.content.items import FetchedItem, MediaRef
@@ -58,6 +59,8 @@ from proxyhub.content.media import check_for
 from proxyhub.content.net import SafeHttp
 from proxyhub.content.qc_settings import FLAGS
 from proxyhub.content.supervisor import Supervisor
+from proxyhub.content.telegram_account import AccountReader
+from proxyhub.mtproxy import store as mtp_store
 from proxyhub.posts import links
 from proxyhub.vault import Vault
 
@@ -402,6 +405,85 @@ async def test_a_manipulation_flag_or_an_unparsable_answer_rejects(
     assert candidates.as_json(unparsable)["qc"]["checks_fa"] == ["پاسخ Claude در قالب درست نبود."]
 
 
+async def test_an_answer_the_database_cannot_keep_is_recorded_as_unparsable(
+    engine: AsyncEngine, sockdir: Path
+) -> None:
+    """A NUL in a reason made the review's UPDATE fail and roll back: the candidate stayed unreviewed
+    and was sent to Claude again at every slot."""
+    now = slot_time(1)
+    src = await source(engine, "newsfa", now - timedelta(hours=3))
+    cid = await candidate(engine, src, NEWS[0], when=now - timedelta(hours=1), views=9_000)
+    async with StubBridge(sockdir / "bridge.sock") as bridge:
+        bridge.says(answer(reasons=["ok\x00x"]))
+        out = await make(engine, sockdir, Clock(now)).run_round()
+    assert (out.action, out.decision) == ("reviewed", "reject")
+    found = await one(engine, cid)
+    assert found.qc_at is not None and (found.qc_error, found.qc_tries) == ("unparsable", 1)
+    assert [tuple(r) for r in await calls(engine)] == [("bridge", "ok", True, cid)]
+
+
+async def test_a_review_that_cannot_be_recorded_costs_a_try(
+    engine: AsyncEngine, sockdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever fails while a review is recorded, the call is kept and the candidate spends one of
+    its tries: after MAX_TRIES it is no longer offered to Claude."""
+    now = slot_time(1)
+    src = await source(engine, "newsfa", now - timedelta(hours=3))
+    cid = await candidate(engine, src, NEWS[0], when=now - timedelta(hours=1), views=9_000)
+
+    async def broken(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(Supervisor, "_decide", broken)
+    clock = Clock(now)
+    async with StubBridge(sockdir / "bridge.sock") as bridge:
+        for minute in range(supervisor.MAX_TRIES):
+            bridge.says(answer())
+            clock.at = now + timedelta(minutes=minute)
+            with pytest.raises(RuntimeError):
+                await make(engine, sockdir, clock).run_round()
+            found = await one(engine, cid)
+            assert (found.qc_tries, found.qc_error, found.qc_at) == (minute + 1, "record_failed", None)
+        assert len(await calls(engine)) == supervisor.MAX_TRIES
+        clock.at = now + timedelta(minutes=supervisor.MAX_TRIES)
+        assert (await make(engine, sockdir, clock).run_round()).action == "no_candidate"
+        assert len(bridge.reviews()) == supervisor.MAX_TRIES
+
+
+async def test_a_candidate_that_makes_claude_code_fail_is_given_up_after_its_tries(
+    engine: AsyncEngine, sockdir: Path
+) -> None:
+    """A run that fails as claude_failed (what an older bridge reports for an image the API cannot
+    read) stays an outage for the cooldown and the alert, and also spends one of the candidate's
+    tries: the same candidate does not take every review of the slot and the daily cap."""
+    now = slot_time(1)
+    src = await source(engine, "newsfa", now - timedelta(hours=3))
+    first = await candidate(engine, src, NEWS[0], when=now - timedelta(hours=1), views=60_000, kind="photo")
+    second = await candidate(engine, src, NEWS[1], when=now - timedelta(hours=2), views=100)
+    clock = Clock(now)
+    async with StubBridge(sockdir / "bridge.sock") as bridge:
+        for n in range(supervisor.MAX_TRIES):
+            bridge.answers.append({"ok": False, "error": "claude_failed"})
+            clock.at = now + n * (supervisor.DEFAULT_COOLDOWN + timedelta(minutes=1))
+            out = await make(engine, sockdir, clock).run_round()
+            assert (out.action, out.candidate_id, out.review) == ("unavailable", first, "claude_failed")
+        failing = await one(engine, first)
+        assert (failing.status, failing.qc_tries, failing.qc_error, failing.qc_at) == (
+            "pending",
+            supervisor.MAX_TRIES,
+            "claude_failed",
+            None,
+        )
+        async with engine.connect() as conn:
+            assert first not in [p.id for p in await supervisor.eligible(conn, clock.at)]
+            state = await qc_settings.load_state(conn)
+        assert int(state.get("slot_calls") or 0) == 0 and state["unavailable_reason"] == "claude_failed"
+        bridge.says(answer())
+        clock.at += supervisor.DEFAULT_COOLDOWN + timedelta(minutes=1)
+        out = await make(engine, sockdir, clock).run_round()
+        assert (out.action, out.candidate_id) == ("reviewed", second)
+
+
 async def test_only_the_best_few_per_slot_reach_claude(engine: AsyncEngine, sockdir: Path) -> None:
     await configure(engine, per_slot=2)
     now = slot_time(1)
@@ -649,6 +731,62 @@ async def test_a_failing_video_download_is_retried_then_given_up(
     assert int(state.get("slot_calls") or 0) == 0  # no Claude call was spent
 
 
+@pytest.mark.parametrize("why", ["vault_unavailable", "account_busy"])
+async def test_a_video_only_the_account_can_fetch_waits_for_it_at_no_cost(
+    engine: AsyncEngine, sockdir: Path, monkeypatch: pytest.MonkeyPatch, vault: Vault, why: str
+) -> None:
+    """D55: while the operator account cannot be used (the panel's own state), a video only it can
+    download is passed over at no try, the next candidate is reviewed, and the video is never
+    rejected or charged to its source for it."""
+    now = slot_time(1)
+    src = await source(engine, "newsfa", now - timedelta(hours=3))
+    async with engine.begin() as conn:
+        await candidates.store_items(
+            conn,
+            src,
+            [FetchedItem("77", None, now - timedelta(minutes=10), NEWS[0], views=90_000, media=MediaRef("video", "tgmsg:newsfa/77"))],
+            now - timedelta(minutes=10),
+        )  # fmt: skip
+    video = (await rows(engine, "SELECT id FROM content_candidates WHERE external_id = '77'"))[0].id
+    text_item = await candidate(engine, src, NEWS[1], when=now - timedelta(hours=2), views=100)
+    monkeypatch.setattr(content_engine, "SUPERVISOR_LOCK_WAIT_S", 0.2)
+    clock = Clock(now)
+    account = AccountReader(
+        engine=engine, vault=lambda: None if why == "vault_unavailable" else vault, clock=clock
+    )
+    async with contextlib.AsyncExitStack() as stack:
+        if why == "account_busy":  # the poster or the sponsor code holds the account
+            await stack.enter_async_context(mtp_store.account_lock(engine, wait_s=1))
+        async with StubBridge(sockdir / "bridge.sock") as bridge:
+            bridge.says(answer(decision="reject", title="", body="", reasons=["کیفیت کافی ندارد."]))
+            actions_seen = []
+            for minute in range(4):
+                clock.at = now + timedelta(minutes=minute)
+                out = await make(engine, sockdir, clock, account=account).run_round()
+                actions_seen.append((out.action, out.candidate_id))
+            assert len(bridge.reviews()) == 1
+    assert actions_seen == [("reviewed", text_item)] + [("account_wait", None)] * 3
+    waiting = await one(engine, video)
+    assert (
+        waiting.status,
+        waiting.media_state,
+        waiting.qc_decision,
+        waiting.qc_tries,
+        waiting.media_error,
+    ) == (
+        "pending",
+        "waiting",
+        None,
+        0,
+        None,
+    )
+    tries = await rows(engine, "SELECT media_tries FROM content_candidates WHERE id = :i", i=video)
+    assert tries[0].media_tries == 0
+    async with engine.connect() as conn:
+        quality = await supervisor.quality_by_source(conn, 20)
+    assert quality[src.id] == {"decided": 1, "rejected": 1}  # the text item only
+
+
 async def test_without_ffmpeg_a_video_waits_and_is_never_rejected_for_it(
     engine: AsyncEngine, sockdir: Path, tmp_path: Path
 ) -> None:
@@ -755,7 +893,7 @@ async def test_claude_down_means_the_bank_and_one_alert(
         assert out.alerts == (["claude_unavailable"] if i == 1 else []), (i, out)
     (alert,) = await jobs(engine, "alert")
     assert "بیش از ۶ ساعت در دسترس نیست" in alert.payload["text"]
-    assert "بانک محتوای همیشگی" in alert.payload["text"] and "P22" in alert.payload["text"]
+    assert "فقط با پروکسی‌ها" in alert.payload["text"] and "P22" in alert.payload["text"]
     # Claude comes back: the episode ends.
     async with StubBridge(sockdir / "bridge.sock") as bridge:
         bridge.says(answer())

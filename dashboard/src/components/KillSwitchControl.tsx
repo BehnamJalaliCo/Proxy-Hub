@@ -9,6 +9,7 @@ import * as api from "../lib/endpoints";
 import { keys } from "../lib/queries";
 import { toast } from "../lib/toast";
 import type { FleetSettings, Overview } from "../lib/types";
+import { withKillSwitch } from "../lib/validation";
 import { Button } from "./ui/Button";
 import { Card } from "./ui/Card";
 import { ConfirmDialog } from "./ui/Dialogs";
@@ -25,7 +26,7 @@ export function KillSwitchControl({ on, budgetSet, nodeCapSet }: { on: boolean; 
     api
       .setKillSwitch(target)
       .then((res) => {
-        qc.setQueryData<FleetSettings>(keys.settings, (old) => (old ? { ...old, kill_switch: res.kill_switch } : old));
+        qc.setQueryData<FleetSettings>(keys.settings, (old) => withKillSwitch(old, res));
         qc.setQueryData<Overview>(keys.overview, (old) => (old ? { ...old, kill_switch: res.kill_switch } : old));
         void qc.invalidateQueries({ queryKey: keys.overview });
         void qc.invalidateQueries({ queryKey: ["events"] });
@@ -54,7 +55,7 @@ export function KillSwitchControl({ on, budgetSet, nodeCapSet }: { on: boolean; 
           initial={{ scale: 0.7, rotate: -15 }}
           animate={{ scale: 1, rotate: 0 }}
           transition={{ type: "spring", stiffness: 300, damping: 16 }}
-          className={cn("grid size-16 shrink-0 place-items-center rounded-3xl text-white", on ? "bg-danger shadow-[0_12px_30px_-10px_var(--ph-danger)]" : "bg-success shadow-[0_12px_30px_-10px_var(--ph-success)]")}
+          className={cn("grid size-16 shrink-0 place-items-center rounded-3xl", on ? "bg-danger text-on-danger shadow-[0_12px_30px_-10px_var(--ph-danger)]" : "bg-success text-on-success shadow-[0_12px_30px_-10px_var(--ph-success)]")}
         >
           {on ? <OctagonPause className="size-8" /> : <ShieldCheck className="size-8" />}
         </motion.span>

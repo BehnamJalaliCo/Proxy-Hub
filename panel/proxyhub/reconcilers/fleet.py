@@ -151,3 +151,7 @@ class FleetReconciler(Reconciler):
         if live:
             await execute_plan(conn, plan)
             await raise_alerts(conn, findings(plan, snap), now)
+        else:
+            # Stopped or dry-run: nothing is told, but an alert from the live days still clears
+            # (else the nodes page shows it for as long as the fleet is stopped).
+            await raise_alerts(conn, [], now)

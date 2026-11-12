@@ -6,6 +6,7 @@ exceeded, whatever the fleet state; checked on hand-made scenarios and by a prop
 
 from __future__ import annotations
 
+import dataclasses
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -15,6 +16,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from test_fleet_support import LOCATIONS, live_offers, server
 
+from proxyhub.accounts.hetzner_io import LiveOffer
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
 from proxyhub.fleet.planner import (
     LIMIT_RECHECK,
@@ -26,9 +28,10 @@ from proxyhub.fleet.planner import (
     FleetPlan,
     FleetSnapshot,
     NodeSnapshot,
+    PlannedAction,
     build_plan,
 )
-from proxyhub.safety.budget import Price, rest_of_month_cost
+from proxyhub.safety.budget import CostItem, Price, month_bounds, projected_month_total, rest_of_month_cost
 from proxyhub.settings_schema import FleetSettings
 
 NOW = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
@@ -74,6 +77,7 @@ def node(
     ready_min_ago: float | None = 3 * 24 * 60 - 5,
     is_test: bool = False,
     now: datetime = NOW,
+    deleted_at: datetime | None = None,
 ) -> NodeSnapshot:
     return NodeSnapshot(
         id=f"node-{n}",
@@ -84,7 +88,7 @@ def node(
         state=state,
         hetzner_id=1000 + n,
         created_at=now - timedelta(minutes=created_min_ago),
-        deleted_at=None,
+        deleted_at=deleted_at,
         slot=slot,
         is_test=is_test,
         ready_at=None if ready_min_ago is None else now - timedelta(minutes=ready_min_ago),
@@ -115,6 +119,64 @@ def plan_for(settings_: FleetSettings, **kw: object) -> FleetPlan:
 
 def creates(plan: FleetPlan) -> list:  # type: ignore[type-arg]
     return [a for a in plan.actions if a.action == "create"]
+
+
+def gone_node(base: NodeSnapshot, why: str, min_ago: float = 1) -> NodeSnapshot:
+    """``base`` deleted ``min_ago`` minutes ago, having left as ``why``."""
+    return dataclasses.replace(
+        base, state=NodeState.DELETED, retire_reason=why, deleted_at=NOW - timedelta(minutes=min_ago)
+    )
+
+
+def offer_prices(snap: FleetSnapshot) -> dict[tuple[str, str, str], Price]:
+    return {(ao.account_id, ao.offer.server_type, ao.offer.location): ao.offer.price for ao in snap.offers}
+
+
+def month_so_far(snap: FleetSnapshot) -> tuple[Decimal, tuple[str, ...]]:
+    """Rule 8's oracle: what the snapshot's servers cost this month to its end, and the names of
+    those without a price, worked out here and not by the planner or node_cost_items, so a planner
+    that under-counts them cannot pass its own running total off as checked."""
+    start, _ = month_bounds(snap.now)
+    prices = offer_prices(snap)
+    total, unpriced = Decimal(0), []
+    for n in snap.nodes:  # test nodes are billed too
+        deleted_at = n.deleted_at
+        if n.state == NodeState.DELETED:
+            if n.hetzner_id is None:
+                continue  # Hetzner never made it
+            deleted_at = deleted_at or snap.now  # deleted, time unknown: billed up to now
+        if deleted_at is not None and deleted_at < start:
+            continue  # gone before this month
+        price = prices.get((n.account_id, n.server_type, n.location))
+        if price is None:
+            unpriced.append(n.name)
+            continue
+        total += projected_month_total([CostItem(price, n.created_at, deleted_at)], snap.now)
+    return total, tuple(unpriced)
+
+
+def check_budget(snap: FleetSnapshot, plan: FleetPlan) -> None:
+    """The plan's starting figure is the oracle's, and its allowed creations fit with it under the cap."""
+    existing, unpriced = month_so_far(snap)
+    assert plan.projected_month_eur == existing
+    assert plan.missing_prices == unpriced
+    allowed = [a for a in plan.actions if a.action == "create" and a.allowed]
+    if not allowed:
+        return
+    cap = snap.settings.budget_cap_eur
+    assert cap is not None and not unpriced
+    prices = offer_prices(snap)
+    new = sum(
+        (
+            rest_of_month_cost(
+                prices[(a.context["account_id"], a.context["server_type"], a.context["location"])], snap.now
+            )
+            for a in allowed
+        ),
+        Decimal(0),
+    )
+    assert existing + new <= cap
+    assert plan.projected_after_eur == existing + new
 
 
 # --- fresh panel: nothing may happen ----------------------------------------------------------
@@ -174,6 +236,53 @@ def test_test_nodes_count_against_node_cap_and_budget() -> None:
     plan = plan_for(open_settings(node_cap_total=4), nodes=tests)
     assert sum(a.allowed for a in creates(plan)) == 1
     assert len(creates(plan)) == 9  # test nodes never occupy a slot
+
+    # The budget: 3 test nodes cost 19.47 this month, so 26 EUR leaves room for one more CPX02 only.
+    plan = plan_for(open_settings(node_cap_total=20, budget_cap_eur=Decimal("26")), nodes=tests)
+    assert plan.projected_month_eur == Decimal("19.47")
+    assert [a.allowed for a in creates(plan)] == [True] + [False] * 8
+    assert all("budget_cap_reached" in a.reasons for a in creates(plan)[1:])
+    assert plan.projected_after_eur == Decimal("25.96")
+
+
+def test_the_running_fleet_counts_against_the_budget_cap() -> None:
+    """Rule 8: 9 live CPX02 already cost 58.41 this month; with a 60 EUR cap not one more fits."""
+    plan = plan_for(open_settings(budget_cap_eur=Decimal("60"), target_slots=12), nodes=tuple(full_fleet()))
+    assert plan.projected_month_eur == Decimal("58.41")
+    cs = creates(plan)
+    assert [a.target for a in cs] == ["slot-10", "slot-11", "slot-12"]
+    assert not any(a.allowed for a in cs)
+    assert all("budget_cap_reached" in a.reasons for a in cs)
+    assert plan.projected_after_eur == Decimal("58.41")
+
+
+def test_a_node_deleted_this_month_counts_its_hours_against_the_cap() -> None:
+    """A server deleted on the 2nd was billed 24 hours (0.2496); one deleted last month costs
+    nothing now, nor one Hetzner never made. 3 new CPX02 (19.47) plus 0.2496 is over 19.60."""
+    month = datetime(2026, 11, 1, tzinfo=UTC)
+    billed = node(
+        60,
+        slot=None,
+        state=NodeState.DELETED,
+        created_min_ago=(NOW - month).total_seconds() / 60,
+        deleted_at=month + timedelta(days=1),
+    )
+    last_month = node(
+        61,
+        slot=None,
+        state=NodeState.DELETED,
+        created_min_ago=60 * 24 * 20,
+        deleted_at=month - timedelta(days=2),
+    )
+    never_made = dataclasses.replace(node(62, slot=None, state=NodeState.DELETED), hetzner_id=None)
+    cap = Decimal("19.60")
+    plan = plan_for(open_settings(budget_cap_eur=cap), nodes=(last_month, never_made))
+    assert plan.projected_month_eur == 0
+    assert [a.allowed for a in creates(plan)][:4] == [True, True, True, False]
+    plan = plan_for(open_settings(budget_cap_eur=cap), nodes=(billed, last_month, never_made))
+    assert plan.projected_month_eur == Decimal("0.2496")
+    assert [a.allowed for a in creates(plan)][:3] == [True, True, False]
+    assert "budget_cap_reached" in creates(plan)[2].reasons
 
 
 # --- placement --------------------------------------------------------------------------------
@@ -252,6 +361,83 @@ def test_stale_prices_block_every_creation() -> None:
     assert all("prices_stale" in a.reasons for a in blocked)
 
 
+def _cheaper(offer: LiveOffer) -> LiveOffer:
+    return dataclasses.replace(
+        offer, price=Price(hourly=offer.price.hourly / 2, monthly=offer.price.monthly / 2)
+    )
+
+
+def test_old_prices_of_a_locked_or_retired_account_block_nothing() -> None:
+    """sweep-stuck:1: the pricing loop never reads a locked or retired account again, so its offers
+    age forever; they blocked every creation in every other account, silently. They still price that
+    account's nodes billed this month, so the rows stay (no projection_incomplete)."""
+    from proxyhub.fleet.planner import OFFER_MAX_AGE
+
+    fresh = tuple(AccountOffer("acc-a", o, NOW - timedelta(minutes=20)) for o in OFFERS)
+    old = tuple(AccountOffer("acc-old", o, NOW - OFFER_MAX_AGE - timedelta(hours=1)) for o in OFFERS)
+    gone = dataclasses.replace(
+        node(1, slot=1, account_id="acc-old", location="fsn1"),
+        state=NodeState.DELETED,
+        deleted_at=NOW - timedelta(days=1),
+    )
+    for state in ("retired", "locked"):
+        accounts = (account(), account("acc-old", state=state, age_days=60, observed_min_ago=None))
+        plan = plan_for(open_settings(), accounts=accounts, offers=fresh + old, nodes=(gone,))
+        cs = creates(plan)
+        assert len(cs) == 9 and all(a.allowed for a in cs), (state, cs[0].reasons)
+        assert not plan.missing_prices and plan.projected_month_eur > 0  # the deleted node is priced
+        # Without the old rows that node would have no price: the rows must stay.
+        plan = plan_for(open_settings(), accounts=accounts, offers=fresh, nodes=(gone,))
+        assert all("projection_incomplete" in a.reasons for a in creates(plan))
+    # An account the pricing loop still reads blocks with old prices, as before.
+    for state in ("active", "draining"):
+        accounts = (account(), account("acc-old", state=state, age_days=60))
+        blocked = creates(plan_for(open_settings(), accounts=accounts, offers=fresh + old))
+        assert blocked and all(not a.allowed and "prices_stale" in a.reasons for a in blocked), state
+
+
+def test_a_live_node_in_a_locked_account_is_priced_at_todays_price() -> None:
+    """Rule 8: a frozen price may be lower than today's, so a live node of a locked account is
+    priced at least at what a refreshed account pays for the same type and location; with nothing
+    to compare it to, its price is unknown and nothing is built (prices_stale)."""
+    from proxyhub.fleet.planner import OFFER_MAX_AGE
+
+    old_at = NOW - OFFER_MAX_AGE - timedelta(hours=1)
+    fresh = tuple(AccountOffer("acc-a", o, NOW - timedelta(minutes=20)) for o in OFFERS)
+    frozen_cheap = tuple(AccountOffer("acc-old", _cheaper(o), old_at) for o in OFFERS)
+    frozen_full = tuple(AccountOffer("acc-old", o, old_at) for o in OFFERS)
+    accounts = (account(), account("acc-old", state="locked", age_days=60, observed_min_ago=None))
+    stuck = node(1, slot=1, account_id="acc-old", location="fsn1")
+    plan = plan_for(open_settings(), accounts=accounts, offers=fresh + frozen_cheap, nodes=(stuck,))
+    assert all("prices_stale" not in a.reasons for a in creates(plan))
+    at_todays = plan_for(open_settings(), accounts=accounts, offers=fresh + frozen_full, nodes=(stuck,))
+    assert plan.projected_month_eur == at_todays.projected_month_eur > 0
+
+    # Nobody else sells that type there any more: the frozen price is all there is.
+    alone = tuple(a for a in fresh if a.offer.server_type != "cpx02")
+    plan = plan_for(open_settings(), accounts=accounts, offers=alone + frozen_cheap, nodes=(stuck,))
+    assert creates(plan) and all(not a.allowed and "prices_stale" in a.reasons for a in creates(plan))
+    # A recent frozen price still counts (the account was locked a moment ago).
+    recent = tuple(dataclasses.replace(a, fetched_at=NOW - timedelta(hours=1)) for a in frozen_cheap)
+    plan = plan_for(open_settings(), accounts=accounts, offers=alone + recent, nodes=(stuck,))
+    assert all("prices_stale" not in a.reasons for a in creates(plan))
+
+
+def test_stale_prices_are_told_to_the_owner_and_every_create_block_has_a_text() -> None:
+    """Old prices of an account still in use mean the pricing loop is failing: the owner hears of it
+    (before, nothing was sent at all). A code in CREATE_BLOCKS without a text would raise in the loop."""
+    from proxyhub.fleet.alerts import CREATE_BLOCKS, _create_text, findings
+    from proxyhub.fleet.planner import OFFER_MAX_AGE
+
+    old = tuple(AccountOffer("acc-a", o, NOW - OFFER_MAX_AGE - timedelta(minutes=1)) for o in OFFERS)
+    snap = FleetSnapshot(now=NOW, settings=open_settings(), accounts=(account(),), offers=old)
+    plan = build_plan(snap)
+    (f,) = [f for f in findings(plan, snap) if f.code == "prices_stale"]
+    assert f.detail == {"slots": list(range(1, 10))} and "۶ ساعت" in f.text and "سقف" in f.text
+    for code in CREATE_BLOCKS:
+        assert _create_text(code, [1], plan, snap).startswith("⚠️ ناوگان"), code
+
+
 def test_healthy_full_fleet_plans_nothing() -> None:
     plan = plan_for(open_settings(), nodes=tuple(full_fleet()))
     assert not creates(plan) and all(a.reasons == ("slot_healthy",) for a in plan.actions)
@@ -301,7 +487,9 @@ def test_delete_needs_label_and_live_observation() -> None:
     (d,) = [a for a in plan.actions if a.action == "delete"]
     assert not d.allowed and "label_managed_by_missing" in d.reasons
 
-    plan = plan_for(open_settings(), nodes=(retiring, *rest), servers={})
+    # The last look at the account is older than the node's step to retiring: it proves nothing.
+    just_now = dataclasses.replace(retiring, state_since=NOW - timedelta(seconds=10))
+    plan = plan_for(open_settings(), nodes=(just_now, *rest), servers={})
     (d,) = [a for a in plan.actions if a.action == "delete"]
     assert not d.allowed and "server_not_observed" in d.reasons
 
@@ -309,6 +497,68 @@ def test_delete_needs_label_and_live_observation() -> None:
     plan = plan_for(open_settings(), nodes=(retiring, *rest), servers=protected)
     (d,) = [a for a in plan.actions if a.action == "delete"]
     assert not d.allowed and "delete_protection_on" in d.reasons
+
+
+def dead(n: int, slot: int, *, since_min: float = 30, location: str | None = None) -> NodeSnapshot:
+    """An unhealthy slot node that served for days (its server may since have been deleted)."""
+    return dataclasses.replace(
+        node(n, slot=slot, state=NodeState.UNHEALTHY, location=location),
+        state_since=NOW - timedelta(minutes=since_min),
+    )
+
+
+def test_a_node_whose_server_hetzner_no_longer_has_is_retired() -> None:
+    """fleet:3: a server deleted outside the panel left its node unhealthy forever: every delete was
+    refused as server_not_observed, and the dead row held the spare, the account and the caps."""
+    rest = [node(i, slot=i) for i in range(2, 5)]
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in range(2, 5)}
+    settings_ = open_settings(target_slots=4)
+    full = (account(limit=4, servers_total=3),)  # the guard's fresh look: 3 servers, n1's is gone
+
+    def deletes(plan: FleetPlan) -> list[tuple[str, str, bool, tuple[str, ...]]]:
+        return [
+            (a.target, a.context["why"], a.allowed, a.reasons) for a in plan.actions if a.action == "delete"
+        ]
+
+    # (a) Full account, no replacement possible: the dead node leaves at once, so the slot can be built.
+    for since in (30, 5):  # past its repair window, and within it (it will not recover)
+        plan = plan_for(settings_, nodes=(dead(1, 1, since_min=since), *rest), servers=servers, accounts=full)
+        assert deletes(plan) == [("n1", "unhealthy", True, ())], since
+        (d,) = [a for a in plan.actions if a.action == "delete"]
+        assert d.context["server_gone"] is True
+    # (b) No proof that the server is gone: nothing changes.
+    for why, acc, n1 in (
+        ("stale look", account(limit=4, servers_total=3, observed_min_ago=40), dead(1, 1)),
+        (
+            "look before the node's last step",
+            account(limit=4, servers_total=3, observed_min_ago=20),
+            dead(1, 1, since_min=10),
+        ),
+        ("guard red", account(limit=4, servers_total=3, guard_ok=False), dead(1, 1)),
+    ):
+        plan = plan_for(settings_, nodes=(n1, *rest), servers=servers, accounts=(acc,))
+        assert not deletes(plan), why
+        settled = node(10, slot=1, location="nbg1", ready_min_ago=10)
+        plan = plan_for(settings_, nodes=(n1, settled, *rest), servers=servers, accounts=(acc,))
+        assert deletes(plan) and all(not a[2] and "server_not_observed" in a[3] for a in deletes(plan)), why
+    # (c) With room and a settled replacement the dead node leaves (it used to hold the spare forever).
+    settled = node(10, slot=1, location="nbg1", ready_min_ago=10)
+    plan = plan_for(
+        settings_,
+        nodes=(dead(1, 1), settled, *rest),
+        servers={**servers, ("acc-a", 1010): server(1010)},
+        accounts=(account(servers_total=4),),
+    )
+    assert deletes(plan) == [("n1", "unhealthy", True, ())]
+    # A server that is still there goes through the delete gate as always (rule 5).
+    plan = plan_for(
+        settings_,
+        nodes=(dead(1, 1), settled, *rest),
+        servers={**servers, ("acc-a", 1010): server(1010), ("acc-a", 1001): server(1001, managed=False)},
+        accounts=(account(servers_total=5),),
+    )
+    assert [d[:3] for d in deletes(plan)] == [("n1", "unhealthy", False)]
+    assert "label_managed_by_missing" in deletes(plan)[0][3]
 
 
 def test_orphan_server_is_reported_never_deleted() -> None:
@@ -337,6 +587,17 @@ def test_fingerprint_ignores_cost_drift_but_not_decisions() -> None:
 # real share of its examples (about 10 %) contains allowed creations, asserted by the last test.
 
 STATES = ["verifying", "preparing", "active", "draining", "retired", "locked"]
+
+
+def deleted_variant(draw: st.DrawFn, n: NodeSnapshot, now: datetime) -> NodeSnapshot:
+    """A deleted node as the database can hold it: never seen by Hetzner, or deleted at an unknown
+    time, earlier this month or before it (each bills differently against the cap)."""
+    if n.state != NodeState.DELETED:
+        return n
+    hetzner_id = draw(st.sampled_from([n.hetzner_id, n.hetzner_id, None]))
+    ago = draw(st.one_of(st.none(), st.floats(0, 60 * 24 * 40)))
+    deleted_at = None if ago is None else max(n.created_at, now - timedelta(minutes=ago))
+    return dataclasses.replace(n, hetzner_id=hetzner_id, deleted_at=deleted_at)
 
 
 @st.composite
@@ -368,17 +629,21 @@ def snapshots(draw: st.DrawFn, open_fleet: bool = False) -> FleetSnapshot:
         else st.sampled_from(["cpx02", "cpx12", "ccx99"])
     )
     nodes = tuple(
-        node(
-            i,
-            slot=draw(st.one_of(st.none(), st.integers(1, 13))),
-            state=draw(st.sampled_from(list(NodeState))),
-            location=draw(st.sampled_from(LOCATIONS)),
-            account_id=draw(st.sampled_from(priced if open_fleet else ids)),
-            server_type=draw(types),
-            created_min_ago=draw(st.one_of(st.floats(61, 60 * 24 * 40), st.floats(0, 60))),
-            ready_min_ago=draw(st.one_of(st.none(), st.floats(0, 60))),
-            is_test=draw(st.booleans()),
-            now=now,
+        deleted_variant(
+            draw,
+            node(
+                i,
+                slot=draw(st.one_of(st.none(), st.integers(1, 13))),
+                state=draw(st.sampled_from(list(NodeState))),
+                location=draw(st.sampled_from(LOCATIONS)),
+                account_id=draw(st.sampled_from(priced if open_fleet else ids)),
+                server_type=draw(types),
+                created_min_ago=draw(st.one_of(st.floats(61, 60 * 24 * 40), st.floats(0, 60))),
+                ready_min_ago=draw(st.one_of(st.none(), st.floats(0, 60))),
+                is_test=draw(st.booleans()),
+                now=now,
+            ),
+            now,
         )
         for i in range(draw(st.integers(0, 12)))
     )
@@ -412,6 +677,7 @@ def check_caps(snap: FleetSnapshot) -> int:
     """Assert every cap for the plan's allowed creations; returns how many were allowed."""
     plan = build_plan(snap)
     s = snap.settings
+    check_budget(snap, plan)
     allowed = [a for a in plan.actions if a.action == "create" and a.allowed]
     if not allowed:
         return 0
@@ -492,6 +758,40 @@ def test_a_full_account_lets_burned_nodes_go_first() -> None:
     # The kill switch still stops the deletion.
     plan = plan_for(open_settings(kill_switch=True), nodes=nodes, servers=servers, accounts=full)
     assert all(not a.allowed for a in plan.actions if a.action == "delete")
+
+
+def test_after_making_room_the_replacement_still_avoids_the_burned_location() -> None:
+    """fleet:5 (D14): with every account full the burned node leaves first (D57); the slot is then
+    empty, and its replacement used to be planned as a plain fill, back in the burned location
+    (it held one node fewer, so it sorted first)."""
+    burned = gone_node(node(2, slot=2, location="nbg1"), "burned", min_ago=5)
+    live = (
+        node(1, slot=1, location="fsn1"),
+        node(3, slot=3, location="hel1"),
+        node(4, slot=4, location="fsn1"),
+    )
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in (1, 3, 4)}
+    settings_ = open_settings(target_slots=4)
+    room = (account(limit=4, servers_total=3),)
+
+    def slot2(nodes: tuple[NodeSnapshot, ...], **kw: object) -> PlannedAction:
+        (c,) = creates(plan_for(settings_, nodes=nodes, servers=servers, accounts=room, **kw))
+        assert c.target == "slot-2"
+        return c
+
+    c = slot2((*live, burned))
+    assert c.allowed and c.context["kind"] == "replace"
+    assert c.context["location"] != "nbg1" and "nbg1" in c.context["avoid"]
+    # (a) Soft: with every other location closed it is still built, there (not left empty).
+    c = slot2((*live, burned), location_classes={"fsn1": "bad", "hel1": "bad"})
+    assert c.allowed and c.context["location"] == "nbg1"
+    # (b) The slot served again since (that node left for another reason): a plain fill.
+    later = gone_node(node(5, slot=2, location="hel1", created_min_ago=60, ready_min_ago=50), "unhealthy")
+    assert slot2((*live, burned, later)).context["kind"] == "fill"
+    # (c) Only a burned node steers the location.
+    duplicate = gone_node(node(2, slot=2, location="nbg1"), "duplicate", min_ago=5)
+    c = slot2((*live, duplicate))
+    assert c.context["kind"] == "fill" and c.context["location"] == "nbg1"
 
 
 def test_a_full_account_alert_names_the_limit_and_the_test_node_and_repeats_weekly() -> None:
@@ -593,6 +893,104 @@ def test_a_full_account_moves_one_removed_location_slot_at_a_time() -> None:
         open_settings(target_slots=3, locations=[]), nodes=(s1, s2, s3), servers=servers, accounts=full
     )
     assert not [a for a in plan.actions if a.action == "delete"]
+
+
+def test_a_slot_a_move_emptied_holds_the_next_move_until_it_is_rebuilt() -> None:
+    """fleet:2 (D60, one slot at a time): once the executor deleted the moved slot's server no live
+    node shows the move, and the account observation still says full until the guard looks again.
+    The next slot of the removed location kept losing its server, one per plan."""
+    s2 = node(2, slot=2, location="hel1")
+    s3 = node(3, slot=3, location="fsn1")
+    gone = gone_node(node(1, slot=1, location="hel1"), "location_removed")
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in (2, 3)}
+    moved = open_settings(target_slots=3, locations=["fsn1", "nbg1"])
+
+    def plan_with(*nodes: NodeSnapshot, servers_total: int, more: dict | None = None) -> FleetPlan:  # type: ignore[type-arg]
+        accounts = (account(limit=3, servers_total=servers_total),)
+        return plan_for(moved, nodes=nodes, servers={**servers, **(more or {})}, accounts=accounts)
+
+    def waiting(plan: FleetPlan) -> None:
+        assert {a.target: a.reasons for a in plan.actions if a.action == "none"}["slot-2"] == (
+            "location_move_waiting",
+        )
+        assert not [a for a in plan.actions if a.action == "delete"]
+
+    # The observation still counts n1: slot 1 is refused (full), slot 2 waits.
+    plan = plan_with(gone, s2, s3, servers_total=3)
+    (c,) = creates(plan)
+    assert c.target == "slot-1" and not c.allowed and "account_server_limit_reached" in c.reasons
+    waiting(plan)
+    # A fresh observation: slot 1 is built, and slot 2 still waits (it used to leave in the same plan).
+    plan = plan_with(gone, s2, s3, servers_total=2)
+    (c,) = creates(plan)
+    assert c.target == "slot-1" and c.allowed
+    waiting(plan)
+    # A request the executor refused (no server) does not end the move either.
+    refused = dataclasses.replace(
+        gone_node(node(4, slot=1, location="fsn1", ready_min_ago=None), "create_refused"),
+        hetzner_id=None,
+        create_attempted=False,
+    )
+    waiting(plan_with(gone, refused, s2, s3, servers_total=3))
+    # Slot 1 served again from an allowed location: the next slot moves.
+    rebuilt = node(4, slot=1, location="fsn1", created_min_ago=30, ready_min_ago=20)
+    plan = plan_with(gone, rebuilt, s2, s3, servers_total=3, more={("acc-a", 1004): server(1004)})
+    deletes = [(a.target, a.context["why"], a.allowed) for a in plan.actions if a.action == "delete"]
+    assert deletes == [("n2", "location_removed", True)]
+    assert {a.target: a.reasons for a in plan.actions if a.action == "none"}["slot-2"] == (
+        "making_room_location",
+    )
+    # Slots that never had a server do not hold a move.
+    full = (account(limit=3, servers_total=3),)
+    plan = plan_for(
+        open_settings(target_slots=5, locations=["fsn1", "nbg1"]),
+        nodes=(node(1, slot=1, location="hel1"), s2, s3),
+        servers={**servers, ("acc-a", 1001): server(1001)},
+        accounts=full,
+    )
+    assert [a.target for a in plan.actions if a.action == "delete"] == ["n1"]
+
+
+def test_a_full_account_keeps_a_removed_location_node_when_its_rebuild_is_blocked() -> None:
+    """fleet:4 (D60): with every account full the node of a removed location leaves first, and the
+    slot is built by the next plan. If that plan could not build it, the node used to be thrown away
+    all the same, and the slot (and its posted configs) stayed dead. Now it keeps serving."""
+    s1 = node(1, slot=1, location="hel1")
+    s2 = node(2, slot=2, location="fsn1")
+    s3 = node(3, slot=3, location="nbg1")
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in range(1, 4)}
+    full = (account(limit=3, servers_total=3),)
+    moved = open_settings(target_slots=3, locations=["fsn1", "nbg1"])
+    old_prices = tuple(AccountOffer("acc-a", o, NOW - timedelta(hours=7)) for o in OFFERS)
+    sold_out = tuple(
+        AccountOffer("acc-a", dataclasses.replace(o, available=False) if o.location != "hel1" else o)
+        for o in OFFERS
+    )
+    recent_s2 = node(2, slot=2, location="fsn1", created_min_ago=10, ready_min_ago=5)
+    cases: list[tuple[str, FleetSettings, tuple[NodeSnapshot, ...], dict[str, object]]] = [
+        ("all_locations_closed", moved, (s1, s2, s3), {"location_classes": {"fsn1": "bad", "nbg1": "bad"}}),
+        ("agent_domain_not_set", moved, (s1, s2, s3), {"blockers": ("agent_domain_not_set",)}),
+        ("prices_stale", moved, (s1, s2, s3), {"offers": old_prices}),
+        (
+            "creation_rate_cap_reached",
+            open_settings(target_slots=3, locations=["fsn1", "nbg1"], creations_per_hour_cap=1),
+            (s1, recent_s2, s3),
+            {},
+        ),
+        ("no_live_price", moved, (s1, s2, s3), {"offers": sold_out}),
+    ]
+    for reason, settings_, nodes, kw in cases:
+        plan = plan_for(settings_, nodes=nodes, servers=servers, accounts=full, **kw)
+        assert not [a for a in plan.actions if a.action == "delete"], reason
+        (c,) = creates(plan)
+        assert c.target == "slot-1" and not c.allowed and reason in c.reasons, (reason, c.reasons)
+    # A budget cap just above today's projection still lets the move go: once the old node has left,
+    # its cost for the rest of the month leaves the projection too, so the swap fits.
+    today = plan_for(moved, nodes=(s1, s2, s3), servers=servers, accounts=full).projected_month_eur
+    tight = open_settings(target_slots=3, locations=["fsn1", "nbg1"], budget_cap_eur=today + 1)
+    plan = plan_for(tight, nodes=(s1, s2, s3), servers=servers, accounts=full)
+    assert [(a.target, a.allowed) for a in plan.actions if a.action == "delete"] == [("n1", True)]
+    assert not creates(plan)
 
 
 def test_a_learned_limit_is_tried_again_after_a_while() -> None:

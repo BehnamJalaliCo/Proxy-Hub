@@ -208,3 +208,62 @@ async def test_the_executor_never_retires_an_unhealthy_slot_node_by_itself(world
     node = await world.node(node_id)
     assert node["state"] == "unhealthy" and node["retire_reason"] is None
     assert world.no_hetzner.calls == 0
+
+
+# --- a failed create ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "state", "transient"),
+    [
+        ("uniqueness_error", "creating", True),
+        ("server_error", "creating", True),
+        ("invalid_input", "retiring", False),
+    ],
+)
+async def test_a_create_that_may_have_made_the_server_stays_creating(
+    world: LiveWorld, code: str, state: str, transient: bool
+) -> None:
+    """nodes-hetzner:5 / sweep-failure:1: a create refused as a duplicate (hcloud's own retry after a
+    POST that went through) or failed with Hetzner's server_error may have made the server; the node
+    stays creating and is adopted by label. A final refusal still retires it."""
+    from proxyhub.accounts.hetzner_io import HetznerFailure, summarize_servers
+
+    await world.settings(live_settings())
+    node_id = await add_slot_node(world, 1, state="creating", created_at=ago(minutes=1))
+    executor = world.executor()
+    sm = world.sessions
+    node = await executor._load(sm, node_id)
+    assert node is not None
+    await executor._create_failed(sm, node, HetznerFailure("api_error", code), summarize_servers([]))
+    row = await world.node(node_id)
+    assert row["state"] == state
+    assert (row["retire_reason"] is None) is transient
+    failed = [d for k, d in await world.events(node_id) if k == "create_failed"]
+    assert failed == [{"code": code, "transient": transient}]
+    assert world.no_hetzner.calls == 0
+
+
+# --- the account's count -----------------------------------------------------------------------
+
+
+async def test_a_deleted_server_leaves_the_account_count_at_once(world: LiveWorld) -> None:
+    """fleet:2: the executor dropped a deleted server from the guard's list but not from its count, so
+    the planner saw the account as full (and refused the slot's rebuild) until the guard looked again."""
+    await world.rows(
+        "UPDATE hetzner_account_observations SET servers_total = 3, managed_servers = 3 "
+        "WHERE account_id = :a",
+        a=world.account_id,
+    )
+    await add_slot_node(world, 1, state="deleted", hetzner_id=9005, deleted_at=ago(minutes=1))
+    for _ in range(2):  # the second time the row is already gone (the guard looked): no change
+        async with world.sessions() as s:
+            await ex.NodeExecutor._forget_server(s, world.account_id, 9005)
+            await s.commit()
+        counts = await world.rows(
+            "SELECT servers_total, managed_servers FROM hetzner_account_observations WHERE account_id = :a",
+            a=world.account_id,
+        )
+        assert [tuple(r) for r in counts] == [(2, 2)]
+        left = await world.rows("SELECT count(*) FROM hetzner_account_servers WHERE hetzner_id = 9005")
+        assert [tuple(r) for r in left] == [(0,)]

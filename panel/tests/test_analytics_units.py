@@ -29,7 +29,7 @@ from test_telegram_support import closed_port_bot, free_closed_port, random_toke
 
 from proxyhub.accounts.hetzner_io import HetznerFailure, call_hetzner
 from proxyhub.agent_api.reports import ReportRejected, parse_report
-from proxyhub.analytics import hetzner_usage, sampling
+from proxyhub.analytics import hetzner_usage, report, sampling
 from proxyhub.analytics.members import parse_member_change
 from proxyhub.analytics.messages import cpu_alert_fa, traffic_alert_fa
 from proxyhub.analytics.settings import DEFAULTS, AnalyticsSettings, parse_settings
@@ -218,6 +218,31 @@ def test_a_member_change_keeps_only_the_allowed_facts() -> None:
     c = _change(old="left", new="member", first_name="Secret Name", username="secret_handle", link_name="n")
     assert set(vars(c)) == {"chat_id", "user_id", "at", "kind", "source", "link_name", "link_url"}
     assert "Secret" not in repr(c) and "secret_handle" not in repr(c)
+
+
+def moves_today(now: datetime) -> tuple[int, int]:
+    """The (joins, leaves) of test_analytics_db's test_summary_and_series_numbers that fall on the
+    Tehran day of ``now``: joins one, two and three minutes back and a leave ten seconds back, so a
+    run just after Tehran midnight (20:30 UTC) counts only some of them."""
+    midnight = report.tehran_midnight(now)
+    t = int(now.timestamp())
+    joins = sum(datetime.fromtimestamp(t - 60 * (i + 1), UTC) >= midnight for i in range(3))
+    return joins, int(datetime.fromtimestamp(t - 10, UTC) >= midnight)
+
+
+@pytest.mark.parametrize(
+    ("hms", "want"),
+    [
+        ((20, 30, 5), (0, 0)),
+        ((20, 30, 30), (0, 1)),
+        ((20, 31, 30), (1, 1)),
+        ((20, 32, 30), (2, 1)),
+        ((20, 33, 0), (3, 1)),
+        ((9, 0, 0), (3, 1)),
+    ],
+)
+def test_moves_today_follows_the_tehran_midnight(hms: tuple[int, int, int], want: tuple[int, int]) -> None:
+    assert moves_today(datetime(2026, 11, 12, *hms, tzinfo=UTC)) == want
 
 
 # --- Bot API additions ----------------------------------------------------------------------------------

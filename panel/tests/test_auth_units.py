@@ -260,6 +260,28 @@ def test_global_lock_is_capped_at_one_hour() -> None:
     assert durations == [timedelta(minutes=15), timedelta(minutes=30), timedelta(hours=1), timedelta(hours=1)]
 
 
+@pytest.mark.parametrize("policy", [throttle.USER_POLICY, throttle.GLOBAL_POLICY], ids=lambda p: p.scope)
+def test_lock_duration_never_overflows(policy: throttle.LockPolicy) -> None:
+    """15 min x 2**37 is past timedelta's range: from level 38 on, a wrong login used to end in a
+    500 that counted nothing, so the brute-force limits switched off."""
+    for level in (38, 39, 64, 1000, 10**6):
+        assert policy.lock_duration(level) == policy.max_lock
+
+
+@pytest.mark.parametrize("policy", [throttle.USER_POLICY, throttle.GLOBAL_POLICY], ids=lambda p: p.scope)
+def test_back_to_back_locks_stay_capped(policy: throttle.LockPolicy) -> None:
+    row = AuthThrottle(key="x", failures=0, lock_level=0)
+    now = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
+    for _ in range(100):
+        event = None
+        for _ in range(policy.threshold):
+            event = throttle.register_failure(row, policy, now)
+        assert event is not None and event.duration <= policy.max_lock
+        now = event.until + timedelta(seconds=1)
+    assert event.duration == policy.max_lock
+    assert row.lock_level <= throttle.MAX_LOCK_LEVEL
+
+
 # --- small helpers -------------------------------------------------------------------------
 
 

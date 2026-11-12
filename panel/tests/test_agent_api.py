@@ -12,6 +12,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,8 +29,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from test_agent_support import (
     FP_HEADER,
     PROXY_HEADER,
+    REGISTRATION_DOMAIN,
+    TEST_PREFIX,
     SecretFiles,
-    clean_agent_tables,
+    clean_agent_rows,
     create_node,
     create_registration,
     reset_config_caches,
@@ -45,7 +48,7 @@ from proxyhub.agent_api.desired import (
     set_telemt_node_config,
     set_user_sponsor_tag,
 )
-from proxyhub.agent_api.reports import ReportRejected, parse_report
+from proxyhub.agent_api.reports import PRUNE_BATCH, ReportRejected, accumulate, parse_report, prune_reports
 from proxyhub.agent_api.sealing import SealError, load_seal_key, open_secret, seal_secret
 from proxyhub.agent_api.tokens import TokenRefused, issue_registration_token, token_digest
 from proxyhub.agent_api.validation import (
@@ -98,16 +101,24 @@ class Env:
 
 @pytest.fixture
 async def env(migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Env]:
+    async with open_env(migrated_db, tmp_path, monkeypatch) as opened:
+        yield opened
+
+
+@asynccontextmanager
+async def open_env(migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Env]:
+    """The ``env`` fixture's body, callable from a test that checks what its teardown leaves."""
     from proxyhub.api.app import app
 
     files = write_secret_files(tmp_path / "secrets")
     use_secret_files(monkeypatch, files)
     engine = create_async_engine(migrated_db)
-    await clean_agent_tables(engine)
+    await clean_agent_rows(engine)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="https://agent.test") as client:
             yield Env(engine=engine, files=files, client=client)
     finally:
+        await clean_agent_rows(engine)
         await engine.dispose()
         await get_engine().dispose()
         reset_config_caches()
@@ -455,6 +466,7 @@ async def test_desired_state_rules(env: Env) -> None:
             {"ports": [], "tls_domain": "a.example.com"},
             {"ports": [443, 443], "tls_domain": "a.example.com"},
             {"ports": [9090], "tls_domain": "a.example.com"},
+            {"ports": [8443, 10085], "tls_domain": "a.example.com"},  # Xray's API port
             {"ports": [70000], "tls_domain": "a.example.com"},
             {"ports": [443], "tls_domain": "10.1.2.3"},
             {"ports": [443], "tls_domain": "Example.com"},
@@ -545,6 +557,84 @@ async def test_report_is_stored_as_aggregates(env: Env) -> None:
         n=node_id,
     )
     assert agent == [(True, '"' + "c" * 64 + '"', "3.5.16")]
+
+
+def test_a_counter_that_restarts_from_zero_accumulates() -> None:
+    assert accumulate(0, 0, 1000) == 1000
+    assert accumulate(1000, 1000, 1500) == 1500
+    assert accumulate(1500, 1500, 200) == 1700  # Telemt restarted: its counter began again
+
+
+async def test_telemt_bytes_add_up_across_telemt_restarts(env: Env) -> None:
+    """mtproto-agentapi:2. Telemt's per-user counter starts again from zero when Telemt restarts:
+    the proxy's total keeps what it had (last_total_octets stays the raw value)."""
+    node_id, fp = await registered(env)
+    async with env.maker()() as session:
+        await set_telemt_node_config(session, node_id, ports=[443], tls_domain="cdn.example.com")
+        await create_telemt_user(session, env.seal_key, node_id, "alice")
+        await session.commit()
+    for octets in (1000, 1500, 200):
+        body = report_body()
+        body["telemt"]["users"] = [{"name": "alice", "current_connections": 1, "total_octets": octets}]
+        resp = await env.client.post("/agent/v1/report", json=body, headers=env.headers(fp))
+        assert resp.status_code == 204, resp.text
+    users = await env.rows(
+        "SELECT last_total_octets, octets_total FROM telemt_users WHERE node_id = :n", n=node_id
+    )
+    assert users == [(200, 1700)]
+
+
+async def test_old_report_rows_are_pruned_in_batches_once_an_hour(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """db-models:2. One report row a node a minute, never removed: rows past REPORT_RETENTION go,
+    in batches, the newest stays for every reader; mtproxy_stats (the owner's call) is kept."""
+    from proxyhub.reconcilers.mtproto import PRUNE_EVERY, MtprotoReconciler
+
+    node_id, fp = await registered(env)
+    reg_id = await create_registration(env.engine, "alice")
+    async with env.maker()() as session:
+        await set_telemt_node_config(session, node_id, ports=[443], tls_domain="cdn.example.com")
+        await create_telemt_user(session, env.seal_key, node_id, "alice", registration_id=reg_id)
+        await session.commit()
+    assert (
+        await env.client.post("/agent/v1/report", json=report_body(), headers=env.headers(fp))
+    ).status_code == 204
+    await env.rows(
+        "INSERT INTO agent_node_reports (node_id, at, apply_ok, telemt_up, users_reported) "
+        "SELECT :n, now() - interval '8 days' - make_interval(mins => g), true, true, 0 "
+        "FROM generate_series(1, 5) g",
+        n=node_id,
+    )
+    await env.rows("UPDATE mtproxy_stats SET at = now() - interval '400 days'")
+    now = datetime.now(UTC)
+    async with env.engine.begin() as conn:
+        assert await prune_reports(conn, now, batch=3) == 3
+        assert await prune_reports(conn, now, batch=3) == 2
+        assert await prune_reports(conn, now, batch=3) == 0
+    left = await env.rows(
+        "SELECT at > now() - interval '1 hour' FROM agent_node_reports WHERE node_id = :n", n=node_id
+    )
+    assert left == [(True,)]
+    assert len(await env.rows("SELECT 1 FROM mtproxy_stats WHERE registration_id = :r", r=reg_id)) == 1
+    # The loop prunes once an hour, and every tick while a full batch went last time.
+    rec = MtprotoReconciler()
+    calls: list[datetime] = []
+
+    async def counting(conn: Any, at: datetime, batch: int = 0) -> int:
+        calls.append(at)
+        return PRUNE_BATCH if len(calls) == 1 else 0
+
+    import proxyhub.reconcilers.mtproto as loop
+
+    monkeypatch.setattr(loop, "prune_reports", counting)
+    ticks = [now + timedelta(seconds=s) for s in (0, 15, 30, 1800)] + [
+        now + timedelta(seconds=15) + PRUNE_EVERY
+    ]
+    async with env.engine.begin() as conn:
+        for at in ticks:
+            await rec._prune(conn, at)
+    assert calls == [ticks[0], ticks[1], ticks[4]]
 
 
 async def test_integral_numbers_are_accepted_for_float_fields(env: Env) -> None:
@@ -921,3 +1011,43 @@ async def test_migration_matches_models(env: Env) -> None:
 
     ours = [c for c in changes if table_of(c) is not None]
     assert ours == [], json.dumps([repr(c) for c in ours])
+
+
+# --- test hygiene -------------------------------------------------------------------------------
+
+
+async def test_env_teardown_leaves_no_agent_rows(
+    migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leftover 'booting' agent-test node is one the MTProto policy configures, so it would leak
+    into every later test that runs the policy over the whole table (tests/test_wstls_db.py)."""
+    async with open_env(migrated_db, tmp_path, monkeypatch) as opened:
+        node_id, fp = await registered(opened)
+        reg_id = await create_registration(opened.engine, "alice")
+        async with opened.maker()() as session:
+            await set_telemt_node_config(session, node_id, ports=[443], tls_domain="cdn.example.com")
+            await create_telemt_user(session, opened.seal_key, node_id, "alice", registration_id=reg_id)
+            await session.commit()
+        resp = await opened.client.post("/agent/v1/report", json=report_body(), headers=opened.headers(fp))
+        assert resp.status_code == 204, resp.text
+        # The two rows whose foreign keys do not cascade: the teardown must remove them first.
+        assert await opened.rows("SELECT 1 FROM node_events WHERE node_id = :n", n=node_id)
+        assert await opened.rows("SELECT 1 FROM mtproxy_stats WHERE registration_id = :r", r=reg_id)
+
+    engine = create_async_engine(migrated_db)
+    try:
+        async with engine.connect() as conn:
+            left = (
+                await conn.execute(
+                    text(
+                        "SELECT (SELECT count(*) FROM nodes WHERE name LIKE :p), "
+                        "(SELECT count(*) FROM hetzner_accounts WHERE name LIKE :p), "
+                        "(SELECT count(*) FROM mtproxy_registrations WHERE host LIKE :h), "
+                        "(SELECT count(*) FROM telemt_users)"
+                    ),
+                    {"p": f"{TEST_PREFIX}%", "h": f"%{REGISTRATION_DOMAIN}"},
+                )
+            ).one()
+    finally:
+        await engine.dispose()
+    assert tuple(left) == (0, 0, 0, 0)

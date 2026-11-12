@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
@@ -127,6 +128,15 @@ def test_only_panel_containers_are_labelled_for_log_shipping() -> None:
     assert not any("docker.sock" in str(v) for v in services["alloy"].get("volumes", []))
 
 
+def test_every_container_log_rotates() -> None:
+    """The json-file default never rotates and can fill the panel disk. Rotation must not add the
+    io.proxyhub.logs label to anything but the panel containers (checked above)."""
+    for name, svc in _compose()["services"].items():
+        logging = svc.get("logging") or {}
+        assert logging.get("driver") == "json-file", name
+        assert logging.get("options", {}).get("max-size") and logging["options"].get("max-file"), name
+
+
 def test_new_secrets_are_files_created_by_ensure_secrets() -> None:
     """Rule 3: every compose secret is a file that ensure_secrets.sh creates; none comes from env."""
     compose = _compose()
@@ -227,6 +237,148 @@ def test_alertmanager_runs_behind_the_redactor() -> None:
     assert "redact.awk" in (ALERTMANAGER / "Dockerfile").read_text(encoding="utf-8")
     safe_logs = (DEPLOY / "monitoring" / "safe_logs.sh").read_text(encoding="utf-8")
     assert "alertmanager/redact.awk" in safe_logs and "cat " not in safe_logs
+
+
+def test_the_telegram_fallback_shows_no_stale_description_for_a_resolved_alert() -> None:
+    """A resolved alert keeps its last firing annotations ("... the control loops do not run"):
+    only the firing branch may print the description (check_configs.sh renders it with amtool)."""
+    tmpl = (ALERTMANAGER / "telegram.tmpl").read_text(encoding="utf-8")
+    body = tmpl[tmpl.index("{{ range .Alerts -}}") :]
+    assert body.count(".Annotations.description") == 1
+    firing = body.index('{{ if eq .Status "firing" }}')
+    description = body.index(".Annotations.description")
+    assert firing < description < body.index("{{ else }}", firing)
+    assert body.count(".Annotations.summary") == 2  # both branches name the alert
+
+
+def _render_alertmanager(tmp_path: Path, token: str, chat_id: str, watchdog: str) -> tuple[int, str, Path]:
+    """Run the real entrypoint.sh with the host's POSIX sh, paths moved into tmp_path and amtool
+    left out (PROXYHUB_RENDER_ONLY=1): (exit code, output, the tmpfs secrets directory)."""
+    import shutil
+    import subprocess
+
+    sh = shutil.which("sh")
+    assert sh, "a POSIX sh is needed"
+    secrets, rundir = tmp_path / "secrets", tmp_path / "rundir"
+    secrets.mkdir(parents=True)
+    for name, value in (
+        ("alert_bot_token", token),
+        ("alert_chat_id", chat_id),
+        ("healthchecks_watchdog_url", watchdog),
+    ):
+        (secrets / name).write_text(value + "\n" if value else "", encoding="utf-8")
+    text = (ALERTMANAGER / "entrypoint.sh").read_text(encoding="utf-8")
+    for old, new in (
+        ("SECRETS=/run/secrets", f"SECRETS={secrets}"),
+        ("TPL=/etc/alertmanager/proxyhub/telegram.tmpl", f"TPL={ALERTMANAGER / 'telegram.tmpl'}"),
+        ("RUNDIR=/tmp/alertmanager", f"RUNDIR={rundir}"),
+        ('exec /bin/amtool check-config "$CONFIG"', "exit 0"),
+    ):
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    script = tmp_path / "entrypoint.sh"
+    script.write_text(text, encoding="utf-8")
+    done = subprocess.run(  # noqa: S603 - fixed argv: host sh and a copy of our own script
+        [sh, str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "PROXYHUB_RENDER_ONLY": "1"},
+        timeout=30,
+    )
+    return done.returncode, done.stdout + done.stderr, rundir / "secrets"
+
+
+@pytest.mark.parametrize("junk", ["0", "-", "no", "x", "true"])
+def test_short_junk_in_an_optional_secret_only_turns_that_receiver_off(tmp_path: Path, junk: str) -> None:
+    """'0' or 'no' is also text of the rendered config: the leak check refused to start Alertmanager
+    (and with it the panel webhook) although such a value is never used."""
+    code, out, copies = _render_alertmanager(tmp_path, junk, "-1001234567890", junk)
+    assert code == 0, out
+    assert "panel webhook: on; telegram receiver: off; external watchdog: off" in out
+    assert sorted(p.name for p in copies.iterdir()) == []  # copies of receivers that are off: removed
+
+
+def test_a_valid_telegram_receiver_is_still_on_and_checked(tmp_path: Path) -> None:
+    token = "123456:not-a-real-token-config-check-only"
+    code, out, copies = _render_alertmanager(tmp_path, token, "-1001234567890", "")
+    assert code == 0, out
+    assert "telegram receiver: on" in out
+    assert (copies / "alert_bot_token").read_text(encoding="utf-8") == token  # read by bot_token_file
+
+
+def test_a_chat_id_beyond_telegram_s_range_turns_telegram_off(tmp_path: Path) -> None:
+    """Telegram chat ids fit in 52 bits; 17+ digits can overflow Alertmanager's int64 chat_id."""
+    token = "123456:not-a-real-token-config-check-only"
+    code, out, _ = _render_alertmanager(tmp_path, token, "12345678901234567890", "")
+    assert code == 0 and "telegram receiver: off" in out, out
+    code, out, _ = _render_alertmanager(tmp_path / "ok", token, "-1001234567890123", "")
+    assert code == 0 and "telegram receiver: on" in out, out
+
+
+def _redact_ips(line: str) -> str:
+    """Apply the IPv4 then the IPv6 stage.replace of config.alloy the way Alloy does: every match,
+    no overlap, and only the capture group is replaced (Python re agrees with RE2 on this syntax)."""
+    alloy = (DEPLOY / "monitoring" / "alloy" / "config.alloy").read_text(encoding="utf-8")
+    expressions = re.findall(r'expression = `([^`]*)`\s*replace\s*= "<ip>"', alloy)
+    assert len(expressions) == 2, "IPv4 and IPv6 stages"
+    for expression in expressions:
+        parts, last = [], 0
+        for m in re.finditer(expression, line):
+            parts += [line[last : m.start(1)], "<ip>"]
+            last = m.end(1)
+        line = "".join([*parts, line[last:]])
+    return line
+
+
+def test_ip_redaction_leaves_sql_casts_in_tracebacks_readable() -> None:
+    """The worker logs whole tracebacks; asyncpg renders every bind as "$1::UUID". The IPv6 stage
+    turned them into "$<ip>OOLEAN" and the like."""
+    import sqlalchemy as sa
+    from sqlalchemy.dialects.postgresql import asyncpg
+
+    table = sa.Table(
+        "t",
+        sa.MetaData(),
+        sa.Column("a", sa.Uuid),
+        sa.Column("b", sa.String),
+        sa.Column("c", sa.Boolean),
+        sa.Column("d", sa.DateTime(timezone=True)),
+        sa.Column("e", sa.Date),
+        sa.Column("f", sa.BigInteger),
+    )
+    values = {"a": None, "b": "", "c": True, "d": None, "e": None, "f": 1}
+    sql = str(sa.insert(table).values(**values).compile(dialect=asyncpg.dialect()))
+    assert "$3::BOOLEAN" in sql and "$5::DATE" in sql, sql
+    for line in (
+        f"[SQL: {sql}]",
+        "SELECT n.id::text, value::text, gen_random_uuid()::text, (now() AT TIME ZONE 'UTC')::date",
+        "SELECT pg_try_advisory_lock($1::INTEGER) 2026-11-12 10:11:12,345 INFO worker",
+    ):
+        assert _redact_ips(line) == line
+
+
+@pytest.mark.parametrize(
+    ("line", "redacted"),
+    [
+        ("client 2a01:4f8:c0c:1234::1 connected", "client <ip> connected"),
+        ("ip:2a01:4f8::1", "ip:<ip>"),
+        ("2a01::1,2a01::2", "<ip>,<ip>"),
+        ("[2001:db8::1]:443", "[<ip>]:443"),
+        ("::1", "<ip>"),
+        ("fe80::1%eth0", "<ip>%eth0"),
+        ("::ffff:10.0.0.1", "<ip>:<ip>"),
+        ("2001:0db8:85a3:0000:0000:8a2e:0370:7334 x", "<ip> x"),
+        ("route 2a01:4f8:c0c::/64", "route <ip>/64"),
+        ("x=fe80::abcd:1;", "x=<ip>;"),
+        ('{"ip": "2a01:4f8::2"}', '{"ip": "<ip>"}'),
+        ("GET /?host=%5B2a01:4f8::1%5D", "GET /?host=%5B<ip>%5D"),
+        ("out='a\\n2a01:4f8::1 dev eth0'", "out='a\\n<ip> dev eth0'"),
+        ("from 10.0.0.1:8000 and 192.168.1.20", "from <ip>:8000 and <ip>"),
+    ],
+)
+def test_ip_redaction_still_catches_every_address_form(line: str, redacted: str) -> None:
+    """Rule 7, second line of defence: the cast-safe boundary must not let an address through."""
+    assert _redact_ips(line) == redacted
 
 
 SECRETISH_ENV = re.compile(r"PASS(WORD)?|TOKEN|SECRET|API_?KEY|PRIVATE", re.IGNORECASE)

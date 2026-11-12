@@ -1,4 +1,4 @@
-"""Auth API (M1.3): setup link, login, logout, sessions, recovery codes.
+"""Auth API (M1.3): setup link, login, logout, sessions, recovery codes, a new Authenticator.
 
 Public routes: GET /api/setup/status, POST /api/setup/begin, POST /api/setup/finish and
 POST /api/auth/login. Everything else needs the admin session. Every non-GET route needs the CSRF
@@ -27,7 +27,12 @@ from proxyhub.api.deps import (
     require_csrf,
 )
 from proxyhub.auth import service
-from proxyhub.auth.service import SESSION_ABSOLUTE_TIMEOUT, AuthError, NewSession
+from proxyhub.auth.service import DEVICE_IDLE_TIMEOUT, SESSION_ABSOLUTE_TIMEOUT, AuthError, NewSession
+
+# The known-device cookie (auth/throttle.py): sent only to /api/auth/*, outlives sessions and
+# logouts, renewed on every login from this browser.
+DEVICE_COOKIE = "ph_device"
+DEVICE_COOKIE_PATH = "/api/auth"
 
 router = APIRouter(prefix="/api", route_class=ApiRoute, dependencies=[Depends(require_csrf)], tags=["auth"])
 
@@ -62,6 +67,14 @@ class TotpIn(_In):
     totp_code: str = Field(max_length=32)
 
 
+class TotpReenrollIn(_In):
+    pending: str = Field(max_length=512)
+    new_code: str = Field(max_length=32)
+    password: str = Field(max_length=1024)
+    totp_code: str | None = Field(default=None, max_length=32)
+    recovery_code: str | None = Field(default=None, max_length=64)
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.astimezone(UTC).isoformat() if value is not None else None
 
@@ -84,6 +97,18 @@ def _set_session_cookie(response: Response, new_session: NewSession) -> None:
         new_session.token,
         max_age=int(SESSION_ABSOLUTE_TIMEOUT.total_seconds()),
         path="/",
+        secure=True,
+        httponly=True,
+        samesite="strict",
+    )
+
+
+def _set_device_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        DEVICE_COOKIE,
+        token,
+        max_age=int(DEVICE_IDLE_TIMEOUT.total_seconds()),
+        path=DEVICE_COOKIE_PATH,
         secure=True,
         httponly=True,
         samesite="strict",
@@ -130,6 +155,7 @@ async def setup_finish(body: SetupFinishIn, request: Request, session: DbSession
         return _error(exc)
     response = JSONResponse({"recovery_codes": result.recovery_codes})
     _set_session_cookie(response, result.session)
+    _set_device_cookie(response, result.device_token)
     return response
 
 
@@ -144,11 +170,13 @@ async def login(body: LoginIn, request: Request, session: DbSession) -> Response
             recovery_code=body.recovery_code,
             user_agent=request.headers.get("user-agent"),
             presented_cookie=request.cookies.get(SESSION_COOKIE),
+            presented_device=request.cookies.get(DEVICE_COOKIE),
         )
     except AuthError as exc:
         return _error(exc)
     response = JSONResponse({"username": result.username})
     _set_session_cookie(response, result.session)
+    _set_device_cookie(response, result.device_token)
     return response
 
 
@@ -200,7 +228,37 @@ async def revoke(session_id: str, admin: Admin, session: DbSession) -> Response:
 @router.post("/auth/recovery-codes/regenerate")
 async def regenerate_recovery_codes(body: TotpIn, admin: Admin, session: DbSession) -> Response:
     try:
-        codes = await service.regenerate_recovery_codes(session, admin.resolved(), body.totp_code)
+        result = await service.regenerate_recovery_codes(session, admin.resolved(), body.totp_code)
     except AuthError as exc:
         return _error(exc)
-    return JSONResponse({"recovery_codes": codes})
+    response = JSONResponse({"recovery_codes": result.recovery_codes})
+    _set_device_cookie(response, result.device_token)
+    return response
+
+
+@router.post("/auth/totp/begin")
+async def totp_reenroll_begin(admin: Admin) -> Response:
+    """A new Authenticator (the old phone is lost): the QR secret and its sealed ``pending`` blob."""
+    result = service.totp_reenroll_begin(admin.resolved())
+    return JSONResponse(
+        {"pending": result.pending, "totp_uri": result.totp_uri, "totp_secret": result.totp_secret}
+    )
+
+
+@router.post("/auth/totp/finish")
+async def totp_reenroll_finish(body: TotpReenrollIn, admin: Admin, session: DbSession) -> Response:
+    try:
+        result = await service.totp_reenroll_finish(
+            session,
+            admin.resolved(),
+            pending=body.pending,
+            new_code=body.new_code,
+            password=body.password,
+            totp_code=body.totp_code,
+            recovery_code=body.recovery_code,
+        )
+    except AuthError as exc:
+        return _error(exc)
+    response = JSONResponse({"recovery_codes": result.recovery_codes})
+    _set_device_cookie(response, result.device_token)
+    return response

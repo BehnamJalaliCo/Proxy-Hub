@@ -11,8 +11,10 @@
 #   healthchecks_watchdog_url        -> "watchdog": the always-firing Watchdog alert is POSTed there
 #                                       every 5 minutes (external dead man's switch). Empty: null.
 # Secret values are never printed. They are copied (trimmed) to /tmp, a tmpfs, and Alertmanager reads
-# them through *_file settings, so no secret is written into the rendered config. Alertmanager's own
-# log goes through redact.awk (see the end of this file): v0.34.2 logs the bot token on send errors.
+# them through *_file settings, so no secret is written into the rendered config. The copies of a
+# receiver that stays off are removed again: a short junk value there (e.g. "0") is no secret, and
+# the leak check below must not mistake it for one (a value in use is always checked). Alertmanager's
+# own log goes through redact.awk (see the end of this file): v0.34.2 logs the bot token on errors.
 # PROXYHUB_RENDER_ONLY=1: render + amtool check-config, then exit (deploy/monitoring/check_configs.sh).
 set -eu
 
@@ -35,12 +37,14 @@ telegram=off
 if copy_secret alert_bot_token && copy_secret alert_chat_id; then
   if ! grep -Eq '^[0-9]{3,20}:[A-Za-z0-9_-]{20,100}$' "$RUNDIR/secrets/alert_bot_token"; then
     echo "alertmanager-entrypoint: alert_bot_token does not look like a bot token; Telegram stays off" >&2
-  elif ! grep -Eq '^-?[0-9]{1,20}$' "$RUNDIR/secrets/alert_chat_id"; then
+  elif ! grep -Eq '^-?[0-9]{1,16}$' "$RUNDIR/secrets/alert_chat_id"; then
+    # Telegram chat ids fit in 52 bits (16 digits); a longer number overflows Alertmanager's int64.
     echo "alertmanager-entrypoint: alert_chat_id is not a numeric chat id; Telegram stays off" >&2
   else
     telegram=on
   fi
 fi
+[ "$telegram" = on ] || rm -f "$RUNDIR/secrets/alert_bot_token" "$RUNDIR/secrets/alert_chat_id"
 
 watchdog=off
 if copy_secret healthchecks_watchdog_url; then
@@ -50,6 +54,7 @@ if copy_secret healthchecks_watchdog_url; then
     echo "alertmanager-entrypoint: healthchecks_watchdog_url is not an https URL; watchdog stays off" >&2
   fi
 fi
+[ "$watchdog" = on ] || rm -f "$RUNDIR/secrets/healthchecks_watchdog_url"
 
 {
   cat <<'YAML'

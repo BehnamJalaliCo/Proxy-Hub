@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final
@@ -37,6 +38,16 @@ MAX_LABEL: Final = 80
 FETCH_EVERY: Final = timedelta(minutes=5)
 MAX_BACKOFF: Final = timedelta(hours=6)
 _SPACES = re.compile(r"\s+")
+
+
+def column_chars(column: Any) -> int:
+    """A string column's own length (``String(n)``): what may be stored in it."""
+    length = column.type.length
+    assert isinstance(length, int)
+    return length
+
+
+MAX_REF_CHARS: Final = column_chars(ContentSource.ref)
 
 
 def backoff(failures: int) -> timedelta:
@@ -205,6 +216,8 @@ async def create(db: Db, *, kind: Any, ref: Any, label: Any, now: datetime) -> S
     if not isinstance(ref, str):
         raise SourceInvalid("telegram_name_invalid" if kind == "telegram" else "feed_url_invalid")
     ref = plugin.check_ref(ref)
+    if len(ref) > MAX_REF_CHARS:  # its normal form (a feed URL percent-encoded) is too long to keep
+        raise SourceInvalid("telegram_name_invalid" if kind == "telegram" else "feed_url_invalid")
     label = check_label(label, plugin.default_label(ref))
     count = int((await db.execute(select(func.count()).select_from(ContentSource))).scalar_one())
     if count >= MAX_SOURCES:
@@ -313,6 +326,23 @@ async def record_ok(
             next_fetch_at=now + every,
             last_count=count,
         )
+    )
+
+
+async def defer(db: Db, source_ids: Collection[int], now: datetime, until: datetime) -> None:
+    """Sources due now that cannot be read this round (the operator account is busy or Telegram
+    asked it to wait) are next read at ``until``: no error, no back-off, but their place at the
+    head of :func:`due` goes to the sources that can be read."""
+    if not source_ids:
+        return
+    await db.execute(
+        update(ContentSource)
+        .where(
+            ContentSource.id.in_(list(source_ids)),
+            ContentSource.enabled.is_(True),
+            ContentSource.next_fetch_at.is_(None) | (ContentSource.next_fetch_at <= now),
+        )
+        .values(next_fetch_at=until)
     )
 
 

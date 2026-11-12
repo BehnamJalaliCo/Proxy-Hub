@@ -2,6 +2,15 @@
 // shown as they are, so a new code on the server is never hidden.
 
 import { FLEET_ACTION, FLEET_NODE_EVENT, FLEET_REASON, FLEET_TRANSITION } from "./fleetLabels";
+import {
+  SERVICE_ACTION,
+  SERVICE_ACTOR,
+  SERVICE_REASON,
+  SERVICE_REASON_KEY,
+  SERVICE_STATE,
+  SETTINGS_KEY,
+  SETTINGS_UPDATE_BY_TARGET,
+} from "./serviceLabels";
 import { SPONSOR_ACTION } from "./sponsorLabels";
 import type { AccountState, DomainVerdict, FleetSettings, NodeState, OwnerPoolState, PlanActionKind, PoolState, ProbeVerdict } from "./types";
 
@@ -51,7 +60,7 @@ function toFa(s: string): string {
   return s.replace(/[0-9]/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[Number(d)] ?? d);
 }
 
-export const SETTINGS_LABEL: Record<keyof FleetSettings, string> = {
+export const SETTINGS_LABEL: Record<Exclude<keyof FleetSettings, "updated_at">, string> = {
   kill_switch: "کلید توقف",
   dry_run: "حالت خشک",
   budget_cap_eur: "سقف بودجه‌ی ماه",
@@ -63,6 +72,9 @@ export const SETTINGS_LABEL: Record<keyof FleetSettings, string> = {
 };
 
 const REASON: Record<string, string> = {
+  // first, so the fleet's own wording below wins where a code is shared
+  ...SERVICE_REASON,
+  ...SETTINGS_KEY,
   ...FLEET_REASON,
   // safety gates (proxyhub/safety/gates.py)
   kill_switch_on: "کلید توقف روشن است",
@@ -161,6 +173,7 @@ const REASON: Record<string, string> = {
   telegram_logout: "نشست در تلگرام بسته شد",
   session_already_ended: "نشست از قبل در تلگرام بسته شده بود",
   session_unreadable: "نشست ذخیره‌شده با کلید فعلی پنل باز نشد",
+  session_unusable: "تلگرام این نشست را دیگر نمیپذیرد؛ از پنل پاک شد",
   session_missing: "نشست در گاوصندوق نبود",
   credentials_missing: "api_id یا api_hash در گاوصندوق نبود",
   credentials_only: "فقط api_id و api_hash مانده بود",
@@ -226,8 +239,15 @@ export function reasonLabel(code: string): string {
   if (i > 0) {
     const key = code.slice(0, i);
     const value = code.slice(i + 1);
-    const keyLabel = REASON_KEY[key] ?? REASON[key];
-    if (keyLabel) return `${keyLabel}: ${REASON_VALUE[value] ?? toFa(value)}`;
+    const keyLabel = REASON_KEY[key] ?? SERVICE_REASON_KEY[key] ?? REASON[key];
+    if (keyLabel) return `${keyLabel}: ${REASON_VALUE[value] ?? SERVICE_STATE[value] ?? toFa(value)}`;
+  }
+  // "scheduled->active": a state change named in the reason (sponsor campaigns)
+  const [from, to, ...rest] = code.split("->");
+  if (from && to && rest.length === 0) {
+    const a = SERVICE_STATE[from];
+    const b = SERVICE_STATE[to];
+    if (a && b) return `از ${a} به ${b}`;
   }
   return code;
 }
@@ -273,6 +293,7 @@ const ACTION: Record<string, string> = {
   "telegram.pairing_cancelled": "باطل شدن کد اتصال تلگرام",
   "telegram.owner_paired": "وصل شدن چت مالک به ربات",
   "telegram.channel_set": "ثبت کانال تلگرام",
+  "telegram.channel_refreshed": "نام، عنوان یا اجازه‌های ربات در کانال عوض شده بود و به‌روز شد",
   "telegram.settings_set": "تغییر زمان‌بندی پست",
   "telegram.test_alert": "هشدار آزمایشی",
   "telegram.test_post": "پست آزمایشی",
@@ -310,6 +331,7 @@ const ACTION: Record<string, string> = {
   "posts.own_pack_chosen": "بسته‌ی اختصاصی کانال برای پست‌ها انتخاب شد",
   "posts.operator_not_sent": "پست حساب دوم برای کانال اصلی نرفت (انتشار اصلی خاموش شد)",
   "posts.operator_send_unknown": "معلوم نیست پست حساب دوم رفت یا نه (دوباره فرستاده نمیشود)",
+  "posts.bot_not_sent": "پست ربات برای کانال اصلی نرفت (انتشار اصلی خاموش شد)",
   // the content engine (D51)
   "content.source_added": "افزودن منبع محتوا",
   "content.source_updated": "تغییر منبع محتوا",
@@ -327,8 +349,13 @@ const ACTION: Record<string, string> = {
   "posts.media_skipped": "پست بی عکس و ویدیو رفت",
 };
 
-export function actionLabel(code: string): string {
-  return ACTION[code] ?? FLEET_ACTION[code] ?? SPONSOR_ACTION[code] ?? code;
+/** `target` tells whose settings a settings_update changed (fleet, mtproto, reality, targets). */
+export function actionLabel(code: string, target?: string | null): string {
+  if (code === "settings_update" && target) {
+    const own = SETTINGS_UPDATE_BY_TARGET[target];
+    if (own) return own;
+  }
+  return ACTION[code] ?? FLEET_ACTION[code] ?? SPONSOR_ACTION[code] ?? SERVICE_ACTION[code] ?? code;
 }
 
 export const PLAN_ACTION: Record<PlanActionKind, { label: string; tone: Tone }> = {
@@ -349,7 +376,7 @@ const ACTOR: Record<string, string> = {
   pricing: "چرخه‌ی قیمت",
   account_guard: "نگهبان حساب",
   auth: "سیستم ورود",
-  worker: "worker",
+  worker: "پردازش پس‌زمینه (worker)",
   system: "سیستم",
   node_executor: "چرخه‌ی nodeها",
   agent_api: "API عامل‌ها",
@@ -365,7 +392,7 @@ const ACTOR: Record<string, string> = {
 /** "admin:owner" -> "مالک (owner)"; control loops get a Persian name. */
 export function actorLabel(actor: string): string {
   if (actor.startsWith("admin:")) return `مالک (${actor.slice(6)})`;
-  return ACTOR[actor] ?? actor;
+  return ACTOR[actor] ?? SERVICE_ACTOR[actor] ?? actor;
 }
 
 export function isOwnerActor(actor: string): boolean {
@@ -376,6 +403,11 @@ export function isOwnerActor(actor: string): boolean {
 
 /** Persian text of the round-2 error codes, used when a response carries no message_fa. */
 const ERROR_FA: Record<string, string> = {
+  // a new Authenticator (the server sends its own sentence; this is a spare)
+  reenroll_invalid:
+    "رمز، کد Authenticator فعلی (یا کد بازیابی) یا کد برنامه‌ی تازه درست نیست. اگر بیش از یک ساعت از شروع گذشته است، ثبت Authenticator تازه را از اول شروع کنید.",
+  // fleet settings: saved meanwhile on another device or tab (the form keeps what was typed)
+  settings_changed: "تنظیمات در این میان در جای دیگری ذخیره شده است؛ صفحه را تازه کنید و تغییر خود را دوباره بزنید.",
   // nodes
   gate_refused: "قفل‌های ایمنی این کار را رد کردند. دلیل‌ها در فهرست آمده‌اند.",
   test_node_exists: "یک node آزمایشی زنده هست. اول همان را بازنشسته کنید.",
@@ -403,6 +435,7 @@ const ERROR_FA: Record<string, string> = {
   api_hash_format: "api_hash باید دقیقاً ۳۲ نویسه از 0 تا 9 و a تا f باشد.",
   phone_format: "شماره را کامل، با + و کد کشور وارد کنید.",
   code_format: "کد ورود فقط رقم است (معمولاً ۵ رقم).",
+  code_word_format: "کد این بار یک کلمه یا عبارت است: همان‌طور که در پیامک آمده وارد کنید.",
   password_format: "رمز دومرحله‌ای را وارد کنید.",
   api_id_invalid: "تلگرام این api_id و api_hash را با هم نپذیرفت.",
   api_id_published: "تلگرام این api_id را بسته است؛ در my.telegram.org برنامه‌ی تازه بسازید.",

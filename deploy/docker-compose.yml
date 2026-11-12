@@ -66,6 +66,7 @@ services:
       timeout: 3s
       retries: 20
     restart: unless-stopped
+    logging: *logging
     networks: [backend]
 
   redis:
@@ -90,6 +91,7 @@ services:
       timeout: 3s
       retries: 20
     restart: unless-stopped
+    logging: *logging
     networks: [backend]
 
   migrate:
@@ -149,6 +151,7 @@ services:
       - caddy_config:/config
     depends_on: [api]
     restart: unless-stopped
+    logging: *logging
     networks: [backend]
 
   # --- Monitoring (M1.7). Configs are baked into the pinned images by deploy/monitoring/*/Dockerfile,

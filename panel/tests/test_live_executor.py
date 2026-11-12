@@ -13,7 +13,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from typing import Any
 
@@ -22,11 +22,12 @@ from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from test_fleet_support import CSRF
-from test_live_support import LiveWorld, api_client, good_settings, live_world
+from test_live_support import CPX02_HOURLY, CPX02_MONTHLY, LiveWorld, api_client, good_settings, live_world
 
 from proxyhub.api.deps import require_admin
 from proxyhub.nodes import executor as ex
 from proxyhub.nodes.service import evaluate_create
+from proxyhub.safety.budget import CostItem, Price, projected_month_total, rest_of_month_cost
 
 pytestmark = [pytest.mark.db, pytest.mark.redis]
 
@@ -255,6 +256,34 @@ async def test_an_old_server_limit_does_not_block_the_gate(world: LiveWorld) -> 
         assert "account_server_limit_reached" not in old.reasons, learned_at
 
 
+async def test_a_test_node_goes_to_the_next_account_when_the_youngest_is_full(world: LiveWorld) -> None:
+    """nodes-hetzner:4: the gate took the youngest account with a price and a green guard even when it
+    was full, and refused, although an older account had room. Placement now follows the planner:
+    youngest first, the next one when it is full; with every account full the youngest is refused."""
+    import secrets
+
+    from test_live_support import seed_account
+
+    await world.settings(good_settings())
+    young = await seed_account(world.engine, world.vault, token=secrets.token_hex(32), name="younger-account")
+    await _sql(
+        world,
+        "UPDATE hetzner_accounts SET created_at = now() + interval '1 day', learned_server_limit = 2, "
+        "learned_server_limit_at = now() WHERE id = :a",
+        a=young,
+    )
+    await _sql(
+        world, "UPDATE hetzner_account_observations SET servers_total = 2 WHERE account_id = :a", a=young
+    )
+    async with world.sessions() as s:
+        ev = await evaluate_create(s, datetime.now(UTC), location="fsn1")
+    assert ev.allowed and ev.account_id == world.account_id, ev.reasons
+    await _server_limit(world)  # the older account is full too
+    async with world.sessions() as s:
+        ev = await evaluate_create(s, datetime.now(UTC), location="fsn1")
+    assert not ev.allowed and ev.account_id == young and "account_server_limit_reached" in ev.reasons
+
+
 @pytest.mark.parametrize(("reason", "setup"), REFUSALS, ids=[r for r, _ in REFUSALS])
 async def test_executor_refuses_again_before_any_hetzner_call(
     world: LiveWorld, reason: str, setup: Setup
@@ -305,6 +334,36 @@ async def test_evaluation_counts_and_cost_are_real(world: LiveWorld) -> None:
     assert ev.request.account.servers_in_account == 1  # the DB node counts even if Hetzner said 0
     assert Decimal(0) < ev.request.new_server_rest_of_month_eur <= Decimal("6.49")
     assert ev.request.projected_month_eur > 0
+
+
+async def test_running_servers_count_against_the_budget_cap(world: LiveWorld) -> None:
+    """Rule 8 at the executor's gate: what the running servers (a test node too) cost this month is
+    added to the new server's rest of the month. A cap the new server alone fits under refuses it."""
+    now = datetime.now(UTC)
+    price = Price(hourly=CPX02_HOURLY, monthly=CPX02_MONTHLY)
+    created = now - timedelta(days=2)
+    nodes = [
+        await world.add_node(state="ready", is_test=False, created_at=created),
+        await world.add_node(state="ready", is_test=True, created_at=created),
+    ]
+    existing = 2 * projected_month_total([CostItem(price, created)], now)
+    new = rest_of_month_cost(price, now)
+    cap = new.quantize(Decimal("0.01"), rounding=ROUND_CEILING)  # the cap is stored in cents
+    assert new <= cap < existing + new
+    await world.settings(good_settings(budget_cap_eur=cap))
+    async with world.sessions() as s:
+        ev = await evaluate_create(s, now, location="fsn1")
+    assert ev.request.projected_month_eur == existing and ev.request.new_server_rest_of_month_eur == new
+    assert not ev.allowed and "budget_cap_reached" in ev.reasons
+
+    # The same cap with neither running (deleted before Hetzner made them): the new server fits.
+    for node_id in nodes:
+        await world.rows(
+            "UPDATE nodes SET state = 'deleted', deleted_at = :t WHERE id = :n", t=now, n=node_id
+        )
+    async with world.sessions() as s:
+        alone = await evaluate_create(s, now, location="fsn1")
+    assert alone.request.projected_month_eur == 0 and alone.allowed, alone.reasons
 
 
 # --- lifecycle after the server exists ------------------------------------------------------------
@@ -512,6 +571,23 @@ async def test_retire_without_a_server_and_the_retiring_step(world: LiveWorld) -
     assert log and log[0][0]["reasons"] == ["no_server_requested"]
 
 
+async def test_retiring_a_node_already_retiring_answers_as_before(world: LiveWorld) -> None:
+    """nodes-hetzner:3: the early exit read the node after a rollback had expired it (lazy IO on an
+    AsyncSession: MissingGreenlet), so a second retire was a 500 in the API and a traceback in the CLI."""
+    from proxyhub.nodes import service
+
+    await world.settings(good_settings())
+    node_id = await world.add_node(state="retiring")
+    async with api_client(world) as c:
+        r = await c.post(f"/api/nodes/{node_id}/retire")
+    assert r.status_code == 202 and r.json() == {}
+    async with world.sessions() as s:
+        state = await service.request_retire(s, node_id, actor="test", now=datetime.now(UTC))
+    assert state == "retiring"
+    assert (await world.node(node_id))["state"] == "retiring"
+    assert world.no_hetzner.calls == 0
+
+
 # --- reading -------------------------------------------------------------------------------------
 
 
@@ -520,19 +596,25 @@ async def test_list_and_events_follow_the_contract(world: LiveWorld) -> None:
     gone = await world.add_node(state="deleted", is_test=False)
     await world.rows("UPDATE nodes SET deleted_at = now() - interval '8 days' WHERE id = :n", n=gone)
     await agent_row(world, node_id, at=datetime.now(UTC), report=True)
-    for name, conns in (("alice", 7), ("bob", 5)):
+    # carol's 800 are from a report 20 minutes ago (Telemt down since, or a user no longer
+    # exported): not "connections now".
+    for name, conns, ago in (("alice", 7, 0), ("bob", 5, 0), ("carol", 800, 20)):
         await world.rows(
             "INSERT INTO telemt_users (id, node_id, name, secret_sealed, enabled, last_current_connections, "
             "last_stats_at) VALUES (gen_random_uuid(), :n, :name, decode(repeat('00', 45), 'hex'), true, :c, "
-            "now())",
+            "now() - make_interval(mins => :ago))",
             n=node_id,
             name=name,
             c=conns,
+            ago=ago,
         )
     async with api_client(world) as c:
         nodes = (await c.get("/api/nodes")).json()
         events = (await c.get(f"/api/nodes/{node_id}/events")).json()
         missing = await c.get(f"/api/nodes/{uuid.uuid4()}/events")
+        await world.rows("UPDATE telemt_users SET last_stats_at = now() - interval '20 minutes'")
+        silent = (await c.get("/api/nodes")).json()
+    assert silent[0]["agent"]["connections"] is None  # the node stopped reporting: not known
     assert [n["id"] for n in nodes] == [str(node_id)]  # deleted over a week ago: not listed
     node = nodes[0]
     assert set(node) == {

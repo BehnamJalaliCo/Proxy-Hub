@@ -3,7 +3,11 @@ review (the content supervisor's, decision D52, or the owner's), and what the pu
 
 **Storing** (:func:`store_items`, from proxyhub/content/engine.py): a post of a source is stored once
 (``source_id`` + ``external_id``); a later read only refreshes its view count. Posts older than
-:data:`MAX_AGE` (by their own time) and posts with neither text nor media are skipped, and so is a
+:data:`MAX_AGE` (by their own time) and posts with neither text nor media are skipped. A feed entry
+with no date the panel can read may be of any age: on the source's first read it is stored as
+``expired`` (known, never queued); later, an entry new to the feed is new news. Each read that still
+finds such an entry keeps its row (``updated_at``), so it is never pruned and stored again as new
+while the feed carries it. A post is skipped too when it is a
 **proxy advert** (the owner, 2026-11-07: a proxy channel's news is welcome, its proxies are not):
 proxy links, configs or proxy lines and too few other words (:func:`~proxyhub.content.clean.
 is_proxy_post`). It reaches no review and does not count against its source. The text is
@@ -12,7 +16,10 @@ caption prefilled from it; the content supervisor's
 Claude review replaces it when it approves (proxyhub/content/supervisor.py, decision D52). A post
 whose cleaned text tells what a candidate of the last :data:`MAX_AGE` already tells (any source,
 :func:`~proxyhub.content.clean.similar`) is stored as ``duplicate`` of it and never shown in the
-queue; the original counts it as one more source.
+queue; the original counts it as one more source (another source only: a repost of its own source
+does not). So is a photo whose bytes a live candidate of the last :data:`MAX_AGE` had (its
+``media_sha256`` outlives the posted file), unless it is the same source's picture on other news
+(a channel's banner).
 
 **Statuses**: ``pending`` (in the queue) -> ``approved`` (waits for a post) -> ``used`` (posted; set by
 the publisher only). The content supervisor (decision D52, proxyhub/content/supervisor.py) approves or
@@ -42,12 +49,13 @@ from typing import Any, Final, Literal
 from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
+from sqlalchemy.orm import aliased
 
 from proxyhub.content import clean
 from proxyhub.content.items import FetchedItem
 from proxyhub.content.media import MediaInfo
 from proxyhub.content.messages import media_error_fa
-from proxyhub.content.sources import Source
+from proxyhub.content.sources import Source, column_chars
 from proxyhub.db.models import Outbox
 from proxyhub.db.models_content import CANDIDATE_STATUSES, ContentCandidate, ContentMedia
 from proxyhub.db.models_posts import Post
@@ -61,6 +69,10 @@ MAX_BODY: Final = clean.MAX_BODY_CHARS
 KEEP_ENDED: Final = timedelta(days=14)  # rows of ended candidates (no media) kept for de-duplication
 OWNER_STATUSES: Final = ("pending", "approved", "rejected")
 EDITABLE: Final = ("pending", "approved")
+# The columns' own lengths: a longer address (any plugin) is not stored rather than failing the
+# whole source's insert.
+MAX_LINK_CHARS: Final = column_chars(ContentCandidate.url)
+MAX_MEDIA_URL_CHARS: Final = column_chars(ContentCandidate.media_url)
 Sort = Literal["new", "views", "hot"]
 _SPACES = re.compile(r"[ \t]+")
 
@@ -238,6 +250,10 @@ def _when(item: FetchedItem, now: datetime) -> datetime:
     return item.published_at or now
 
 
+def _fits(value: str | None, limit: int) -> str | None:
+    return value if value and len(value) <= limit else None
+
+
 async def _recent_norms(db: Db, now: datetime) -> list[tuple[int, str]]:
     rows = (
         await db.execute(
@@ -277,9 +293,14 @@ async def store_items(
         if item.external_id in known:
             seen += 1
             row = known[item.external_id]
+            refresh: dict[str, Any] = {}
             if item.views is not None and item.views != row.views:
+                refresh["views"] = item.views
+            if item.published_at is None:  # still in the feed: not pruned, so never "new" again
+                refresh["updated_at"] = now
+            if refresh:
                 await db.execute(
-                    update(ContentCandidate).where(ContentCandidate.id == row.id).values(views=item.views)
+                    update(ContentCandidate).where(ContentCandidate.id == row.id).values(**refresh)
                 )
             continue
         if now - _when(item, now) > MAX_AGE or _when(item, now) > now + timedelta(hours=1):
@@ -290,17 +311,22 @@ async def store_items(
             skipped += 1
             proxy_posts += 1
             continue
-        if not text and (item.media is None or (item.media.url is None and item.media.thumb_url is None)):
+        media = item.media
+        media_url = _fits(media.url, MAX_MEDIA_URL_CHARS) if media else None
+        thumb_url = _fits(media.thumb_url, MAX_MEDIA_URL_CHARS) if media else None
+        if not text and media_url is None and thumb_url is None:
             skipped += 1
             continue
         norm = clean.norm_text(text)
         original = next((cid for cid, other in norms if clean.similar(norm, other)), None)
         title, body = clean.split_caption(text)  # Claude's caption replaces it on approval (QC)
         title, body = title[:MAX_TITLE_CHARS], body[:MAX_BODY]
-        media = item.media
         media_state = "none"
         if media is not None:
-            media_state = "waiting" if media.url else "failed"
+            media_state = "waiting" if media_url else "failed"
+        # An undated entry seen on the source's first read may be weeks old: known, never queued.
+        undated_backlog = item.published_at is None and source.last_ok_at is None
+        status = "expired" if undated_backlog else "duplicate" if original is not None else "pending"
         inserted = (
             await db.execute(
                 pg_insert(ContentCandidate)
@@ -309,20 +335,20 @@ async def store_items(
                     source_kind=source.kind,
                     source_label=source.label,
                     external_id=item.external_id,
-                    url=item.url,
+                    url=_fits(item.url, MAX_LINK_CHARS),
                     published_at=item.published_at,
                     views=item.views,
                     source_text=text,
                     norm_text=norm,
                     title=title,
                     body=body,
-                    status="duplicate" if original is not None else "pending",
-                    duplicate_of=original,
+                    status=status,
+                    duplicate_of=original if status == "duplicate" else None,
                     media_kind=media.kind if media else None,
-                    media_url=media.url if media else None,
-                    thumb_url=media.thumb_url if media else None,
+                    media_url=media_url,
+                    thumb_url=thumb_url,
                     media_state=media_state,
-                    media_error="no_url" if media is not None and not media.url else None,
+                    media_error="no_url" if media is not None and not media_url else None,
                     created_at=now,
                     updated_at=now,
                 )
@@ -333,7 +359,9 @@ async def store_items(
         if inserted is None:
             seen += 1
             continue
-        if original is not None:
+        if undated_backlog:
+            skipped += 1
+        elif original is not None:
             dups += 1
         else:
             new += 1
@@ -471,29 +499,57 @@ async def media_bytes_total(db: Db) -> int:
     return int((await db.execute(select(func.coalesce(func.sum(ContentMedia.size), 0)))).scalar_one())
 
 
+async def _photo_twin(db: Db, candidate_id: int, sha: str, now: datetime) -> int | None:
+    """The live candidate (pending, approved, or posted within :data:`MAX_AGE`) whose photo has the
+    same bytes and that tells the same news: from another source (the same photo, carried on), or
+    from this source with the same or a similar text (a repost). A source's own banner on different
+    news is not a twin. The hash outlives the posted file (``media_sha256``)."""
+    own = (
+        await db.execute(
+            select(ContentCandidate.source_id, ContentCandidate.norm_text).where(
+                ContentCandidate.id == candidate_id
+            )
+        )
+    ).first()
+    if own is None:
+        return None
+    when = func.coalesce(ContentCandidate.published_at, ContentCandidate.created_at)
+    twins = (
+        await db.execute(
+            select(ContentCandidate.id, ContentCandidate.source_id, ContentCandidate.norm_text)
+            .where(
+                ContentCandidate.media_sha256 == sha,
+                ContentCandidate.id != candidate_id,
+                ContentCandidate.status.in_(("pending", "approved", "used")),
+                when >= now - MAX_AGE,
+            )
+            .order_by(ContentCandidate.id)
+            .limit(20)
+        )
+    ).all()
+    for twin in twins:
+        if (
+            twin.source_id != own.source_id
+            or twin.norm_text == own.norm_text
+            or clean.similar(str(own.norm_text), str(twin.norm_text))
+        ):
+            return int(twin.id)
+    return None
+
+
 async def save_media(db: Db, task: MediaTask, info: MediaInfo, data: bytes, now: datetime) -> int | None:
-    """Store the downloaded file. A photo whose bytes another live candidate already has makes this
-    candidate a duplicate of that one (the same photo from two sources). Returns the media id."""
+    """Store the downloaded file. A photo another live candidate already had makes this candidate a
+    duplicate of that one (:func:`_photo_twin`: the same photo from two sources, or a repost).
+    Returns the media id."""
     sha = hashlib.sha256(data).hexdigest()
     role = "thumb" if task.role == "thumb" else "main"
     if task.role == "photo":
-        twin = (
-            await db.execute(
-                select(ContentMedia.candidate_id)
-                .join(ContentCandidate, ContentCandidate.id == ContentMedia.candidate_id)
-                .where(
-                    ContentMedia.sha256 == sha,
-                    ContentMedia.candidate_id != task.candidate_id,
-                    ContentCandidate.status.in_(("pending", "approved", "used")),
-                )
-                .limit(1)
-            )
-        ).first()
+        twin = await _photo_twin(db, task.candidate_id, sha, now)
         if twin is not None:
             await db.execute(
                 update(ContentCandidate)
                 .where(ContentCandidate.id == task.candidate_id, ContentCandidate.status == "pending")
-                .values(status="duplicate", duplicate_of=int(twin.candidate_id), updated_at=now)
+                .values(status="duplicate", duplicate_of=twin, updated_at=now)
             )
     media_id = (
         await db.execute(
@@ -518,7 +574,12 @@ async def save_media(db: Db, task: MediaTask, info: MediaInfo, data: bytes, now:
         await db.execute(
             update(ContentCandidate)
             .where(ContentCandidate.id == task.candidate_id)
-            .values(media_state="ready", media_error=None, updated_at=now)
+            .values(
+                media_state="ready",
+                media_error=None,
+                media_sha256=sha if task.role == "photo" else None,
+                updated_at=now,
+            )
         )
     return int(media_id.id) if media_id is not None else None
 
@@ -629,13 +690,19 @@ async def counts(db: Db) -> dict[str, int]:
 
 
 async def also_in(db: Db, candidate_ids: list[int]) -> dict[int, list[str]]:
-    """The other sources that gave the same news: candidate id -> their labels."""
+    """The other sources that gave the same news: candidate id -> their labels. A source's own
+    repost is not another source."""
     if not candidate_ids:
         return {}
+    original = aliased(ContentCandidate)
     rows = (
         await db.execute(
             select(ContentCandidate.duplicate_of, ContentCandidate.source_label)
-            .where(ContentCandidate.duplicate_of.in_(candidate_ids))
+            .join(original, original.id == ContentCandidate.duplicate_of)
+            .where(
+                ContentCandidate.duplicate_of.in_(candidate_ids),
+                ContentCandidate.source_id.is_distinct_from(original.source_id),
+            )
             .order_by(ContentCandidate.id)
         )
     ).all()
@@ -665,13 +732,17 @@ async def edit(db: Db, candidate_id: int, title: Any, body: Any, now: datetime) 
 async def set_status(
     db: Db, candidate_id: int, status: str, now: datetime
 ) -> tuple[Candidate | None, str | None]:
-    """The owner moves a candidate (pending, approved, rejected). Returns it and its old status."""
+    """The owner moves a candidate (pending, approved, rejected). Returns it and its old status. An
+    item older than :data:`MAX_AGE` cannot go back to the queue: it is stale (:func:`expire` would
+    end it within a minute, and :func:`next_for_post` never takes it)."""
     if status not in OWNER_STATUSES:
         raise CandidateInvalid("status_invalid")
     current = await get(db, candidate_id, lock=True)
     if current is None:
         return None, None
     if current.status not in OWNER_STATUSES:
+        raise CandidateInvalid("not_editable")
+    if status in EDITABLE and status != current.status and current.when < now - MAX_AGE:
         raise CandidateInvalid("not_editable")
     if status == "approved" and not (current.title or current.body):
         raise CandidateInvalid("caption_invalid")
@@ -692,21 +763,25 @@ async def set_status(
 # --- the publisher's side ----------------------------------------------------------------------------------
 
 
-async def next_for_post(db: Db, now: datetime) -> Candidate | None:
-    """The oldest approved candidate that can go now (see the module doc)."""
+async def next_for_post(db: Db, now: datetime, *, lock: bool = False) -> Candidate | None:
+    """The oldest approved candidate that can go now (see the module doc). ``lock`` (the publisher):
+    the row stays locked until the post is queued, so an owner's reject or edit at that moment waits
+    and then finds it posted (``not_editable``); a row the owner is changing right now is passed
+    over for the next one."""
     when = func.coalesce(ContentCandidate.published_at, ContentCandidate.created_at)
-    row = (
-        await db.execute(
-            select(*_COLS)
-            .where(
-                ContentCandidate.status == "approved",
-                ContentCandidate.media_state.in_(("none", "ready", "failed")),
-                when >= now - MAX_AGE,
-            )
-            .order_by(ContentCandidate.reviewed_at.asc().nulls_last(), ContentCandidate.id)
-            .limit(1)
+    stmt = (
+        select(*_COLS)
+        .where(
+            ContentCandidate.status == "approved",
+            ContentCandidate.media_state.in_(("none", "ready", "failed")),
+            when >= now - MAX_AGE,
         )
-    ).first()
+        .order_by(ContentCandidate.reviewed_at.asc().nulls_last(), ContentCandidate.id)
+        .limit(1)
+    )
+    if lock:
+        stmt = stmt.with_for_update(skip_locked=True)
+    row = (await db.execute(stmt)).first()
     return None if row is None else _candidate(row)
 
 
@@ -718,11 +793,18 @@ async def post_media(db: Db, candidate: Candidate) -> MediaRow | None:
 
 
 async def mark_used(db: Db, candidate_id: int, now: datetime) -> None:
-    await db.execute(
-        update(ContentCandidate)
-        .where(ContentCandidate.id == candidate_id)
-        .values(status="used", used_at=now, updated_at=now)
-    )
+    """The publisher queued the post of an approved candidate. Anything else (the owner rejected it
+    meanwhile) raises ``not_editable``, so the publisher's step rolls back its post."""
+    done = (
+        await db.execute(
+            update(ContentCandidate)
+            .where(ContentCandidate.id == candidate_id, ContentCandidate.status == "approved")
+            .values(status="used", used_at=now, updated_at=now)
+            .returning(ContentCandidate.id)
+        )
+    ).first()
+    if done is None:
+        raise CandidateInvalid("not_editable")
 
 
 # --- housekeeping -------------------------------------------------------------------------------------------
@@ -746,7 +828,15 @@ async def drop_media(db: Db, now: datetime, posted_keep: timedelta = timedelta(h
     """Remove files nobody needs any more: those of ended candidates (rejected, expired, duplicate),
     and those of used candidates once their post's job finished (sent, or failed for good) and an
     hour passed: the outbox reads the file only when it sends, and a status edit changes only the
-    caption."""
+    caption. A rejected candidate whose file goes waits for its download again (as
+    :func:`drop_video`), so moving it back to the queue fetches the file as before instead of
+    posting the news without it."""
+    await db.execute(
+        update(ContentCandidate)
+        .where(ContentCandidate.status == "rejected", ContentCandidate.media_state == "ready")
+        # updated_at is left as it is: it dates the rejection, which prune counts from
+        .values(media_state=case((ContentCandidate.media_url.is_not(None), "waiting"), else_="failed"))
+    )
     still_sending = (
         select(Post.content_candidate_id)
         .join(Outbox, Outbox.id == Post.outbox_id)

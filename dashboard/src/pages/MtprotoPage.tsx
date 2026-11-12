@@ -306,7 +306,7 @@ export default function MtprotoPage() {
             </div>
             <Skeleton className="h-80 rounded-3xl" />
           </>
-        ) : q.isError ? (
+        ) : q.isLoadingError ? (
           <Card>
             <LoadError error={q.error} notYet={NOT_YET} onRetry={() => void q.refetch()} />
           </Card>

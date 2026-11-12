@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
+import { LINK_STATUS } from "./posts";
 import {
   draftFrom,
   formatBytes,
   freshEveryHours,
+  freshText,
   meterTone,
   parseDraft,
   REALITY_STATUS,
@@ -123,6 +125,9 @@ describe("reality settings form", () => {
   it("says how often a fresh config comes", () => {
     expect(freshEveryHours(DEFAULTS)).toBe(24);
     expect(freshEveryHours({ cap_hours: 24, configs_per_node: 3 })).toBe(8);
+    // With renewal on, a healthy config is renewed in place; no fresh one is made every N hours.
+    expect(freshText({ cap_hours: 48, configs_per_node: 2, renew: true })).toBe("هر کانفیگ سالم هر ۴۸ ساعت با همان لینک تمدید میشود");
+    expect(freshText({ cap_hours: 48, configs_per_node: 2, renew: false })).toBe("هر node یک کانفیگ تازه در هر ۲۴ ساعت");
   });
 });
 
@@ -136,11 +141,27 @@ describe("reality numbers", () => {
   });
 
   it("measures time and volume used", () => {
+    const period = { cap_hours: 48, cap_gb: 1000, gb_bytes: 1e9 };
     const c = config({ used_bytes: 40e9 });
-    const u = usage(c, new Date("2026-11-04T06:00:00Z"));
+    const u = usage(c, new Date("2026-11-04T06:00:00Z"), period);
     expect(u.time).toBeCloseTo(0.25);
     expect(u.volume).toBeCloseTo(0.8);
-    expect(usage(c, new Date("2026-11-06T00:00:00Z")).time).toBe(1);
+    expect(usage(c, new Date("2026-11-06T00:00:00Z"), period).time).toBe(1);
+    // A config renewed in place for 20 days (D41): measured over its current 48-hour period.
+    const renewed = config({
+      created_at: "2026-10-23T00:00:00Z",
+      expires_at: "2026-11-14T23:00:00Z",
+      used_bytes: 4.5e12,
+      data_cap_bytes: 5.5e12,
+    });
+    const fresh = usage(renewed, new Date("2026-11-13T00:00:00Z"), period); // 47 h left
+    expect(fresh.time).toBeCloseTo(1 / 48);
+    expect(meterTone(fresh.time)).toBe("success");
+    expect(fresh.volume).toBe(0); // a whole 1 TB left in this period
+    const late = usage(renewed, new Date("2026-11-14T22:00:00Z"), period); // 1 h left
+    expect(late.time).toBeCloseTo(47 / 48);
+    expect(meterTone(late.time)).toBe("danger");
+    expect(usage({ ...renewed, used_bytes: 5.0e12 }, new Date("2026-11-13T00:00:00Z"), period).volume).toBeCloseTo(0.5);
     expect(meterTone(0.5)).toBe("success");
     expect(meterTone(0.75)).toBe("warning");
     expect(meterTone(0.95)).toBe("danger");
@@ -163,6 +184,14 @@ describe("reality words", () => {
       expect(REALITY_STATUS[s].label).toMatch(/[؀-ۿ]/);
     }
     expect(REALITY_STATUS.burned.tone).toBe("danger");
+  });
+
+  it("names the same mark the post shows for an ended config", () => {
+    const bare = (s: string) => s.replace(/️/g, "");
+    for (const s of ["expired", "full", "burned"] as const) {
+      expect(bare(REALITY_STATUS[s].hint), s).toContain(bare(LINK_STATUS[s].mark));
+    }
+    expect(REALITY_STATUS.burned.hint).not.toContain("🔴");
   });
 
   it("explains a node's Xray state", () => {

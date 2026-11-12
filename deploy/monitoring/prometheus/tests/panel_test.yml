@@ -60,6 +60,34 @@ tests:
               summary: "دیتابیس پنل پاسخ نمیدهد"
               description: "API پنل بیش از ۱ دقیقه به PostgreSQL وصل نشده است."
 
+  # A worker loop (dns, every 60 s) stops finishing passes: over 3 x 60 s + 900 s from minute 19,
+  # firing 5 minutes later. The healthy loop (acme) never alerts.
+  - interval: 1m
+    input_series:
+      - series: 'proxyhub_reconciler_last_success_age_seconds{job="proxyhub-api", instance="api:8000", name="dns"}'
+        values: "0+60x40"
+      - series: 'proxyhub_reconciler_interval_seconds{job="proxyhub-api", instance="api:8000", name="dns"}'
+        values: "60x40"
+      - series: 'proxyhub_reconciler_last_success_age_seconds{job="proxyhub-api", instance="api:8000", name="acme"}'
+        values: "30x40"
+      - series: 'proxyhub_reconciler_interval_seconds{job="proxyhub-api", instance="api:8000", name="acme"}'
+        values: "300x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ReconcilerStalled
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ReconcilerStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: proxyhub-api
+              instance: "api:8000"
+              name: dns
+            exp_annotations:
+              summary: "چرخه‌ی کنترل dns در worker پنل کارش را تمام نمیکند"
+              description: "چرخه‌ی dns مدتی است هیچ دوری را با موفقیت تمام نکرده است (هر بار خطا میدهد یا گیر کرده). جزئیات در لاگ worker است."
+
   # API scrape fails for more than 2 minutes.
   - interval: 15s
     input_series:
@@ -268,4 +296,52 @@ tests:
               description: "سرور تازه‌ترین commit شاخه‌ی main را اجرا نکرد، چون ادغام امضاشده‌ی یک PR در گیت‌هاب نبود. ممکن است کسی مستقیم روی main کد فرستاده باشد. نسخه‌ی قبلی همچنان در حال کار است. جزئیات: journalctl -u proxyhub-deployer.service"
       - eval_time: 14m
         alertname: DeployRefused
+        exp_alerts: []
+
+  # A failed deploy with a good rollback: warning at once, cleared by a good deploy. A failed rollback
+  # raises only the critical alert (the previous version is not known to run).
+  - interval: 1m
+    input_series:
+      - series: 'proxyhub_deploy_failed{job="node", instance="node-exporter:9100"}'
+        values: "0x5 1x5 1x5 0x5"
+      - series: 'proxyhub_deploy_rollback_failed{job="node", instance="node-exporter:9100"}'
+        values: "0x5 0x5 1x5 0x5"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: DeployFailed
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: DeployRollbackFailed
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: DeployFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node
+              instance: "node-exporter:9100"
+            exp_annotations:
+              summary: "استقرار شکست خورد: تازه‌ترین commit اجرا نمیشود"
+              description: "سرور نتوانست تازه‌ترین commit شاخه‌ی main را مستقر کند (ساخت یا آزمون سلامت آن شکست خورد) و به نسخه‌ی قبلی برگشت. نسخه‌ی قبلی همچنان در حال کار است. همین commit خودبه‌خود دوباره امتحان نمیشود؛ با ادغام بعدی، استقرار دوباره امتحان میشود. جزئیات: journalctl -u proxyhub-deployer.service"
+      - eval_time: 7m
+        alertname: DeployRollbackFailed
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: DeployFailed
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: DeployRollbackFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node
+              instance: "node-exporter:9100"
+            exp_annotations:
+              summary: "استقرار شکست خورد و برگشت به نسخه‌ی قبلی هم نشد"
+              description: "تازه‌ترین commit شاخه‌ی main مستقر نشد، و برگشت به نسخه‌ی سالم قبلی هم شکست خورد. ممکن است پنل یا worker از کار افتاده باشد. جزئیات: journalctl -u proxyhub-deployer.service"
+      - eval_time: 18m
+        alertname: DeployFailed
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: DeployRollbackFailed
         exp_alerts: []

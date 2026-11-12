@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from proxyhub.fleet.actions import log_action
 from proxyhub.mtproxy import state, store
-from proxyhub.mtproxy.messages import session_ended_alert
+from proxyhub.mtproxy.messages import check_failed_alert, check_recovered_alert, session_ended_alert
 from proxyhub.mtproxy.state import AccountRow
 from proxyhub.mtproxy.userclient import (
     Account,
@@ -40,7 +40,7 @@ from proxyhub.mtproxy.userclient import (
     OperatorSession,
     operator_session,
 )
-from proxyhub.mtproxy.validation import mask_phone
+from proxyhub.mtproxy.validation import InputError, mask_phone, parse_code
 from proxyhub.telegram.store import enqueue_owner_alert
 from proxyhub.vault import SecretValue, Vault, VaultError, secret_exists
 
@@ -61,6 +61,11 @@ _LOGIN_OVER: Final = frozenset(
         "update_app_to_login",
     }
 )
+
+
+# Telegram refuses the stored session for good: logout cannot end it there, and keeping it would
+# block every new login (start_login refuses while a session is stored).
+_SESSION_UNUSABLE: Final = frozenset({"api_id_invalid", "api_id_published"})
 
 
 class ServiceError(Exception):
@@ -325,6 +330,11 @@ async def _finish_login(
 async def submit_code(deps: Deps, *, code: str, actor: str) -> AccountRow:
     async with _Locked(deps):
         row, pending = await _pending_for(deps, expected=state.CODE_SENT, actor=actor)
+        try:
+            # Digits, or the word / phrase of an SMS: checked against how Telegram sent this code.
+            code = parse_code(code, via=row.code_via)
+        except InputError as exc:
+            raise ServiceError(exc.code) from None
         signed: _SignedIn | None = None
         try:
             async with operator_session(
@@ -408,7 +418,9 @@ async def _sign_in_failed(
 
 async def logout(deps: Deps, *, actor: str) -> AccountRow:
     """Ends the session on Telegram (auth.logOut), then removes it and the api credentials from the
-    vault. A login in progress is cancelled. Telegram unreachable: nothing is removed (502)."""
+    vault. A login in progress is cancelled. Telegram unreachable: nothing is removed (502). A
+    session Telegram refuses for good (api_id refused or published, auth key unknown) cannot be
+    ended from here and is removed like an unreadable one, so a new login is possible."""
     async with _Locked(deps):
         row, session_stored = await _read(deps)
         reason: str
@@ -450,6 +462,8 @@ async def _end_session_on_telegram(deps: Deps) -> str:
     except MtpError as exc:
         if exc.code == "session_terminated":
             return "session_already_ended"
+        if exc.code in _SESSION_UNUSABLE or exc.rpc == "AUTH_KEY_NOT_FOUND":
+            return "session_unusable"
         raise ServiceError("logout_unavailable", rpc=exc.rpc) from None
     return "telegram_logout"
 
@@ -475,7 +489,9 @@ async def _cleared(deps: Deps, row: AccountRow, *, actor: str, action: str, reas
 
 async def check_session(deps: Deps) -> str:
     """Every 30 minutes while a session is stored and the kill switch is OFF: connect, get_me,
-    disconnect (and resolve @MTProxybot once, if the login could not). Returns what happened:
+    disconnect (and resolve @MTProxybot once, if the login could not). A session in ``error`` is
+    checked too, so a cause that went away (a master key restored, a refusal Telegram stopped
+    sending) brings the account back without a new login. Returns what happened:
     ``kill_switch``, ``idle``, ``not_due``, ``ok``, ``terminated``, ``failed:<code>``."""
     now = deps.clock()
     try:
@@ -483,7 +499,7 @@ async def check_session(deps: Deps) -> str:
             if await store.kill_switch_on(db):
                 return "kill_switch"  # docs/11 lock 6: the kill switch stops this module too
             row = await store.load_row(db)
-            if row.state != state.CONNECTED:
+            if row.state not in state.CHECKED:
                 return "idle"
             if not state.check_due(row, now):
                 return "not_due"
@@ -497,14 +513,15 @@ async def check_session(deps: Deps) -> str:
     bot_id = row.mtproxybot_id
     code: str | None = None
     rpc: str | None = None
+    seconds: int | None = None
     try:
         async with operator_session(creds, session, options=deps.options) as op:
             account = await op.get_me()
             if bot_id is None:
                 bot_id, _ = await _resolve_bot(op)
     except MtpError as exc:
-        code, rpc = exc.code, exc.rpc
-    return await _record_check(deps, row, code=code, rpc=rpc, account=account, bot_id=bot_id)
+        code, rpc, seconds = exc.code, exc.rpc, exc.seconds
+    return await _record_check(deps, row, code=code, rpc=rpc, account=account, bot_id=bot_id, seconds=seconds)
 
 
 async def _record_check(
@@ -515,11 +532,12 @@ async def _record_check(
     rpc: str | None,
     account: Account | None,
     bot_id: int | None,
+    seconds: int | None = None,
 ) -> str:
     now = deps.clock()
     async with deps.engine.begin() as db:
         current = await store.load_row(db, for_update=True)
-        if current.session_id != checked.session_id or current.state != state.CONNECTED:
+        if current.session_id != checked.session_id or current.state not in state.CHECKED:
             return "stale"  # logged out or logged in again meanwhile
         new = state.after_check(
             current,
@@ -527,6 +545,7 @@ async def _record_check(
             rpc=rpc,
             first_name=account.first_name if account else None,
             mtproxybot_id=bot_id,
+            seconds=seconds,
             now=now,
         )
         await store.save_row(db, new)
@@ -547,16 +566,19 @@ async def _record_check(
             await enqueue_owner_alert(db, session_ended_alert(reason.upper()))
             outcome = "terminated"
         elif code is not None and code not in state.TRANSIENT:
-            await log_action(
-                db,
-                actor=WORKER_ACTOR,
-                action="mtproxy.account_check_failed",
-                target=target,
-                dry_run=False,
-                allowed=False,
-                reasons=[code],
-                context={"telegram_error": rpc} if rpc else {},
-            )
+            if current.state != state.ERROR or current.error != code:
+                # Once per cause: the same failure every 30 minutes is neither logged nor sent again.
+                await log_action(
+                    db,
+                    actor=WORKER_ACTOR,
+                    action="mtproxy.account_check_failed",
+                    target=target,
+                    dry_run=False,
+                    allowed=False,
+                    reasons=[code],
+                    context={"telegram_error": rpc} if rpc else {},
+                )
+                await enqueue_owner_alert(db, check_failed_alert(code, rpc))
             outcome = f"failed:{code}"
         elif code is not None:
             outcome = f"failed:{code}"
@@ -571,6 +593,8 @@ async def _record_check(
                     allowed=True,
                     reasons=["get_me_ok"],
                 )
+            if current.state == state.ERROR:
+                await enqueue_owner_alert(db, check_recovered_alert())
             outcome = "ok"
     if code is not None:
         log.warning("mtproxy: session check failed (%s)", code)

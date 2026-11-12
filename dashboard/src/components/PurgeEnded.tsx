@@ -3,7 +3,7 @@ import { Archive, CircleAlert, Eraser, Info } from "lucide-react";
 import { useState } from "react";
 
 import { errorMessage } from "../lib/api";
-import { keptLines, MIN_AGE_OPTIONS, previewEndedPurge, purgeEnded, purgeLines, type EndedPurge } from "../lib/cleanup";
+import { keptLines, latestOnly, MIN_AGE_OPTIONS, previewEndedPurge, previewFor, purgeEnded, purgeLines, type EndedPurge } from "../lib/cleanup";
 import { formatNumber } from "../lib/format";
 import { toast } from "../lib/toast";
 import { Button } from "./ui/Button";
@@ -24,19 +24,27 @@ export function PurgeEndedButton({ size = "sm", label = "پاک کردن پای�
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [gate] = useState(latestOnly);
 
   const hoursOf = (value: string) => MIN_AGE_OPTIONS.find((o) => o.value === value)?.hours ?? 1;
 
+  // The owner may change the age while a preview runs: only the newest answer counts.
   const load = (value: string) => {
+    const token = gate.next();
     setLoading(true);
     setError(null);
     previewEndedPurge(hoursOf(value))
-      .then(setPreview)
+      .then((p) => {
+        if (gate.isCurrent(token)) setPreview(p);
+      })
       .catch((e: unknown) => {
+        if (!gate.isCurrent(token)) return;
         setPreview(null);
         setError(errorMessage(e));
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (gate.isCurrent(token)) setLoading(false);
+      });
   };
 
   const openDialog = () => {
@@ -59,8 +67,10 @@ export function PurgeEndedButton({ size = "sm", label = "پاک کردن پای�
       .finally(() => setBusy(false));
   };
 
-  const lines = preview ? purgeLines(preview.removed) : [];
-  const kept = preview ? keptLines(preview.kept) : [];
+  // Counts made for another age are never shown with, nor enable, a purge of the selected one.
+  const shown = previewFor(preview, hoursOf(age));
+  const lines = shown ? purgeLines(shown.removed) : [];
+  const kept = shown ? keptLines(shown.kept) : [];
 
   return (
     <>
@@ -70,15 +80,17 @@ export function PurgeEndedButton({ size = "sm", label = "پاک کردن پای�
       <ConfirmDialog
         open={open}
         onOpenChange={(v) => {
-          if (!busy) setOpen(v);
+          if (busy) return;
+          if (!v) gate.cancel(); // a late answer never writes into a closed dialog
+          setOpen(v);
         }}
         title="پاک کردن پایان‌یافته‌ها"
         description="فقط آنچه تمام شده از دیتابیس پنل پاک میشود: nodeهای حذف‌شده با سابقه‌شان، کانفیگ‌های Reality پایان‌یافته، ثبت‌های اسپانسر بازنشسته، ردیف‌های پست‌های تمام‌شده‌ی کانال آزمایشی و کارهای تمام‌شده‌ی صف ارسال. چیزی از تلگرام، هتزنر یا Cloudflare پاک نمیشود."
-        confirmLabel={preview && preview.total > 0 ? `پاک کن (${formatNumber(preview.total)} ردیف)` : "پاک کن"}
+        confirmLabel={shown && shown.total > 0 ? `پاک کن (${formatNumber(shown.total)} ردیف)` : "پاک کن"}
         tone="danger"
         icon={<Archive className="size-6" />}
         busy={busy}
-        confirmDisabled={loading || !preview || preview.total === 0}
+        confirmDisabled={loading || !shown || shown.total === 0}
         onConfirm={confirm}
       >
         <div className="flex flex-col gap-3">
@@ -106,8 +118,8 @@ export function PurgeEndedButton({ size = "sm", label = "پاک کردن پای�
               <CircleAlert className="mt-1 size-4 shrink-0 text-danger" />
               <span>{error}</span>
             </p>
-          ) : preview ? (
-            preview.total === 0 ? (
+          ) : shown ? (
+            shown.total === 0 ? (
               <p className="rounded-2xl border border-line bg-surface-2 p-3 text-sm leading-7 text-fg-muted">
                 با این کمینه‌ی عمر، چیزی برای پاک کردن نیست.
               </p>
@@ -122,14 +134,14 @@ export function PurgeEndedButton({ size = "sm", label = "پاک کردن پای�
               </ul>
             )
           ) : null}
-          {!loading && preview && (kept.length > 0 || preview.ip_history_unlinked > 0) ? (
+          {!loading && shown && (kept.length > 0 || shown.ip_history_unlinked > 0) ? (
             <div className="flex gap-2 rounded-2xl border border-line bg-surface p-3 text-[0.82rem] leading-6 text-fg-muted">
               <Info className="mt-1 size-4 shrink-0 text-brand" />
               <ul className="flex flex-col gap-1">
                 {kept.map((k) => (
                   <li key={k}>{k}</li>
                 ))}
-                {preview.ip_history_unlinked > 0 ? (
+                {shown.ip_history_unlinked > 0 ? (
                   <li>حافظه‌ی IPهای سوخته میماند تا همان IPها دوباره گرفته نشوند.</li>
                 ) : null}
                 <li>دفتر هزینه، رویدادها، تنظیمات و رمزها هرگز پاک نمیشوند.</li>

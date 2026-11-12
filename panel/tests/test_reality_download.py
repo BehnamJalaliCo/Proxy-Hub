@@ -66,6 +66,14 @@ def test_the_report_carries_both_totals_or_neither() -> None:
             XrayCounters.model_validate({**base, **bad})
 
 
+def test_a_restart_seen_in_one_direction_resets_both() -> None:
+    assert download.deltas((None, None), 1000, 5000) == (0, 0)  # the first totals teach nothing yet
+    assert download.deltas((1000, 5000), 50 * MB, 40 * MB) == (50 * MB - 1000, 40 * MB - 5000)
+    # Xray started again: up fell, down has already passed its old value. Both began at 0.
+    assert download.deltas((50 * MB, 40 * MB), 10 * MB, 45 * MB) == (10 * MB, 45 * MB)
+    assert download.deltas((50 * MB, 40 * MB), 60 * MB, 5 * MB) == (60 * MB, 5 * MB)
+
+
 async def _report(world: World, node: uuid.UUID, up: int, down: int, at: datetime) -> None:
     async with world.engine.begin() as conn:
         await store_xray_report(

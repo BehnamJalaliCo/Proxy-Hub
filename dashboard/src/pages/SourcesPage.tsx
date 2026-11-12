@@ -272,7 +272,7 @@ export default function SourcesPage() {
           <div className="p-4 sm:p-5">
             {sources.isPending ? (
               <SkeletonLines lines={5} />
-            ) : sources.isError ? (
+            ) : sources.isLoadingError ? (
               <LoadError error={sources.error} compact onRetry={() => void sources.refetch()} notYet={NOT_YET} />
             ) : data && data.sources.length === 0 ? (
               <EmptyState

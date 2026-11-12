@@ -519,10 +519,13 @@ async def usage(db: Db, now: datetime | None = None, days: int = 30) -> dict[str
     for dim in ("country", "region", "asn"):
         rows = (
             await db.execute(
+                # The runs of one node and day are combined first, as for the daily total: users by
+                # max (a restarted agent counts the same people again), bytes by sum.
                 text(
-                    "SELECT key, sum(users) AS user_days, count(DISTINCT day) AS days, sum(bytes) AS bytes "
-                    "FROM analytics_usage_dims WHERE dim = :dim AND day >= :since GROUP BY key "
-                    "ORDER BY 2 DESC, 1 LIMIT 30"
+                    "SELECT key, sum(u) AS user_days, count(DISTINCT day) AS days, sum(b) AS bytes FROM ("
+                    " SELECT node_id, day, key, max(users) AS u, sum(bytes) AS b FROM analytics_usage_dims"
+                    " WHERE dim = :dim AND day >= :since GROUP BY node_id, day, key) x "
+                    "GROUP BY key ORDER BY 2 DESC, 1 LIMIT 30"
                 ),
                 {"dim": dim, "since": since_day},
             )

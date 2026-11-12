@@ -8,7 +8,11 @@ The preview page below follows the markup of Telegram's real public preview (t.m
 
 from __future__ import annotations
 
+import contextlib
 import gzip
+import ssl
+import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,6 +22,7 @@ from test_content_support import LocalSite, Page, jpeg_header, mp4, png, site_ht
 from proxyhub.content import clean, media
 from proxyhub.content.items import SourceInvalid
 from proxyhub.content.net import (
+    MAX_URL_CHARS,
     FetchError,
     GuardedBackend,
     SafeHttp,
@@ -25,7 +30,7 @@ from proxyhub.content.net import (
     public_address,
     valid_hostname,
 )
-from proxyhub.content.rss import RssFeed, parse_feed
+from proxyhub.content.rss import MAX_ELEMENT_TEXT, MAX_FEED_BYTES, FeedRefused, RssFeed, parse_feed, parse_xml
 from proxyhub.content.telegram_preview import (
     TelegramPreview,
     check_name,
@@ -65,6 +70,17 @@ def test_good_urls_are_normalized() -> None:
     )
     assert check_url("https://t.me/s/bbcpersian") == "https://t.me/s/bbcpersian"
     assert valid_hostname("cdn4.telesco.pe") and not valid_hostname("CDN.example")
+
+
+def test_the_normalized_url_is_bounded_too() -> None:
+    """Percent-encoding makes a Persian slug six times longer: the RESULT is what gets stored."""
+    head = "https://news.example/"
+    with pytest.raises(FetchError, match="bad_url"):
+        check_url(head + "خ" * 400)  # 421 characters in, 2421 out
+    exact = head + "a" * (MAX_URL_CHARS - len(head))
+    assert check_url(exact) == exact
+    with pytest.raises(FetchError, match="bad_url"):
+        check_url(exact + "a")
 
 
 @pytest.mark.parametrize(
@@ -134,6 +150,8 @@ async def test_a_page_is_read_and_every_redirect_hop_is_checked(tmp_path: Path) 
             ("http://news.example/feed", "bad_url"),
             ("https://127.0.0.1/feed", "bad_url"),
             ("https://news.example:8443/feed", "bad_url"),
+            ("https://[", "bad_redirect"),  # urljoin itself refuses it (ValueError)
+            ("//[x", "bad_redirect"),
         ):
             site.pages[("news.example", "/away")] = Page(301, headers={"Location": location})
             with pytest.raises(FetchError, match=code):
@@ -168,6 +186,47 @@ async def test_bodies_are_bounded_also_when_compressed(tmp_path: Path) -> None:
         assert (await http.get("https://news.example/small.gz", limit=100)).body == b"ok"
         with pytest.raises(FetchError, match="bad_encoding"):
             await http.get("https://news.example/br", limit=100)
+
+
+class _Stream:
+    """A response whose body read fails the way a TLS alert after the handshake does."""
+
+    status = 200
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+        self.headers = [(b"Content-Type", b"text/xml")]
+
+    async def aiter_stream(self) -> AsyncIterator[bytes]:
+        yield b"<rss>"
+        raise self.error
+
+
+class _Pool:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    @contextlib.asynccontextmanager
+    async def stream(self, *args: object, **kwargs: object) -> AsyncIterator[_Stream]:
+        yield _Stream(self.error)
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (ssl.SSLError(1, "certificate required"), "connect_failed"),
+        (ConnectionResetError(), "connect_failed"),
+        (TimeoutError(), "timeout"),
+    ],
+)
+async def test_every_error_of_a_read_is_a_fetch_error(error: BaseException, code: str) -> None:
+    http = SafeHttp()
+    http._pool = _Pool(error)  # type: ignore[assignment]
+    with pytest.raises(FetchError, match=code):
+        await http.get("https://news.example/feed", limit=1000)
 
 
 async def test_the_certificate_is_checked_for_the_name(tmp_path: Path) -> None:
@@ -374,6 +433,26 @@ async def test_unsafe_or_broken_feeds_are_refused(tmp_path: Path, document: str,
             await RssFeed().fetch(http, "https://news.example/feed")
 
 
+def test_a_text_of_many_short_chunks_costs_linear_time() -> None:
+    """expat calls the text handler once per newline and per entity reference; re-summing the text
+    on each call made a 3 MB feed freeze the worker for over an hour."""
+    short = "\n" * 5000
+    (node,) = parse_xml(f"<rss><a>{short}</a></rss>".encode()).children[0].children
+    assert "".join(node.text) == short and len(node.text) < 10  # coalesced, not 5000 calls
+    lines = "\n" * (MAX_ELEMENT_TEXT - 1)
+    hostile = "<rss>" + f"<a>{lines}</a>" * 30 + "</rss>"
+    assert len(hostile) <= MAX_FEED_BYTES
+    started = time.monotonic()
+    parse_xml(hostile.encode())
+    assert time.monotonic() - started < 5
+    unit = "a\n&amp;"  # three characters once parsed: the size counts parsed text, as before
+    full = unit * (MAX_ELEMENT_TEXT // 3) + "a" * (MAX_ELEMENT_TEXT % 3)
+    (node,) = parse_xml(f"<rss><a>{full}</a></rss>".encode()).children[0].children
+    assert sum(len(t) for t in node.text) == MAX_ELEMENT_TEXT
+    with pytest.raises(FeedRefused, match="too_big"):
+        parse_xml(f"<rss><a>{full}a</a></rss>".encode())
+
+
 async def test_a_feed_is_read_over_the_guard(tmp_path: Path) -> None:
     async with LocalSite(tmp_path) as site, site_http(site) as http:
         site.pages[("news.example", "/feed")] = Page(
@@ -393,6 +472,21 @@ async def test_a_feed_is_read_over_the_guard(tmp_path: Path) -> None:
 def test_bad_feed_urls(raw: str) -> None:
     with pytest.raises(SourceInvalid, match="feed_url_invalid"):
         RssFeed().check_ref(raw)
+
+
+def test_long_entry_links_leave_the_parser_bounded() -> None:
+    """An agency's link carries the whole headline as its slug: what leaves the plugin is still a
+    URL :func:`check_url` accepted, never longer than :data:`MAX_URL_CHARS`."""
+    slug = "خ" * 400
+    document = (
+        f"<rss><channel><item><title>t</title><link>https://news.example/{slug}</link><guid>g1</guid>"
+        f'<enclosure url="https://cdn.example/{slug}.jpg" type="image/jpeg"/></item>'
+        f"<item><title>t2</title><link>https://news.example/{'خ' * 180}</link><guid>g2</guid></item>"
+        "</channel></rss>"
+    )
+    first, second = parse_feed(document.encode())
+    assert first.url is None and first.media is None  # each over 2048 once encoded
+    assert second.url is not None and 1024 < len(second.url) <= MAX_URL_CHARS
 
 
 # --- cleaning and captions ------------------------------------------------------------------------
@@ -419,6 +513,39 @@ def test_links_mentions_tags_and_the_signature_go() -> None:
     )
     assert clean.clean_source_text("t.me/joinchat/abc @x #y_z") == "y z"
     assert clean.clean_source_text("‮متن‏ معکوس​") == "متن معکوس"
+
+
+@pytest.mark.parametrize(
+    ("text", "names", "expected"),
+    [
+        # The most topical news for this channel names two platforms: it is news, not a signature.
+        ("تلگرام و اینستاگرام رفع فیلتر شدند", (), "تلگرام و اینستاگرام رفع فیلتر شدند"),
+        ("واتساپ و اینستاگرام رفع فیلتر شدند\n@somehandle", (), "واتساپ و اینستاگرام رفع فیلتر شدند"),
+        ("🔴 فوری | عضویت ایران در بریکس رسمی شد", (), "🔴 فوری | عضویت ایران در بریکس رسمی شد"),
+        ("ایسنا: قیمت دلار کاهش یافت", ("isna", "ایسنا"), "ایسنا: قیمت دلار کاهش یافت"),
+        (
+            "خبر اول درباره چیزی مهم\nزلزله استان فارس را لرزاند",
+            ("farsna", "فارس"),
+            "خبر اول درباره چیزی مهم\nزلزله استان فارس را لرزاند",
+        ),
+        (
+            "وزیر ارتباطات گفت.\nاو افزود: رفع فیلتر تلگرام و واتساپ در دستور کار است.",
+            (),
+            "وزیر ارتباطات گفت.\nاو افزود: رفع فیلتر تلگرام و واتساپ در دستور کار است.",
+        ),
+        ("متن خبر\nعضو شورای شهر تهران گفت", (), "متن خبر\nعضو شورای شهر تهران گفت"),
+        # A signature still goes.
+        ("متن خبر\nکانال خبری فارس", ("farsna", "فارس"), "متن خبر"),
+        ("متن خبر\n📡 خبرگزاری ایسنا", ("isna", "ایسنا"), "متن خبر"),
+        ("متن خبر\nما را در اینستاگرام و تلگرام دنبال کنید", (), "متن خبر"),
+        ("متن خبر\nاینستاگرام و تلگرام", (), "متن خبر"),
+        ("عضو کانال ما شوید", (), ""),  # nothing but an invitation
+    ],
+)
+def test_the_signature_is_stripped_but_never_the_news(
+    text: str, names: tuple[str, ...], expected: str
+) -> None:
+    assert clean.clean_source_text(text, names) == expected
 
 
 def test_proxies_are_not_content_but_a_proxy_channels_news_is() -> None:

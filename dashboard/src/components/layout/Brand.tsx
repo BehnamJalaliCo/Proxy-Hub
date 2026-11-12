@@ -9,21 +9,27 @@ export function LogoMark({ className }: { className?: string }) {
   const gid = `ph-logo-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
   return (
     <svg viewBox="0 0 64 64" className={cn("size-10", className)} aria-hidden>
+      {/* An obsidian seal with a gold edge and the hub in gold: the same mark in both themes. */}
       <defs>
-        <linearGradient id={gid} x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#7c6cff" />
-          <stop offset="1" stopColor="#22c3e6" />
+        <linearGradient id={`${gid}-bg`} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#2a261c" />
+          <stop offset="1" stopColor="#0a0a0c" />
+        </linearGradient>
+        <linearGradient id={`${gid}-au`} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#f6e6bb" />
+          <stop offset=".5" stopColor="#dfc07a" />
+          <stop offset="1" stopColor="#b98f3c" />
         </linearGradient>
       </defs>
-      <rect width="64" height="64" rx="18" fill={`url(#${gid})`} />
-      <g stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeOpacity=".85">
-        <path d="M19 21l9 8M45 21l-9 8M19 43l9-8M45 43l-9-8" />
+      <rect x="1.25" y="1.25" width="61.5" height="61.5" rx="18" fill={`url(#${gid}-bg)`} stroke={`url(#${gid}-au)`} strokeWidth="1.5" />
+      <g stroke={`url(#${gid}-au)`} strokeWidth="2.6" strokeLinecap="round" strokeOpacity=".9">
+        <path d="M20 22l8 7M44 22l-8 7M20 42l8-7M44 42l-8-7" />
       </g>
-      <circle cx="32" cy="32" r="7" fill="#fff" />
-      <circle cx="16" cy="18" r="4.5" fill="#fff" fillOpacity=".9" />
-      <circle cx="48" cy="18" r="4.5" fill="#fff" fillOpacity=".9" />
-      <circle cx="16" cy="46" r="4.5" fill="#fff" fillOpacity=".9" />
-      <circle cx="48" cy="46" r="4.5" fill="#fff" fillOpacity=".9" />
+      <circle cx="32" cy="32" r="6.5" fill={`url(#${gid}-au)`} />
+      <circle cx="17" cy="19" r="4" fill={`url(#${gid}-au)`} />
+      <circle cx="47" cy="19" r="4" fill={`url(#${gid}-au)`} />
+      <circle cx="17" cy="45" r="4" fill={`url(#${gid}-au)`} />
+      <circle cx="47" cy="45" r="4" fill={`url(#${gid}-au)`} />
     </svg>
   );
 }
@@ -33,7 +39,9 @@ export function Logo({ compact = false }: { compact?: boolean }) {
     <div className="flex items-center gap-3">
       <LogoMark className={compact ? "size-9" : "size-11"} />
       <div className="leading-tight">
-        <div className="ltr text-[1.05rem] font-extrabold tracking-tight text-fg">Proxy-Hub</div>
+        <div className="ltr text-[1.08rem] font-extrabold tracking-tight text-fg">
+          Proxy<span className="text-brand">-</span>Hub
+        </div>
         {!compact ? <div className="text-xs text-fg-muted">پنل خودکار پروکسی</div> : null}
       </div>
     </div>

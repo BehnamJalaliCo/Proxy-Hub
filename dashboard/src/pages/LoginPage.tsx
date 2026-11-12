@@ -84,7 +84,7 @@ export default function LoginPage() {
     <AuthLayout>
       <div className="rounded-[2rem] border border-line bg-surface/90 p-6 shadow-pop backdrop-blur-xl sm:p-8">
         <div className="mb-6 flex items-center gap-3">
-          <span className="grid size-12 place-items-center rounded-2xl bg-[linear-gradient(135deg,var(--ph-brand),var(--ph-brand-2))] text-white shadow-[0_10px_30px_-10px_var(--ph-brand)]">
+          <span className="grid size-12 place-items-center rounded-2xl ph-gold">
             <LogIn className="size-6 rtl:-scale-x-100" />
           </span>
           <div>

@@ -10,9 +10,10 @@ here is a secret.
 ``settings`` rows:
 
 =========================  ==========================================================================
-``posts.operator``         the owner's choice: ``{"poster": "bot" | "operator", "emoji_pack": name}``;
-                           the bot until the owner switches (``emoji_pack``: the short name of the
-                           pack link ``https://t.me/addemoji/<name>``, or null)
+``posts.operator``         the owner's choice: ``{"poster": "bot" | "operator", "emoji_pack": name,
+                           "auto": bool}``; the bot until the owner switches (``emoji_pack``: the
+                           short name of the pack link ``https://t.me/addemoji/<name>``, or null;
+                           ``auto``: it is the panel's own pack, see proxyhub/posts/own_pack.py)
 ``posts.operator.pack``    the pack as Telegram last returned it: short name, title, ``entries``
                            (``[document id as a string, alt emoji]``), when, and the last error
 ``posts.operator.rights``  the account's own rights in each configured channel (role -> chat id,
@@ -71,9 +72,12 @@ PosterName = Literal["bot", "operator"]
 class OperatorConfig:
     poster: PosterName = "bot"
     emoji_pack: str | None = None
+    # The pack is the panel's own (proxyhub/posts/own_pack.py), not one the owner pasted: a newer own
+    # pack (new drawings, or a renamed main channel or bot) takes its place by itself (D43).
+    auto: bool = False
 
     def as_json(self) -> dict[str, Any]:
-        return {"poster": self.poster, "emoji_pack": self.emoji_pack}
+        return {"poster": self.poster, "emoji_pack": self.emoji_pack, "auto": self.auto}
 
 
 DEFAULT_CONFIG: Final = OperatorConfig()
@@ -115,9 +119,11 @@ def _config_from(value: dict[str, Any] | None) -> OperatorConfig:
         return DEFAULT_CONFIG
     poster = value.get("poster")
     pack = value.get("emoji_pack")
+    emoji_pack = pack if isinstance(pack, str) and _SHORT_NAME.fullmatch(pack) else None
     return OperatorConfig(
         poster="operator" if poster == "operator" else "bot",
-        emoji_pack=pack if isinstance(pack, str) and _SHORT_NAME.fullmatch(pack) else None,
+        emoji_pack=emoji_pack,
+        auto=emoji_pack is not None and value.get("auto") is True,
     )
 
 

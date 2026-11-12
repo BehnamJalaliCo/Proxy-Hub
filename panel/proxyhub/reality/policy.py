@@ -367,13 +367,38 @@ async def moving_slots(conn: AsyncConnection, now: datetime) -> set[int]:
     return {int(r.slot) for r in rows}
 
 
-async def end_configs(conn: AsyncConnection, now: datetime, transport: Transport) -> dict[int, EndStatus]:
+# After the panel could not see its fleet (its host, API or database down: no serving node's report
+# is fresh), a config whose end passed meanwhile is not expired until its scope's nodes have
+# reported again, at most this long after the last such tick: REPORT_FRESH plus the agent's longest
+# backoff (5 minutes). renew_configs then decides on fresh reports (D41).
+RESUME_GRACE: Final = timedelta(minutes=15)
+_FAR: Final = datetime.max.replace(tzinfo=UTC)
+
+
+async def fleet_blind(conn: AsyncConnection, now: datetime) -> bool:
+    """True when some node is in service but none of them has a report fresher than
+    :data:`REPORT_FRESH`: the panel has not been able to see its fleet."""
+    serving = [n for n in await live_nodes(conn) if S(n.state) in SERVE_STATES]
+    if not serving:
+        return False
+    statuses = await all_statuses(conn)
+    return not any(
+        (st := statuses.get(n.id)) is not None and st.reported_at >= now - REPORT_FRESH for n in serving
+    )
+
+
+async def end_configs(
+    conn: AsyncConnection, now: datetime, transport: Transport, *, hold_time: bool = False
+) -> dict[int, EndStatus]:
     """End every active config that no longer works (``transport``: the one the nodes serve now).
-    Returns config id -> new status."""
+    ``hold_time`` (the panel has just been blind, :data:`RESUME_GRACE`): a config that only its time
+    ends is kept while no node of its scope is READY with a fresh report, so a node that cannot have
+    reported since the panel came back does not lose its renewal. Returns config id -> new status."""
     configs = await _active(conn)
     if not configs:
         return {}
     nodes = {n.id: n for n in await live_nodes(conn)}
+    statuses = await all_statuses(conn) if hold_time else {}
     keys = {
         k.id: (k.slot, k.node_id)
         for k in (await conn.execute(select(RealityKey.id, RealityKey.slot, RealityKey.node_id))).all()
@@ -395,6 +420,32 @@ async def end_configs(conn: AsyncConnection, now: datetime, transport: Transport
             active_domain=domain,
             transport=transport,
         )
+        if why == "expired" and hold_time:
+            only_time = (
+                end_status(
+                    replace(c, expires_at=_FAR),
+                    now=now,
+                    own_node_state=own.state if own else None,
+                    scope_served=served,
+                    active_domain=domain,
+                    transport=transport,
+                )
+                is None
+            )
+            scope_nodes = [
+                n
+                for n in nodes.values()
+                if (n.slot == key_slot if key_slot is not None else n.id == key_node)
+                and S(n.state) in SERVE_STATES
+            ]
+            seen = any(
+                n.state == S.READY.value
+                and (st := statuses.get(n.id)) is not None
+                and st.reported_at >= now - REPORT_FRESH
+                for n in scope_nodes
+            )
+            if only_time and scope_nodes and not seen:
+                continue  # its node has not reported since the panel came back: not yet
         if why is not None:
             ended[c.id] = why
     for status in ("full", "expired", "burned"):

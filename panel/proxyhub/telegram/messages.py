@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from proxyhub.telegram.templates import RLM
+
 ERRORS_FA: Final[dict[str, str]] = {
     "bot_token_invalid": (
         "توکن ربات درست نیست یا در BotFather باطل شده است. "
@@ -42,9 +44,25 @@ ERRORS_FA: Final[dict[str, str]] = {
 PAIRED_FA: Final = "✅ <b>این چت به Proxy-Hub وصل شد.</b>\nاز این پس هشدارها و پیام‌های پنل به همین چت میرسند."
 TEST_ALERT_FA: Final = "🧪 <b>پیام آزمایشی Proxy-Hub</b>\nهشدارهای پنل به همین چت میرسند."
 TEST_POST_FA: Final = "🧪 <b>پست آزمایشی Proxy-Hub</b>\nارسال و ویرایش پست در این کانال درست کار میکند."
+# Each line starts with a Latin word, so each starts with RLM to stay right-to-left (templates.RLM).
 API_DOWN_FA: Final = (
-    "🔴 <b>API پنل از دسترس خارج است</b>\n"
-    "worker سه بار پشت سر هم (در حدود ۳ دقیقه) نتوانست به API پنل برسد. "
+    f"{RLM}🔴 <b>API پنل از دسترس خارج است</b>\n"
+    f"{RLM}worker سه بار پشت سر هم (در حدود ۳ دقیقه) نتوانست به API پنل برسد. "
     "داشبورد و دریافت هشدارهای Alertmanager ممکن است کار نکنند."
 )
-API_BACK_FA: Final = "✅ <b>API پنل دوباره در دسترس است.</b>"
+API_BACK_FA: Final = f"{RLM}✅ <b>API پنل دوباره در دسترس است.</b>"
+# The daily read of our channels (proxyhub/reconcilers/telegram.py). {role}: «اصلی» or «آزمایشی»;
+# {old} and {new}: @names, wrapped in LRM so the "@" stays in front.
+CHANNEL_ROLE_FA: Final = {"main": "اصلی", "test": "آزمایشی"}
+CHANNEL_RENAMED_FA: Final = (
+    "⚠️ <b>نام کانال {role} در تلگرام عوض شده است</b>\n"
+    "نام قبلی: \u200e{old}\u200e — نام تازه: \u200e{new}\u200e\n"
+    "پنل از این پس نام تازه را زیر پست‌های تازه و در نام کانفیگ‌ها میگذارد. "
+    "اگر کانال اصلی است، کانال حامی را هم در صفحه‌ی اسپانسر با نام تازه دوباره ثبت کنید."
+)
+CHANNEL_RIGHTS_LOST_FA: Final = (
+    "⚠️ <b>ربات در کانال {role} دیگر اجازه‌ی {what} ندارد</b>\n"
+    "در تنظیمات ادمین کانال، این اجازه را برای ربات دوباره روشن کنید؛ تا آن وقت پست‌ها و ویرایش‌های ربات "
+    "در این کانال نمیروند."
+)
+CHANNEL_RIGHT_FA: Final = {"can_post": "ارسال پیام", "can_edit": "ویرایش پیام"}

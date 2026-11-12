@@ -9,6 +9,13 @@
 // that would be secrets on a real panel (TOTP QR/key, recovery codes) are masked in the images and
 // never printed. Never point this at the production panel with a real token.
 //
+// PAGES_ONLY=1 STATE_FILE=<session saved by SAVE_STATE>: no setup flow and no public pages; shoots
+// EVERY signed-in route (and the phone's drawer) on the four combinations, with the same checks. For
+// a throwaway panel that already has data (scripts/seed_demo.py fills one), so each page is seen in
+// its busy state. It only reads: nothing is clicked except the drawer button. PAGES=stats,nodes
+// (names or paths, comma separated) shoots only those routes. A phone page taller than one image
+// continues in <name>-part2-...; a phone page wider than the phone is reported as a problem.
+//
 // Playwright is not a dashboard dependency: it is resolved from the machine (global install).
 
 import { createHmac, randomBytes } from "node:crypto";
@@ -27,6 +34,9 @@ const PREFIX = process.env.PREFIX ?? "";
 // ONLY_STATS=1: after the setup (or with STATE_FILE, a session saved by SAVE_STATE on a throwaway
 // database), shoot only the «آمار» page, e.g. once empty and once after local data was added.
 const ONLY_STATS = process.env.ONLY_STATS === "1";
+// PAGES_ONLY=1 with STATE_FILE: every signed-in route, nothing else (see the top of this file).
+const PAGES_ONLY = process.env.PAGES_ONLY === "1";
+const PAGES = (process.env.PAGES ?? "").split(",").map((p) => p.trim()).filter(Boolean);
 const STATE_FILE = process.env.STATE_FILE ?? "";
 const SAVE_STATE = process.env.SAVE_STATE ?? "";
 // A fresh random owner password per run (never printed, never in the repo): even a run pointed at
@@ -41,6 +51,9 @@ const DEVICES = [
 ];
 const THEMES = ["light", "dark"];
 const COMBOS = DEVICES.flatMap((d) => THEMES.map((t) => ({ device: d, theme: t })));
+
+// The tallest page one image holds (CSS pixels); a taller page is cut there.
+const MAX_SHOT_HEIGHT = 12000;
 
 const problems = [];
 const resourceErrors = [];
@@ -122,22 +135,38 @@ async function shot(page, name, combo, { full = true } = {}) {
   // A whole page is shot by growing the viewport to the page height (instead of `fullPage`), so the
   // fixed top bar, sidebar and bottom navigation sit where a reader expects them.
   const base = combo.device.viewport;
+  let height = base.height;
   if (full) {
-    const height = await page.evaluate(() => document.documentElement.scrollHeight);
+    height = await page.evaluate(() => document.documentElement.scrollHeight);
     if (height > base.height) {
-      await page.setViewportSize({ width: base.width, height: Math.min(height, 12000) });
+      await page.setViewportSize({ width: base.width, height: Math.min(height, MAX_SHOT_HEIGHT) });
       await page.waitForTimeout(500);
     }
   }
-  await page.screenshot({
-    path: file,
+  const options = {
     animations: "disabled",
     mask: [page.locator("[data-ph-secret]")],
     maskColor: combo.theme === "dark" ? "#2a2f48" : "#d9dcea",
-  });
-  await page.setViewportSize(base);
+  };
+  await page.screenshot({ path: file, ...options });
   shots += 1;
   console.log(`  saved ${file}`);
+  // PAGES_ONLY: a page with data can be taller than one image holds (the statistics on a phone).
+  // The rest follows as <name>-part2, -part3, ...: the page scrolled on, so the fixed bars show again.
+  if (full && PAGES_ONLY) {
+    for (let top = MAX_SHOT_HEIGHT, part = 2; top < height; top += MAX_SHOT_HEIGHT, part += 1) {
+      const rest = Math.min(height - top, MAX_SHOT_HEIGHT);
+      await page.setViewportSize({ width: base.width, height: Math.max(rest, base.height) });
+      await page.evaluate((y) => window.scrollTo(0, y), top);
+      await page.waitForTimeout(900);
+      const more = join(OUT, `${PREFIX}${name}-part${String(part)}-${combo.device.name}-${combo.theme}.png`);
+      await page.screenshot({ path: more, ...options });
+      shots += 1;
+      console.log(`  saved ${more}`);
+    }
+    if (height > MAX_SHOT_HEIGHT) await page.evaluate(() => window.scrollTo(0, 0));
+  }
+  await page.setViewportSize(base);
 }
 
 async function checkRtl(page, label) {
@@ -272,6 +301,110 @@ async function signedInPages(browser, combo, state) {
   await ctx.close();
 }
 
+/** Every route of the signed-in panel (dashboard/src/App.tsx), in the order of the menu, with the
+ * h1 that shows the page really loaded. */
+const ALL_PAGES = [
+  ["/", "overview", "نمای کلی"],
+  ["/stats", "stats", "آمار"],
+  ["/nodes", "nodes", "nodeها"],
+  ["/telegram", "telegram", "تلگرام"],
+  ["/mtproto", "mtproto", "پروکسی‌های MTProto"],
+  ["/sponsor", "sponsor", "اسپانسر"],
+  ["/content", "content", "محتوا و انتشار"],
+  ["/review", "review", "صف بازبینی"],
+  ["/sources", "sources", "منبع‌های محتوا"],
+  ["/reality", "reality", "Reality"],
+  ["/accounts", "accounts", "حساب‌های هتزنر"],
+  ["/cloudflare", "cloudflare", "Cloudflare و دامنه‌ها"],
+  ["/events", "events", "رویدادها"],
+  ["/settings", "settings", "تنظیمات ناوگان"],
+  ["/security", "security", "امنیت"],
+];
+
+class SessionExpired extends Error {}
+
+/** A phone page that is wider than the phone. Chromium's phone emulation then lays the page out in
+ * a wider viewport and zooms out, so `scrollWidth - innerWidth` (checkRtl) stays 0 and a screenshot
+ * shows the page shrunk into a corner. Returns null, or how far the page sticks out (in an RTL page:
+ * on the left) and the outermost elements that do, none of them clipped by a parent. */
+async function phoneOverflow(page) {
+  return page.evaluate(() => {
+    const width = document.documentElement.clientWidth;
+    const off = window.innerWidth - width;
+    if (off <= 1) return null;
+    const clips = (el) => /(hidden|clip|auto|scroll)/.test(getComputedStyle(el).overflowX);
+    const inside = (r) => r.left >= off - 1 && r.right <= off + width + 1;
+    const found = [];
+    for (const el of document.querySelectorAll("body *")) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || inside(r)) continue;
+      let skip = false;
+      for (let a = el; a && a !== document.documentElement && !skip; a = a.parentElement) {
+        if (getComputedStyle(a).position === "fixed") skip = true;
+        else if (a !== el && (found.includes(a) || (clips(a) && inside(a.getBoundingClientRect())))) skip = true;
+      }
+      if (!skip) found.push(el);
+    }
+    const say = (el) => {
+      const r = el.getBoundingClientRect();
+      const text = (el.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 40);
+      return `<${el.tagName.toLowerCase()} class="${String(el.className).slice(0, 60)}"> ${String(Math.round(r.width))}px wide «${text}»`;
+    };
+    return { by: Math.round(off), layout: window.innerWidth, elements: found.slice(0, 3).map(say), more: Math.max(0, found.length - 3) };
+  });
+}
+
+/** Reports a phone page that is wider than the phone (once per page: `label` null only repairs),
+ * then clips the overflow for the picture: without that the emulation zooms out and the image is
+ * useless. The image then shows what the phone shows before anyone pans sideways; the problem list
+ * says what sticks out. */
+async function fitPhone(page, label) {
+  await settle(page);
+  const wide = await phoneOverflow(page);
+  if (!wide) return;
+  if (label) {
+    const rest = wide.more > 0 ? ` (+${String(wide.more)} more)` : "";
+    problems.push(
+      `${label}: wider than the phone by ${String(wide.by)}px (laid out ${String(wide.layout)}px wide): ${wide.elements.join(" | ")}${rest}`,
+    );
+  }
+  await page.evaluate(() => document.documentElement.style.setProperty("overflow-x", "clip", "important"));
+  await page.waitForTimeout(400);
+}
+
+/** PAGES_ONLY=1: every route once per combination, then the drawer on the phone. Read-only. */
+async function allPages(browser, combo, state) {
+  const ctx = await newContext(browser, combo, state);
+  const page = await ctx.newPage();
+  const label = `${combo.device.name}/${combo.theme}`;
+  watch(page, label);
+  try {
+    const wanted = ALL_PAGES.filter(([path, name]) => PAGES.length === 0 || PAGES.includes(name) || PAGES.includes(path));
+    for (const [path, name, heading] of wanted) {
+      await visit(page, path, label);
+      const h1 = page.getByRole("heading", { name: heading, level: 1, exact: true });
+      const login = page.getByRole("heading", { name: "ورود به پنل" });
+      await h1.or(login).first().waitFor({ timeout: 20000 });
+      if (new URL(page.url()).pathname.startsWith("/login")) {
+        throw new SessionExpired(`the saved session is no longer signed in (${path} went to /login)`);
+      }
+      await checkRtl(page, `${label} ${path}`);
+      if (combo.device.isMobile) await fitPhone(page, `${label} ${path}`);
+      await shot(page, name, combo);
+    }
+    if (combo.device.name === "mobile" && (PAGES.length === 0 || PAGES.includes("drawer"))) {
+      await visit(page, "/", label);
+      await settle(page);
+      await fitPhone(page, null); // "/" was reported above
+      await page.getByRole("button", { name: "منوی پنل" }).click();
+      await page.getByRole("dialog").waitFor();
+      await shot(page, "drawer", combo, { full: false });
+    }
+  } finally {
+    await ctx.close();
+  }
+}
+
 /** Only the «آمار» page (ONLY_STATS=1). */
 async function statsPage(browser, combo, state) {
   const ctx = await newContext(browser, combo, state);
@@ -337,11 +470,18 @@ async function loginError(browser, combo) {
 
 const browser = await chromium.launch();
 try {
-  for (const combo of ONLY_STATS ? [] : COMBOS) {
+  for (const combo of ONLY_STATS || PAGES_ONLY ? [] : COMBOS) {
     console.log(`public pages: ${combo.device.name}/${combo.theme}`);
     await publicPages(browser, combo);
   }
-  if (ONLY_STATS && STATE_FILE) {
+  if (PAGES_ONLY) {
+    if (!STATE_FILE) throw new Error("PAGES_ONLY=1 needs STATE_FILE (a session saved with SAVE_STATE)");
+    const saved = JSON.parse(readFileSync(STATE_FILE, "utf8"));
+    for (const combo of COMBOS) {
+      console.log(`all pages: ${combo.device.name}/${combo.theme}`);
+      await allPages(browser, combo, saved);
+    }
+  } else if (ONLY_STATS && STATE_FILE) {
     const saved = JSON.parse(readFileSync(STATE_FILE, "utf8"));
     for (const combo of COMBOS) await statsPage(browser, combo, saved);
   } else if (TOKEN && !ONLY_PUBLIC) {
@@ -366,6 +506,10 @@ try {
       await loginError(browser, COMBOS[3]);
     }
   }
+} catch (err) {
+  if (!(err instanceof SessionExpired)) throw err;
+  // Nothing is repaired here: a new session needs a new setup link on a throwaway database.
+  problems.push(`${err.message}; make a new STATE_FILE (SETUP_TOKEN + SAVE_STATE) and run again`);
 } finally {
   await browser.close();
 }

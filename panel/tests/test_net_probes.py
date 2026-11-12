@@ -5,6 +5,7 @@ tests/test_net_probes_real.py.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -410,9 +411,25 @@ async def store(engine: AsyncEngine, result: service.CycleResult, target: servic
         return await service.store_cycle(conn, result, [target], ProbeSettings())
 
 
+async def xray(
+    engine: AsyncEngine, node_id: uuid.UUID, *, up: bool = True, uptime_s: float | None = None
+) -> None:
+    """The node's agent reports Xray (443) enabled and ``up`` now (a round on 443 counts only then)."""
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO reality_node_status (node_id, enabled, up, uptime_s, users_reported, "
+                "reported_at) VALUES (:n, true, :up, :u, 0, now()) ON CONFLICT (node_id) DO UPDATE "
+                "SET up = excluded.up, uptime_s = excluded.uptime_s, reported_at = excluded.reported_at"
+            ),
+            {"n": node_id, "up": up, "u": uptime_s},
+        )
+
+
 @pytest.mark.db
 async def test_verdicts_over_rounds_are_stored_and_logged_on_change(engine: AsyncEngine) -> None:
     node_id = await make_node(engine, state="ready", ipv4="203.0.113.10")
+    await xray(engine, node_id)
     target = target_of(node_id, "203.0.113.10")
     now = datetime.now(UTC)
     v1 = await store(
@@ -487,6 +504,7 @@ async def test_tcp_answers_never_make_a_blocked_node_reachable(engine: AsyncEngi
     """P15: MCI and Rightel answer a TCP SYN themselves for blocked addresses. Every TCP probe
     connects, every TLS handshake times out: the node is blocked."""
     node_id = await make_node(engine, state="ready", ipv4="203.0.113.12")
+    await xray(engine, node_id)
     target = target_of(node_id, "203.0.113.12")
     now = datetime.now(UTC)
     for minutes in (20, 10):
@@ -512,6 +530,7 @@ async def test_tcp_answers_never_make_a_blocked_node_reachable(engine: AsyncEngi
 @pytest.mark.db
 async def test_a_failed_control_gives_unknown_never_blocked(engine: AsyncEngine) -> None:
     node_id = await make_node(engine, state="ready", ipv4="203.0.113.11")
+    await xray(engine, node_id)
     target = target_of(node_id, "203.0.113.11")
     now = datetime.now(UTC)
     for minutes in (20, 10):
@@ -534,6 +553,7 @@ async def test_a_failed_control_gives_unknown_never_blocked(engine: AsyncEngine)
 async def test_one_key_network_open_is_never_blocked(engine: AsyncEngine) -> None:
     """Closed from MCI but open from Rightel (or a key network without a valid probe): never blocked."""
     node_id = await make_node(engine, state="ready", ipv4="203.0.113.13")
+    await xray(engine, node_id)
     target = target_of(node_id, "203.0.113.13")
     now = datetime.now(UTC)
     for minutes in (20, 10):
@@ -558,6 +578,7 @@ async def test_one_key_network_open_is_never_blocked(engine: AsyncEngine) -> Non
     assert verdicts[node_id][0] == "suspect"
     # MCI had no probe at all (Rightel down): "incomplete", so unknown, not blocked.
     node2 = await make_node(engine, state="ready", ipv4="203.0.113.14")
+    await xray(engine, node2)
     t2 = target_of(node2, "203.0.113.14")
     for minutes in (20, 10):
         cycle = real_cycle(node2, t2.ip, at=now - timedelta(minutes=minutes), node_up=False)
@@ -572,6 +593,137 @@ async def test_one_key_network_open_is_never_blocked(engine: AsyncEngine) -> Non
                 )
         verdicts = await store(engine, cycle, t2)
     assert verdicts[node2][0] == "unknown" and "round0:https:incomplete" in verdicts[node2][1]
+
+
+async def reach_rows(engine: AsyncEngine, node_id: uuid.UUID) -> int:
+    async with engine.connect() as conn:
+        return int(
+            (
+                await conn.execute(
+                    text("SELECT count(*) FROM probe_location_reach WHERE node_id = :n"), {"n": node_id}
+                )
+            ).scalar_one()
+        )
+
+
+@pytest.mark.db
+async def test_a_closed_443_on_our_side_is_never_blocked(engine: AsyncEngine) -> None:
+    """probes:1. Xray (the only thing on 443) is down on the node while Telemt runs: every MCI and
+    Rightel handshake fails while the control works, exactly like a block. Nothing is concluded and
+    no location is scored closed; with Xray up the same rounds are blocked."""
+    node_id = await make_node(engine, state="ready", ipv4="203.0.113.15")
+    target = target_of(node_id, "203.0.113.15")
+    now = datetime.now(UTC)
+    for up in (None, False):  # never reported, then reported down
+        if up is not None:
+            await xray(engine, node_id, up=up)
+        for minutes in (50, 40):
+            cycle = real_cycle(node_id, target.ip, at=now - timedelta(minutes=minutes), node_up=False)
+            verdicts = await store(engine, cycle, target)
+        assert verdicts[node_id][0] == "unknown"
+        assert {"round0:https:service_down", "round1:https:service_down"} <= set(verdicts[node_id][1])
+        assert await reach_rows(engine, node_id) == 0
+    async with engine.connect() as conn:
+        obs = (
+            await conn.execute(
+                text("SELECT observations FROM probe_rounds WHERE node_id = :n LIMIT 1"), {"n": node_id}
+            )
+        ).scalar_one()
+        stored = (await conn.execute(text("SELECT count(*) FROM probe_network_results"))).scalar_one()
+    assert obs["https"] == {
+        "state": "invalid",
+        "reason": "service_down",
+        "valid_networks": 0,
+        "up_networks": 0,
+    }
+    assert stored > 0  # the measurements themselves are kept for the dashboard
+    # Xray restarted during the round (up 10 s at the report): the round still says nothing.
+    await xray(engine, node_id, up=True, uptime_s=10)
+    v = await store(
+        engine, real_cycle(node_id, target.ip, at=now - timedelta(minutes=30), node_up=False), target
+    )
+    assert v[node_id][0] == "unknown" and "round0:https:service_down" in v[node_id][1]
+    # Up and running since well before the rounds: the same answers are a block.
+    await xray(engine, node_id, up=True, uptime_s=86400)
+    for minutes in (20, 10):
+        cycle = real_cycle(node_id, target.ip, at=now - timedelta(minutes=minutes), node_up=False)
+        verdicts = await store(engine, cycle, target)
+    assert verdicts[node_id] == ("blocked", ["all_unreachable"])
+    assert await reach_rows(engine, node_id) == 2
+    # A report older than the Reality policy's freshness: the agent no longer says anything.
+    async with engine.begin() as conn:
+        await conn.execute(text("UPDATE reality_node_status SET reported_at = now() - interval '11 minutes'"))
+    v = await store(engine, real_cycle(node_id, target.ip, at=now, node_up=False), target)
+    assert v[node_id][0] == "unknown" and "round0:https:service_down" in v[node_id][1]
+
+
+@pytest.mark.db
+async def test_rounds_on_a_node_that_was_not_serving_never_count(engine: AsyncEngine) -> None:
+    """probes:2. Two owner rounds on an UNHEALTHY node (its server down) are not a block, and a
+    node READY again less than READY_GRACE before a round is not measured either."""
+    node_id = await make_node(engine, state="unhealthy", ipv4="203.0.113.16")
+    await xray(engine, node_id)
+    target = target_of(node_id, "203.0.113.16")
+    now = datetime.now(UTC)
+    for minutes in (3, 2):
+        cycle = real_cycle(node_id, target.ip, at=now - timedelta(minutes=minutes), node_up=False)
+        verdicts = await store(engine, cycle, target)
+    assert verdicts[node_id][0] == "unknown"
+    assert "round0:https:node_not_serving" in verdicts[node_id][1]
+    assert await reach_rows(engine, node_id) == 0
+    # Recovered: READY since now (node_operations.state_since; ready_at is from its first time).
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE nodes SET state = 'ready', ready_at = now() - interval '1 day' WHERE id = :n"),
+            {"n": node_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO node_operations (node_id, requested_by, requested_at, state_since, "
+                "create_attempts, delete_attempts) VALUES (:n, 'cli', now() - interval '1 day', now(), 0, 0)"
+            ),
+            {"n": node_id},
+        )
+    v = await store(
+        engine, real_cycle(node_id, target.ip, at=now + timedelta(minutes=1), node_up=False), target
+    )
+    assert v[node_id][0] == "unknown" and "round0:https:node_not_serving" in v[node_id][1]
+    async with engine.begin() as conn:  # its last round long ago: only the grace holds it back
+        await conn.execute(text("UPDATE probe_node_state SET last_round_at = now() - interval '1 day'"))
+    async with engine.connect() as conn:
+        due = {t.node_id for t in await service.due_targets(conn, ProbeSettings(), now, None)}
+        later = now + service.READY_GRACE + timedelta(seconds=1)
+        due_later = {t.node_id for t in await service.due_targets(conn, ProbeSettings(), later, None)}
+    assert node_id not in due and node_id in due_later  # the grace counts from the recovery too
+    # READY for long: the same down rounds are a block again.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE node_operations SET state_since = now() - interval '2 hours' WHERE node_id = :n"),
+            {"n": node_id},
+        )
+    for minutes in (2, 3):
+        cycle = real_cycle(node_id, target.ip, at=now + timedelta(minutes=minutes), node_up=False)
+        verdicts = await store(engine, cycle, target)
+    assert verdicts[node_id] == ("blocked", ["all_unreachable"])
+
+
+def test_round_problem() -> None:
+    start, end = T0, T0 + timedelta(minutes=2)
+    ok = service.Serving("ready", T0 - timedelta(hours=1), True, True, end, 7200.0)
+    assert service.round_problem(ok, start, end) is None
+    assert service.round_problem(None, start, end) == "node_not_serving"
+    for change, why in (
+        ({"state": "unhealthy"}, "node_not_serving"),
+        ({"since": T0 - timedelta(minutes=4)}, "node_not_serving"),
+        ({"xray_enabled": None, "xray_up": None, "xray_reported_at": None}, "service_down"),
+        ({"xray_enabled": False}, "service_down"),
+        ({"xray_up": False}, "service_down"),
+        ({"xray_reported_at": end - timedelta(minutes=11)}, "service_down"),
+        ({"xray_uptime_s": 60.0}, "service_down"),
+    ):
+        assert service.round_problem(dataclasses.replace(ok, **change), start, end) == why, change
+    # No state_since and no ready_at (an old row), and an unknown uptime: counts.
+    assert service.round_problem(dataclasses.replace(ok, since=None, xray_uptime_s=None), start, end) is None
 
 
 @pytest.mark.db
@@ -662,6 +814,7 @@ async def test_reconciler_with_unreachable_sources_records_unknown(engine: Async
     """Both services unreachable (a closed local port): the round is stored, every measurement says
     'error', and the verdict stays unknown. Nothing is concluded from a failure of the probes."""
     node_id = await make_node(engine, state="ready", ipv4="203.0.113.31")
+    await xray(engine, node_id)  # 443 up: what is left to fail is the probe services
     rec = ProbesReconciler(
         gp_factory=lambda: GlobalpingClient(base_url="http://127.0.0.1:9"),
         ch_factory=lambda: CheckHostClient(base_url="http://127.0.0.1:9", poll_seconds=0.01),

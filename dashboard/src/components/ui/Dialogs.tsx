@@ -4,6 +4,7 @@ import { AlertDialog, Dialog } from "radix-ui";
 import { useState, useSyncExternalStore, type ReactNode } from "react";
 
 import { cn } from "../../lib/browser";
+import { ackFor, type AckState } from "../../lib/dialogs";
 import { Button } from "./Button";
 
 const WIDE = "(min-width: 640px)";
@@ -50,7 +51,7 @@ export function Drawer({
         {open ? (
           <Dialog.Portal forceMount>
             <Dialog.Overlay asChild forceMount>
-              <motion.div {...overlay} className="fixed inset-0 z-50 bg-[rgb(6_8_18/0.5)] backdrop-blur-[2px]" />
+              <motion.div {...overlay} className="fixed inset-0 z-50 bg-[rgb(4_4_6/0.6)] backdrop-blur-[3px]" />
             </Dialog.Overlay>
             <Dialog.Content asChild forceMount>
               <motion.div
@@ -65,7 +66,7 @@ export function Drawer({
               >
                 {!wide ? <div className="mx-auto mt-3 h-1.5 w-12 shrink-0 rounded-full bg-line-strong" aria-hidden /> : null}
                 <div className="flex items-start gap-3 border-b border-line px-5 pt-4 pb-4 sm:pt-6">
-                  {icon ? <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-brand-soft text-brand">{icon}</span> : null}
+                  {icon ? <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-brand-soft text-brand ring-1 ring-brand/15 ring-inset">{icon}</span> : null}
                   <div className="min-w-0 flex-1">
                     <Dialog.Title className="text-lg leading-8 font-bold text-fg">{title}</Dialog.Title>
                     <Dialog.Description className={cn("text-sm leading-7 text-fg-muted", !description && "sr-only")}>
@@ -141,14 +142,14 @@ export function Modal({
         {open ? (
           <Dialog.Portal forceMount>
             <Dialog.Overlay asChild forceMount>
-              <motion.div {...overlay} className="fixed inset-0 z-50 bg-[rgb(6_8_18/0.55)] backdrop-blur-[3px]" />
+              <motion.div {...overlay} className="fixed inset-0 z-50 bg-[rgb(4_4_6/0.62)] backdrop-blur-[4px]" />
             </Dialog.Overlay>
             <div className="pointer-events-none fixed inset-0 z-50 sm:grid sm:place-items-center">
               <Dialog.Content asChild forceMount onOpenAutoFocus={focusFirstField}>
                 <motion.div {...panel} className={PANEL_CLASS}>
                   <div className="mx-auto mb-4 h-1.5 w-12 rounded-full bg-line-strong sm:hidden" aria-hidden />
                   <div className="mb-5 flex items-start gap-3">
-                    {icon ? <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-brand-soft text-brand">{icon}</span> : null}
+                    {icon ? <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-brand-soft text-brand ring-1 ring-brand/15 ring-inset">{icon}</span> : null}
                     <div className="min-w-0 flex-1">
                       <Dialog.Title className="text-lg leading-8 font-bold text-fg">{title}</Dialog.Title>
                       <Dialog.Description className={cn("text-sm leading-7 text-fg-muted", !description && "sr-only")}>
@@ -205,21 +206,19 @@ export function ConfirmDialog({
   onConfirm: () => void;
   children?: ReactNode;
 }) {
-  const [ack, setAck] = useState(false);
+  const [ackState, setAckState] = useState<AckState>({ open, ack: false });
+  const current = ackFor(ackState, open);
+  if (current !== ackState) setAckState(current); // reset during render: opened or closed by anyone
+  const ack = current.ack;
+  const setAck = (v: boolean) => setAckState({ open, ack: v });
   const iconTone = tone === "danger" ? "bg-danger-soft text-danger" : tone === "success" ? "bg-success-soft text-success" : "bg-brand-soft text-brand";
   return (
-    <AlertDialog.Root
-      open={open}
-      onOpenChange={(v) => {
-        if (!v) setAck(false);
-        onOpenChange(v);
-      }}
-    >
+    <AlertDialog.Root open={open} onOpenChange={onOpenChange}>
       <AnimatePresence>
         {open ? (
           <AlertDialog.Portal forceMount>
             <AlertDialog.Overlay asChild forceMount>
-              <motion.div {...overlay} className="fixed inset-0 z-50 bg-[rgb(6_8_18/0.55)] backdrop-blur-[3px]" />
+              <motion.div {...overlay} className="fixed inset-0 z-50 bg-[rgb(4_4_6/0.62)] backdrop-blur-[4px]" />
             </AlertDialog.Overlay>
             <div className="pointer-events-none fixed inset-0 z-50 sm:grid sm:place-items-center">
               <AlertDialog.Content asChild forceMount>

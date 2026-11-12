@@ -28,6 +28,7 @@ from proxyhub.reality.links import (
     xhttp_key,
     xhttp_url,
 )
+from proxyhub.reality.policy import REPORT_FRESH
 from proxyhub.reality.settings import GB, PORT, XHTTP_PORT, RealitySettings, load_reality_settings
 from proxyhub.reality.store import (
     agent_supports_ws_tls,
@@ -158,6 +159,7 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
                 "xhttp": xhttp,
             }
         )
+    live = [statuses[n.id] for n in nodes if n.id in statuses]
     counts = dict(
         (await db.execute(select(RealityConfig.status, func.count()).group_by(RealityConfig.status))).all()
     )
@@ -186,8 +188,10 @@ async def summary(db: Db, now: datetime | None = None) -> dict[str, Any]:
             "full": int(counts.get("full", 0)),
             "burned": int(counts.get("burned", 0)),
             "used_bytes": int(total_used),
-            "nodes_enabled": sum(1 for s in statuses.values() if s.enabled),
-            "nodes_up": sum(1 for s in statuses.values() if s.enabled and s.up),
+            # Over the nodes listed below (a deleted server's last row stays until the cleanup);
+            # "up" only with a report the Reality policy still counts as fresh.
+            "nodes_enabled": sum(1 for s in live if s.enabled),
+            "nodes_up": sum(1 for s in live if s.enabled and s.up and s.reported_at >= now - REPORT_FRESH),
         },
         "nodes": node_items,
         "configs": config_items,

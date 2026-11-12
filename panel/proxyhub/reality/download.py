@@ -50,12 +50,17 @@ def hour_of(at: datetime) -> datetime:
     return at.replace(minute=0, second=0, microsecond=0)
 
 
-def delta(previous: int | None, current: int) -> int:
-    """Bytes since the last report: a total below the last one means Xray started again (its
-    counters began at 0); with no last total nothing is known yet."""
-    if previous is None:
-        return 0
-    return current - previous if current >= previous else current
+def deltas(previous: tuple[int | None, int | None], up: int, down: int) -> tuple[int, int]:
+    """Bytes of each direction since the last report; with no last totals nothing is known yet.
+    Either total below the last one means Xray started again, and then the counters of BOTH
+    directions began at 0: the other one may already have passed its old value. (Removing a user
+    live keeps Xray's counters, so nothing else lowers a total.)"""
+    prev_up, prev_down = previous
+    if prev_up is None or prev_down is None:
+        return 0, 0
+    if up < prev_up or down < prev_down:
+        return up, down
+    return up - prev_up, down - prev_down
 
 
 async def record_traffic(db: Db, node_id: uuid.UUID, up_total: int, down_total: int, now: datetime) -> None:
@@ -67,8 +72,7 @@ async def record_traffic(db: Db, node_id: uuid.UUID, up_total: int, down_total: 
             )
         )
     ).first()
-    d_up = delta(row.traffic_up if row else None, up_total)
-    d_down = delta(row.traffic_down if row else None, down_total)
+    d_up, d_down = deltas((row.traffic_up, row.traffic_down) if row else (None, None), up_total, down_total)
     await db.execute(
         update(RealityNodeStatus)
         .where(RealityNodeStatus.node_id == node_id)
