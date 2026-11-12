@@ -170,7 +170,7 @@ class TelemtUser(Base):
     last_total_octets: Mapped[int | None] = mapped_column(BigInteger)
     last_stats_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # The user's bytes across Telemt restarts (its own counter starts again from zero at each one;
-    # proxyhub/agent_api/reports.py adds the growth). Migration 0034_proxies_octets_total.
+    # proxyhub/agent_api/reports.py adds the growth). Migration 0036_proxies_octets_total.
     octets_total: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = _now()
     updated_at: Mapped[datetime] = _now()

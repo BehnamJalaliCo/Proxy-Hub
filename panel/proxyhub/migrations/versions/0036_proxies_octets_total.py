@@ -6,16 +6,16 @@ each report's growth here, or the whole new value after such a restart, as it do
 usage; this is what the MTProto page shows as the proxy's total traffic. One number per proxy
 secret, never per person (rule 7). Existing rows start from their last raw value.
 
-Revision ID: 0034_proxies_octets_total
-Revises: 0033_reality_traffic
+Revision ID: 0036_proxies_octets_total
+Revises: 0035_content_media_sha
 Create Date: 2026-11-12 12:00:00
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0034_proxies_octets_total"
-down_revision = "0033_reality_traffic"
+revision = "0036_proxies_octets_total"
+down_revision = "0035_content_media_sha"
 branch_labels = None
 depends_on = None
 
