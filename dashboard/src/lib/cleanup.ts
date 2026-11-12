@@ -29,6 +29,25 @@ export const previewEndedPurge = (min_age_hours: number) =>
 export const purgeEnded = (min_age_hours: number) =>
   request<EndedPurge>("POST", "/api/cleanup/ended", { min_age_hours });
 
+/** The preview only when it was made for the selected minimum age: counts of another age never
+ * label or enable the purge (which always runs with the selected age). */
+export function previewFor(preview: EndedPurge | null, hours: number): EndedPurge | null {
+  return preview !== null && preview.min_age_hours === hours ? preview : null;
+}
+
+/** Only the newest of overlapping requests may apply its answer: `next()` before each request,
+ * `isCurrent(token)` in its handlers, `cancel()` when the dialog closes. */
+export function latestOnly(): { next: () => number; isCurrent: (token: number) => boolean; cancel: () => void } {
+  let current = 0;
+  return {
+    next: () => ++current,
+    isCurrent: (token) => token === current,
+    cancel: () => {
+      current += 1;
+    },
+  };
+}
+
 export const MIN_AGE_OPTIONS: readonly { value: string; hours: number; label: string }[] = [
   { value: "1", hours: 1, label: "۱ ساعت" },
   { value: "24", hours: 24, label: "۱ روز" },
