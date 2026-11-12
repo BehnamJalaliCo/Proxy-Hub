@@ -315,6 +315,72 @@ def test_a_chat_id_beyond_telegram_s_range_turns_telegram_off(tmp_path: Path) ->
     assert code == 0 and "telegram receiver: on" in out, out
 
 
+def _redact_ips(line: str) -> str:
+    """Apply the IPv4 then the IPv6 stage.replace of config.alloy the way Alloy does: every match,
+    no overlap, and only the capture group is replaced (Python re agrees with RE2 on this syntax)."""
+    alloy = (DEPLOY / "monitoring" / "alloy" / "config.alloy").read_text(encoding="utf-8")
+    expressions = re.findall(r'expression = `([^`]*)`\s*replace\s*= "<ip>"', alloy)
+    assert len(expressions) == 2, "IPv4 and IPv6 stages"
+    for expression in expressions:
+        parts, last = [], 0
+        for m in re.finditer(expression, line):
+            parts += [line[last : m.start(1)], "<ip>"]
+            last = m.end(1)
+        line = "".join([*parts, line[last:]])
+    return line
+
+
+def test_ip_redaction_leaves_sql_casts_in_tracebacks_readable() -> None:
+    """The worker logs whole tracebacks; asyncpg renders every bind as "$1::UUID". The IPv6 stage
+    turned them into "$<ip>OOLEAN" and the like."""
+    import sqlalchemy as sa
+    from sqlalchemy.dialects.postgresql import asyncpg
+
+    table = sa.Table(
+        "t",
+        sa.MetaData(),
+        sa.Column("a", sa.Uuid),
+        sa.Column("b", sa.String),
+        sa.Column("c", sa.Boolean),
+        sa.Column("d", sa.DateTime(timezone=True)),
+        sa.Column("e", sa.Date),
+        sa.Column("f", sa.BigInteger),
+    )
+    values = {"a": None, "b": "", "c": True, "d": None, "e": None, "f": 1}
+    sql = str(sa.insert(table).values(**values).compile(dialect=asyncpg.dialect()))
+    assert "$3::BOOLEAN" in sql and "$5::DATE" in sql, sql
+    for line in (
+        f"[SQL: {sql}]",
+        "SELECT n.id::text, value::text, gen_random_uuid()::text, (now() AT TIME ZONE 'UTC')::date",
+        "SELECT pg_try_advisory_lock($1::INTEGER) 2026-11-12 10:11:12,345 INFO worker",
+    ):
+        assert _redact_ips(line) == line
+
+
+@pytest.mark.parametrize(
+    ("line", "redacted"),
+    [
+        ("client 2a01:4f8:c0c:1234::1 connected", "client <ip> connected"),
+        ("ip:2a01:4f8::1", "ip:<ip>"),
+        ("2a01::1,2a01::2", "<ip>,<ip>"),
+        ("[2001:db8::1]:443", "[<ip>]:443"),
+        ("::1", "<ip>"),
+        ("fe80::1%eth0", "<ip>%eth0"),
+        ("::ffff:10.0.0.1", "<ip>:<ip>"),
+        ("2001:0db8:85a3:0000:0000:8a2e:0370:7334 x", "<ip> x"),
+        ("route 2a01:4f8:c0c::/64", "route <ip>/64"),
+        ("x=fe80::abcd:1;", "x=<ip>;"),
+        ('{"ip": "2a01:4f8::2"}', '{"ip": "<ip>"}'),
+        ("GET /?host=%5B2a01:4f8::1%5D", "GET /?host=%5B<ip>%5D"),
+        ("out='a\\n2a01:4f8::1 dev eth0'", "out='a\\n<ip> dev eth0'"),
+        ("from 10.0.0.1:8000 and 192.168.1.20", "from <ip>:8000 and <ip>"),
+    ],
+)
+def test_ip_redaction_still_catches_every_address_form(line: str, redacted: str) -> None:
+    """Rule 7, second line of defence: the cast-safe boundary must not let an address through."""
+    assert _redact_ips(line) == redacted
+
+
 SECRETISH_ENV = re.compile(r"PASS(WORD)?|TOKEN|SECRET|API_?KEY|PRIVATE", re.IGNORECASE)
 
 
