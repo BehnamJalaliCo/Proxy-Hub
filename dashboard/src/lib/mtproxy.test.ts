@@ -72,6 +72,10 @@ describe("operator account inputs (mirror panel/proxyhub/mtproxy/validation.py)"
     expect(normalizeCode(" 12 345 ")).toEqual({ ok: true, value: "12345" });
     expect(normalizeCode("۱۲۳۴۵")).toEqual({ ok: true, value: "12345" });
     for (const bad of ["", "1234", "123456789", "12a45"]) expect(normalizeCode(bad).ok).toBe(false);
+    expect(normalizeCode("  Blue   river ", "sms_word")).toEqual({ ok: true, value: "Blue river" });
+    expect(normalizeCode("سیب", "sms_word")).toEqual({ ok: true, value: "سیب" });
+    for (const bad of ["", "12345", "a-b", "x".repeat(65)]) expect(normalizeCode(bad, "sms_word").ok).toBe(false);
+    expect(normalizeCode("apple", "app").ok).toBe(false);
     expect(passwordProblem(" spaces count ")).toBeNull();
     expect(passwordProblem("")).toMatch(PERSIAN);
     expect(passwordProblem("x".repeat(257))).toMatch(PERSIAN);
@@ -98,6 +102,7 @@ describe("operator account states", () => {
   it("explains where the code went, why a check failed and why a session ended", () => {
     for (const via of ["app", "sms", "call", "email", "fragment", "sms_word", "other", null]) expect(codeViaText(via)).toMatch(PERSIAN);
     expect(codeViaText("app")).toContain("اپ تلگرام");
+    expect(codeViaText("sms_word")).toContain("کلمه");
     expect(checkErrorText(null)).toBeNull();
     expect(checkErrorText("telegram_refused")).toContain("بررسی خودکار بعدی");
     expect(checkErrorText("api_id_published")).toBe(checkErrorText("api_id_invalid"));
@@ -170,6 +175,7 @@ describe("operator account labels", () => {
       "api_hash_format",
       "phone_format",
       "code_format",
+      "code_word_format",
       "password_format",
       "api_id_invalid",
       "api_id_published",

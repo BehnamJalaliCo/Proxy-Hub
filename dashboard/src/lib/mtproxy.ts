@@ -38,8 +38,17 @@ export function normalizePhone(raw: string): Parsed<string> {
   return { ok: true, value: s };
 }
 
-/** The login code: 5 to 8 digits, spaces and dashes dropped, Persian digits allowed. */
-export function normalizeCode(raw: string): Parsed<string> {
+/** The login code: 5 to 8 digits, spaces and dashes dropped, Persian digits allowed. When Telegram
+ * sent it by SMS as a word or a phrase (``via`` "sms_word"): that text as typed, spaces made single. */
+export function normalizeCode(raw: string, via?: string | null): Parsed<string> {
+  if (via === "sms_word") {
+    const w = raw.trim().split(/\s+/).join(" ");
+    if (w === "") return { ok: false, error: "کلمه‌ای را که با پیامک آمده وارد کنید." };
+    if (w.length > 64 || !/^[\p{L}\p{N} ]+$/u.test(w) || !/\p{L}/u.test(w)) {
+      return { ok: false, error: "کد این بار یک کلمه یا عبارت است: همان‌طور که در پیامک آمده، فقط حرف و رقم و فاصله." };
+    }
+    return { ok: true, value: w };
+  }
   const s = asciiDigits(raw).replace(/[\s-]/g, "");
   if (s === "") return { ok: false, error: "کدی را که تلگرام فرستاده وارد کنید." };
   if (!/^\d{5,8}$/.test(s)) return { ok: false, error: "کد ورود فقط رقم است (معمولاً ۵ رقم)." };
@@ -81,7 +90,7 @@ export function codeViaText(via: string | null | undefined): string {
     case "fragment":
       return "در Fragment (برای شماره‌های بی‌سیم‌کارت) آمد.";
     case "sms_word":
-      return "با پیامک آمد.";
+      return "با پیامک آمد و این بار یک کلمه یا یک عبارت است، نه رقم: آن را همان‌طور که در پیامک نوشته شده وارد کنید.";
     default:
       return "تلگرام آن را برای حساب دوم فرستاد.";
   }

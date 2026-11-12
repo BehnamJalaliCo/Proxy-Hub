@@ -40,7 +40,7 @@ from proxyhub.mtproxy.userclient import (
     OperatorSession,
     operator_session,
 )
-from proxyhub.mtproxy.validation import mask_phone
+from proxyhub.mtproxy.validation import InputError, mask_phone, parse_code
 from proxyhub.telegram.store import enqueue_owner_alert
 from proxyhub.vault import SecretValue, Vault, VaultError, secret_exists
 
@@ -330,6 +330,11 @@ async def _finish_login(
 async def submit_code(deps: Deps, *, code: str, actor: str) -> AccountRow:
     async with _Locked(deps):
         row, pending = await _pending_for(deps, expected=state.CODE_SENT, actor=actor)
+        try:
+            # Digits, or the word / phrase of an SMS: checked against how Telegram sent this code.
+            code = parse_code(code, via=row.code_via)
+        except InputError as exc:
+            raise ServiceError(exc.code) from None
         signed: _SignedIn | None = None
         try:
             async with operator_session(

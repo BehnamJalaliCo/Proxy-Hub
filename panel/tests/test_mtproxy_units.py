@@ -109,15 +109,31 @@ def test_code_and_password() -> None:
     assert validation.parse_code("12345") == "12345"
     assert validation.parse_code(" 12 345 ") == "12345"
     assert validation.parse_code("۱۲۳۴۵") == "12345"
-    for bad in ["", "1234", "123456789", "12a45", "١٢٣٤"]:
+    for bad in ["", "1234", "123456789", "12a45", "١٢٣٤", "apple"]:
         with pytest.raises(InputError) as caught:
-            validation.parse_code(bad)
+            validation.parse_code(bad, via="app")
+        assert caught.value.code == "code_format"
+    for bad in ["", "1234", "123456789", "١٢٣٤", "!!!!!", "x" * 65]:
+        with pytest.raises(InputError) as caught:
+            validation.parse_code(bad)  # the way is not known yet: no shape a code can have
         assert caught.value.code == "code_format"
     assert validation.parse_password(" with spaces ") == " with spaces "
     for bad in ["", "x" * 257]:
         with pytest.raises(InputError) as caught:
             validation.parse_password(bad)
         assert caught.value.code == "password_format"
+
+
+def test_a_code_sent_as_an_sms_word_is_typed_as_a_word() -> None:
+    assert validation.parse_code("apple", via="sms_word") == "apple"
+    assert validation.parse_code("  two   Words ", via="sms_word") == "two Words"
+    assert validation.parse_code("سیب", via="sms_word") == "سیب"
+    assert validation.parse_code("apple") == "apple"  # the route lets it through; the login decides
+    assert validation.parse_code(" 12 345 ") == "12345"
+    for bad in ["", "   ", "12345", "x" * 65, "no-dash", "a​b"]:
+        with pytest.raises(InputError) as caught:
+            validation.parse_code(bad, via="sms_word")
+        assert caught.value.code == "code_word_format"
 
 
 def test_mask_phone_shows_four_digits_and_never_the_length() -> None:

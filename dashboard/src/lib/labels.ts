@@ -404,6 +404,7 @@ const ERROR_FA: Record<string, string> = {
   api_hash_format: "api_hash باید دقیقاً ۳۲ نویسه از 0 تا 9 و a تا f باشد.",
   phone_format: "شماره را کامل، با + و کد کشور وارد کنید.",
   code_format: "کد ورود فقط رقم است (معمولاً ۵ رقم).",
+  code_word_format: "کد این بار یک کلمه یا عبارت است: همان‌طور که در پیامک آمده وارد کنید.",
   password_format: "رمز دومرحله‌ای را وارد کنید.",
   api_id_invalid: "تلگرام این api_id و api_hash را با هم نپذیرفت.",
   api_id_published: "تلگرام این api_id را بسته است؛ در my.telegram.org برنامه‌ی تازه بسازید.",

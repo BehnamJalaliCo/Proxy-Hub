@@ -216,7 +216,7 @@ async def test_put_with_a_wrong_shape_is_invalid_request(client: AsyncClient, bo
     ("path", "body", "code"),
     [
         ("code", {"code": "12"}, "code_format"),
-        ("code", {"code": "abcde"}, "code_format"),
+        ("code", {"code": "!!!!!"}, "code_format"),
         ("password", {"password": ""}, "password_format"),
         ("password", {"password": "x" * 300}, "password_format"),
     ],
@@ -372,6 +372,48 @@ async def test_the_pending_login_in_redis_is_sealed(
     r = await client.get(BASE)
     assert r.json()["state"] == "code_sent" and r.json()["login"]["code_via"] == "app"
     assert pending.phone_code_hash.reveal() not in r.text and pending.session.reveal() not in r.text
+
+
+@pytest.mark.parametrize(
+    ("via", "typed", "sent", "error"),
+    [
+        ("sms_word", "  Blue   river ", "Blue river", None),
+        ("app", "apple", None, "code_format"),
+        ("sms_word", "12345", None, "code_word_format"),
+    ],
+)
+async def test_a_code_is_checked_against_how_telegram_sent_it(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    vault: Vault,
+    port: int,
+    monkeypatch: pytest.MonkeyPatch,
+    via: str,
+    typed: str,
+    sent: str | None,
+    error: str | None,
+) -> None:
+    seen: list[str] = []
+
+    class Op:
+        async def sign_in_code(self, phone: Any, phone_code_hash: Any, code: Any) -> Any:
+            seen.append(code.reveal())
+            raise MtpError("telegram_unavailable")
+
+    @asynccontextmanager
+    async def connected(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        yield Op()
+
+    monkeypatch.setattr(service, "operator_session", connected)
+    await seed_pending(engine, app_redis(), vault, port=port, via=via)
+    r = await client.post(f"{BASE}/code", json={"code": typed})
+    if error is None:
+        assert_error(r, 502, "telegram_unavailable")  # the word reached Telegram as typed
+        assert seen == [sent]
+    else:
+        assert_error(r, 400, error)
+        assert seen == [] and await actions(engine) == []  # nothing was sent, no attempt counted
+    assert (await load_row(engine)).state == "code_sent"
 
 
 async def test_a_code_with_telegram_unreachable_keeps_the_login(
