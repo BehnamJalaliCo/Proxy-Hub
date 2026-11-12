@@ -337,6 +337,65 @@ async def test_a_registration_the_bot_no_longer_has_is_retired_and_the_proxy_reg
     assert TAG not in json.dumps([a["reasons"] for a in await actions(engine)])
 
 
+async def test_a_dead_tag_that_did_not_leave_the_node_is_cleared_again(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """The bot forgot the registration, and clearing its tag from the node failed: the proxy would
+    never be listed again. The clear is tried again every TAG_RETRY, and only while no newer
+    registration holds the proxy."""
+    await kill_switch(engine, False)
+    provider = TelemtUsersProvider(seal_key)
+    node = await create_proxy_node(engine, seal_key, ipv4="203.0.113.21")
+    clock = [NOON]
+    d = deps(engine, vault, provider, clock=lambda: clock[0])
+    reg_id = await register(engine, vault, provider, clock=lambda: clock[0])
+    provider.fail_apply = True
+    outcome = FlowResult(result=Forgotten(), last_step=Step.SENT_MYPROXIES)
+    assert await service._record(d, await work_for(engine, provider, reg_id), outcome) == "forgotten"
+    (written,) = await registration_rows(engine)
+    assert (written["state"], written["state_reason"]) == ("retired", "removed_in_bot")
+    assert await user_tags(engine, node) == {user_name(node): TAG}
+    assert await listed(engine, provider) == []
+    (row,) = await regs(engine)
+    assert row["tag_failed_at"] == NOON and row["tag_applied_at"] is None
+    provider.fail_apply = False
+    provider.applied.clear()
+    clock[0] += timedelta(minutes=5)
+    assert await service.run_once(d) == "no_account"
+    assert await user_tags(engine, node) == {user_name(node): TAG}  # not before TAG_RETRY
+    clock[0] = NOON + service.TAG_RETRY
+    assert await service.run_once(d) == "no_account"
+    assert await user_tags(engine, node) == {user_name(node): None}
+    assert provider.applied == [(key_of(node), None)]
+    assert await listed(engine, provider) == [key_of(node)]
+    clock[0] += timedelta(minutes=1)
+    assert await service.run_once(d) == "no_account"  # a fresh candidate, never the dead tag again
+    fresh = [r for r in await regs(engine) if r["registration_id"] is None]
+    assert len(fresh) == 1 and fresh[0]["proxy_key"] == key_of(node)
+    assert provider.applied == [(key_of(node), None)]  # cleared once
+    assert "sponsor.registration_reused" not in [a["action"] for a in await actions(engine)]
+
+    # Registered again as another registration (the old flow stays on record): the old flow's
+    # unconfirmed clear never takes the new registration's tag off the node.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE sponsor_flows SET tag_applied_at = NULL, tag_failed_at = NULL WHERE id = :i"),
+            {"i": reg_id},
+        )
+        await conn.execute(
+            text("UPDATE sponsor_flows SET user_name = 'mt_renamed' WHERE id = :i"), {"i": fresh[0]["id"]}
+        )
+    new_tag = secrets.token_hex(16)
+    work = await work_for(engine, provider, fresh[0]["id"])
+    registered = FlowResult(result=Registered(tag=new_tag), last_step=Step.SENT_SECRET)
+    assert await service._record(d, work, registered) == "registered"
+    assert len(await registration_rows(engine)) == 2
+    clock[0] += service.TAG_RETRY
+    assert await service.run_once(d) == "no_account"
+    assert await user_tags(engine, node) == {user_name(node): new_tag}
+    assert provider.applied == [(key_of(node), None), (key_of(node), new_tag)]
+
+
 async def test_a_tag_the_node_could_not_take_is_tried_again(
     engine: AsyncEngine, vault: Vault, seal_key: bytes
 ) -> None:
@@ -498,6 +557,133 @@ async def test_retry_on_a_stuck_proxy_without_a_tag_leads_to_a_new_attempt(
     assert row["state"] == "pending" and row["attempts"] == 1 and row["stuck_reason"] is None
 
 
+async def promote_stuck(engine: AsyncEngine, d: Deps, reg_id: uuid.UUID, reason: str, step: Step) -> str:
+    """What a sponsor conversation records when the bot's list did not show this proxy's button."""
+    async with engine.connect() as conn:
+        reg = await store.load_reg(conn, reg_id)
+    assert reg is not None and reg.ad_tag is not None
+    work = Work(
+        reg=reg,
+        job=PromoteJob(host=reg.host, port=reg.port, channel="ipoxxo", tag=reg.ad_tag),
+        key=reg.proxy_key,
+        priority=2,
+    )
+    return await service._record(d, work, FlowResult(result=Stuck(step=step, reason=reason), last_step=step))
+
+
+@pytest.mark.parametrize(
+    ("reason", "step"),
+    [("proxy_not_in_list", Step.SENT_MYPROXIES), ("tag_not_in_list", Step.PRESSED_NEXT_PAGE)],
+)
+async def test_retry_on_a_proxy_the_bots_list_does_not_show_registers_it_again(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes, reason: str, step: Step
+) -> None:
+    """The owner wiped @MTProxybot's list by hand while it still holds other proxies: a sponsor
+    change stops on our missing button. «ثبت دوباره» forgets the registration (as for an empty
+    list) and the proxy is registered again; it is never decided without the owner."""
+    await kill_switch(engine, False)
+    provider = TelemtUsersProvider(seal_key)
+    node = await create_proxy_node(engine, seal_key, ipv4="203.0.113.41")
+    reg_id = await register(engine, vault, provider)
+    d = deps(engine, vault, provider)
+    assert await promote_stuck(engine, d, reg_id, reason, step) == f"stuck:{reason}"
+    await service.retry(engine, reg_id, actor="admin:owner", now=datetime.now(UTC))
+    (written,) = await registration_rows(engine)
+    assert (written["state"], written["state_reason"]) == ("retired", "removed_in_bot")
+    (row,) = await regs(engine)
+    assert row["stuck_reason"] is None and row["tag_applied_at"] is None
+    logged = [a for a in await actions(engine) if a["action"] == "sponsor.retry_requested"]
+    assert (
+        logged[-1]["reasons"]["reasons"] == ["from:failed", "forget"] and logged[-1]["actor"] == "admin:owner"
+    )
+    assert "sponsor.registration_forgotten" in [a["action"] for a in await actions(engine)]
+    assert await service.run_once(d) == "no_account"  # the dead tag leaves the node
+    assert provider.applied[-1] == (key_of(node), None) and await user_tags(engine, node) == {
+        user_name(node): None
+    }
+    assert await service.run_once(d) == "no_account"
+    regs_now = await load(engine)
+    fresh = [r for r in regs_now if r.candidate]
+    assert len(fresh) == 1 and fresh[0].proxy_key == key_of(node)
+    async with engine.connect() as conn:
+        live = {p.key: p for p in await provider.proxies_to_register(conn)}
+    chosen = service.choose(regs_now, live=live, nodes={node: "ready"}, wanted="ipoxxo", default="ipoxxo",
+                            campaign_channels=set(), now=datetime.now(UTC))  # fmt: skip
+    assert chosen is not None and isinstance(chosen.job, RegisterJob) and chosen.reg.id == fresh[0].id
+
+
+async def test_retry_on_a_proxy_stuck_for_another_reason_sets_its_sponsor_again(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    await kill_switch(engine, False)
+    provider = TelemtUsersProvider(seal_key)
+    node = await create_proxy_node(engine, seal_key, ipv4="203.0.113.42")
+    reg_id = await register(engine, vault, provider)
+    d = deps(engine, vault, provider)
+    assert (
+        await promote_stuck(engine, d, reg_id, "channel_refused", Step.SENT_CHANNEL)
+        == "stuck:channel_refused"
+    )
+    await service.retry(engine, reg_id, actor="admin:owner", now=datetime.now(UTC))
+    (written,) = await registration_rows(engine)
+    assert (written["state"], written["ad_tag"]) == ("registered", TAG)
+    (row,) = await regs(engine)
+    assert row["sponsor_channel"] is None and row["stuck_reason"] is None
+    assert await user_tags(engine, node) == {user_name(node): TAG}
+
+
+async def test_a_list_wiped_by_hand_is_recovered_with_retry_on_every_proxy(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """Three registered proxies; the owner deleted them all in @MTProxybot. The first sponsor change
+    finds the list empty (forgotten, registered again at once), so the next two find a list with
+    only that one and stop: two stuck flows pause the module. «ثبت دوباره» on both recovers them."""
+    await kill_switch(engine, False)
+    await pair_owner(engine)
+    provider = TelemtUsersProvider(seal_key)
+    nodes = [await create_proxy_node(engine, seal_key, ipv4=f"203.0.113.{50 + i}") for i in range(3)]
+    await service.run_once(deps(engine, vault, provider))
+    flows = {r["proxy_key"]: r["id"] for r in await regs(engine)}
+    a, b, c = (flows[key_of(n)] for n in nodes)
+    clock = [NOON]
+    d = deps(engine, vault, provider, clock=lambda: clock[0])
+    for flow_id in (a, b, c):
+        work = await work_for(engine, provider, flow_id)
+        tag = secrets.token_hex(16)
+        assert await service._record(d, work, FlowResult(result=Registered(tag=tag))) == "registered"
+    await seed_connected(engine, vault, port=closed_port(), mtproxybot_id=BOT_ID)  # Telegram unreachable
+    work_a = await work_for(engine, provider, a)
+    assert (
+        await service._record(d, work_a, FlowResult(result=Forgotten(), last_step=Step.SENT_MYPROXIES))
+        == "forgotten"
+    )
+    for flow_id in (b, c):
+        assert (
+            await promote_stuck(engine, d, flow_id, "proxy_not_in_list", Step.SENT_MYPROXIES)
+            == "stuck:proxy_not_in_list"
+        )
+    assert await service.run_once(d) == "paused"
+    for flow_id in (b, c):
+        await service.retry(engine, flow_id, actor="admin:owner", now=clock[0])
+    assert service.stuck_count(await load(engine)) == 0
+    assert await service.run_once(d) != "paused"  # the stale tags leave the nodes on this pass
+    assert {n: (await user_tags(engine, n))[user_name(n)] for n in nodes} == {n: None for n in nodes}
+    await service.run_once(d)
+    candidates = {r.proxy_key: r for r in await load(engine) if r.candidate}
+    assert set(candidates) == {key_of(n) for n in nodes}
+    new_tags = {}
+    for node in nodes:
+        work = await work_for(engine, provider, candidates[key_of(node)].id)
+        new_tags[node] = secrets.token_hex(16)
+        outcome = FlowResult(result=Registered(tag=new_tags[node]), last_step=Step.SENT_SECRET)
+        assert await service._record(d, work, outcome) == "registered"
+    rows = await registration_rows(engine)
+    assert len(rows) == 3 and {r["state"] for r in rows} == {"registered"}
+    assert {n: (await user_tags(engine, n))[user_name(n)] for n in nodes} == new_tags
+    assert service.stuck_count(await load(engine)) == 0
+    assert await service.run_once(d) != "paused"
+
+
 async def test_an_alert_that_had_nobody_to_go_to_is_sent_once_the_owner_is_paired(
     engine: AsyncEngine, vault: Vault, seal_key: bytes
 ) -> None:
@@ -575,7 +761,8 @@ async def test_telegram_refusing_the_chat_is_not_retried_blindly(
     for code in ("mtproxybot_changed", "telegram_refused"):
         await service.retry(engine, reg_id, actor="admin:o", now=datetime.now(UTC))
         assert await service._record(d, work, FlowResult(error=code, rpc="PEER_FLOOD")) == f"stuck:{code}"
-    assert len(await alerts(engine)) == 2
+    sent = await alerts(engine)
+    assert len(sent) == 2 and all("کجا: start" not in a and "پیش از آنکه پیامی" in a for a in sent)
 
 
 # --- the real conversation step, without Telegram ------------------------------------------------------

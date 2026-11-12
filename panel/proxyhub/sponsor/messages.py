@@ -65,6 +65,8 @@ def error_message(code: str) -> str:
 
 
 STEP_FA: Final[dict[str, str]] = {
+    # No message reached the bot: opening the chat failed, or Telegram refused the first message.
+    "start": "در آغاز گفتگو، پیش از آنکه پیامی به ‎@MTProxybot‎ برسد",
     "sent_newproxy": "پس از فرمان ‎/newproxy",
     "sent_address": "پس از فرستادن نشانی و پورت",
     "sent_secret": "پس از فرستادن secret",
@@ -81,11 +83,15 @@ REASON_FA: Final[dict[str, str]] = {
     "unexpected_reply": "پاسخ ربات با آنچه انتظار میرفت فرق داشت.",
     "address_refused": "ربات نشانی و پورت را نپذیرفت.",
     "no_tag_in_reply": "در پاسخ ربات tag ۳۲ رقمی پیدا نشد.",
-    "proxy_not_in_list": "این پروکسی در فهرست ‎/myproxies‎ نبود.",
+    "proxy_not_in_list": (
+        "این پروکسی در فهرست ‎/myproxies‎ نبود. اگر در ‎@MTProxybot‎ هم نیست، «ثبت دوباره» آن را از نو در ربات "
+        "ثبت میکند و اسپانسرش را میگذارد."
+    ),
     "proxy_listed_twice": "این پروکسی دو بار در فهرست ‎/myproxies‎ بود.",
     "tag_not_in_list": (
         "نشانی این پروکسی در فهرست ‎/myproxies‎ بود، ولی هیچ دکمه‌ای tag ثبت ما را نداشت "
-        "(احتمالاً ثبت قدیمی همین IP است)."
+        "(احتمالاً ثبت قدیمی همین IP است). اگر ثبت ما در ‎@MTProxybot‎ نیست، «ثبت دوباره» پروکسی را از نو "
+        "در ربات ثبت میکند."
     ),
     "menu_of_another_tag": "صفحه‌ی پروکسی tag دیگری داشت، نه tag ثبت ما؛ چیزی زده نشد.",
     "menu_of_another_proxy": "ربات منوی پروکسی دیگری را نشان داد.",

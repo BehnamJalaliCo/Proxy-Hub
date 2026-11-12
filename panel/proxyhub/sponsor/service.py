@@ -92,6 +92,8 @@ TAG_RETRY: Final = timedelta(minutes=10)
 # A registration @MTProxybot no longer has (its /myproxies is empty): never reused, the proxy is
 # registered again with /newproxy (P19).
 FORGOTTEN: Final = "removed_in_bot"
+# A list that shows other proxies but not this one: forgotten only by the owner's «ثبت دوباره».
+NOT_IN_LIST: Final = frozenset({"proxy_not_in_list", "tag_not_in_list"})
 
 
 @dataclass(frozen=True)
@@ -443,20 +445,28 @@ async def sync(
             reasons=["node_gone"],
             context={"key": reg.proxy_key},
         )
-    for reg in await store.load_regs(db):
+    current = await store.load_regs(db)
+    held = {r.proxy_key for r in current if r.state != RETIRED and r.proxy_key is not None}
+    for reg in current:
         if (
-            not reg.candidate
-            and reg.ad_tag is not None
-            and reg.state != RETIRED
-            and reg.proxy_key is not None
-            and reg.proxy_key not in live
-            and reg.tag_applied_at is None
-            and node_of(reg.proxy_key) is not None
-            and in_use(reg, nodes)
-            and _tag_retry_due(reg, now)
+            reg.candidate
+            or reg.proxy_key is None
+            or reg.proxy_key in live
+            or reg.tag_applied_at is not None
+            or node_of(reg.proxy_key) is None
+            or not in_use(reg, nodes)
+            or not _tag_retry_due(reg, now)
         ):
+            continue
+        if reg.ad_tag is not None and reg.state != RETIRED:
             jobs.append(
                 TagJob(flow_id=reg.id, key=reg.proxy_key, tag=reg.ad_tag, address=reg.address, announce=True)
+            )
+        elif reg.state == RETIRED and reg.state_reason == FORGOTTEN and reg.proxy_key not in held:
+            # The bot's dead tag is still on the node (its clear failed, or never ran): the provider
+            # lists the proxy again only once it is gone. Never over a newer registration's tag.
+            jobs.append(
+                TagJob(flow_id=reg.id, key=reg.proxy_key, tag=None, address=reg.address, announce=True)
             )
     return await store.load_regs(db), nodes, live, jobs
 
@@ -713,10 +723,21 @@ async def _settle(
 async def _forgotten(db: AsyncConnection, reg: Reg, step: str, now: datetime) -> tuple[str, TagJob | None]:
     """@MTProxybot has no proxy of ours at all: retire the registration for good (never reused,
     :data:`FORGOTTEN`) and clear its tag from the node, so the provider lists the proxy again and
-    the next pass registers it with /newproxy and sets its sponsor (P19)."""
+    the next pass registers it with /newproxy and sets its sponsor (P19). From here on
+    ``tag_applied_at`` says the stale tag left the node: a clear that failed (or never ran) is tried
+    again by :func:`sync`."""
     await store.update_reg(db, reg.registration_id, now, state=RETIRED, state_reason=FORGOTTEN)
     await store.update_flow(
-        db, reg.id, now, attempts=0, next_attempt_at=None, last_error=None, last_step=step, **CLEAR_STUCK
+        db,
+        reg.id,
+        now,
+        attempts=0,
+        next_attempt_at=None,
+        last_error=None,
+        last_step=step,
+        tag_applied_at=None,
+        tag_failed_at=None,
+        **CLEAR_STUCK,
     )
     await _log(
         db,
@@ -973,16 +994,42 @@ class SponsorError(Exception):
         self.code = code
 
 
+def _not_in_bot_list(reg: Reg) -> bool:
+    """Stuck because @MTProxybot's list, read to the end, did not show this registration's button
+    while it showed other proxies (an empty list is :class:`Forgotten` by itself)."""
+    return (
+        reg.ad_tag is not None
+        and reg.stuck
+        and reg.stuck_reason in NOT_IN_LIST
+        and reg.last_step in (Step.SENT_MYPROXIES.value, Step.PRESSED_NEXT_PAGE.value)
+    )
+
+
 async def retry(engine: AsyncEngine, reg_id: uuid.UUID, *, actor: str, now: datetime) -> None:
     """«ثبت دوباره»: a stuck proxy goes back to work. One without a tag is registered again: it has
     no registration row, so the provider keeps listing it with its secret. One with a tag (stuck or
-    not) has its sponsor set again. The alert may fire again if it gets stuck again."""
+    not) has its sponsor set again, except one stuck because the bot's list does not show it: the
+    owner, who sees the list, says it is gone there, so it is forgotten like a registration the bot
+    no longer has (:func:`_forgotten`; its tag leaves the node on the next pass, :func:`sync`) and
+    registered again. This is never decided without the owner: the same stop also comes from a
+    list the panel could not read. The alert may fire again if it gets stuck again."""
     async with engine.begin() as db:
         reg = await store.load_reg(db, reg_id, for_update=True)
         if reg is None:
             raise SponsorError("not_found")
         if reg.state == RETIRED:
             raise SponsorError("registration_retired")
+        if _not_in_bot_list(reg):
+            await _forgotten(db, reg, reg.last_step or Step.SENT_MYPROXIES.value, now)
+            await _log(
+                db,
+                "sponsor.retry_requested",
+                reg.address,
+                reasons=[f"from:{reg.state}", "forget"],
+                context={"stuck_reason": reg.stuck_reason, "has_tag": True},
+                actor=actor,
+            )
+            return
         if reg.ad_tag is not None:
             await store.update_reg(
                 db, reg.registration_id, now, state=REGISTERED, state_reason=None, sponsor_channel=None
