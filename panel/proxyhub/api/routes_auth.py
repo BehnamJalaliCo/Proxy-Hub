@@ -1,4 +1,4 @@
-"""Auth API (M1.3): setup link, login, logout, sessions, recovery codes.
+"""Auth API (M1.3): setup link, login, logout, sessions, recovery codes, a new Authenticator.
 
 Public routes: GET /api/setup/status, POST /api/setup/begin, POST /api/setup/finish and
 POST /api/auth/login. Everything else needs the admin session. Every non-GET route needs the CSRF
@@ -65,6 +65,14 @@ class LoginIn(_In):
 
 class TotpIn(_In):
     totp_code: str = Field(max_length=32)
+
+
+class TotpReenrollIn(_In):
+    pending: str = Field(max_length=512)
+    new_code: str = Field(max_length=32)
+    password: str = Field(max_length=1024)
+    totp_code: str | None = Field(default=None, max_length=32)
+    recovery_code: str | None = Field(default=None, max_length=64)
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -221,6 +229,34 @@ async def revoke(session_id: str, admin: Admin, session: DbSession) -> Response:
 async def regenerate_recovery_codes(body: TotpIn, admin: Admin, session: DbSession) -> Response:
     try:
         result = await service.regenerate_recovery_codes(session, admin.resolved(), body.totp_code)
+    except AuthError as exc:
+        return _error(exc)
+    response = JSONResponse({"recovery_codes": result.recovery_codes})
+    _set_device_cookie(response, result.device_token)
+    return response
+
+
+@router.post("/auth/totp/begin")
+async def totp_reenroll_begin(admin: Admin) -> Response:
+    """A new Authenticator (the old phone is lost): the QR secret and its sealed ``pending`` blob."""
+    result = service.totp_reenroll_begin(admin.resolved())
+    return JSONResponse(
+        {"pending": result.pending, "totp_uri": result.totp_uri, "totp_secret": result.totp_secret}
+    )
+
+
+@router.post("/auth/totp/finish")
+async def totp_reenroll_finish(body: TotpReenrollIn, admin: Admin, session: DbSession) -> Response:
+    try:
+        result = await service.totp_reenroll_finish(
+            session,
+            admin.resolved(),
+            pending=body.pending,
+            new_code=body.new_code,
+            password=body.password,
+            totp_code=body.totp_code,
+            recovery_code=body.recovery_code,
+        )
     except AuthError as exc:
         return _error(exc)
     response = JSONResponse({"recovery_codes": result.recovery_codes})

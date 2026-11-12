@@ -1,4 +1,4 @@
-"""Auth business logic: setup, login, sessions, recovery codes.
+"""Auth business logic: setup, login, sessions, recovery codes, a new Authenticator.
 
 Every function takes the request's ``AsyncSession`` and ends its own transaction (commit or
 rollback) before returning or raising, so failure counters and audit rows are saved even when the
@@ -8,6 +8,7 @@ status codes and Persian messages.
 
 from __future__ import annotations
 
+import base64
 import logging
 import uuid
 from dataclasses import dataclass
@@ -26,7 +27,7 @@ from proxyhub.auth.passwords import (
     password_problem,
     verify_password_async,
 )
-from proxyhub.auth.secretbox import open_sealed, seal
+from proxyhub.auth.secretbox import DecryptError, open_sealed, seal
 from proxyhub.auth.tokens import (
     new_recovery_codes,
     new_token,
@@ -47,6 +48,7 @@ from proxyhub.reconcilers.base import lock_key
 log = logging.getLogger("proxyhub.auth")
 
 SETUP_TOKEN_TTL = timedelta(minutes=60)
+REENROLL_TTL = SETUP_TOKEN_TTL  # a new Authenticator must be confirmed within the same hour
 SESSION_IDLE_TIMEOUT = timedelta(hours=12)
 SESSION_ABSOLUTE_TIMEOUT = timedelta(days=7)
 SESSION_TOUCH_INTERVAL = timedelta(seconds=60)
@@ -100,6 +102,13 @@ class LoginOk:
     username: str
     session: NewSession
     device_token: str  # a new device cookie, or the presented one (renewed)
+
+
+@dataclass(frozen=True)
+class TotpReenrollBegin:
+    pending: str  # the new secret sealed to this session; only the finish step can open it
+    totp_uri: str
+    totp_secret: str
 
 
 @dataclass(frozen=True)
@@ -744,30 +753,15 @@ async def regenerate_recovery_codes(
     secret = open_sealed(user.totp_secret_enc, _totp_context(user.id)).decode()
     step = totp.match_step(secret, totp_code, user.totp_last_step, now)
     if step is None:
-        event = throttle.register_failure(user_row, throttle.USER_POLICY, now)
-        audit.record(
+        await _refuse_owner_action(
             session,
-            "recovery_regenerate_failed",
+            user_row,
+            now,
+            action="recovery_regenerate_failed",
             target=user.username,
-            allowed=False,
             reasons={"factor": "totp"},
+            code="totp_invalid",
         )
-        if event is not None:
-            audit.record(
-                session,
-                "locked",
-                target=user.username,
-                allowed=False,
-                reasons={
-                    "scope": event.scope,
-                    "level": event.level,
-                    "lock_s": int(event.duration.total_seconds()),
-                },
-            )
-        await session.commit()
-        if event is not None:
-            raise AuthError("locked", retry_after_s=int(event.duration.total_seconds()))
-        raise AuthError("totp_invalid")
     user.totp_last_step = step
     user.updated_at = now
     await session.execute(delete(AdminRecoveryCode).where(AdminRecoveryCode.user_id == user.id))
@@ -775,5 +769,156 @@ async def regenerate_recovery_codes(
     await session.execute(delete(AdminDevice).where(AdminDevice.user_id == user.id))
     device_token = _issue_device(session, user.id, now)
     audit.record(session, "recovery_codes_regenerated", target=user.username, reasons={"count": len(codes)})
+    await session.commit()
+    return NewRecoveryCodes(recovery_codes=codes, device_token=device_token)
+
+
+async def _refuse_owner_action(
+    session: AsyncSession,
+    user_row: AuthThrottle,
+    now: datetime,
+    *,
+    action: str,
+    target: str,
+    reasons: dict[str, str],
+    code: str,
+) -> NoReturn:
+    """A logged-in owner's failed proof: counted on the username like a wrong login, audited,
+    committed, then refused (``locked`` once the count reaches a lock)."""
+    event = throttle.register_failure(user_row, throttle.USER_POLICY, now)
+    audit.record(session, action, target=target, allowed=False, reasons=reasons)
+    if event is not None:
+        audit.record(
+            session,
+            "locked",
+            target=target,
+            allowed=False,
+            reasons={
+                "scope": event.scope,
+                "level": event.level,
+                "lock_s": int(event.duration.total_seconds()),
+            },
+        )
+    await session.commit()
+    if event is not None:
+        raise AuthError("locked", retry_after_s=int(event.duration.total_seconds()))
+    raise AuthError(code)
+
+
+# --- a new Authenticator (lost phone) -----------------------------------------------------------
+
+
+def _reenroll_context(identity: ResolvedSession) -> str:
+    return f"admin-reenroll:{identity.user_id}:{identity.session_id}"
+
+
+def totp_reenroll_begin(identity: ResolvedSession, now: datetime | None = None) -> TotpReenrollBegin:
+    """A fresh TOTP secret for a new Authenticator. Nothing is stored: the secret travels back in
+    ``pending``, sealed to this session with its issue time, and is checked by the finish step."""
+    now = now or utcnow()
+    secret = totp.new_secret()
+    blob = seal(f"{int(now.timestamp())}:{secret}".encode(), _reenroll_context(identity))
+    pending = base64.urlsafe_b64encode(blob).decode().rstrip("=")
+    return TotpReenrollBegin(pending=pending, totp_uri=totp.provisioning_uri(secret), totp_secret=secret)
+
+
+def _open_pending(pending: str, identity: ResolvedSession, now: datetime) -> str | None:
+    """The new secret in ``pending`` if this session made it less than an hour ago."""
+    try:
+        blob = base64.urlsafe_b64decode(pending + "=" * (-len(pending) % 4))
+        issued, secret = open_sealed(blob, _reenroll_context(identity)).decode().split(":", 1)
+        issued_at = datetime.fromtimestamp(int(issued), UTC)
+    except (DecryptError, ValueError):
+        return None
+    if not timedelta(0) <= now - issued_at <= REENROLL_TTL:
+        return None
+    return secret
+
+
+async def totp_reenroll_finish(
+    session: AsyncSession,
+    identity: ResolvedSession,
+    *,
+    pending: str,
+    new_code: str,
+    password: str,
+    totp_code: str | None,
+    recovery_code: str | None,
+    now: datetime | None = None,
+) -> NewRecoveryCodes:
+    """Replace the Authenticator. Proof: the password, a code of the current Authenticator or an
+    unused recovery code (the phone may be gone), and a code of the new one. On success the old
+    secret, every recovery code, every other session and every known device are gone; the owner
+    gets 10 new codes. Throttled on the username like a login; one generic error for any mistake."""
+    now = now or utcnow()
+    ukey = throttle.user_key(identity.username)
+    await throttle.ensure_rows(session, [ukey])
+    user_row = await throttle.load(session, ukey, for_update=True)
+    wait = throttle.retry_after_s(user_row, now)
+    if wait:
+        await session.rollback()
+        raise AuthError("locked", retry_after_s=wait)
+    user = (
+        await session.execute(select(AdminUser).where(AdminUser.id == identity.user_id).with_for_update())
+    ).scalar_one()
+    password_ok = await verify_password_async(user.password_hash, password)
+    old_step: int | None = None
+    code_row: AdminRecoveryCode | None = None
+    method = "none"
+    if totp_code and totp_code.strip():
+        method = "totp"
+        old_secret = open_sealed(user.totp_secret_enc, _totp_context(user.id)).decode()
+        old_step = totp.match_step(old_secret, totp_code, user.totp_last_step, now)
+    elif recovery_code and recovery_code.strip():
+        method = "recovery"
+        digest = recovery_code_hash(recovery_code)
+        if digest is not None:
+            code_row = (
+                await session.execute(
+                    select(AdminRecoveryCode)
+                    .where(
+                        AdminRecoveryCode.user_id == user.id,
+                        AdminRecoveryCode.code_hash == digest,
+                        AdminRecoveryCode.used_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+    new_secret = _open_pending(pending, identity, now)
+    new_step = totp.match_step(new_secret, new_code, None, now) if new_secret is not None else None
+    if not password_ok or (old_step is None and code_row is None) or new_step is None:
+        if not password_ok:
+            factor = "password"
+        elif old_step is None and code_row is None:
+            factor = "second_factor"
+        else:
+            factor = "new_code" if new_secret is not None else "pending"
+        await _refuse_owner_action(
+            session,
+            user_row,
+            now,
+            action="totp_reenroll_failed",
+            target=user.username,
+            reasons={"factor": factor, "method": method},
+            code="reenroll_invalid",
+        )
+    assert new_secret is not None and new_step is not None
+    user.totp_secret_enc = seal(new_secret.encode(), _totp_context(user.id))
+    user.totp_last_step = new_step
+    user.updated_at = now
+    await session.execute(delete(AdminRecoveryCode).where(AdminRecoveryCode.user_id == user.id))
+    codes = _store_new_recovery_codes(session, user.id, now)
+    await session.execute(
+        update(AdminSession)
+        .where(
+            AdminSession.user_id == user.id,
+            AdminSession.id != identity.session_id,
+            AdminSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+    )
+    await session.execute(delete(AdminDevice).where(AdminDevice.user_id == user.id))
+    device_token = _issue_device(session, user.id, now)
+    audit.record(session, "totp_reenrolled", target=user.username, reasons={"method": method})
     await session.commit()
     return NewRecoveryCodes(recovery_codes=codes, device_token=device_token)

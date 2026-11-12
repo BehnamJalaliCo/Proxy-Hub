@@ -440,6 +440,122 @@ async def test_regenerate_recovery_codes(env: Env, client: AsyncClient) -> None:
     assert len(await env.audit("recovery_regenerate_failed")) == 1
 
 
+FINISH = "/api/auth/totp/finish"
+
+
+def tampered(blob: str) -> str:
+    return blob[:20] + ("A" if blob[20] != "A" else "B") + blob[21:]
+
+
+async def test_a_lost_authenticator_can_be_replaced(env: Env, client: AsyncClient) -> None:
+    """api-a:4: the phone is gone. Logged in with a recovery code, the owner registers a new
+    Authenticator with the password, another recovery code and a code of the new app."""
+    owner = await do_setup(env, client)
+    async with make_client() as anon:
+        assert_error(await anon.post("/api/auth/totp/begin"), 401, "unauthenticated")
+        assert_error(await anon.post(FINISH, json={}), 401, "unauthenticated")
+    async with make_client() as laptop, make_client() as other:
+        assert (await login(laptop, recovery_code=owner.recovery_codes[0])).status_code == 200
+        assert (await login(other, recovery_code=owner.recovery_codes[1])).status_code == 200
+        r = await laptop.post("/api/auth/totp/begin")
+        assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
+        begin = r.json()
+        new_app = pyotp.TOTP(begin["totp_secret"])
+        assert pyotp.parse_uri(begin["totp_uri"]).secret == begin["totp_secret"]
+        assert begin["totp_secret"] not in begin["pending"]
+        base = {"pending": begin["pending"], "password": PASSWORD, "recovery_code": owner.recovery_codes[2]}
+        five_minutes_ago = new_app.at(datetime.now(UTC) - timedelta(minutes=5))
+        bodies = [
+            assert_error(
+                await laptop.post(FINISH, json={**base, **wrong, "new_code": new_app.now()}),
+                400,
+                "reenroll_invalid",
+            )
+            for wrong in (
+                {"password": "wrong-password-12"},
+                {"recovery_code": owner.recovery_codes[0]},  # already used
+                {
+                    "recovery_code": None,
+                    "totp_code": pyotp.TOTP(owner.secret).at(datetime.now(UTC) - timedelta(minutes=5)),
+                },
+                {"pending": tampered(begin["pending"])},
+            )
+        ]
+        assert all(b == bodies[0] for b in bodies)  # one answer, whatever was wrong
+        assert_error(await laptop.post(FINISH, json={**base, "new_code": five_minutes_ago}), 429, "locked")
+        # Another session cannot use this session's pending secret.
+        await expire_user_locks(env)
+        r = await other.post(FINISH, json={**base, "new_code": new_app.now()})
+        assert_error(r, 400, "reenroll_invalid")
+
+        await expire_user_locks(env)
+        r = await laptop.post(FINISH, json={**base, "new_code": new_app.now()})
+        assert r.status_code == 200, r.text
+        codes = r.json()["recovery_codes"]
+        assert len(codes) == 10 and not set(codes) & set(owner.recovery_codes)
+        assert "path=/api/auth" in device_cookie_attrs(r)
+        assert (await laptop.get("/api/auth/me")).status_code == 200
+        assert_error(await other.get("/api/auth/me"), 401, "unauthenticated")  # every other session ends
+    assert_error(await client.get("/api/auth/me"), 401, "unauthenticated")
+
+    async with make_client() as c:
+        assert_error(await login(c, totp_code=await env.fresh_code(owner.secret)), 401, "invalid_credentials")
+        assert_error(await login(c, recovery_code=owner.recovery_codes[3]), 401, "invalid_credentials")
+        assert (await login(c, totp_code=await env.fresh_code(begin["totp_secret"]))).status_code == 200
+    async with make_client() as c:
+        assert (await login(c, recovery_code=codes[0])).status_code == 200
+    (done,) = await env.audit("totp_reenrolled")
+    assert done.target == "owner" and done.reasons == {"method": "recovery"}
+    failed = await env.audit("totp_reenroll_failed")
+    assert [row.reasons["factor"] for row in failed] == [
+        "password",
+        "second_factor",
+        "second_factor",
+        "pending",
+        "new_code",
+        "pending",
+    ]
+    assert [row.reasons["scope"] for row in await env.audit("locked")] == ["user"]
+    stored = await env.dump()
+    assert begin["totp_secret"] not in stored and begin["pending"] not in stored
+
+
+async def test_reenroll_with_the_current_authenticator_and_a_stale_pending(
+    env: Env, client: AsyncClient
+) -> None:
+    from proxyhub.auth.service import ResolvedSession, totp_reenroll_begin
+
+    owner = await do_setup(env, client)
+    (row,) = await env.rows("SELECT id, user_id FROM admin_sessions")
+    identity = ResolvedSession(user_id=row.user_id, username=USERNAME, session_id=row.id)
+    stale = totp_reenroll_begin(identity, now=datetime.now(UTC) - timedelta(minutes=61))
+    r = await client.post(
+        FINISH,
+        json={
+            "pending": stale.pending,
+            "password": PASSWORD,
+            "totp_code": await env.fresh_code(owner.secret),
+            "new_code": pyotp.TOTP(stale.totp_secret).now(),
+        },
+    )
+    assert_error(r, 400, "reenroll_invalid")  # begun more than an hour ago
+
+    begin = (await client.post("/api/auth/totp/begin")).json()
+    r = await client.post(
+        FINISH,
+        json={
+            "pending": begin["pending"],
+            "password": PASSWORD,
+            "totp_code": await env.fresh_code(owner.secret),
+            "new_code": pyotp.TOTP(begin["totp_secret"]).now(),
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert (await client.get("/api/auth/me")).status_code == 200
+    (done,) = await env.audit("totp_reenrolled")
+    assert done.reasons == {"method": "totp"}
+
+
 async def test_password_hash_is_upgraded_on_login(env: Env, client: AsyncClient) -> None:
     owner = await do_setup(env, client)
     weak = PasswordHasher(time_cost=1, memory_cost=8192, parallelism=1).hash(PASSWORD)
