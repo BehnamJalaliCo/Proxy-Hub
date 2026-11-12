@@ -208,7 +208,7 @@ function ZoneRow({ zone, index, now, onPick }: { zone: CfZone; index: number; no
           <span
             className={cn(
               "grid size-10 shrink-0 place-items-center rounded-xl",
-              zone.pool_state === "active" ? "bg-success text-white" : zone.pool_state === "filtered" ? "bg-danger text-white" : "bg-surface-3 text-fg-muted",
+              zone.pool_state === "active" ? "bg-success text-on-success" : zone.pool_state === "filtered" ? "bg-danger text-on-danger" : "bg-surface-3 text-fg-muted",
             )}
           >
             {deleted ? <Trash2 className="size-5" /> : <Globe className="size-5" />}

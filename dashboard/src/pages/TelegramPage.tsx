@@ -106,7 +106,7 @@ function SetupSteps({ s }: { s: TgStatus }) {
             {...fadeUp(i)}
             className={cn("flex items-center gap-2.5 rounded-2xl border p-2.5", x.done ? "border-success/25 bg-success-soft" : "border-line bg-surface-2")}
           >
-            <span className={cn("grid size-8 shrink-0 place-items-center rounded-xl text-sm font-bold", x.done ? "bg-success text-white" : "bg-surface-3 text-fg-muted")}>
+            <span className={cn("grid size-8 shrink-0 place-items-center rounded-xl text-sm font-bold", x.done ? "bg-success text-on-success" : "bg-surface-3 text-fg-muted")}>
               {x.done ? <CircleCheck className="size-4" /> : toFaDigits(i + 1)}
             </span>
             <span className="min-w-0">
@@ -343,7 +343,7 @@ function PairingCard({ s, created, onCreated }: { s: TgStatus; created: TgPairin
             </div>
             <ol className="flex flex-col gap-3">
               <li className="flex gap-3">
-                <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-brand text-sm font-bold text-white">۱</span>
+                <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-brand text-sm font-bold text-on-brand">۱</span>
                 <div className="min-w-0 flex-1 text-sm leading-7 text-fg">
                   ربات را در تلگرام باز کنید و <b>Start</b> را بزنید:
                   {deep ? (
@@ -351,7 +351,7 @@ function PairingCard({ s, created, onCreated }: { s: TgStatus; created: TgPairin
                       href={deep}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="mt-1.5 flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[linear-gradient(110deg,var(--ph-brand),var(--ph-brand-2))] font-bold text-white sm:w-auto sm:px-5"
+                      className="mt-1.5 flex h-11 w-full items-center justify-center gap-2 rounded-xl ph-cta font-bold sm:w-auto sm:px-5"
                     >
                       <Send className="size-4 rtl:-scale-x-100" />
                       باز کردن ‎@{bot.username}‎
@@ -360,7 +360,7 @@ function PairingCard({ s, created, onCreated }: { s: TgStatus; created: TgPairin
                 </div>
               </li>
               <li className="flex gap-3">
-                <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-brand text-sm font-bold text-white">۲</span>
+                <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-brand text-sm font-bold text-on-brand">۲</span>
                 <div className="min-w-0 flex-1 text-sm leading-7 text-fg">
                   اگر پیام خودکار نرفت، همین را برای ربات بفرستید:
                   <div className="mt-1.5 flex items-center gap-2">
@@ -372,7 +372,7 @@ function PairingCard({ s, created, onCreated }: { s: TgStatus; created: TgPairin
                 </div>
               </li>
               <li className="flex gap-3">
-                <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-brand text-sm font-bold text-white">۳</span>
+                <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-brand text-sm font-bold text-on-brand">۳</span>
                 <p className="flex-1 text-sm leading-7 text-fg">
                   همین صفحه خودش میفهمد؛ چند ثانیه بعد «وصل» میشود. کد فقط ۱۰ دقیقه و یک بار کار میکند.
                 </p>

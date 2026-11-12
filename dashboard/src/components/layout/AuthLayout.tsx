@@ -11,7 +11,7 @@ export function AuthLayout({ children, wide = false }: { children: ReactNode; wi
       <div aria-hidden className="pointer-events-none absolute inset-0 overflow-clip">
         <div className="absolute -top-40 -right-32 size-[34rem] animate-float-a rounded-full bg-[radial-gradient(circle,var(--ph-bg-glow-1),transparent_65%)] blur-2xl" />
         <div className="absolute -bottom-48 -left-40 size-[38rem] animate-float-b rounded-full bg-[radial-gradient(circle,var(--ph-bg-glow-2),transparent_65%)] blur-2xl" />
-        <div className="absolute inset-0 bg-[radial-gradient(var(--ph-line)_1px,transparent_1px)] [background-size:22px_22px] [mask-image:radial-gradient(ellipse_at_center,black_30%,transparent_75%)]" />
+        <div className="absolute inset-0 bg-[image:var(--ph-pattern)] [background-size:72px_72px] opacity-[var(--ph-pattern-opacity)] [mask-image:radial-gradient(ellipse_at_center,black_25%,transparent_78%)]" />
       </div>
 
       <header className="relative z-10 flex items-center justify-between px-4 pt-[max(1rem,env(safe-area-inset-top))] sm:px-8 sm:pt-6">

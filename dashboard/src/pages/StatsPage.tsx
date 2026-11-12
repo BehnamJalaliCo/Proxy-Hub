@@ -121,7 +121,7 @@ function Section({ id, icon, title, sentence, children }: { id: string; icon: Re
   return (
     <section aria-labelledby={id} className="flex flex-col gap-4">
       <div className="flex items-start gap-3 pt-2">
-        <span className="grid size-10 shrink-0 place-items-center rounded-2xl bg-[linear-gradient(135deg,var(--ph-brand),var(--ph-brand-2))] text-white shadow-[0_8px_22px_-12px_var(--ph-brand)]">
+        <span className="grid size-10 shrink-0 place-items-center rounded-2xl ph-gold">
           {icon}
         </span>
         <div className="min-w-0">

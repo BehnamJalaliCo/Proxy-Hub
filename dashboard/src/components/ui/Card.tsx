@@ -6,7 +6,7 @@ import { TONE_DOT, TONE_SOFT } from "../../lib/tones";
 
 export function Card({ className, children, ...rest }: HTMLAttributes<HTMLElement>) {
   return (
-    <section className={cn("rounded-3xl border border-line bg-surface shadow-card", className)} {...rest}>
+    <section className={cn("ph-card rounded-3xl", className)} {...rest}>
       {children}
     </section>
   );
@@ -28,7 +28,7 @@ export function CardHeader({
   return (
     <header className={cn("flex items-start gap-3 px-5 pt-5", className)}>
       {icon ? (
-        <span className="grid size-10 shrink-0 place-items-center rounded-2xl bg-brand-soft text-brand">{icon}</span>
+        <span className="grid size-10 shrink-0 place-items-center rounded-2xl bg-brand-soft text-brand ring-1 ring-brand/15 ring-inset">{icon}</span>
       ) : null}
       <div className="min-w-0 flex-1">
         <h2 className="text-[1.02rem] leading-7 font-bold text-fg">{title}</h2>
@@ -55,7 +55,7 @@ export function Badge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs leading-none font-semibold whitespace-nowrap",
+        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs leading-none font-semibold whitespace-nowrap ring-1 ring-current/12 ring-inset",
         TONE_SOFT[tone],
         className,
       )}

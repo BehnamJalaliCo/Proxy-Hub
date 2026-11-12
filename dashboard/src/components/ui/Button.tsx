@@ -8,12 +8,11 @@ type Variant = "primary" | "secondary" | "ghost" | "danger" | "success";
 type Size = "sm" | "md" | "lg";
 
 const VARIANT: Record<Variant, string> = {
-  primary:
-    "text-on-brand bg-[linear-gradient(110deg,var(--ph-brand),var(--ph-brand-strong)_55%,var(--ph-brand-2))] shadow-[0_8px_24px_-10px_var(--ph-brand)] hover:brightness-110 active:brightness-95",
-  secondary: "bg-surface text-fg border border-line-strong hover:bg-surface-2 active:bg-surface-3",
+  primary: "ph-cta hover:brightness-110 active:brightness-95",
+  secondary: "bg-surface text-fg border border-line-strong hover:border-brand/45 hover:bg-surface-2 active:bg-surface-3",
   ghost: "text-fg-muted hover:text-fg hover:bg-surface-3/70",
-  danger: "text-white bg-danger shadow-[0_8px_22px_-12px_var(--ph-danger)] hover:brightness-110 active:brightness-95",
-  success: "text-white bg-success shadow-[0_8px_22px_-12px_var(--ph-success)] hover:brightness-110",
+  danger: "text-on-danger bg-danger shadow-[0_8px_22px_-12px_var(--ph-danger)] hover:brightness-110 active:brightness-95",
+  success: "text-on-success bg-success shadow-[0_8px_22px_-12px_var(--ph-success)] hover:brightness-110",
 };
 
 const SIZE: Record<Size, string> = {

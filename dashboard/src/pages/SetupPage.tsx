@@ -211,7 +211,7 @@ export default function SetupPage() {
           {step === "intro" ? (
             <motion.div key="intro" {...slide} className="flex flex-col gap-5">
               <div className="flex items-center gap-3">
-                <span className="grid size-12 place-items-center rounded-2xl bg-[linear-gradient(135deg,var(--ph-brand),var(--ph-brand-2))] text-white">
+                <span className="grid size-12 place-items-center rounded-2xl ph-gold">
                   <Rocket className="size-6" />
                 </span>
                 <div>
@@ -264,7 +264,7 @@ export default function SetupPage() {
                 <div className="flex w-full min-w-0 flex-1 flex-col gap-3">
                   <a
                     href={enrollment.totp_uri}
-                    className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl bg-[linear-gradient(110deg,var(--ph-brand),var(--ph-brand-2))] px-4 font-semibold text-white shadow-[0_8px_24px_-10px_var(--ph-brand)]"
+                    className="inline-flex h-12 items-center justify-center gap-2 rounded-2xl ph-cta px-4 font-semibold"
                   >
                     <Smartphone className="size-5" />
                     افزودن به Authenticator همین گوشی

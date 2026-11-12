@@ -20,7 +20,7 @@ __pycache__/
 .claude/worktrees/
 
 # Dashboard (Node): dependencies and build output are never committed
-node_modules/
+node_modules
 dashboard/dist/
 dashboard/*.tsbuildinfo
 dashboard/test-results/

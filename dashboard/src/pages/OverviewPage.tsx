@@ -60,7 +60,7 @@ function CostPerMemberHero({ overview }: { overview: Overview | undefined }) {
       <div className="relative flex flex-col gap-6 p-5 sm:p-7">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
-            <span className="grid size-12 place-items-center rounded-2xl bg-[linear-gradient(135deg,var(--ph-brand),var(--ph-brand-2))] text-white shadow-[0_10px_30px_-12px_var(--ph-brand)]">
+            <span className="grid size-12 place-items-center rounded-2xl ph-gold">
               <Coins className="size-6" />
             </span>
             <div>
@@ -125,7 +125,7 @@ function KillSwitchStatus({ overview }: { overview: Overview }) {
       />
       <div className="relative flex flex-1 flex-col gap-4 p-5 sm:p-6">
         <div className="flex items-center gap-3">
-          <span className={cn("relative grid size-14 place-items-center rounded-2xl", on ? "bg-danger text-white" : "bg-success text-white")}>
+          <span className={cn("relative grid size-14 place-items-center rounded-2xl", on ? "bg-danger text-on-danger" : "bg-success text-on-success")}>
             {on ? <OctagonPause className="size-7" /> : <ShieldCheck className="size-7" />}
             <span className={cn("absolute inset-0 animate-ping-soft rounded-2xl", on ? "bg-danger/40" : "bg-success/30")} aria-hidden />
           </span>
@@ -258,7 +258,7 @@ function SlotGrid({ o }: { o: Overview }) {
                     className={cn(
                       "relative grid aspect-square place-items-center rounded-2xl",
                       live
-                        ? "bg-[linear-gradient(135deg,var(--ph-brand),var(--ph-brand-2))] text-white shadow-[0_8px_22px_-10px_var(--ph-brand)]"
+                        ? "ph-gold"
                         : "border-2 border-dashed border-line-strong text-fg-faint",
                     )}
                     aria-label={live ? `جایگاه ${formatNumber(i + 1)}: node زنده` : `جایگاه ${formatNumber(i + 1)}: خالی`}
@@ -396,9 +396,9 @@ function AccountsSplit({ o }: { o: Overview }) {
   const { active, locked, total } = o.accounts;
   const other = Math.max(0, total - active - locked);
   const parts = [
-    { key: "active", label: "فعال", value: active, cls: "bg-success text-white" },
-    { key: "locked", label: "قفل", value: locked, cls: "bg-danger text-white" },
-    { key: "other", label: "دیگر وضعیت‌ها", value: other, cls: "bg-fg-faint text-white" },
+    { key: "active", label: "فعال", value: active, cls: "bg-success text-on-success" },
+    { key: "locked", label: "قفل", value: locked, cls: "bg-danger text-on-danger" },
+    { key: "other", label: "دیگر وضعیت‌ها", value: other, cls: "bg-fg-faint text-surface" },
   ].filter((p) => p.value > 0);
   return (
     <Card className="lg:col-span-4">

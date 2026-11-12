@@ -12,7 +12,7 @@ import { useMe, useOverview } from "../../lib/queries";
 import { toast } from "../../lib/toast";
 import { StatusDot } from "../ui/Card";
 import { Logo, ThemeSwitch, ThemeToggleButton } from "./Brand";
-import { BOTTOM_NAV, NAV, titleFor } from "./nav";
+import { BOTTOM_NAV, NAV, NAV_GROUPS, titleFor } from "./nav";
 
 function useLogout(): [boolean, () => void] {
   const qc = useQueryClient();
@@ -40,43 +40,52 @@ function isActive(pathname: string, to: string): boolean {
 function SideNav({ onNavigate, withDescriptions = false }: { onNavigate?: () => void; withDescriptions?: boolean }) {
   const { pathname } = useLocation();
   return (
-    <nav aria-label="بخش‌های پنل" className="flex flex-col gap-1">
-      {NAV.map((item) => {
-        const active = isActive(pathname, item.to);
-        const Icon = item.icon;
-        return (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            end={item.to === "/"}
-            onClick={onNavigate}
-            className={cn(
-              "group relative flex items-center gap-3 rounded-2xl px-3 py-2.5 transition-colors",
-              active ? "text-fg" : "text-fg-muted hover:bg-surface-3/60 hover:text-fg",
-            )}
-          >
-            {active ? (
-              <motion.span
-                layoutId={withDescriptions ? "drawer-active" : "side-active"}
-                className="absolute inset-0 rounded-2xl bg-surface shadow-card ring-1 ring-line"
-                transition={{ type: "spring", stiffness: 420, damping: 36 }}
-              />
-            ) : null}
-            <span
-              className={cn(
-                "relative grid size-9 place-items-center rounded-xl transition-colors",
-                active ? "bg-[linear-gradient(135deg,var(--ph-brand),var(--ph-brand-2))] text-white shadow-[0_6px_18px_-8px_var(--ph-brand)]" : "bg-surface-3/70",
-              )}
-            >
-              <Icon className="size-[1.15rem]" />
-            </span>
-            <span className="relative min-w-0">
-              <span className="block text-[0.95rem] font-semibold">{item.label}</span>
-              {withDescriptions ? <span className="block truncate text-xs text-fg-faint">{item.description}</span> : null}
-            </span>
-          </NavLink>
-        );
-      })}
+    <nav aria-label="بخش‌های پنل" className="flex flex-col gap-4">
+      {NAV_GROUPS.map((group) => (
+        <div key={group.id} role="group" aria-label={group.label} className="flex flex-col gap-0.5">
+          <div aria-hidden className="mb-1 flex items-center gap-2.5 px-3 text-[0.7rem] font-bold text-fg-faint">
+            <span>{group.label}</span>
+            <span className="ph-rule flex-1" />
+          </div>
+          {NAV.filter((item) => item.group === group.id).map((item) => {
+            const active = isActive(pathname, item.to);
+            const Icon = item.icon;
+            return (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.to === "/"}
+                onClick={onNavigate}
+                className={cn(
+                  "group relative flex items-center gap-3 rounded-2xl px-2.5 transition-colors",
+                  withDescriptions ? "py-2" : "py-1.5",
+                  active ? "text-fg" : "text-fg-muted hover:bg-surface-3/50 hover:text-fg",
+                )}
+              >
+                {active ? (
+                  <motion.span
+                    layoutId={withDescriptions ? "drawer-active" : "side-active"}
+                    className="absolute inset-0 rounded-2xl border border-brand/25 bg-brand-soft"
+                    transition={{ type: "spring", stiffness: 420, damping: 36 }}
+                  />
+                ) : null}
+                <span
+                  className={cn(
+                    "relative grid size-9 shrink-0 place-items-center rounded-xl transition-colors",
+                    active ? "ph-gold" : "text-fg-faint group-hover:text-fg",
+                  )}
+                >
+                  <Icon className="size-[1.15rem]" />
+                </span>
+                <span className="relative min-w-0">
+                  <span className={cn("block text-[0.94rem]", active ? "font-bold" : "font-semibold")}>{item.label}</span>
+                  {withDescriptions ? <span className="block truncate text-xs text-fg-faint">{item.description}</span> : null}
+                </span>
+              </NavLink>
+            );
+          })}
+        </div>
+      ))}
     </nav>
   );
 }
@@ -114,8 +123,8 @@ function FleetPulse() {
 function UserBlock({ onLogout, busy }: { onLogout: () => void; busy: boolean }) {
   const { data: me } = useMe();
   return (
-    <div className="flex items-center gap-3 rounded-2xl border border-line bg-surface p-2.5 shadow-card">
-      <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-brand-soft text-brand">
+    <div className="flex items-center gap-3 rounded-2xl border border-line bg-surface-2/70 p-2.5">
+      <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-brand-soft text-brand ring-1 ring-brand/15 ring-inset">
         <UserRound className="size-5" />
       </span>
       <div className="min-w-0 flex-1">
@@ -199,12 +208,15 @@ export function AppShell() {
   return (
     <div className="ph-backdrop min-h-dvh">
       {/* Desktop sidebar (right side: the start edge in RTL) */}
-      <aside className="fixed inset-y-0 start-0 z-30 hidden w-72 flex-col gap-5 border-e border-line bg-surface/60 px-4 py-5 backdrop-blur-xl lg:flex">
-        <div className="px-2">
+      <aside className="ph-glass fixed inset-y-0 start-0 z-30 hidden w-72 flex-col border-e border-line lg:flex">
+        <div className="px-6 pt-6 pb-5">
           <Logo />
         </div>
-        <SideNav />
-        <div className="mt-auto flex flex-col gap-3">
+        {/* The menu scrolls on a short screen; the status, theme and sign-out stay in reach. */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-6 [mask-image:linear-gradient(to_bottom,black_calc(100%-2rem),transparent)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <SideNav />
+        </div>
+        <div className="flex flex-col gap-3 border-t border-line p-3">
           <FleetPulse />
           <div className="flex items-center justify-between px-1">
             <span className="text-xs text-fg-faint">حالت نمایش</span>
@@ -215,7 +227,7 @@ export function AppShell() {
       </aside>
 
       {/* Phone top bar */}
-      <header className="sticky top-0 z-30 flex h-14 items-center gap-2 border-b border-line bg-bg/75 px-2 pt-[env(safe-area-inset-top)] backdrop-blur-xl lg:hidden">
+      <header className="ph-glass sticky top-0 z-30 flex h-14 items-center gap-2 border-b border-line px-2 pt-[env(safe-area-inset-top)] lg:hidden">
         <Dialog.Root open={drawer} onOpenChange={setDrawer}>
           <Dialog.Trigger asChild>
             <button type="button" className="grid size-10 place-items-center rounded-xl text-fg hover:bg-surface-3/70" aria-label="منوی پنل">
@@ -230,7 +242,7 @@ export function AppShell() {
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
-                    className="fixed inset-0 z-40 bg-[rgb(6_8_18/0.5)] backdrop-blur-[2px]"
+                    className="fixed inset-0 z-40 bg-[rgb(4_4_6/0.6)] backdrop-blur-[3px]"
                   />
                 </Dialog.Overlay>
                 <Dialog.Content asChild forceMount>
@@ -239,9 +251,9 @@ export function AppShell() {
                     animate={{ x: 0 }}
                     exit={{ x: "100%" }}
                     transition={{ type: "spring", stiffness: 380, damping: 38 }}
-                    className="fixed inset-y-0 right-0 z-50 flex w-[min(20rem,86vw)] flex-col gap-5 border-s border-line bg-surface px-4 pt-[max(1.25rem,env(safe-area-inset-top))] pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-pop outline-none"
+                    className="fixed inset-y-0 right-0 z-50 flex w-[min(20rem,86vw)] flex-col gap-4 border-s border-line bg-surface pt-[max(1.25rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] shadow-pop outline-none"
                   >
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between px-4">
                       <Logo />
                       <Dialog.Close asChild>
                         <button type="button" className="grid size-9 place-items-center rounded-xl text-fg-faint hover:bg-surface-3" aria-label="بستن منو">
@@ -251,14 +263,18 @@ export function AppShell() {
                     </div>
                     <Dialog.Title className="sr-only">منوی پنل</Dialog.Title>
                     <Dialog.Description className="sr-only">بخش‌های پنل، حالت نمایش و خروج</Dialog.Description>
-                    <SideNav withDescriptions onNavigate={() => setDrawer(false)} />
-                    <div className="mt-auto flex flex-col gap-3">
-                      <FleetPulse />
-                      <div className="flex items-center justify-between px-1">
-                        <span className="text-xs text-fg-faint">حالت نمایش</span>
-                        <ThemeSwitch />
+                    {/* The menu is longer than a phone: everything under the logo scrolls together,
+                        so the menu has the whole height and the status, theme and sign-out follow it. */}
+                    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain px-3">
+                      <SideNav withDescriptions onNavigate={() => setDrawer(false)} />
+                      <div className="mt-auto flex flex-col gap-3 border-t border-line px-1 pt-4">
+                        <FleetPulse />
+                        <div className="flex items-center justify-between px-1">
+                          <span className="text-xs text-fg-faint">حالت نمایش</span>
+                          <ThemeSwitch />
+                        </div>
+                        <UserBlock onLogout={logout} busy={busy} />
                       </div>
-                      <UserBlock onLogout={logout} busy={busy} />
                     </div>
                   </motion.div>
                 </Dialog.Content>
@@ -289,9 +305,9 @@ export function AppShell() {
       {/* Phone bottom navigation */}
       <nav
         aria-label="بخش‌های اصلی"
-        className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface/85 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl lg:hidden"
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-30 px-3 pb-[max(0.6rem,env(safe-area-inset-bottom))] lg:hidden"
       >
-        <ul className="mx-auto grid max-w-lg grid-cols-5">
+        <ul className="ph-glass pointer-events-auto mx-auto grid max-w-lg grid-cols-5 rounded-[1.6rem] border border-line shadow-pop">
           {BOTTOM_NAV.map((item) => {
             const active = isActive(location.pathname, item.to);
             const Icon = item.icon;
@@ -305,7 +321,7 @@ export function AppShell() {
                   {active ? (
                     <motion.span
                       layoutId="bottom-active"
-                      className="absolute top-1.5 h-8 w-14 rounded-full bg-brand-soft"
+                      className="absolute top-1.5 h-8 w-14 rounded-2xl bg-brand-soft ring-1 ring-brand/20 ring-inset"
                       transition={{ type: "spring", stiffness: 480, damping: 36 }}
                     />
                   ) : null}
@@ -327,7 +343,7 @@ export function AppShell() {
               {moreActive ? (
                 <motion.span
                   layoutId="bottom-active"
-                  className="absolute top-1.5 h-8 w-14 rounded-full bg-brand-soft"
+                  className="absolute top-1.5 h-8 w-14 rounded-2xl bg-brand-soft ring-1 ring-brand/20 ring-inset"
                   transition={{ type: "spring", stiffness: 480, damping: 36 }}
                 />
               ) : null}
