@@ -3,7 +3,11 @@ review (the content supervisor's, decision D52, or the owner's), and what the pu
 
 **Storing** (:func:`store_items`, from proxyhub/content/engine.py): a post of a source is stored once
 (``source_id`` + ``external_id``); a later read only refreshes its view count. Posts older than
-:data:`MAX_AGE` (by their own time) and posts with neither text nor media are skipped, and so is a
+:data:`MAX_AGE` (by their own time) and posts with neither text nor media are skipped. A feed entry
+with no date the panel can read may be of any age: on the source's first read it is stored as
+``expired`` (known, never queued); later, an entry new to the feed is new news. Each read that still
+finds such an entry keeps its row (``updated_at``), so it is never pruned and stored again as new
+while the feed carries it. A post is skipped too when it is a
 **proxy advert** (the owner, 2026-11-07: a proxy channel's news is welcome, its proxies are not):
 proxy links, configs or proxy lines and too few other words (:func:`~proxyhub.content.clean.
 is_proxy_post`). It reaches no review and does not count against its source. The text is
@@ -289,9 +293,14 @@ async def store_items(
         if item.external_id in known:
             seen += 1
             row = known[item.external_id]
+            refresh: dict[str, Any] = {}
             if item.views is not None and item.views != row.views:
+                refresh["views"] = item.views
+            if item.published_at is None:  # still in the feed: not pruned, so never "new" again
+                refresh["updated_at"] = now
+            if refresh:
                 await db.execute(
-                    update(ContentCandidate).where(ContentCandidate.id == row.id).values(views=item.views)
+                    update(ContentCandidate).where(ContentCandidate.id == row.id).values(**refresh)
                 )
             continue
         if now - _when(item, now) > MAX_AGE or _when(item, now) > now + timedelta(hours=1):
@@ -315,6 +324,9 @@ async def store_items(
         media_state = "none"
         if media is not None:
             media_state = "waiting" if media_url else "failed"
+        # An undated entry seen on the source's first read may be weeks old: known, never queued.
+        undated_backlog = item.published_at is None and source.last_ok_at is None
+        status = "expired" if undated_backlog else "duplicate" if original is not None else "pending"
         inserted = (
             await db.execute(
                 pg_insert(ContentCandidate)
@@ -330,8 +342,8 @@ async def store_items(
                     norm_text=norm,
                     title=title,
                     body=body,
-                    status="duplicate" if original is not None else "pending",
-                    duplicate_of=original,
+                    status=status,
+                    duplicate_of=original if status == "duplicate" else None,
                     media_kind=media.kind if media else None,
                     media_url=media_url,
                     thumb_url=thumb_url,
@@ -347,7 +359,9 @@ async def store_items(
         if inserted is None:
             seen += 1
             continue
-        if original is not None:
+        if undated_backlog:
+            skipped += 1
+        elif original is not None:
             dups += 1
         else:
             new += 1

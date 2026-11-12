@@ -491,6 +491,75 @@ async def test_a_sources_own_banner_on_other_news_is_not_a_duplicate(engine: Asy
         }  # its own repost is not «another source»
 
 
+UNDATED = [
+    "بارش برف سنگین در استان‌های شمالی راه چند روستا را بست و نیروهای امدادی اعزام شدند",
+    "پژوهشگران دانشگاه از ساخت باتری تازه‌ای خبر دادند که شارژ آن تنها ده دقیقه طول میکشد",
+    "یک فیلم کوتاه ایرانی در جشنواره‌ی برلین جایزه‌ی ویژه‌ی هیئت داوران را از آن خود کرد",
+    "بانک مرکزی اعلام کرد نرخ تورم نقطه‌ای برای دومین ماه پیاپی کاهش یافته است",
+]
+
+
+async def _read_once(
+    engine: AsyncEngine, source: sources.Source, items: list[FetchedItem], at: datetime
+) -> candidates.Stored:
+    """One successful read, as the engine stores it (the source's own row, then record_ok)."""
+    async with engine.begin() as conn:
+        current = await sources.get(conn, source.id)
+        assert current is not None
+        stored = await candidates.store_items(conn, current, items, at)
+        await sources.record_ok(conn, source.id, at, len(items))
+    return stored
+
+
+async def test_undated_entries_are_not_fresh_news_on_a_first_read(engine: AsyncEngine) -> None:
+    """A feed whose entries carry no readable date: its backlog (any age) is never queued as news;
+    an entry that appears later is."""
+    source = await add(engine, "https://news.example/undated.xml")
+    backlog = [FetchedItem(str(n), None, None, UNDATED[n]) for n in range(3)]
+    first = await _read_once(engine, source, backlog, T0)
+    assert (first.new, first.skipped) == (0, 3)
+    later = T0 + timedelta(minutes=5)
+    second = await _read_once(engine, source, [*backlog, FetchedItem("3", None, None, UNDATED[3])], later)
+    assert (second.new, second.seen) == (1, 3)
+    found = await all_candidates(engine)
+    assert {k: v["status"] for k, v in found.items()} == {
+        "0": "expired",
+        "1": "expired",
+        "2": "expired",
+        "3": "pending",
+    }
+    assert found["3"]["created_at"] == later
+    # A dated entry on a first read behaves as before: fresh ones are queued, old ones skipped.
+    dated = await add(engine, "https://news.example/dated.xml")
+    got = await _read_once(
+        engine,
+        dated,
+        [FetchedItem("a", None, T0, OTHER_NEWS), FetchedItem("b", None, T0 - timedelta(days=3), SUNSET)],
+        T0,
+    )
+    assert (got.new, got.skipped) == (1, 1)
+
+
+async def test_an_undated_entry_still_in_the_feed_never_comes_back_as_new(engine: AsyncEngine) -> None:
+    source = await add(engine, "https://news.example/undated.xml")
+    await _read_once(engine, source, [], T0)  # the source has been read before
+    entry = FetchedItem("static", None, None, UNDATED[0])
+    assert (await _read_once(engine, source, [entry], T0)).new == 1
+    cid = int((await all_candidates(engine))["static"]["id"])
+    async with engine.begin() as conn:
+        await candidates.set_status(conn, cid, "approved", T0)
+        await candidates.mark_used(conn, cid, T0)
+    reread = T0 + timedelta(days=10)
+    assert (await _read_once(engine, source, [entry], reread)).seen == 1
+    async with engine.begin() as conn:
+        assert await candidates.prune(conn, T0 + candidates.KEEP_ENDED + timedelta(minutes=1)) == 0
+    again = await _read_once(engine, source, [entry], T0 + candidates.KEEP_ENDED + timedelta(minutes=2))
+    assert (again.new, again.seen) == (0, 1)  # still known: not posted a second time
+    async with engine.begin() as conn:  # gone from the feed: pruned KEEP_ENDED after its last read
+        last = T0 + candidates.KEEP_ENDED + timedelta(minutes=2)
+        assert await candidates.prune(conn, last + candidates.KEEP_ENDED + timedelta(minutes=1)) == 1
+
+
 async def test_a_source_removed_takes_only_its_unreviewed_candidates(engine: AsyncEngine) -> None:
     source = await add(engine, "https://news.example/a.xml")
     items = [
