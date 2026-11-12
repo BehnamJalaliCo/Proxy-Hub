@@ -271,17 +271,32 @@ export function formatBytes(bytes: number): string {
   return `${formatNumber(bytes)} بایت`;
 }
 
-/** Share of a config already used (0..1) in time and in volume; the larger one ends it first. */
-export function usage(c: Pick<RealityConfig, "created_at" | "expires_at" | "used_bytes" | "data_cap_bytes">, now: Date): {
-  time: number;
-  volume: number;
-} {
+const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
+
+/** Share of the CURRENT period already used (0..1) in time and in volume; the larger one ends it
+ * first. A renewal in place (D41) moves expires_at by cap_hours and the cap by cap_gb but keeps
+ * created_at, so a config's whole life is not its period: a healthy config renewed ten times would
+ * read 90% used for good. The period is one cap_hours and one cap_gb at most (a config never
+ * renewed is measured over its own life, as before). */
+export function usage(
+  c: Pick<RealityConfig, "created_at" | "expires_at" | "used_bytes" | "data_cap_bytes">,
+  now: Date,
+  s: Pick<RealitySettingsView, "cap_hours" | "cap_gb" | "gb_bytes">,
+): { time: number; volume: number } {
   const start = new Date(c.created_at).getTime();
   const end = new Date(c.expires_at).getTime();
-  const span = end - start;
-  const time = span > 0 ? Math.min(1, Math.max(0, (now.getTime() - start) / span)) : 1;
-  const volume = c.data_cap_bytes > 0 ? Math.min(1, Math.max(0, c.used_bytes / c.data_cap_bytes)) : 1;
+  const periodMs = Math.min(end - start, s.cap_hours * 3_600_000);
+  const time = periodMs > 0 ? clamp01(1 - (end - now.getTime()) / periodMs) : 1;
+  const periodBytes = Math.min(c.data_cap_bytes, s.cap_gb * s.gb_bytes);
+  const volume = periodBytes > 0 ? clamp01(1 - (c.data_cap_bytes - c.used_bytes) / periodBytes) : 1;
   return { time, volume };
+}
+
+/** How fresh configs come, in words: with renewal on, a healthy config is renewed in place and no
+ * fresh one is made while a node has its configs_per_node. */
+export function freshText(s: Pick<RealitySettings, "cap_hours" | "configs_per_node" | "renew">): string {
+  if (s.renew) return `هر کانفیگ سالم هر ${formatNumber(s.cap_hours)} ساعت با همان لینک تمدید میشود`;
+  return `هر node یک کانفیگ تازه در هر ${formatNumber(freshEveryHours(s), 1)} ساعت`;
 }
 
 /** Tone of a meter: calm until most is used. */
