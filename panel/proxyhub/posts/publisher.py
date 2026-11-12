@@ -334,7 +334,7 @@ async def publish_due(db: AsyncConnection, now: datetime, harvest: HarvestFn, po
         return "no_links"
     # The approved candidate first (decision D51), else the owner's own content bank item (D58),
     # else the links alone under the panel's title (content_for(None)).
-    candidate = await candidates.next_for_post(db, now)
+    candidate = await candidates.next_for_post(db, now, lock=True)
     item, recycled = (
         (None, False) if candidate is not None else await content.next_item(db, now, cfg.recycle_after_days)
     )

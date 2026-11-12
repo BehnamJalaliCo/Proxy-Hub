@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from test_content_support import LocalSite, Page, clean_content_tables, mp4, png, site_http
 
@@ -709,6 +709,58 @@ async def test_a_stale_rejected_item_cannot_go_back_to_the_queue(engine: AsyncEn
         assert got is not None and got.status == "rejected"
         moved, before = await candidates.set_status(conn, cid, "pending", T0 + timedelta(hours=1))
         assert moved is not None and (before, moved.status) == ("rejected", "pending")
+
+
+async def test_the_publisher_and_an_owners_reject_never_both_win(engine: AsyncEngine) -> None:
+    """The publisher locks the approved candidate it takes until the post is queued: an owner's
+    reject at that moment waits and then finds it posted; a candidate the owner is changing right
+    now is passed over. A rejected candidate is never posted and marked used."""
+    source = await add(engine, "https://news.example/a.xml")
+    async with engine.begin() as conn:
+        await candidates.store_items(
+            conn, source, [FetchedItem("1", None, T0, NEWS), FetchedItem("2", None, T0, OTHER_NEWS)], T0
+        )
+    found = await all_candidates(engine)
+    first, second = int(found["1"]["id"]), int(found["2"]["id"])
+    async with engine.begin() as conn:
+        await candidates.set_status(conn, first, "approved", T0)
+        await candidates.set_status(conn, second, "approved", T0 + timedelta(minutes=1))
+    now = T0 + timedelta(minutes=2)
+
+    # The publisher holds the row: the owner's reject waits (here: times out) ...
+    async with engine.connect() as publisher, engine.connect() as owner:
+        taken = await candidates.next_for_post(publisher, now, lock=True)
+        assert taken is not None and taken.id == first
+        await owner.execute(text("SET LOCAL lock_timeout = '200ms'"))
+        with pytest.raises(DBAPIError):
+            await candidates.set_status(owner, first, "rejected", now)
+        await owner.rollback()
+        await candidates.mark_used(publisher, first, now)
+        await publisher.commit()
+        # ... and then finds it posted.
+        with pytest.raises(CandidateInvalid, match="not_editable"):
+            await candidates.set_status(owner, first, "rejected", now)
+        await owner.rollback()
+
+    # The owner holds a row (a reject not yet committed): the publisher takes nothing it holds.
+    async with engine.begin() as conn:
+        third_source = await sources.create(
+            conn, kind="rss", ref="https://news.example/b.xml", label=None, now=T0
+        )
+        await candidates.store_items(conn, third_source, [FetchedItem("3", None, T0, SUNSET)], T0)
+    third = int((await all_candidates(engine))["3"]["id"])
+    async with engine.begin() as conn:
+        await candidates.set_status(conn, third, "approved", T0 + timedelta(minutes=3))
+    async with engine.connect() as publisher, engine.connect() as owner:
+        await candidates.set_status(owner, second, "rejected", now)  # not committed yet
+        taken = await candidates.next_for_post(publisher, now, lock=True)
+        assert taken is not None and taken.id == third
+        await owner.commit()
+        await publisher.rollback()
+    # A post of a candidate that is no longer approved is refused (its step rolls back).
+    async with engine.begin() as conn:
+        with pytest.raises(CandidateInvalid, match="not_editable"):
+            await candidates.mark_used(conn, second, now)
 
 
 async def test_old_candidates_expire_and_their_files_go(engine: AsyncEngine) -> None:

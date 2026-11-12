@@ -763,21 +763,25 @@ async def set_status(
 # --- the publisher's side ----------------------------------------------------------------------------------
 
 
-async def next_for_post(db: Db, now: datetime) -> Candidate | None:
-    """The oldest approved candidate that can go now (see the module doc)."""
+async def next_for_post(db: Db, now: datetime, *, lock: bool = False) -> Candidate | None:
+    """The oldest approved candidate that can go now (see the module doc). ``lock`` (the publisher):
+    the row stays locked until the post is queued, so an owner's reject or edit at that moment waits
+    and then finds it posted (``not_editable``); a row the owner is changing right now is passed
+    over for the next one."""
     when = func.coalesce(ContentCandidate.published_at, ContentCandidate.created_at)
-    row = (
-        await db.execute(
-            select(*_COLS)
-            .where(
-                ContentCandidate.status == "approved",
-                ContentCandidate.media_state.in_(("none", "ready", "failed")),
-                when >= now - MAX_AGE,
-            )
-            .order_by(ContentCandidate.reviewed_at.asc().nulls_last(), ContentCandidate.id)
-            .limit(1)
+    stmt = (
+        select(*_COLS)
+        .where(
+            ContentCandidate.status == "approved",
+            ContentCandidate.media_state.in_(("none", "ready", "failed")),
+            when >= now - MAX_AGE,
         )
-    ).first()
+        .order_by(ContentCandidate.reviewed_at.asc().nulls_last(), ContentCandidate.id)
+        .limit(1)
+    )
+    if lock:
+        stmt = stmt.with_for_update(skip_locked=True)
+    row = (await db.execute(stmt)).first()
     return None if row is None else _candidate(row)
 
 
@@ -789,11 +793,18 @@ async def post_media(db: Db, candidate: Candidate) -> MediaRow | None:
 
 
 async def mark_used(db: Db, candidate_id: int, now: datetime) -> None:
-    await db.execute(
-        update(ContentCandidate)
-        .where(ContentCandidate.id == candidate_id)
-        .values(status="used", used_at=now, updated_at=now)
-    )
+    """The publisher queued the post of an approved candidate. Anything else (the owner rejected it
+    meanwhile) raises ``not_editable``, so the publisher's step rolls back its post."""
+    done = (
+        await db.execute(
+            update(ContentCandidate)
+            .where(ContentCandidate.id == candidate_id, ContentCandidate.status == "approved")
+            .values(status="used", used_at=now, updated_at=now)
+            .returning(ContentCandidate.id)
+        )
+    ).first()
+    if done is None:
+        raise CandidateInvalid("not_editable")
 
 
 # --- housekeeping -------------------------------------------------------------------------------------------
