@@ -311,6 +311,55 @@ async def test_old_registrations_whose_rows_are_gone_are_found_from_what_the_pan
     assert prepared.live_tags == frozenset({LIVE_TAG})
 
 
+async def test_a_proxy_whose_rows_are_gone_is_removed_through_its_real_screen(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """Its list button names no port and no row of ours is left at its address: the walk names it
+    by the ports the panel uses, so its own screen ("Proxy <host:8443> ...") is not read as another
+    proxy's and the cleanup does not get stuck on it."""
+    from test_mtproxybot_list import REAL_CONFIRM, REAL_CONFIRM_TEXT, real_screen
+
+    from proxyhub.sponsor.botlist import MenuWalk
+    from proxyhub.sponsor.conversation import Press
+
+    ip, label = "203.0.113.77", "203.0.113.77 1a1b1c1d"
+    await seed(engine, seal_key)
+    async with engine.begin() as db:
+        await db.execute(
+            text(
+                "INSERT INTO ip_history (ip, prefix24, location, first_seen_at) "
+                "VALUES (:ip, '203.0.113.0/24', 'hel1', now())"
+            ),
+            {"ip": ip},
+        )
+    await enable_removal(engine)
+    await inventory.request_job(engine, inventory.CLEANUP, actor="admin:owner", now=datetime.now(UTC))
+    await read_the_list(engine, vault, LIVE_LABEL, label)
+    prepared = await prepare(engine, vault)
+    assert prepared.plan.kind == "remove" and prepared.plan.entry is not None
+    assert prepared.plan.entry.address == ip and 8443 in prepared.ports
+    assert prepared.plan.mapped is not None and prepared.plan.mapped.note == "no_record"
+    to = inventory.walk_target(prepared, prepared.plan.entry, prepared.plan.mapped)
+    assert f"{ip}:8443" in to.words
+    walk = MenuWalk(to, remove=True)
+    confirm_text = REAL_CONFIRM_TEXT.replace(LIVE_HOST, ip)
+    replies_in_order = [
+        (Step.SENT_MYPROXIES, REAL_LIST_HEADER, ((BotButton(label, b"p:0"),),)),
+        (Step.PRESSED_PROXY, real_screen(f"{ip}:8443").text, ((BotButton("Delete proxy", b"d"),),)),
+        (Step.PRESSED_REMOVE, confirm_text, ((BotButton(REAL_CONFIRM, b"y"),),)),
+    ]
+    for step, reply, rows in replies_in_order:
+        message = BotMessage(id=300, outgoing=False, text=reply, edit_date=None, buttons=rows)
+        assert isinstance(walk.next(step, Observation(messages=(message,))), Press), step
+    success = BotMessage(id=301, outgoing=False, text="Success!", edit_date=None, buttons=())
+    done = walk.next(Step.PRESSED_CONFIRM, Observation(messages=(success,)))
+    assert isinstance(done, Removed) and done.confirmed
+    assert await record(engine, prepared, WalkResult(result=done, messages_sent=4)) == "mtproxybot:removed"
+    await record(engine, await prepare(engine, vault), WalkResult(result=list_read(LIVE_LABEL)))
+    assert await inventory.step(deps(engine, vault)) == "mtproxybot:done"
+    assert (await job(engine)).state == "done"
+
+
 async def test_the_inventory_then_reads_the_sponsor_of_each_live_proxy(
     engine: AsyncEngine, vault: Vault, seal_key: bytes
 ) -> None:

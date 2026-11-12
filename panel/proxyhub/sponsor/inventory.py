@@ -45,6 +45,7 @@ button was pressed.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -60,6 +61,7 @@ from proxyhub.cloudflare.service import node_dns_name
 from proxyhub.db.models import MtproxyRegistration, Setting
 from proxyhub.db.models_sponsor import MtproxybotEntry
 from proxyhub.fleet.actions import iso
+from proxyhub.mtproto import settings as mtproto_settings
 from proxyhub.mtproxy import state as account_state
 from proxyhub.mtproxy import store as account_store
 from proxyhub.mtproxy.userclient import BotChat, MtpError
@@ -502,14 +504,38 @@ def plan(job: Job, info: ListInfo | None, items: Sequence[tuple[Entry, Mapped]],
 
 @dataclass(frozen=True)
 class _Prepared:
+    """``ports``: every port our proxies use or used, for an entry with no row at its address
+    (:func:`proxyhub.sponsor.botlist.target_of`)."""
+
     state: BotListState
     plan: Plan
     copies: int
     live_tags: frozenset[str] = frozenset()
+    ports: tuple[int, ...] = ()
 
 
 def _copies(entries: Sequence[Entry], entry: Entry) -> int:
     return sum(1 for e in entries if e.label_fp == entry.label_fp)
+
+
+async def our_ports(db: AsyncConnection, regs: Sequence[store.Reg]) -> tuple[int, ...]:
+    """The ports of our registrations, the MTProto default and the port set now (the panel has only
+    ever used 8443): what the screen of a proxy whose rows were deleted can name it by."""
+    ports = {r.port for r in regs} | {mtproto_settings.DEFAULT_PORT}
+    with contextlib.suppress(mtproto_settings.SettingsCorrupt):
+        ports.add((await mtproto_settings.load_settings(db)).port)
+    return tuple(sorted(ports))
+
+
+def walk_target(prepared: _Prepared, entry: Entry, mapped: Mapped) -> botlist.Target:
+    """The target of a walk to this entry's screen (and the removal permit's words)."""
+    return botlist.target_of(
+        entry.facts(),
+        mapped,
+        copies=prepared.copies,
+        live_tags=prepared.live_tags,
+        fallback_ports=prepared.ports,
+    )
 
 
 async def known_addresses(db: AsyncConnection, regs: Sequence[store.Reg]) -> botlist.Known:
@@ -574,7 +600,13 @@ async def _prepare(deps: Deps, now: datetime, paused: bool) -> _Prepared | str:
                 context={"requested_by": job.requested_by},
             )
         copies = _copies(entries, step_plan.entry) if step_plan.entry is not None else 0
-        return _Prepared(state=state, plan=step_plan, copies=copies, live_tags=live_tags(regs))
+        return _Prepared(
+            state=state,
+            plan=step_plan,
+            copies=copies,
+            live_tags=live_tags(regs),
+            ports=await our_ports(db, regs),
+        )
 
 
 async def step(deps: Deps, *, paused: bool = False) -> str:
@@ -592,12 +624,10 @@ async def step(deps: Deps, *, paused: bool = False) -> str:
     if entry is None or mapped is None:
         machine, target = botlist.ListWalk(), "@MTProxybot"
     else:
-        walk_target = botlist.target_of(
-            entry.facts(), mapped, copies=prepared.copies, live_tags=prepared.live_tags
-        )
-        machine, target = MenuWalk(walk_target, remove=the_plan.kind == "remove"), entry.address
+        to = walk_target(prepared, entry, mapped)
+        machine, target = MenuWalk(to, remove=the_plan.kind == "remove"), entry.address
         if the_plan.kind == "remove":
-            permit = walk_target.words
+            permit = to.words
 
     async def talk(
         chat: BotChat, take_slot: Callable[[], Awaitable[object]], recorder: driver.Recorder
