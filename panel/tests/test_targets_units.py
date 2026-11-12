@@ -253,6 +253,49 @@ def test_net_results_count_only_where_the_control_worked() -> None:
     assert NetResult.from_json("junk") == NetResult("nodata")
 
 
+def ok_in(total: int) -> dict[str, object]:
+    """A real finished HTTPS answer, taking ``total`` ms."""
+    return {**HTTP_OK_GITHUB_RIGHTEL, "timings": {**HTTP_OK_GITHUB_RIGHTEL["timings"], "total": total}}
+
+
+def test_an_open_network_keeps_its_fastest_time_whatever_probe_answered_first() -> None:
+    """Two probes per network (the default): the first one failing must not lose the time of the
+    second, and a faster site is never ranked behind a slower one for it."""
+    rightel_b = {**RIGHTEL_PROBE, "city": "Karaj"}
+    control_raw = gp_https(
+        "c",
+        "github.com",
+        443,
+        [(MCI_PROBE, HTTP_OK_GITHUB_RIGHTEL), (RIGHTEL_PROBE, HTTP_OK_GITHUB_RIGHTEL)],
+        at="x",
+    )
+    control = Measurement(
+        "globalping", "https", "control", "github.com", 443, "ok", T0,
+        networks=tuple(parse_http(control_raw, KEY_ASNS)),
+    )  # fmt: skip
+    timeout = {**HTTP_TLS_TIMEOUT_RIGHTEL_443, "resolvedAddress": "151.101.1.1"}
+
+    def measured(host: str, results: list[tuple[dict[str, object], dict[str, object]]]) -> Candidate:
+        raw = gp_https("m", host, 443, results, at="x")
+        m = Measurement(
+            "globalping", "https", "target", host, 443, "ok", T0, networks=tuple(parse_http(raw, KEY_ASNS))
+        )
+        nets = net_results(m, control)
+        return Candidate(host, T0 - timedelta(hours=1), nets, T0 - timedelta(hours=2), nets)
+
+    b = measured(
+        "b",
+        [(MCI_PROBE, timeout), (MCI_PROBE, ok_in(100)), (RIGHTEL_PROBE, ok_in(300)), (rightel_b, ok_in(120))],
+    )
+    assert b.iran["asn:197207"] == NetResult("up", "همراه اول", 197207, 100.0)
+    assert b.iran["asn:57218"].ms == 120.0
+    c = measured("c", [(MCI_PROBE, ok_in(900)), (RIGHTEL_PROBE, ok_in(900))])
+    current = cand("www.mozilla.org", {k: "down" for k in KEYS}, {k: "down" for k in KEYS})
+    listed = ["www.mozilla.org", "c", "b"]
+    assert choose_reality("www.mozilla.org", listed, states(current, b, c), KEYS, T0).host == "b"
+    assert choose_mtproto("www.mozilla.org", listed, states(current, b, c), KEYS, T0).host == "b"
+
+
 def test_target_settings_and_modes() -> None:
     s = TargetSettings.model_validate({"candidates": [" WWW.Mozilla.org. ", "www.mozilla.org", "github.com"]})
     assert s.candidates == ["www.mozilla.org", "github.com"]

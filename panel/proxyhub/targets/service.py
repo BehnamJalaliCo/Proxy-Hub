@@ -195,7 +195,9 @@ async def measure_round(
 
 def net_results(m: Measurement, control: Measurement) -> dict[str, NetResult]:
     """A site's per-network result: valid only where the round's control worked from the same
-    network (else ``nodata``)."""
+    network (else ``nodata``). The time of an open network is its fastest successful handshake
+    (``rtt_ms``, kept over all of the network's probes; the merged ``detail`` is the first probe's,
+    which may be a failure)."""
     control_up = (
         {n.network_key for n in control.networks if n.state == "up"} if control.status == "ok" else set()
     )
@@ -205,7 +207,7 @@ def net_results(m: Measurement, control: Measurement) -> dict[str, NetResult]:
             state: Any = "nodata"
         else:
             state = n.state
-        ms = n.detail.get("total_ms") if state == "up" else None
+        ms = n.rtt_ms if state == "up" else None
         out[n.network_key] = NetResult(
             state, n.network, n.asn, float(ms) if isinstance(ms, int | float) else None
         )
