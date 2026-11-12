@@ -506,6 +506,71 @@ async def test_new_zones_join_the_pool_and_the_first_seen_becomes_active(engine:
 
 
 @pytest.mark.db
+async def test_an_active_domain_that_left_cloudflare_is_replaced(engine: AsyncEngine) -> None:
+    now = datetime.now(UTC)
+    long_ago = now - timedelta(days=3)
+    await add_zone(
+        engine, ZONE_ID, "old.example", pool="active", created_at=long_ago, pool_changed_at=long_ago
+    )
+    await add_zone(engine, ZONE_ID_2, "next.example", pool="standby", created_at=long_ago)
+    await pair_owner(engine)
+    async with engine.begin() as conn:  # the account no longer lists old.example
+        gone = await service.store_zones(
+            conn, [parse_zone(cf_zone_json(ZONE_ID_2, "next.example"))], {ZONE_ID_2: True}, now
+        )
+        update = await rotation.auto_pool(conn, now)
+    assert gone == ["old.example"]
+    assert (update.gone, update.promoted) == ("old.example", "next.example")
+    old = await zone(engine, ZONE_ID)
+    assert (old.status, old.pool_state) == ("gone", "standby")
+    assert await pools(engine) == {"old.example": "standby", "next.example": "active"}
+    assert pool_log(await actions(engine)) == [
+        ("domains", "old.example", "zone_gone", "active", "standby"),
+        ("domains", "next.example", "replaces_zone_gone", "standby", "active"),
+    ]
+    (alert,) = await alerts(engine)
+    assert "<b>old.example</b>" in alert and "<b>next.example</b>" in alert and NO_STANDBY_FA in alert
+    async with engine.connect() as conn:
+        assert await rotation.current_active_domain(conn) == "next.example"
+    # The next refresh changes nothing and tells nobody again.
+    async with engine.begin() as conn:
+        update = await rotation.auto_pool(conn, now + timedelta(hours=1))
+    assert (update.gone, update.promoted) == (None, None) and len(await alerts(engine)) == 1
+
+
+@pytest.mark.db
+async def test_a_domain_re_added_under_a_new_zone_id_takes_over(engine: AsyncEngine) -> None:
+    now = datetime.now(UTC)
+    await add_zone(engine, ZONE_ID, "same.example", pool="active", pool_changed_at=now - timedelta(days=3))
+    async with engine.begin() as conn:  # removed and added again: Cloudflare gives it a new id
+        await service.store_zones(
+            conn, [parse_zone(cf_zone_json(ZONE_ID_2, "same.example"))], {ZONE_ID_2: True}, now
+        )
+        update = await rotation.auto_pool(conn, now)
+    assert (update.joined, update.gone, update.promoted) == (["same.example"], "same.example", "same.example")
+    assert (await zone(engine, ZONE_ID)).pool_state == "standby"
+    assert (await zone(engine, ZONE_ID_2)).pool_state == "active"
+    async with engine.connect() as conn:
+        assert (await service.active_zone(conn)).id == ZONE_ID_2  # type: ignore[union-attr]
+
+
+@pytest.mark.db
+async def test_a_gone_active_domain_without_a_standby_asks_for_a_domain(engine: AsyncEngine) -> None:
+    now = datetime.now(UTC)
+    await add_zone(engine, ZONE_ID, "only.example", pool="active", pool_changed_at=now - timedelta(days=3))
+    await pair_owner(engine)
+    async with engine.begin() as conn:
+        await service.store_zones(conn, [], {}, now)
+        update = await rotation.auto_pool(conn, now)
+    assert (update.gone, update.promoted) == ("only.example", None)
+    assert await pools(engine) == {"only.example": "standby"}
+    (alert,) = await alerts(engine)
+    assert "<b>only.example</b>" in alert and NO_STANDBY_FA in alert and "جایش" not in alert
+    async with engine.connect() as conn:
+        assert (await conn.execute(text("SELECT standby_alert_at FROM cf_state"))).scalar_one() is not None
+
+
+@pytest.mark.db
 async def test_filtered_active_domain_is_replaced_in_the_same_transaction(engine: AsyncEngine) -> None:
     now = datetime.now(UTC)
     long_ago = now - timedelta(days=3)

@@ -6,7 +6,9 @@
   zone (nameservers not on Cloudflare yet) waits for a later refresh. A zone the owner moved (to
   ``none``, ``retired``, ...) is never moved back automatically.
 * **Always one active domain.** With no ``active`` zone, the usable standby zone the panel saw
-  first becomes active (a standby whose latest check showed a hijacked answer comes last).
+  first becomes active (a standby whose latest check showed a hijacked answer comes last). An
+  active zone the account no longer lists counts as none: it moves to ``standby`` and the owner is
+  told.
 * **A filtered domain leaves rotation.** On a ``filtered`` verdict (proxyhub/cloudflare/filtering.py)
   the active zone becomes ``filtered`` and the next standby becomes active IN THE SAME
   TRANSACTION; a filtered standby simply leaves the pool. The DNS loop then moves the slot names by
@@ -253,22 +255,48 @@ async def promote_standby(db: Db, zones: Sequence[PoolZone], now: datetime, why:
 class PoolUpdate:
     joined: list[str]
     promoted: str | None
+    gone: str | None = None  # the active domain Cloudflare no longer lists, moved to standby
 
 
 async def auto_pool(db: Db, now: datetime) -> PoolUpdate:
-    """Run after zones were stored (token set, hourly refresh), in the same transaction."""
+    """Run after zones were stored (token set, hourly refresh), in the same transaction.
+
+    An active zone the account no longer lists (removed from Cloudflare, re-added under a new zone
+    id, or the token now belongs to another account) is no active domain for anyone: it goes to
+    ``standby`` (unusable while gone; usable again if Cloudflare lists the same zone again), the
+    next usable standby becomes active and the owner is told."""
     zones = await load_zones(db, lock=True)
     joined: list[str] = []
     for z in zones:
         if joins_by_itself(z):
             await move(db, z, P.STANDBY, now, "auto_new_zone")
             joined.append(z.name)
-    if joined:
+    gone: str | None = None
+    for z in zones:
+        if z.pool_state == P.ACTIVE.value and z.status == GONE:
+            await move(db, z, P.STANDBY, now, "zone_gone")  # first: at most one active zone
+            gone = z.name
+    if joined or gone:
         zones = await load_zones(db)
-    promoted = await promote_standby(db, zones, now, "auto_promote")
+    promoted = await promote_standby(db, zones, now, "replaces_zone_gone" if gone else "auto_promote")
+    if gone is not None:
+        text = gone_alert_fa(gone, replacement=promoted.name if promoted else None)
+        if not any(usable_standby(z) for z in await load_zones(db)):
+            text += "\n\n" + NO_STANDBY_FA
+            await _set_standby_alert(db, now)
+        await enqueue_owner_alert(db, text)
     # The "no standby left" reminder streak (if any) ends in remind_no_standby once a usable
     # standby exists; a domain that joined and was promoted right away leaves the pool still empty.
-    return PoolUpdate(joined=joined, promoted=promoted.name if promoted else None)
+    return PoolUpdate(joined=joined, promoted=promoted.name if promoted else None, gone=gone)
+
+
+def gone_alert_fa(name: str, *, replacement: str | None) -> str:
+    """The Persian owner alert for an active domain that is no longer in the Cloudflare account."""
+    n = f"<b>{html.escape(name)}</b>"
+    head = f"⚠️ دامنه‌ی فعال {n} دیگر در حساب Cloudflare مخصوص Proxy-Hub نیست و از دور خارج شد"
+    if replacement:
+        return f"{head}؛ <b>{html.escape(replacement)}</b> جایش فعال شد."
+    return f"{head}. تا دامنه‌ی فعال تازه‌ای نباشد، نام تازه‌ای برای سرورها ساخته نمیشود."
 
 
 # --- one filter check: store, decide, act --------------------------------------------------------
