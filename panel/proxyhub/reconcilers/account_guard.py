@@ -5,6 +5,10 @@ account's project, without a label filter. A single server without ``managed-by=
 the account; so does a token Hetzner no longer accepts (401/403). A locked account is never
 unlocked by code: the owner decides. Transient failures (network, rate limit, 5xx) only mark the
 observation as failed; the planner treats an observation older than 30 minutes as "guard not green".
+
+No transaction stays open across a Hetzner call (up to 90 s): each account's result is written and
+committed in its own short transaction, so one account's rows (and a LOCKED decision) are visible,
+and not held locked, while the next account's project is listed.
 """
 
 from __future__ import annotations
@@ -15,8 +19,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from proxyhub.accounts.hetzner_io import HetznerFailure, ServersObservation, call_hetzner, observe_servers
 from proxyhub.accounts.service import store_observation, store_observation_failure, transition_account
@@ -25,7 +29,7 @@ from proxyhub.db.models import HetznerAccount
 from proxyhub.db.models_fleet import AccountObservation
 from proxyhub.fleet.actions import log_action
 from proxyhub.hetzner.client import HetznerReader
-from proxyhub.reconcilers.base import Reconciler
+from proxyhub.reconcilers.base import Reconciler, lock_key
 from proxyhub.vault import Vault, hcloud_secret_name
 
 log = logging.getLogger(__name__)
@@ -119,29 +123,48 @@ class AccountGuardReconciler(Reconciler):
             return True
         return account.checked_at is None or now - account.checked_at >= GUARD_INTERVAL
 
-    async def run_once(self, conn: AsyncConnection) -> None:
+    async def run_once(self, conn: AsyncConnection) -> None:  # pragma: no cover - not used
+        raise NotImplementedError("AccountGuardReconciler manages its own transactions (try_run_once)")
+
+    async def try_run_once(self, engine: AsyncEngine) -> bool:
+        async with engine.connect() as lock_conn:
+            got = (
+                await lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": lock_key(self.name)})
+            ).scalar_one()
+            if not got:
+                return False
+            try:
+                await self._run(engine)
+            finally:
+                await lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key(self.name)})
+                await lock_conn.commit()
+        return True
+
+    async def _run(self, engine: AsyncEngine) -> None:
         now = datetime.now(UTC)
-        due = [a for a in await observed_accounts(conn) if self.is_due(a, now)]
+        async with engine.connect() as conn:
+            due = [a for a in await observed_accounts(conn) if self.is_due(a, now)]
         if not due:
             return
         vault = self._vault_factory()
         for account in due:
-            # One account per savepoint: an unexpected error on one (a damaged vault row, a race
-            # with an owner action, an odd API answer) must not roll back what was recorded for
-            # the others, and is itself recorded so the owner sees it (fails closed: stale looks
-            # block creations).
+            # One account at a time: an unexpected error on one (a damaged vault row, a race with
+            # an owner action, an odd API answer) must not undo what was recorded for the others,
+            # and is itself recorded so the owner sees it (fails closed: stale looks block creations).
             try:
-                async with conn.begin_nested():
-                    await self.check(conn, vault, account, now)
+                await self.check(engine, vault, account, now)
             except Exception as exc:
                 log.warning("account guard for %s: internal error %s", account.name, type(exc).__name__)
-                await store_observation_failure(conn, account.id, f"internal:{type(exc).__name__}", now)
+                async with engine.begin() as conn:
+                    await store_observation_failure(conn, account.id, f"internal:{type(exc).__name__}", now)
 
-    async def check(self, conn: AsyncConnection, vault: Vault, account: AccountRef, now: datetime) -> None:
+    async def check(self, engine: AsyncEngine, vault: Vault, account: AccountRef, now: datetime) -> None:
         self._checked_since_start.add(account.id)
-        token = await vault.get(conn, hcloud_secret_name(account.id))
+        async with engine.connect() as conn:  # a read, closed before the Hetzner call
+            token = await vault.get(conn, hcloud_secret_name(account.id))
         if token is None:
-            await store_observation_failure(conn, account.id, "token_missing", now)
+            async with engine.begin() as conn:
+                await store_observation_failure(conn, account.id, "token_missing", now)
             log.warning("account %s has no token in the vault", account.name)
             return
         reader_factory = self._reader_factory
@@ -149,6 +172,8 @@ class AccountGuardReconciler(Reconciler):
             obs = await call_hetzner(lambda: observe_servers(reader_factory(token.reveal())))
         except HetznerFailure as failure:
             log.warning("account guard for %s failed: %s", account.name, failure)
-            await apply_failure(conn, account, failure, now)
+            async with engine.begin() as conn:
+                await apply_failure(conn, account, failure, now)
             return
-        await apply_observation(conn, account, obs, now)
+        async with engine.begin() as conn:
+            await apply_observation(conn, account, obs, now)
