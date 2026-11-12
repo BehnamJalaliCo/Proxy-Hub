@@ -733,6 +733,19 @@ def test_a_proxy_whose_rows_were_deleted_can_be_opened_and_removed() -> None:
         assert isinstance(result, WalkStuck) and result.reason == "menu_of_another_proxy", other
 
 
+@pytest.mark.parametrize(
+    "title", ["Shop.ir | فروشگاه", "Mr.Proxy | پروکسی", "ipoxxo.online", "VPN & MTProxy | پروکسی"]
+)
+def test_a_dotted_channel_title_does_not_stop_the_check_or_the_removal(title: str) -> None:
+    """The promoted channel's TITLE is free text (P26): a dotted word in it is not another proxy."""
+    look = MenuWalk(target(), remove=False)
+    look.next(Step.SENT_MYPROXIES, listing(REAL_LABEL))
+    seen_menu = look.next(Step.PRESSED_PROXY, real_screen(f"{HOST}:{PORT}", title))
+    assert isinstance(seen_menu, MenuSeen) and seen_menu.promoted_title == title
+    press = removal_walk().next(Step.PRESSED_PROXY, real_screen(f"{HOST}:{PORT}", title))
+    assert isinstance(press, Press) and press.label == "Delete proxy"
+
+
 def test_a_removal_never_presses_delete_on_a_screen_that_shows_a_live_tag() -> None:
     live_tag = "9e8d7c6b" + "0" * 24
     guarded = Target(
