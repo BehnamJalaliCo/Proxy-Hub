@@ -21,11 +21,14 @@ from test_posts_support import PROVIDERS, clean_posts_tables, jobs, rows, setup_
 from proxyhub.content import breaking, candidates, qc_prompt, qc_settings, sources
 from proxyhub.content.items import FetchedItem
 from proxyhub.content.qc_settings import FLAGS, QcConfig
-from proxyhub.posts import links, publisher
+from proxyhub.posts import links, plan, publisher
+from proxyhub.posts import settings as posting
 from proxyhub.telegram import outbox
+from proxyhub.telegram.schedule import QuietWindow, covers_whole_day, quiet_until
 from proxyhub.vault import Vault
 
 EXTERNAL = itertools.count(500)
+ALL_DAY_QUIET = [("00:00", "12:00"), ("12:00", "00:00")]  # a window ends before its end minute
 NEWS = (
     "حمله‌ی موشکی به یک پایگاه نظامی در شمال کشور گزارش شد و مقام‌های رسمی آن را تأیید کردند؛ "
     "جزئیات بیشتر هنوز منتشر نشده است و خبرگزاری‌ها از ادامه‌ی بررسی‌ها خبر میدهند."
@@ -69,6 +72,21 @@ def test_claude_says_breaking_only_with_an_approval_and_strictly() -> None:
         QcConfig(), qc_prompt.limits_for(None, media=False), "n0nce", media_kind=None, image_sent=False
     )
     assert '"breaking": true or false' in prompt and "rumour" in prompt
+
+
+def test_the_all_day_no_post_window_leaves_no_minute_for_the_day_plan() -> None:
+    """A window ends before its end minute, so ("00:00", "23:59") left 23:59 Tehran (20:29 UTC) free:
+    the day plan put a slot there and the breaking test saw an ordinary post queued."""
+    windows = [QuietWindow.parse(a, b) for a, b in ALL_DAY_QUIET]
+    assert covers_whole_day(windows)
+    d = posting.DEFAULTS  # what configure() stores
+    when = {"count": d.posts_per_day, "start": d.start, "end": d.end, "quiet": windows}
+    day = datetime(2026, 11, 12, tzinfo=UTC)
+    for offset in range(-1, 2):
+        assert plan.day_plan(day.date() + timedelta(days=offset), **when) == []
+    for minute in range(24 * 60):
+        assert quiet_until(day + timedelta(minutes=minute, seconds=30), windows) is not None
+    assert plan.due_slot(day.replace(hour=20, minute=29, second=30), **when) is None  # 23:59 Tehran
 
 
 def test_the_breaking_title() -> None:
@@ -211,7 +229,7 @@ async def test_a_breaking_post_goes_at_once_in_no_post_hours_within_its_budget(
     await ready_fleet(engine, 3)
     await setup_telegram(engine, vault, main=True)
     await configure(engine, main_enabled=True)
-    await quiet(engine, [("00:00", "23:59")], interval=60)  # a no-post window all day
+    await quiet(engine, ALL_DAY_QUIET, interval=60)  # a no-post window all day
     now = datetime.now(UTC).replace(microsecond=0)
     cid = await promoted(engine, now)
     assert await publish(engine, now) in ("quiet", "not_due")  # the day plan waits

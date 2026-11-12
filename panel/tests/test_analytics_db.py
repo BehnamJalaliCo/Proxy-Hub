@@ -33,7 +33,7 @@ from test_analytics_support import (
     random_link,
     server_json,
 )
-from test_analytics_units import broadcast_stats, usage_block
+from test_analytics_units import broadcast_stats, moves_today, usage_block
 from test_fleet_support import assert_absent_from_database, clean_fleet_tables, make_vault
 from test_mtproxy_support import clean as clean_mtproxy
 from test_mtproxy_support import seed_connected
@@ -601,14 +601,7 @@ async def test_summary_and_series_numbers(engine: AsyncEngine) -> None:
     (srv,) = s["servers"]
     assert srv["name"] == "fsn-1" and srv["traffic_pct"] == pytest.approx(2.5) and srv["state"] == "ready"
     assert s["channel"]["main"]["members"] == 1234
-    assert (s["channel"]["main"]["joins_today"], s["channel"]["main"]["leaves_today"]) in (
-        (3, 1),
-        (0, 0),
-        (1, 0),
-        (2, 0),
-        (2, 1),
-        (3, 0),
-    )
+    assert (s["channel"]["main"]["joins_today"], s["channel"]["main"]["leaves_today"]) == moves_today(now)
     assert s["channel"]["main"]["net_7d"] == 2
     assert {(t["kind"], t["joins"], t["leaves"]) for t in s["top_sources"]} == {
         ("folder", 1, 0),
