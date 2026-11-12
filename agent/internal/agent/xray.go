@@ -73,6 +73,9 @@ type xrayRuntime struct {
 	certChecked   string
 	targetAt      time.Time
 	lastRestart   time.Time
+	// scrapedAt: when the last scrape that worked began (this process only, so a.now's monotonic
+	// reading applies): an uptime shorter than the time since then means Xray restarted meanwhile.
+	scrapedAt time.Time
 	// xhttpPort: the port of the VLESS + XHTTP + REALITY inbound in the config last applied without
 	// an error (0: none). Reported while Xray is up, so the panel publishes XHTTP links only for a
 	// node that really serves them.
@@ -131,6 +134,7 @@ func (a *Agent) ScrapeXray(ctx context.Context) {
 	if a.xr == nil {
 		return
 	}
+	at := a.now()
 	uptime, err := a.xr.api.Uptime(ctx)
 	var counted xray.Traffic
 	if err == nil {
@@ -140,21 +144,42 @@ func (a *Agent) ScrapeXray(ctx context.Context) {
 		a.xr.up, a.xr.uptimeS, a.xr.split = false, nil, false
 		return
 	}
-	traffic := counted.Users
+	a.foldXray(at, uptime, counted)
+}
+
+// foldXray takes one scrape that worked (begun at "at"). Xray's counters run from its start, so a
+// restart since the last scrape is told to the tracker first: one the agent did itself (flagged),
+// or any other (a crash, systemd) by an uptime shorter than the time since that scrape. Without
+// it, a new counter that has already passed the old value would lose the old value. Xray truncates
+// its uptime to whole seconds, hence the +1: an Xray that answered the last scrape is never taken
+// for a restarted one.
+func (a *Agent) foldXray(at time.Time, uptime uint32, counted xray.Traffic) {
+	restarted := a.local.XrayCountersFresh ||
+		(!a.xr.scrapedAt.IsZero() && float64(uptime)+1 <= at.Sub(a.xr.scrapedAt).Seconds())
+	a.xr.scrapedAt = at
+	save := false
+	if restarted {
+		a.local.XrayUsage.Restarted()
+		a.local.XrayCountersFresh = false
+		save = true
+	}
 	up := float64(uptime)
 	a.xr.up, a.xr.uptimeS = true, &up
 	a.xr.uplink, a.xr.downlink, a.xr.split = counted.Uplink, counted.Downlink, true
-	if a.doc == nil || a.doc.Xray == nil {
+	if a.doc != nil && a.doc.Xray != nil {
+		keep := map[string]bool{}
+		for _, u := range a.doc.Xray.Users {
+			keep[u.Email] = true
+			if raw, ok := counted.Users[u.Email]; ok {
+				a.local.XrayUsage.Observe(u.Email, enforce.Generation(u.ID), raw)
+			}
+		}
+		a.local.XrayUsage.Prune(keep)
+		save = true
+	}
+	if !save {
 		return
 	}
-	keep := map[string]bool{}
-	for _, u := range a.doc.Xray.Users {
-		keep[u.Email] = true
-		if raw, ok := traffic[u.Email]; ok {
-			a.local.XrayUsage.Observe(u.Email, enforce.Generation(u.ID), raw)
-		}
-	}
-	a.local.XrayUsage.Prune(keep)
 	if err := a.saveLocal(); err != nil {
 		a.log.Warn("could not save xray usage", "error", err.Error())
 	}
@@ -197,6 +222,10 @@ func (a *Agent) applyXray(ctx context.Context) (xray.TLSFiles, xray.Kind, error)
 		if err := a.xr.service.Stop(ctx); err != nil {
 			a.xr.applyErr = "xray_service_failed"
 			return files, xray.KindNone, err
+		}
+		a.local.XrayCountersFresh = true
+		if err := a.saveLocal(); err != nil {
+			a.log.Warn("could not save local state", "error", err.Error())
 		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			a.xr.applyErr = "xray_write_failed"
@@ -283,7 +312,7 @@ func (a *Agent) applyXray(ctx context.Context) (xray.TLSFiles, xray.Kind, error)
 		a.xr.applyErr = "xray_service_failed"
 		return files, xray.KindRestart, err
 	}
-	a.local.XrayRestartPending = false
+	a.local.XrayRestartPending, a.local.XrayCountersFresh = false, true
 	if err := a.saveLocal(); err != nil {
 		a.log.Warn("could not save local state", "error", err.Error())
 	}

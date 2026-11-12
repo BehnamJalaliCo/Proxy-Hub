@@ -34,6 +34,23 @@ func TestUsageSurvivesTelemtRestarts(t *testing.T) {
 	}
 }
 
+// A restart the caller knows of counts the whole new counter, even when it has already passed the
+// value seen before the restart (Observe alone would add only the difference).
+func TestUsageRestartedCountsTheWholeNewCounter(t *testing.T) {
+	u := NewUsage()
+	g := Generation(secretA)
+	u.Observe("alice", g, 300)
+	u.Restarted()
+	u.Observe("alice", g, 320)
+	if got := u.Total("alice", g); got != 620 {
+		t.Fatalf("total = %d, want 620", got)
+	}
+	u.Observe("alice", g, 330) // no restart since: +10
+	if got := u.Total("alice", g); got != 630 {
+		t.Fatalf("total = %d, want 630", got)
+	}
+}
+
 func TestGenerationDoesNotRevealSecret(t *testing.T) {
 	g := Generation(secretA)
 	if len(g) != 16 || g == secretA[:16] {

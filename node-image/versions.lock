@@ -30,4 +30,4 @@ XCORE_GEOIP_SHA256=ce90dc02a81528109c99d769e1f8fe3071ded6b02a574f31e62d8f4eee312
 # (go1.24.7, CGO off, -trimpath, empty build id: reproducible). A test rebuilds it and compares.
 AGENT_VERSION=0.5.1
 AGENT_GO_VERSION=1.24.7
-AGENT_SHA256=c49275ec6e255dd377a76a0cee24b46bb8ad476944e45ef9db3da2ec3f7a1a25
+AGENT_SHA256=76eb21a792a032edbe454d5a3e55369083c0e9cb94d868db39a105b7bdd9c4b7

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/config"
+	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/enforce"
 	"github.com/BehnamJalaliCo/Proxy-Hub/agent/internal/xray"
 )
 
@@ -346,6 +347,88 @@ func TestXrayTargetIsRecheckedWhenTheDesiredTargetChanges(t *testing.T) {
 	}
 	if ok, target, name := reported(); ok != false || target != "www.example.org:443" || name != "dl.google.com" {
 		t.Fatalf("after the server name change reported %v %v %v", ok, target, name)
+	}
+}
+
+// Xray's counters run from its start. A restart is noticed even when the new counter has already
+// passed the old one: by an uptime shorter than the time since the last scrape (a crash, systemd),
+// and by a flag for the agent's own restarts that survives an agent restart.
+func TestXrayRestartKeepsTheCountedBytes(t *testing.T) {
+	dir := t.TempDir()
+	caPath := writeIdentity(t, dir)
+	cfg := &config.Config{
+		PanelURL: "http://" + closedPort(t), NodeID: node, CAFile: caPath,
+		TokenFile: filepath.Join(dir, "token"), StateDir: filepath.Join(dir, "state"),
+		TelemtConfig: filepath.Join(dir, "telemt.toml"), TelemtDataDir: "/var/lib/telemt",
+		MetricsListen: closedPort(t),
+	}
+	cached, _ := json.Marshal(cachedDesired{ETag: `"` + strings.Repeat("f", 64) + `"`, Body: json.RawMessage(xrayDoc(userC))})
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.DesiredFile(), cached, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restarts := filepath.Join(dir, "restarts")
+	settings := &xray.Settings{
+		Config: filepath.Join(dir, "config.json"), Binary: "/nonexistent/xray", AssetsDir: dir, API: closedPort(t),
+		RestartCommand: []string{"/bin/sh", "-c", "echo r >> " + restarts}, StopCommand: []string{"/bin/true"},
+	}
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	start := func() *Agent {
+		a, err := New(cfg, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.now = func() time.Time { return now }
+		if err := a.SetXray(settings); err != nil {
+			t.Fatal(err)
+		}
+		a.xr.service.Binary = "" // no config test here: this is about the counters
+		a.xr.checkTarget = func(context.Context, string, string, *x509.CertPool) error { return nil }
+		return a
+	}
+	const email = "cfg-3@proxyhub"
+	gen := enforce.Generation("77777777-1111-4c3b-9a55-0123456789ab")
+	fold := func(a *Agent, uptime uint32, raw uint64) uint64 {
+		a.foldXray(a.now(), uptime, xray.Traffic{Users: map[string]uint64{email: raw}, Uplink: raw / 2, Downlink: raw / 2})
+		return a.local.XrayUsage.Total(email, gen)
+	}
+	a := start()
+	if got := fold(a, 100, 300); got != 300 {
+		t.Fatalf("first scrape total %d", got)
+	}
+	// 15 s later Xray has been up for 14 s only: it restarted, the new 320 bytes all count.
+	now = now.Add(15 * time.Second)
+	if got := fold(a, 14, 320); got != 620 {
+		t.Fatalf("after a restart seen by its uptime: total %d, want 620", got)
+	}
+	// No restart since: only the increase counts.
+	now = now.Add(15 * time.Second)
+	if got := fold(a, 29, 330); got != 630 {
+		t.Fatalf("without a restart: total %d, want 630", got)
+	}
+	// The agent restarts Xray itself, and the agent process restarts before the next scrape: the
+	// flag in local.json still tells it (Xray's uptime alone can not, the new process has no last
+	// scrape time).
+	if err := a.ApplyXray(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(restarts); string(data) != "r\n" {
+		t.Fatalf("restarts %q", data)
+	}
+	b := start()
+	now = now.Add(15 * time.Second)
+	if got := fold(b, 1000, 340); got != 970 {
+		t.Fatalf("after the agent's own restart: total %d, want 970", got)
+	}
+	// The flag is taken once.
+	now = now.Add(15 * time.Second)
+	if got := fold(b, 1015, 350); got != 980 {
+		t.Fatalf("the restart was counted twice: total %d, want 980", got)
+	}
+	if data, _ := os.ReadFile(cfg.UsageFile()); strings.Contains(string(data), "xray_counters_fresh") {
+		t.Fatalf("the flag stayed in local.json: %s", data)
 	}
 }
 

@@ -76,6 +76,9 @@ type localState struct {
 	XrayUsage *enforce.Usage `json:"xray_usage,omitempty"`
 	// XrayRestartPending: a new Xray config is in place but Xray has not been restarted on it yet.
 	XrayRestartPending bool `json:"xray_restart_pending,omitempty"`
+	// XrayCountersFresh: the agent restarted or stopped Xray, so the next scrape's counters began
+	// at zero (kept across an agent restart until a scrape has taken them).
+	XrayCountersFresh bool `json:"xray_counters_fresh,omitempty"`
 }
 
 // cachedDesired is desired.json: the last document the panel served, with its ETag.
