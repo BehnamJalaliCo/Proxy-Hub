@@ -220,16 +220,23 @@ def tls_cost(targets: Sequence[Target], probes: int) -> int:
 
 
 def tls_fit(
-    targets: Sequence[Target], probes: int, rate: RateLimit | None, now: datetime, reserve: int = 0
+    targets: Sequence[Target],
+    probes: int,
+    rate: RateLimit | None,
+    now: datetime,
+    reserve: int = 0,
+    *,
+    control_paid: bool = False,
 ) -> int:
     """How many of the due targets (in their order: owner requests first, then the longest
     unmeasured) one cycle can measure with TLS inside Globalping's remaining hourly allowance,
     keeping ``reserve`` tests. An unknown or expired window: all of them (the headers of the first
-    measurement tell the truth again)."""
+    measurement tell the truth again). ``control_paid``: ``rate`` came from the TLS control's own
+    creation headers, which already took its tests off, so it is not counted again."""
     if rate is None or rate.reset_at <= now:
         return len(targets)
     available = rate.remaining - reserve
-    cost, fit = probes, 0
+    cost, fit = (0 if control_paid else probes), 0
     for t in targets:
         cost += probes * len(t.tls_ports)
         if cost > available:
@@ -331,7 +338,9 @@ async def run_cycle(
         )
         rate = gp.last_rate or gp_rate
         used = probes_used(tls_ctrl) if tls_ctrl.status == "ok" else None
-        fit = tls_fit(targets, used or estimate, rate, datetime.now(UTC))
+        fit = tls_fit(
+            targets, used or estimate, rate, datetime.now(UTC), control_paid=gp.last_rate is not None
+        )
         measured = list(targets[:fit])
         # Reuse the control's exact probes; fall back to the location list only if the control
         # itself failed for a transient reason (so the node is still measured).

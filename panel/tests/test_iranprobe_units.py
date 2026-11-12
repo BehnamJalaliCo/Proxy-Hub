@@ -8,8 +8,9 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from hypothesis import given, settings
@@ -24,9 +25,12 @@ from test_net_support import (
     GP_HTTPS_PANEL_443,
     GP_HTTPS_PANEL_8443,
     GP_HTTPS_PANEL_BLOCKED,
+    HTTP_OK_GITHUB_RIGHTEL,
     HTTP_RESET_ARVAN,
     HTTP_TLS_TIMEOUT_RIGHTEL_443,
+    MCI_PROBE,
     PANEL_IP,
+    RIGHTEL_PROBE,
     deep,
     gp_https,
 )
@@ -35,7 +39,14 @@ from proxyhub.fleet.alerts import DAILY, findings
 from proxyhub.fleet.locations import CLASS_RANK, ReachRow, aggregate, classify, location_classes, reach_json
 from proxyhub.fleet.planner import FleetSnapshot, build_plan
 from proxyhub.probes import service
-from proxyhub.probes.globalping import RateLimit, https_body, location_asns, parse_http
+from proxyhub.probes.globalping import (
+    Created,
+    GlobalpingClient,
+    RateLimit,
+    https_body,
+    location_asns,
+    parse_http,
+)
 from proxyhub.probes.service import Target, node_network_states, tls_cost, tls_fit
 from proxyhub.probes.settings import ProbeLocation, ProbeSettings
 from proxyhub.probes.types import Measurement, NetworkObs
@@ -265,6 +276,53 @@ def test_tls_budget() -> None:
     assert tls_fit(nine, 5, RateLimit(250, 25, window), T0, reserve=10) == 1
     assert tls_fit([target(1, (443,)), *nine], 5, RateLimit(250, 10, window), T0) == 1  # one port: 5
     assert service.probes_used(tls(443, {"a": "up", "b": "down", "c": "nodata"})) == 3
+    # probes:4: an allowance read from the TLS control's own creation headers has already paid for
+    # the control; only the nodes are counted against it.
+    one, nine1 = [target(1, (443,))], [target(i, (443,)) for i in range(9)]
+    assert tls_fit(one, 5, RateLimit(250, 7, window), T0) == 0
+    assert tls_fit(one, 5, RateLimit(250, 7, window), T0, control_paid=True) == 1
+    assert tls_fit(nine1, 5, RateLimit(250, 45, window), T0, control_paid=True) == 9
+    assert tls_fit(nine1, 5, RateLimit(250, 44, window), T0, control_paid=True) == 8
+
+
+class HeaderGlobalping(GlobalpingClient):
+    """Globalping as its API answers: every creation's X-RateLimit-Remaining already has that
+    measurement's tests taken off; every measurement finishes on five probes."""
+
+    def __init__(self, remaining: int) -> None:
+        super().__init__(base_url="http://127.0.0.1:9")
+        self.remaining = remaining
+        self.created: list[str] = []
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def create(self, body: Mapping[str, Any]) -> Created:
+        self.remaining -= 5
+        self.last_rate = RateLimit(250, self.remaining, datetime.now(UTC) + timedelta(minutes=30))
+        self.created.append(str(body["target"]))
+        return Created("ok", f"m{len(self.created)}", self.last_rate)
+
+    async def wait(self, measurement_id: str) -> tuple[Any, dict[str, Any] | None]:
+        results = [(MCI_PROBE, HTTP_OK_GITHUB_RIGHTEL)] * 3 + [(RIGHTEL_PROBE, HTTP_OK_GITHUB_RIGHTEL)] * 2
+        return "ok", gp_https(measurement_id, "x", 443, results, at="2026-11-05T16:15:37.146Z")
+
+
+async def test_a_cycle_measures_the_node_its_paid_control_left_room_for() -> None:
+    """probes:4. 12 tests left, 5 probes: control 5 + node 5 fit. After the control the headers say
+    7, which still covers the node's 5; the control is not charged a second time."""
+    gp = HeaderGlobalping(12)
+    s = ProbeSettings().model_copy(update={"checkhost": False})
+    t = target(1, (443,))
+    window = datetime.now(UTC) + timedelta(minutes=30)
+    result = await service.run_cycle(
+        [t], s, gp_factory=lambda: gp, gp_rate=RateLimit(250, 12, window), tls_probes=5
+    )
+    assert result is not None and result.measured == [t]
+    assert gp.created[:2] == [s.tls_control_host, t.tls_host]
 
 
 # --- location scores and the planner -------------------------------------------------------------------
