@@ -17,7 +17,11 @@ anything read, forwards, or writes anywhere.
 * **Kept low**: a source is read every :data:`ACCOUNT_FETCH_EVERY` (not every 5 minutes as a web
   page), a channel's id is resolved once and kept (:data:`CACHE_KEY`, again after
   :data:`REFRESH_EVERY`), and a flood wait from Telegram stops every read and download of this
-  process until it is over (:attr:`AccountReader.hold_until`).
+  process until it is over (:class:`AccountHold`, one per process: :data:`PROCESS_HOLD`, shared by
+  the content engine's reader and the supervisor's).
+* **The panel's own state is not the candidate's fault**: while the account cannot be used
+  (:data:`ACCOUNT_WAIT`), a file only it can download waits; it costs no try of the candidate
+  (proxyhub/content/engine.py :class:`~proxyhub.content.engine.AccountWait`).
 * **Not usable** (not connected, kill switch on, vault unreadable): the engine reads the source's
   web preview as before (:data:`USE_PREVIEW`).
 * **Media**: a post's file is stored by reference (``tgmsg:<name>/<id>``, :func:`media_ref`), never
@@ -70,6 +74,9 @@ MAX_HOLD: Final = timedelta(hours=24)
 # Why the account cannot read now, when the web preview should be read instead (it may work for a
 # channel whose preview is on). Busy and flood wait are short: the source waits for a later round.
 USE_PREVIEW: Final = frozenset({"not_connected", "kill_switch", "vault_unavailable"})
+# Why the account cannot be used now that is the panel's own state (or Telegram's wait), not the
+# file's: a download that needs the account waits for it and costs the candidate no try.
+ACCOUNT_WAIT: Final = USE_PREVIEW | {"account_busy", "account_flood", "account_unavailable"}
 _LIMIT: Final = {
     "photo": media.PHOTO_MAX_BYTES,
     "thumb": media.THUMB_MAX_BYTES,
@@ -273,6 +280,17 @@ class AccountRead:
 
 
 @dataclass
+class AccountHold:
+    """Until when Telegram asked the account to wait (a flood wait). One per process, shared by
+    every reader of the account there, so the wait one loop saw stops the other's reads too."""
+
+    until: datetime | None = None
+
+
+PROCESS_HOLD: Final = AccountHold()  # the worker's: its content loop and its supervisor share it
+
+
+@dataclass
 class AccountReader:
     """Opens :class:`AccountRead` connections (one process: the worker's content loops)."""
 
@@ -281,14 +299,18 @@ class AccountReader:
     clock: Callable[[], datetime]
     options: ClientOptions | None = None
     lock_wait_s: float = LOCK_WAIT_S
-    hold_until: datetime | None = None
+    held: AccountHold = field(default_factory=AccountHold)
     last_unavailable: str | None = None
+
+    @property
+    def hold_until(self) -> datetime | None:
+        return self.held.until
 
     def hold(self, seconds: int | None) -> None:
         wait = timedelta(seconds=seconds or 0)
         until = self.clock() + min(max(wait, MIN_HOLD), MAX_HOLD)
-        if self.hold_until is None or until > self.hold_until:
-            self.hold_until = until
+        if self.held.until is None or until > self.held.until:
+            self.held.until = until
         log.warning("content: Telegram asked the account to wait; sources read again after %s", iso(until))
 
     @contextlib.asynccontextmanager

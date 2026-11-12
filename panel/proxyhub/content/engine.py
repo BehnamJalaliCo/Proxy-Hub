@@ -43,6 +43,7 @@ from proxyhub.content.net import MEDIA_DEADLINE_S, FetchError, SafeHttp
 from proxyhub.content.plugins import PLUGINS, SourcePlugin
 from proxyhub.content.telegram_account import (
     ACCOUNT_FETCH_EVERY,
+    ACCOUNT_WAIT,
     USE_PREVIEW,
     AccountRead,
     AccountReader,
@@ -72,6 +73,12 @@ _LIMIT: Final = {
 
 HttpFactory = Callable[[], SafeHttp]
 Clock = Callable[[], datetime]
+
+
+class AccountWait(FetchError):
+    """A file only the operator account can download, while the account cannot be used (D55: the
+    kill switch, busy, a flood wait ...). The panel's state, not the file's: it is tried later and
+    costs the candidate no try (the content supervisor, proxyhub/content/supervisor.py)."""
 
 
 async def fresh_video_url(
@@ -104,11 +111,17 @@ async def fetch_media(
         if found is None:
             raise FetchError("bad_url")
         if account is None:
-            raise FetchError("account_unavailable")
+            raise AccountWait("account_unavailable")
         async with account.connect({found[0]}, wait_s=SUPERVISOR_LOCK_WAIT_S) as read:
             if read is None:
-                raise FetchError(account.last_unavailable or "account_unavailable")
-            return await read.download(task.url, task.role)
+                code = account.last_unavailable or "account_unavailable"
+                raise AccountWait(code) if code in ACCOUNT_WAIT else FetchError(code)
+            try:
+                return await read.download(task.url, task.role)
+            except FetchError as exc:
+                if read.stopped:  # a flood wait began during the download
+                    raise AccountWait(exc.code) from None
+                raise
     url = await fresh_video_url(http, task, plugins) if task.role == "video" else task.url
     fetched = await http.get(
         url, limit=_LIMIT[task.role], accept=_ACCEPT[task.role], deadline_s=MEDIA_DEADLINE_S

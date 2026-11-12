@@ -31,6 +31,7 @@ from proxyhub.content.items import FetchedItem
 from proxyhub.content.net import FetchError, SafeHttp
 from proxyhub.content.telegram_account import (
     READ_LIMIT,
+    AccountHold,
     AccountReader,
     items_from,
     media_ref,
@@ -407,6 +408,18 @@ async def test_the_reader_says_why_the_account_cannot_read(engine: AsyncEngine, 
     held.hold(30)  # a flood wait: at least a minute, nothing is even tried
     assert held.hold_until == T0 + timedelta(minutes=1)
     assert await opened(held, {"imtproto"}) == "account_flood"
+
+
+@pytest.mark.db
+async def test_a_flood_wait_stops_every_reader_of_the_process(engine: AsyncEngine, vault: Vault) -> None:
+    """The content loop and the supervisor each have a reader; Telegram's wait holds for both."""
+    shared = AccountHold()
+    first, second = reader(engine, vault), reader(engine, vault)
+    first.held = second.held = shared
+    first.hold(30)
+    assert second.hold_until == T0 + timedelta(minutes=1)
+    assert await opened(second, {"imtproto"}) == "account_flood"
+    assert reader(engine, vault).hold_until is None  # a reader of its own holds nothing
 
 
 async def add(engine: AsyncEngine, ref: str, kind: str = "telegram") -> sources.Source:

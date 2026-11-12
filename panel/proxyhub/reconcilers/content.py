@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from proxyhub.content.engine import Engine, HttpFactory, Round
 from proxyhub.content.net import SafeHttp
-from proxyhub.content.telegram_account import AccountReader
+from proxyhub.content.telegram_account import PROCESS_HOLD, AccountReader
 from proxyhub.reconcilers.base import Reconciler
 from proxyhub.reconcilers.telegram import run_locked
 from proxyhub.telegram.store import now_utc
@@ -69,7 +69,7 @@ class ContentReconciler(Reconciler):
         async def step() -> None:
             if self._engine is None or self._engine.engine is not engine:
                 account = (
-                    AccountReader(engine=engine, vault=self._vault, clock=self.now)
+                    AccountReader(engine=engine, vault=self._vault, clock=self.now, held=PROCESS_HOLD)
                     if self.use_account
                     else None
                 )

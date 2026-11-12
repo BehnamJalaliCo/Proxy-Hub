@@ -22,8 +22,11 @@ transaction open while Claude answers:
    :data:`~proxyhub.content.frames.FRAME_COUNT` frames are taken across its whole length with ffmpeg
    (proxyhub/content/frames.py). A video too long or unreadable is rejected by ``rules`` without
    Claude; a download that may work later is tried again next round (at most 3 times, then
-   ``video_unavailable``). The file is kept for the post: an approved video is never fetched twice;
-   a rejected one is removed at once (:func:`~proxyhub.content.candidates.drop_video`).
+   ``video_unavailable``). A video only the operator account can download (D55) waits, at no try,
+   while the account cannot be used (kill switch, busy, a flood wait: the panel's state, not the
+   video's), and the next candidate is reviewed instead. The file is kept for the post: an approved
+   video is never fetched twice; a rejected one is removed at once
+   (:func:`~proxyhub.content.candidates.drop_video`).
 4. **Ask Claude** about the best one (proxyhub/content/claude_backends.py): the bridge first, the API
    key as backup, each within its daily cap and after a pause when it failed. A photo goes as one
    image, a video as its frames in order, in ONE review. The prompt and its injection hardening:
@@ -79,7 +82,7 @@ from proxyhub.content.messages import qc_check_fa, qc_outcome_fa
 from proxyhub.content.net import FetchError, SafeHttp
 from proxyhub.content.plugins import PLUGINS, SourcePlugin
 from proxyhub.content.qc_settings import QcConfig
-from proxyhub.content.telegram_account import AccountReader
+from proxyhub.content.telegram_account import AccountReader, is_account_media
 from proxyhub.content.writer import Image, Review, ReviewRequest
 from proxyhub.db.models_content import ContentCandidate, ContentMedia, ContentQcCall, ContentSource
 from proxyhub.fleet.actions import iso, log_action
@@ -155,6 +158,7 @@ class Pick:
     duration: int | None = None  # seconds: a stored video's, by its own header
     extra_sources: int = 0
     score: float = 0.0
+    by_account: bool = False  # its file is downloaded by the operator account (D55, ``tgmsg:``)
 
     @property
     def image_role(self) -> str | None:
@@ -210,6 +214,7 @@ async def eligible(db: AsyncConnection, now: datetime) -> list[Pick]:
                 main.width,
                 main.height,
                 main.duration,
+                ContentCandidate.media_url,
             )
             .join(ContentSource, ContentSource.id == ContentCandidate.source_id)
             .outerjoin(main, and_(main.candidate_id == ContentCandidate.id, main.role == "main"))
@@ -247,6 +252,7 @@ async def eligible(db: AsyncConnection, now: datetime) -> list[Pick]:
             height=r.height,
             duration=r.duration,
             extra_sources=len(also.get(int(r.id), [])),
+            by_account=is_account_media(r.media_url),
         )
         picks.append(replace(base, score=score(base.views, base.when, now, base.extra_sources, base.seen)))
     return sorted(picks, key=lambda p: (-p.score, -p.id))
@@ -520,14 +526,12 @@ class Supervisor:
                 if blocked in ("unavailable", "cooling"):
                     self._unavailable(state, now, state.get("unavailable_reason") or "unavailable")
                 return
-        pick = picks[0]
-        sampled: frames.Sampled | None = None
-        if pick.media_kind == "video":
-            got = await self._video(pick)
-            if isinstance(got, str):
-                await self._video_failed(config, pick, got, now, out)
-                return
-            sampled = got
+        ready = await self._first_ready(config, picks, now, out)
+        if ready == "account_wait":
+            out.action = ready
+        if isinstance(ready, str):  # else _video_failed said what happened
+            return
+        pick, sampled = ready
         async with self.engine.begin() as conn:
             prepared = await self._prepare(conn, config, pick, now, sampled)
         if prepared is None:
@@ -564,14 +568,10 @@ class Supervisor:
             backends, _ = await self._backends(conn, config, state, now)
             if not backends:
                 return False
-        pick = picks[0]
-        sampled: frames.Sampled | None = None
-        if pick.media_kind == "video":
-            got = await self._video(pick)
-            if isinstance(got, str):
-                await self._video_failed(config, pick, got, now, out)
-                return True
-            sampled = got
+        ready = await self._first_ready(config, picks, now, out)
+        if isinstance(ready, str):
+            return ready == "video_failed"  # a video failed: this round's work is done
+        pick, sampled = ready
         async with self.engine.begin() as conn:
             prepared = await self._prepare(conn, config, pick, now, sampled)
         if prepared is None:
@@ -584,11 +584,36 @@ class Supervisor:
 
     # -- a video, before its review --
 
+    async def _first_ready(
+        self, config: QcConfig, picks: list[Pick], now: datetime, out: Outcome
+    ) -> tuple[Pick, frames.Sampled | None] | str:
+        """The best pick that can be reviewed now, with its video's frames. A video only the
+        operator account can download, while the account cannot be used, is passed over with every
+        other such video (no try is spent: the panel's state, not the candidate's). Else
+        ``video_failed`` (another video failure, handled as before: the round ends) or
+        ``account_wait`` (nothing left to review this round)."""
+        account_down = False
+        for pick in picks:
+            if account_down and pick.needs_download and pick.by_account:
+                continue
+            if pick.media_kind != "video":
+                return pick, None
+            got = await self._video(pick)
+            if got == "account_wait":
+                account_down = True
+                continue
+            if isinstance(got, str):
+                await self._video_failed(config, pick, got, now, out)
+                return "video_failed"
+            return pick, got
+        return "account_wait"
+
     async def _video(self, pick: Pick) -> frames.Sampled | str:
         """The frames of a video candidate (see the module doc), from the panel's own copy of the file,
         downloaded first when there is none. No transaction is open while the network or ffmpeg
         works. Else why not: a code of :data:`VIDEO_REJECTS` or :data:`VIDEO_ERRORS`,
-        ``video_retry`` (a download that may work next round) or ``gone``."""
+        ``video_retry`` (a download that may work next round), ``account_wait`` (the operator
+        account, the only way to its file, cannot be used now) or ``gone``."""
         data: bytes | None = None
         task: candidates.MediaTask | None = None
         async with self.engine.begin() as conn:
@@ -622,6 +647,8 @@ class Supervisor:
         try:
             async with self.http_factory() as http:
                 info, data = await content_engine.fetch_media(http, task, self.plugins, self.account)
+        except content_engine.AccountWait:  # no try spent: the account comes back
+            return "account_wait"
         except FetchError as exc:
             final = exc.code in content_engine.FINAL_ERRORS
             async with self.engine.begin() as conn:
