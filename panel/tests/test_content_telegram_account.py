@@ -26,7 +26,7 @@ from test_mtproxy_support import seed_connected
 from test_mtproxy_units import closed_port
 
 from proxyhub.content import candidates, sources
-from proxyhub.content.engine import Engine
+from proxyhub.content.engine import WAIT_RETRY, Engine
 from proxyhub.content.items import FetchedItem
 from proxyhub.content.net import FetchError, SafeHttp
 from proxyhub.content.telegram_account import (
@@ -410,6 +410,54 @@ async def test_the_reader_says_why_the_account_cannot_read(engine: AsyncEngine, 
     assert await opened(held, {"imtproto"}) == "account_flood"
 
 
+class _Feed:
+    """An RSS source's place: records its reads (no network)."""
+
+    kind = "rss"
+
+    def __init__(self) -> None:
+        self.read: list[str] = []
+
+    async def fetch(self, http: SafeHttp, ref: str) -> list[FetchedItem]:
+        self.read.append(ref)
+        return []
+
+
+@pytest.mark.db
+async def test_telegram_sources_waiting_for_the_account_do_not_starve_a_feed(
+    engine: AsyncEngine, vault: Vault
+) -> None:
+    """Four Telegram sources wait out a flood hold; the round's four places go to what can be read."""
+    channels = [await add(engine, f"@channel{n}") for n in range(4)]
+    feed = await add(engine, "https://news.example/feed.xml", kind="rss")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE content_sources SET next_fetch_at = :t WHERE kind = 'telegram'"),
+            {"t": T0 - timedelta(minutes=10)},
+        )
+        await conn.execute(
+            text("UPDATE content_sources SET next_fetch_at = :t WHERE kind = 'rss'"),
+            {"t": T0 - timedelta(minutes=1)},
+        )
+    clock = [T0]
+    held = AccountReader(engine=engine, vault=lambda: vault, clock=lambda: clock[0])
+    held.held.until = T0 + timedelta(hours=1)
+    rss = _Feed()
+    eng = Engine(engine=engine, clock=lambda: clock[0], plugins={"rss": rss}, account=held)  # type: ignore[dict-item]
+    first = await eng.run_round()
+    assert first.waiting == {c.id: "account_flood" for c in channels} and first.read == {}
+    for c in channels:
+        row = await source_row(engine, c.id)
+        assert (row["next_fetch_at"], row["failures"], row["last_error"]) == (
+            T0 + timedelta(hours=1),
+            0,
+            None,
+        )
+    clock[0] = T0 + timedelta(minutes=1)
+    second = await eng.run_round()
+    assert second.read == {feed.id: "ok:0"} and rss.read == [feed.ref]
+
+
 @pytest.mark.db
 async def test_a_flood_wait_stops_every_reader_of_the_process(engine: AsyncEngine, vault: Vault) -> None:
     """The content loop and the supervisor each have a reader; Telegram's wait holds for both."""
@@ -475,7 +523,8 @@ async def test_the_engine_falls_back_to_the_preview_or_waits(engine: AsyncEngine
         result = await make(reader(engine, vault, port)).run_round()
     assert result.waiting == {source.id: "account_busy"} and result.read == {}
     row = await source_row(engine, source.id)
-    assert row["last_error"] is None and row["failures"] == 0 and row["next_fetch_at"] is None
+    assert row["last_error"] is None and row["failures"] == 0
+    assert row["next_fetch_at"] == T0 + WAIT_RETRY  # behind the sources that can be read now
     assert preview.read == ["imtproto"]  # not read again by its preview
 
     # A photo of a post the account read waits for the account; it is never fetched over https.

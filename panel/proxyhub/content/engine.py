@@ -12,7 +12,8 @@ Every round (a minute), with no transaction open while the network answers:
    proxyhub/content/telegram_account.py) on one connection for the round, under the account's
    lock, every 10 minutes; while the account is not usable (not connected, kill switch, vault)
    its web preview is read instead, and while the account is busy or Telegram asked it to wait,
-   the source waits for a later round;
+   the source's next read moves to the end of the wait (or :data:`WAIT_RETRY` later), with no
+   error, so the round's places go to the sources that can be read (an RSS feed is not starved);
 3. **media**: up to :data:`MEDIA_PER_ROUND` files are downloaded (approved videos first, then
    photos and video thumbnails of the queue), each checked by its real bytes
    (proxyhub/content/media.py), while the stored total stays under :data:`MEDIA_STORE_MAX`. A
@@ -60,6 +61,7 @@ ACCOUNT_MEDIA_PER_ROUND: Final = 4
 SUPERVISOR_LOCK_WAIT_S: Final = 30.0
 MEDIA_STORE_MAX: Final = 300 * 1024 * 1024
 PRUNE_EVERY: Final = timedelta(hours=1)
+WAIT_RETRY: Final = timedelta(minutes=1)  # a Telegram source the account could not read now
 # Download errors no retry can fix.
 FINAL_ERRORS: Final = frozenset(
     {"too_big", "bad_url", "blocked_address", "bad_content_type", "http_404", "http_410", "media_gone"}
@@ -178,6 +180,11 @@ class Engine:
                         result.waiting.update({s.id: reason for s in by_account})
                 else:
                     stored_bytes = await self._account_round(read, by_account, stored_bytes, result)
+            if result.waiting:
+                hold = self.account.hold_until
+                until = max(self.clock() + WAIT_RETRY, hold or now)
+                async with self.engine.begin() as conn:
+                    await sources.defer(conn, result.waiting.keys(), now, until)
         async with self.http_factory() as http:
             for source in others:
                 result.read[source.id] = await self._read(http, source)

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Final
@@ -325,6 +326,23 @@ async def record_ok(
             next_fetch_at=now + every,
             last_count=count,
         )
+    )
+
+
+async def defer(db: Db, source_ids: Collection[int], now: datetime, until: datetime) -> None:
+    """Sources due now that cannot be read this round (the operator account is busy or Telegram
+    asked it to wait) are next read at ``until``: no error, no back-off, but their place at the
+    head of :func:`due` goes to the sources that can be read."""
+    if not source_ids:
+        return
+    await db.execute(
+        update(ContentSource)
+        .where(
+            ContentSource.id.in_(list(source_ids)),
+            ContentSource.enabled.is_(True),
+            ContentSource.next_fetch_at.is_(None) | (ContentSource.next_fetch_at <= now),
+        )
+        .values(next_fetch_at=until)
     )
 
 
