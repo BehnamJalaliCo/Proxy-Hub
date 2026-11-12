@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import gzip
 import ssl
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,7 +30,7 @@ from proxyhub.content.net import (
     public_address,
     valid_hostname,
 )
-from proxyhub.content.rss import RssFeed, parse_feed
+from proxyhub.content.rss import MAX_ELEMENT_TEXT, MAX_FEED_BYTES, FeedRefused, RssFeed, parse_feed, parse_xml
 from proxyhub.content.telegram_preview import (
     TelegramPreview,
     check_name,
@@ -430,6 +431,26 @@ async def test_unsafe_or_broken_feeds_are_refused(tmp_path: Path, document: str,
         )
         with pytest.raises(FetchError, match=code):
             await RssFeed().fetch(http, "https://news.example/feed")
+
+
+def test_a_text_of_many_short_chunks_costs_linear_time() -> None:
+    """expat calls the text handler once per newline and per entity reference; re-summing the text
+    on each call made a 3 MB feed freeze the worker for over an hour."""
+    short = "\n" * 5000
+    (node,) = parse_xml(f"<rss><a>{short}</a></rss>".encode()).children[0].children
+    assert "".join(node.text) == short and len(node.text) < 10  # coalesced, not 5000 calls
+    lines = "\n" * (MAX_ELEMENT_TEXT - 1)
+    hostile = "<rss>" + f"<a>{lines}</a>" * 30 + "</rss>"
+    assert len(hostile) <= MAX_FEED_BYTES
+    started = time.monotonic()
+    parse_xml(hostile.encode())
+    assert time.monotonic() - started < 5
+    unit = "a\n&amp;"  # three characters once parsed: the size counts parsed text, as before
+    full = unit * (MAX_ELEMENT_TEXT // 3) + "a" * (MAX_ELEMENT_TEXT % 3)
+    (node,) = parse_xml(f"<rss><a>{full}</a></rss>".encode()).children[0].children
+    assert sum(len(t) for t in node.text) == MAX_ELEMENT_TEXT
+    with pytest.raises(FeedRefused, match="too_big"):
+        parse_xml(f"<rss><a>{full}a</a></rss>".encode())
 
 
 async def test_a_feed_is_read_over_the_guard(tmp_path: Path) -> None:
