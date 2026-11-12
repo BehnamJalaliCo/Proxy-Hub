@@ -42,7 +42,7 @@ from test_agent_support import (
     METRICS_FIXTURE,
     PROXY_HEADER,
     SecretFiles,
-    clean_agent_tables,
+    clean_agent_rows,
     create_node,
     create_registration,
     free_port,
@@ -131,28 +131,29 @@ async def world(migrated_db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     files = write_secret_files(tmp_path / "secrets")
     use_secret_files(monkeypatch, files)
     engine = create_async_engine(migrated_db)
-    await clean_agent_tables(engine)
-    node_id = await create_node(engine)
-    alice_reg = await create_registration(engine, "alice")
-    seal = load_seal_key(files.master_key)
-    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
-        await set_telemt_node_config(
-            session, node_id, ports=[443], tls_domain="cdn.example.com", ad_tag="a" * 32
-        )
-        await create_telemt_user(session, seal, node_id, "alice", registration_id=alice_reg)
-        await create_telemt_user(
-            session,
-            seal,
-            node_id,
-            "sponsor_b",
-            ad_tag="b" * 32,
-            expires_at=datetime.now(UTC) + timedelta(days=7),
-        )
-        await session.commit()
+    await clean_agent_rows(engine)
     try:
+        node_id = await create_node(engine)
+        alice_reg = await create_registration(engine, "alice")
+        seal = load_seal_key(files.master_key)
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            await set_telemt_node_config(
+                session, node_id, ports=[443], tls_domain="cdn.example.com", ad_tag="a" * 32
+            )
+            await create_telemt_user(session, seal, node_id, "alice", registration_id=alice_reg)
+            await create_telemt_user(
+                session,
+                seal,
+                node_id,
+                "sponsor_b",
+                ad_tag="b" * 32,
+                expires_at=datetime.now(UTC) + timedelta(days=7),
+            )
+            await session.commit()
         async with serve_panel() as url:
             yield World(engine, files, tmp_path, url, node_id, alice_reg)
     finally:
+        await clean_agent_rows(engine)
         await engine.dispose()
         await get_engine().dispose()
         reset_config_caches()
