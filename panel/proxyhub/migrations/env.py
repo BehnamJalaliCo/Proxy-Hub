@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import pkgutil
 
 from alembic import context
@@ -20,11 +21,29 @@ for _info in pkgutil.iter_modules(db_pkg.__path__):
 
 config = context.config
 target_metadata = Base.metadata
+log = logging.getLogger("proxyhub.migrations")
+
+
+def _unknown_heads() -> list[str]:
+    """Revisions the database is on that this code has no script for: a newer commit migrated it
+    and the deployer then rolled the code back to this one."""
+    known = {script.revision for script in context.script.walk_revisions()}
+    return [head for head in context.get_context().get_current_heads() if head not in known]
 
 
 def _run(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
     with context.begin_transaction():
+        # Only ``proxyhub migrate`` sets the flag: downgrade and check still fail on such a schema.
+        newer = _unknown_heads() if config.attributes.get("tolerate_newer_schema") else []
+        if newer:
+            # Migrations stay backward compatible (expand/contract), so this code runs on that schema.
+            log.warning(
+                "database schema is newer than this code (revision %s); "
+                "rollback: leaving the schema as it is",
+                ", ".join(newer),
+            )
+            return
         context.run_migrations()
 
 
