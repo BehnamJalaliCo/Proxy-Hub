@@ -99,3 +99,38 @@ describe("slot helpers", () => {
     expect(spareText({ spare: { in_use: true, slots: [] }, slots: [] }, fa)).toBe("در کار است.");
   });
 });
+
+describe("owner alert and executor codes", () => {
+  // Every key of DELAY in panel/proxyhub/fleet/alerts.py (CREATE_BLOCKS plus the three after it):
+  // a new alert code is added there and here, with its Persian word in fleetLabels.ts.
+  const ALERT_CODES = [
+    "budget_cap_reached",
+    "node_cap_reached",
+    "budget_cap_not_set",
+    "node_cap_not_set",
+    "account_server_limit_reached",
+    "no_active_account",
+    "account_guard_failed",
+    "account_not_usable",
+    "no_live_price",
+    "no_other_location",
+    "spare_in_use",
+    "agent_domain_not_set",
+    "all_locations_closed",
+    "delete_blocked",
+    "burned_ip_streak",
+    "download_suspect",
+  ];
+
+  it("names every owner alert of the fleet in Persian", () => {
+    for (const code of ALERT_CODES) expect(reasonLabel(code), code).toMatch(/[آ-ی]/);
+  });
+
+  it("names the executor's closing reasons in the timeline, the events and the slot", () => {
+    for (const code of ["no_server_found", "server_already_gone", "no_server_requested"]) {
+      expect(transitionReasonLabel(code), code).toMatch(/[آ-ی]/);
+      expect(reasonLabel(code), code).toMatch(/[آ-ی]/);
+    }
+    expect(reasonLabel("create_failed")).toBe("هتزنر ساخت را تأیید نکرد");
+  });
+});

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { formatJalali } from "./format";
 import { nodeStateInfo, reasonLabel } from "./labels";
 import { agentHealth, canRetire, countByState, eventView, liveTestNode, sortEvents, sortNodes } from "./nodes";
 import type { NodeInfo } from "./types";
@@ -83,6 +84,41 @@ describe("node events", () => {
     expect(v.fields).toContainEqual({ key: "hetzner_id", label: "شناسه‌ی هتزنر", value: "123456" });
     expect(v.fields).toContainEqual({ key: "transient", label: "گذرا", value: "خیر" });
     expect(v.fields).toContainEqual({ key: "extra", label: "extra", value: '{"a":1}' });
+  });
+
+  it("names the fleet's and the agent's detail keys, with a Jalali verdict time", () => {
+    const burned = eventView({
+      at: "2026-11-12T08:31:00Z",
+      kind: "state",
+      detail: { from: "ready", to: "burned", reason: "verdict_blocked", verdict_at: "2026-11-12T08:30:00Z" },
+    });
+    const at = burned.fields.find((f) => f.key === "verdict_at");
+    expect(at?.label).toBe("زمان حکم");
+    expect(at?.value).toBe(formatJalali("2026-11-12T08:30:00Z", "datetime"));
+    expect(at?.value).not.toMatch(/[TZ]/);
+
+    const requested = eventView({
+      at: "2026-11-12T08:31:00Z",
+      kind: "requested",
+      detail: { slot: 3, need: "replace", account_name: "main", avoid: ["hel1"], by: "fleet" },
+    });
+    const field = (k: string) => requested.fields.find((f) => f.key === k);
+    expect(field("slot")).toMatchObject({ label: "جایگاه", value: "۳" });
+    expect(field("need")).toMatchObject({ label: "نوع درخواست", value: "جایگزینی" });
+    expect(field("account_name")?.label).toBe("حساب");
+    expect(field("avoid")).toMatchObject({ label: "جاهای کنارگذاشته", value: "hel1" });
+
+    const fill = eventView({ at: "2026-11-12T08:31:00Z", kind: "requested", detail: { slot: 1, need: "fill", avoid: [] } });
+    expect(fill.fields.find((f) => f.key === "avoid")).toBeUndefined();
+    expect(fill.fields.find((f) => f.key === "need")?.value).toBe("پر کردن جایگاه");
+
+    const test = eventView({ at: "2026-11-12T08:31:00Z", kind: "requested", detail: { price_monthly_eur: "4.59" } });
+    expect(test.fields[0]).toMatchObject({ label: "قیمت ماهانه", value: "۴٫۵۹ یورو" });
+
+    const agent = eventView({ at: "2026-11-12T08:31:00Z", kind: "agent_registered", detail: { agent_version: "0.5.0", telemt_version: "3.1" } });
+    expect(agent.fields.map((f) => f.label)).toEqual(["نسخه‌ی عامل", "نسخه‌ی telemt"]);
+    const ip = eventView({ at: "2026-11-12T08:31:00Z", kind: "burned_ip", detail: { match: "prefix24" } });
+    expect(ip.fields[0]).toMatchObject({ label: "تطبیق", value: "همان بازه‌ی /24" });
   });
 
   it("orders events newest first whatever the time format", () => {
