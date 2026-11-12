@@ -198,8 +198,14 @@ async def test_a_cleaning_does_not_free_the_slot_it_just_removed(engine: AsyncEn
     today = sent_at.astimezone(TEHRAN).date()
     job = await w.job("send_post", done_at=sent_at, payload={"role": "test", "text": "t"})
     await w.post(role="test", created_at=sent_at, slot=4, outbox_id=job, plan_day=today)
-    await w.run("UPDATE posts SET breaking = true WHERE outbox_id = :o", o=job)
     await w.channel_post(role="test", chat_id=TEST_CHAT, message_id=41, outbox_id=job, created_at=sent_at)
+    # A breaking-news post of the same day: it holds no plan slot (publisher.slot_taken counts only
+    # day-plan posts), but it counts towards the day's breaking posts.
+    flash_at = sent_at + timedelta(minutes=5)
+    flash = await w.job("send_post", done_at=flash_at, payload={"role": "test", "text": "b"})
+    await w.post(role="test", created_at=flash_at, slot=5, outbox_id=flash, plan_day=today)
+    await w.run("UPDATE posts SET breaking = true WHERE outbox_id = :o", o=flash)
+    await w.channel_post(role="test", chat_id=TEST_CHAT, message_id=42, outbox_id=flash, created_at=flash_at)
     slot = plan.Slot(day=today, index=4, at=sent_at)
 
     async def plan_view() -> tuple[bool, int, object, int]:
@@ -216,8 +222,8 @@ async def test_a_cleaning_does_not_free_the_slot_it_just_removed(engine: AsyncEn
     async with engine.connect() as conn:
         t = await tc.target(conn)
     async with engine.begin() as conn:
-        counts = await tc.forget_removed(conn, t, [41], w.now)
-    assert counts["channel_posts"] == 1 and counts["posts"] == 1
+        counts = await tc.forget_removed(conn, t, [41, 42], w.now)
+    assert counts["channel_posts"] == 2 and counts["posts"] == 2
     assert await plan_view() == before
 
 

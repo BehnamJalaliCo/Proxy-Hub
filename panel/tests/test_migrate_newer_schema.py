@@ -52,4 +52,5 @@ async def test_migrate_leaves_a_newer_schema_alone(
         assert await _version(engine) == head
     finally:
         await _set_version(engine, head)  # the test database is shared by the whole session
+        await asyncio.to_thread(migrate, "head")  # test_suite_migration_guard: head in a finally
         await engine.dispose()
