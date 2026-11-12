@@ -95,11 +95,13 @@ from proxyhub.posts.messages import (
     NO_LINKS_ALERT_FA,
 )
 from proxyhub.posts.poster import BOT, POSTERS, MediaPayload, Poster, for_new_post
+from proxyhub.reality.settings import load_reality_settings
 from proxyhub.telegram import outbox as tg_outbox
 from proxyhub.telegram import store as tg_store
 from proxyhub.telegram.schedule import TEHRAN, quiet_until
 from proxyhub.telegram.templates import (
     CAPTION_LIMIT,
+    CONFIG_VALIDITY_HOURS,
     LinkKind,
     PostTooLong,
     RenderedPost,
@@ -170,12 +172,16 @@ def fit(
     tag: str,
     texts: StatusTexts,
     names: Mapping[str, str] | None = None,
+    *,
+    validity_hours: int = CONFIG_VALIDITY_HOURS,
 ) -> tuple[RenderedPost, list[ProxyLink]]:
-    """Render; if even the links do not fit one message, drop links from the end (Reality first)."""
+    """Render; if even the links do not fit one message, drop links from the end (Reality first).
+    ``validity_hours``: the configs' period (the Reality settings' ``cap_hours``)."""
     kept = list(chosen)
     while True:
         try:
-            return render_post(content_html, views_for_new_post(kept, names), tag, texts), kept
+            views = views_for_new_post(kept, names)
+            return render_post(content_html, views, tag, texts, validity_hours=validity_hours), kept
         except PostTooLong:
             if not kept:
                 raise
@@ -188,15 +194,17 @@ def fit_caption(
     tag: str,
     texts: StatusTexts,
     names: Mapping[str, str] | None = None,
+    *,
+    validity_hours: int = CONFIG_VALIDITY_HOURS,
 ) -> tuple[RenderedPost, list[ProxyLink]]:
     """A media post's caption (decision D51): the links must fit the caption limit now AND in every
     later state (a status edit only ever shortens the content); otherwise links are dropped from the
     end (the Reality configs first). PostTooLong when not even one link fits."""
-    kept = list(chosen)
+    kept, hours = list(chosen), validity_hours
     while kept:
         views = views_for_new_post(kept, names)
-        if tail_always_fits(views, tag, texts, caption=True):
-            return render_post(content_html, views, tag, texts, caption=True), kept
+        if tail_always_fits(views, tag, texts, caption=True, validity_hours=hours):
+            return render_post(content_html, views, tag, texts, caption=True, validity_hours=hours), kept
         kept.pop()
     raise PostTooLong("not one link fits a media caption")
 
@@ -206,6 +214,12 @@ def content_for(item: content.Item | None) -> str:
 
 
 # --- small reads ---------------------------------------------------------------------------------
+
+
+async def validity_hours(db: AsyncConnection) -> int:
+    """The configs' period a post states over each config: the Reality settings' ``cap_hours``,
+    which the owner can change on the Reality page (D41)."""
+    return (await load_reality_settings(db)).cap_hours
 
 
 async def slot_taken(db: AsyncConnection, role: str, slot: plan.Slot) -> bool:
@@ -378,18 +392,21 @@ async def _queue(
     else:
         content_html = content_for(item)
     names = await operators.operator_labels(db, chosen, now)  # D50: decided once, stored below
+    hours = await validity_hours(db)
     media_row = await candidates.post_media(db, candidate) if candidate is not None else None
     offered = list(chosen)
     media_skipped: str | None = None
     if media_row is not None:
         try:
-            rendered, chosen = fit_caption(content_html, chosen, where.tag, cfg.texts(), names)
+            rendered, chosen = fit_caption(
+                content_html, chosen, where.tag, cfg.texts(), names, validity_hours=hours
+            )
         except PostTooLong:  # not one link fits a caption: the post goes as text, with its links
             media_row, media_skipped = None, "links_do_not_fit_caption"
     elif candidate is not None and candidate.media_kind is not None:
         media_skipped = f"media_{candidate.media_state}"  # approved although its file failed
     if media_row is None:
-        rendered, chosen = fit(content_html, chosen, where.tag, cfg.texts(), names)
+        rendered, chosen = fit(content_html, chosen, where.tag, cfg.texts(), names, validity_hours=hours)
     if not chosen:
         return "no_links"
     media = (
@@ -851,6 +868,7 @@ async def refresh_posts(
     if not h.complete or h.providers == 0:  # no full picture of the links: change nothing
         return 0
     texts = cfg.texts()
+    hours = await validity_hours(db)
     queued = 0
     for post in ready:
         if queued >= MAX_EDITS_PER_RUN or waiting + queued >= MAX_PENDING_EDITS:
@@ -872,7 +890,9 @@ async def refresh_posts(
         paused = [c.label for c, x in zip(carried, shown, strict=True) if x.view.status == "paused"]
         caption = post.media_kind is not None
         try:
-            text = render_post(post.content_html, views, post.channel_tag, texts, caption=caption).text
+            text = render_post(
+                post.content_html, views, post.channel_tag, texts, caption=caption, validity_hours=hours
+            ).text
         except (PostTooLong, ValueError) as exc:
             log.warning("publisher: post %d could not be rendered again (%s)", post.id, type(exc).__name__)
             continue

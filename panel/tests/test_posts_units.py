@@ -247,7 +247,13 @@ def test_a_config_line_states_its_period_not_its_end() -> None:
     for end in (datetime(2026, 11, 5, 23, 0, tzinfo=UTC), datetime(2026, 11, 8, 9, 0, tzinfo=UTC)):
         text = render_post(None, [rl(1, expires=end)], "@ipoxxo").text
         assert text.startswith(f"{LINE}\n") and "ساعت ۰" not in text.split("\n", 1)[0]
-    assert CONFIG_VALIDITY_HOURS == RealitySettings().cap_hours  # the line tells the configs' real period
+    # The line tells the configs' real period: the Reality settings' cap_hours, which the owner can
+    # change; 48 (the default cap_hours) only when the caller gives none.
+    assert CONFIG_VALIDITY_HOURS == RealitySettings().cap_hours
+    end = datetime(2026, 11, 8, 9, 0, tzinfo=UTC)
+    for hours, shown in ((24, "۲۴"), (72, "۷۲"), (720, "۷۲۰")):
+        text = render_post(None, [rl(1, expires=end)], "@ipoxxo", validity_hours=hours).text
+        assert text.startswith(f"🔒 کانفیگ V2Ray — اعتبار {shown} ساعت\n")
     # A config that never ends: the line without a period.
     assert render_post(None, [rl(1)], "@ipoxxo").text.startswith(f"🔒 کانفیگ V2Ray\n{QUOTE}<code>")
 

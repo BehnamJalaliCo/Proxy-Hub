@@ -42,6 +42,7 @@ from proxyhub.links.contract import ProxyLink
 from proxyhub.posts import content, links, plan, publisher, views
 from proxyhub.posts import settings as posting
 from proxyhub.posts.poster import BotPoster
+from proxyhub.reality.settings import RealitySettings, save_reality_settings
 from proxyhub.reconcilers.publisher import PublisherReconciler
 from proxyhub.telegram import store
 from proxyhub.telegram.schedule import TEHRAN, QuietWindow
@@ -242,6 +243,26 @@ async def test_no_post_window_and_waiting_post(engine: AsyncEngine, vault: Vault
     # The earlier post never left the outbox (bot paused): nothing more is queued.
     assert await publish(engine, slot_time(3)) == "waiting"
     assert len(await jobs(engine, "send_post")) == 1
+
+
+async def test_a_post_states_the_period_the_owner_set_for_configs(engine: AsyncEngine, vault: Vault) -> None:
+    await ready_fleet(engine, 1)
+    await setup_telegram(engine, vault)
+    async with engine.begin() as conn:  # the owner's Reality settings (D41): configs live 72 hours
+        await save_reality_settings(conn, RealitySettings(cap_hours=72))
+        shown = await views.preview(conn, slot_time(2), await links.harvest(conn, PROVIDERS))
+    assert "🔒 کانفیگ V2Ray — اعتبار ۷۲ ساعت\n" in shown["text"] and LOCK not in shown["text"]
+    now = slot_time(2)
+    await posted(engine, vault, now)
+    body = (await jobs(engine, "send_post"))[-1].payload["text"]
+    assert "🔒 کانفیگ V2Ray — اعتبار ۷۲ ساعت\n" in body and LOCK not in body
+    # The owner changes the period: a recent post gets one edit that states the new one.
+    async with engine.begin() as conn:
+        await save_reality_settings(conn, RealitySettings(cap_hours=24))
+    assert await refresh(engine, now + timedelta(minutes=1)) == 1
+    assert "🔒 کانفیگ V2Ray — اعتبار ۲۴ ساعت\n" in await edit_text(engine)
+    await deliver(engine, (await jobs(engine, "edit_post"))[-1].id, message_id=0)
+    assert await refresh(engine, now + timedelta(minutes=20)) == 0
 
 
 async def test_main_channel_only_when_turned_on(engine: AsyncEngine, vault: Vault) -> None:
