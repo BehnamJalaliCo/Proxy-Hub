@@ -92,9 +92,21 @@ HEARTBEAT_TIMEOUT = timedelta(minutes=5)
 # A test node that stays unhealthy this long is retired (through the delete gate) to stop its cost.
 UNHEALTHY_TEST_RETIRE_AFTER = timedelta(hours=1)
 TRANSIENT_FAILURES = frozenset({"unreachable", "rate_limited"})
+# Hetzner's own codes for a passing trouble on its side (a JSON error body keeps the code, which
+# hcloud does not retry for these), and the bare HTTP statuses of a body that is not JSON. Not
+# "unavailable": Hetzner documents it as a service or product that is no longer available, final
+# for a create (the fleet then moves on to another location) and never expected for a read.
 TRANSIENT_CODES = frozenset(
-    {"timeout", "conflict", "bad_gateway", "service_unavailable", "500", "502", "503"}
+    {
+        *("timeout", "conflict", "bad_gateway", "locked"),
+        *("server_error", "service_error", "maintenance"),
+        *("500", "502", "503", "504"),
+    }
 )
+# A create that failed with one of these may still have made the server: hcloud retries a POST by
+# itself (read timeout, 502, 504), and a retry after a create that went through is refused with
+# uniqueness_error, as the node's server name is unique in its project.
+CREATE_MAY_EXIST_CODES = frozenset({"uniqueness_error"})
 LIVE_STEP_STATES = (S.REQUESTED, S.CREATING, S.BOOTING, S.REGISTERING, S.READY, S.UNHEALTHY, S.RETIRING)
 
 
@@ -132,6 +144,10 @@ class AgentHealth:
 
 def _transient(failure: HetznerFailure) -> bool:
     return failure.kind in TRANSIENT_FAILURES or failure.code in TRANSIENT_CODES
+
+
+def _create_may_have_happened(failure: HetznerFailure) -> bool:
+    return _transient(failure) or failure.code in CREATE_MAY_EXIST_CODES
 
 
 def _public_ips(server: object) -> tuple[str | None, str | None]:
@@ -523,7 +539,7 @@ class NodeExecutor:
         obs: ServersObservation,
     ) -> None:
         now = self._clock()
-        transient = _transient(failure)
+        transient = _create_may_have_happened(failure)
         async with sm() as s:
             row = await lock_node(s, node.id)
             if row is None:
@@ -545,8 +561,10 @@ class NodeExecutor:
                 context={"node_id": str(node.id), "kind": failure.kind, "transient": transient},
                 result="Hetzner did not confirm the create",
             )
-            # A transient failure may still have created the server: stay "creating" and look it up
-            # by label. Otherwise retire: the retiring step looks once more before closing the node.
+            # A transient failure may still have created the server, and uniqueness_error means
+            # hcloud's own retry found the server the first POST made: stay "creating" and adopt it
+            # by its node-id label (closed after CREATE_LOOKUP_GRACE if none turns up). Otherwise
+            # retire: the retiring step looks once more before closing the node.
             if not transient and row.state == S.CREATING.value:
                 await self._to_retiring(s, row, now, "create_failed")
             await s.commit()

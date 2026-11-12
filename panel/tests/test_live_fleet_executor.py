@@ -210,6 +210,40 @@ async def test_the_executor_never_retires_an_unhealthy_slot_node_by_itself(world
     assert world.no_hetzner.calls == 0
 
 
+# --- a failed create ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "state", "transient"),
+    [
+        ("uniqueness_error", "creating", True),
+        ("server_error", "creating", True),
+        ("invalid_input", "retiring", False),
+    ],
+)
+async def test_a_create_that_may_have_made_the_server_stays_creating(
+    world: LiveWorld, code: str, state: str, transient: bool
+) -> None:
+    """nodes-hetzner:5 / sweep-failure:1: a create refused as a duplicate (hcloud's own retry after a
+    POST that went through) or failed with Hetzner's server_error may have made the server; the node
+    stays creating and is adopted by label. A final refusal still retires it."""
+    from proxyhub.accounts.hetzner_io import HetznerFailure, summarize_servers
+
+    await world.settings(live_settings())
+    node_id = await add_slot_node(world, 1, state="creating", created_at=ago(minutes=1))
+    executor = world.executor()
+    sm = world.sessions
+    node = await executor._load(sm, node_id)
+    assert node is not None
+    await executor._create_failed(sm, node, HetznerFailure("api_error", code), summarize_servers([]))
+    row = await world.node(node_id)
+    assert row["state"] == state
+    assert (row["retire_reason"] is None) is transient
+    failed = [d for k, d in await world.events(node_id) if k == "create_failed"]
+    assert failed == [{"code": code, "transient": transient}]
+    assert world.no_hetzner.calls == 0
+
+
 # --- the account's count -----------------------------------------------------------------------
 
 
