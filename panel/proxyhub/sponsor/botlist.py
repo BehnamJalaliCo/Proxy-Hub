@@ -568,11 +568,22 @@ def classify(
     return out
 
 
-def target_of(entry: EntryFacts, mapped: Mapped, *, copies: int = 1, live_tags: Iterable[str] = ()) -> Target:
+def target_of(
+    entry: EntryFacts,
+    mapped: Mapped,
+    *,
+    copies: int = 1,
+    live_tags: Iterable[str] = (),
+    fallback_ports: Iterable[int] = (),
+) -> Target:
     """The walk's target for an entry: its screens may name ``host`` or ``host:port`` for the
-    entry's own port, else for our ports at that address. ``live_tags``: the tags of our live
-    registrations; a removal stops on a screen that shows one."""
-    ports: Iterable[int] = (entry.port,) if entry.port is not None else mapped.ports
+    entry's own port, else for our ports at that address. An entry with no row of ours at its
+    address (:data:`NO_RECORD`; the list names no port, P13) has no such port: then the ports the
+    panel uses for MTProto (``fallback_ports``), since its screen always names ``host:port`` (P18).
+    ``live_tags``: the tags of our live registrations; a removal stops on a screen that shows one."""
+    ports: Iterable[int] = (
+        (entry.port,) if entry.port is not None else (mapped.ports or tuple(fallback_ports))
+    )
     return Target(
         host=entry.host,
         port=entry.port,

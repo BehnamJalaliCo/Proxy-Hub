@@ -17,6 +17,7 @@ import uuid
 import pytest
 from test_sponsor_units import NODE_A, NODE_B, reg
 
+from proxyhub.mtproxy import userclient
 from proxyhub.mtproxy.userclient import BotButton, BotMessage
 from proxyhub.sponsor import botlist, replies
 from proxyhub.sponsor.botlist import (
@@ -419,6 +420,20 @@ def test_looking_stops_when_the_target_is_not_exactly_one_button(
     assert isinstance(result, WalkStuck) and result.reason == reason
 
 
+def test_a_reply_that_is_not_the_screen_does_not_name_the_proxy() -> None:
+    """A toast or an error after the proxy's button names no address: the walk reports it as a
+    screen that does not name the proxy (the inventory then records an unreadable screen)."""
+    for reply in (seen(answer="Please try again later"), seen(msg("Sorry, something went wrong."))):
+        walk = MenuWalk(target(), remove=False)
+        walk.next(Step.SENT_MYPROXIES, listing(REAL_LABEL))
+        result = walk.next(Step.PRESSED_PROXY, reply)
+        assert isinstance(result, MenuSeen) and not result.names_proxy and result.channels == ()
+    walk = MenuWalk(target(), remove=False)
+    walk.next(Step.SENT_MYPROXIES, listing(REAL_LABEL))
+    real = walk.next(Step.PRESSED_PROXY, real_screen(f"{HOST}:{PORT}"))
+    assert isinstance(real, MenuSeen) and real.names_proxy and real.promoted_title is None
+
+
 def test_a_screen_of_another_proxy_stops_the_walk() -> None:
     walk = MenuWalk(target(), remove=False)
     walk.next(Step.SENT_MYPROXIES, listing(REAL_LABEL))
@@ -668,6 +683,67 @@ def test_an_address_of_ours_with_no_rows_left_goes_only_when_nothing_holds_it() 
     assert [(m.status, m.removable, m.note) for m in got] == list(cases.values())
     # Without what the panel knows (the default), nothing changes: unknown stays unknown.
     assert [m.status for m in classify([facts("5.161.131.202")], [], {})] == [UNKNOWN]
+
+
+REAL_ROWS = ((btn(REAL_SET_PROMOTION), btn("Stats")), (btn("Delete proxy"), btn(REAL_BACK_TO_LIST)))
+
+
+def real_screen(address: str, title: str = "n/a") -> Observation:
+    """A proxy's screen as the bot really shows it (P18, P26)."""
+    text = f"Proxy {address} with the tag 1a1b1c1d.\nPromoted channel: {title}.\nHow can I help?"
+    return menu(text, *REAL_ROWS)
+
+
+def test_a_proxy_whose_rows_were_deleted_can_be_opened_and_removed() -> None:
+    """The list names no port ("<host> <hex>", P13) and no row of ours is left at the address, so
+    the screen's "host:port" (P18) must come from the ports the panel uses, or the walk reads the
+    proxy's own screen as another proxy's."""
+    ip, label = "5.161.131.202", "5.161.131.202 1a1b1c1d"
+    entry = facts(ip, fp=replies.label_fingerprint(label))
+    (mapped,) = classify([entry], [], {}, Known(ips=frozenset({ip})))
+    assert (mapped.status, mapped.removable, mapped.ports, mapped.note) == (GONE, True, (), NO_RECORD)
+    assert botlist.target_of(entry, mapped).words == frozenset({ip})  # the old target: stuck on its screen
+    to = botlist.target_of(entry, mapped, fallback_ports=[8443])
+    assert to.words == frozenset({ip, f"{ip}:8443"})
+
+    walk = MenuWalk(to, remove=True)
+    assert isinstance(walk.next(Step.SENT_MYPROXIES, listing(label)), Press)
+    screen = real_screen(f"{ip}:8443")
+    press = walk.next(Step.PRESSED_PROXY, screen)
+    assert isinstance(press, Press) and press.label == "Delete proxy"
+    assert userclient.text_names(screen.text, to.words)  # the operator client's allowlist agrees
+    confirm_text = REAL_CONFIRM_TEXT.replace(HOST, ip)
+    confirm = walk.next(
+        Step.PRESSED_REMOVE,
+        seen(msg(confirm_text, (btn(REAL_CONFIRM),), (btn(REAL_BACK_TO_PROXY), btn(REAL_BACK_TO_LIST)))),
+    )
+    assert isinstance(confirm, Press) and confirm.label == REAL_CONFIRM
+    done = walk.next(Step.PRESSED_CONFIRM, seen(msg("Success!")))
+    assert isinstance(done, Removed) and done.confirmed
+
+    look = MenuWalk(to, remove=False)
+    look.next(Step.SENT_MYPROXIES, listing(label))
+    seen_menu = look.next(Step.PRESSED_PROXY, screen)
+    assert isinstance(seen_menu, MenuSeen) and seen_menu.remove_named
+    # Another host, or a port the panel never used, still stops the walk.
+    for other in ("5.6.7.8:8443", f"{ip}:443"):
+        stuck = MenuWalk(to, remove=True)
+        stuck.next(Step.SENT_MYPROXIES, listing(label))
+        result = stuck.next(Step.PRESSED_PROXY, real_screen(other))
+        assert isinstance(result, WalkStuck) and result.reason == "menu_of_another_proxy", other
+
+
+@pytest.mark.parametrize(
+    "title", ["Shop.ir | فروشگاه", "Mr.Proxy | پروکسی", "ipoxxo.online", "VPN & MTProxy | پروکسی"]
+)
+def test_a_dotted_channel_title_does_not_stop_the_check_or_the_removal(title: str) -> None:
+    """The promoted channel's TITLE is free text (P26): a dotted word in it is not another proxy."""
+    look = MenuWalk(target(), remove=False)
+    look.next(Step.SENT_MYPROXIES, listing(REAL_LABEL))
+    seen_menu = look.next(Step.PRESSED_PROXY, real_screen(f"{HOST}:{PORT}", title))
+    assert isinstance(seen_menu, MenuSeen) and seen_menu.promoted_title == title
+    press = removal_walk().next(Step.PRESSED_PROXY, real_screen(f"{HOST}:{PORT}", title))
+    assert isinstance(press, Press) and press.label == "Delete proxy"
 
 
 def test_a_removal_never_presses_delete_on_a_screen_that_shows_a_live_tag() -> None:

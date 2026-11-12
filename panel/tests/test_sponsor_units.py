@@ -331,3 +331,30 @@ def test_only_the_bots_new_or_edited_messages_count_as_its_reply() -> None:
     assert changes(before, before) == []
     # A message older than everything seen (scrolled into view) is not a reply.
     assert changes([msg(20, "x")], [msg(15, "older"), msg(20, "x")]) == []
+
+
+def test_a_sponsor_change_is_budgeted_for_every_page_of_the_list() -> None:
+    """/myproxies, one press per further page, the proxy, "Set promotion", the link."""
+    from proxyhub.sponsor.driver import MAX_ACTIONS, messages_needed
+
+    promote = PromoteJob(host="203.0.113.1", port=8443, channel="ipoxxo")
+    got = {pages: messages_needed(promote, pages) for pages in (None, 0, 1, 2, 3, 5, 9)}
+    assert got == {None: 5, 0: 5, 1: 5, 2: 5, 3: 6, 5: 8, 9: MAX_ACTIONS}
+    assert messages_needed(RegisterJob(host="203.0.113.1", port=8443, secret_hex="ab" * 16), 9) == 3
+
+
+def test_every_step_of_an_alert_is_said_in_persian() -> None:
+    """A flow that stops before its first message reached the bot is recorded at step "start"."""
+    from proxyhub.sponsor.conversation import Step
+    from proxyhub.sponsor.messages import STEP_FA, stuck_alert
+
+    assert set(STEP_FA) >= {s.value for s in Step} | {"start"}
+    alert = stuck_alert(
+        address="203.0.113.1:443",
+        step="start",
+        reason="mtproxybot_changed",
+        hint=None,
+        bot_text=None,
+        paused=False,
+    )
+    assert "کجا: start" not in alert and STEP_FA["start"] in alert

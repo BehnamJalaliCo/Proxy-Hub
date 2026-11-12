@@ -478,3 +478,16 @@ def test_a_bot_without_any_proxy_of_ours_means_the_registration_is_gone() -> Non
     assert isinstance(next_action(P18_PROMO, Step.PRESSED_NEXT_PAGE, seen(REAL_NO_PROXIES)), Stuck)
     assert not replies.no_proxies(REAL_LIST_HEADER + "\nYou didn't create any proxy yet")
     assert not replies.no_proxies("Proxy deleted. You can create a new proxy with /newproxy.")
+
+
+@pytest.mark.parametrize(
+    "title", ["Shop.ir | فروشگاه", "Mr.Proxy | پروکسی", "ipoxxo.online", "V2ray.NG", "Dr.VPN"]
+)
+def test_a_dotted_channel_title_is_no_other_proxy(title: str) -> None:
+    """P26: the screen names the sponsor by its title, which is free text."""
+    words = replies.address_words("65.109.209.24", [8443])
+    screen = REAL_SCREEN.format(tag=P18_TAG).replace("n/a", title)
+    assert not replies.names_other_proxy(screen, words)
+    assert replies.promoted_title(screen) == title
+    # The proxy's own line is still checked.
+    assert replies.names_other_proxy(f"Proxy 5.6.7.8:443 with the tag x.\nPromoted channel: {title}.", words)

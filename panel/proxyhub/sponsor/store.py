@@ -31,6 +31,8 @@ from proxyhub.sponsor.campaigns import DEFAULT_LEAD, Window
 from proxyhub.sponsor.channels import DEFAULT_CHANNEL, ChannelError, parse_public_channel
 
 SETTINGS_KEY: Final = "sponsor.settings"
+# The job on @MTProxybot's own list and what it last read (proxyhub/sponsor/inventory.py).
+MTPROXYBOT_KEY: Final = "sponsor.mtproxybot"
 MIN_LEAD_MIN: Final = 0
 MAX_LEAD_MIN: Final = 360
 
@@ -72,6 +74,15 @@ class SponsorSettings:
 async def load_settings(db: AsyncConnection) -> SponsorSettings:
     row = (await db.execute(select(Setting.value).where(Setting.key == SETTINGS_KEY))).first()
     return SponsorSettings() if row is None else SponsorSettings.from_json(row[0])
+
+
+async def list_pages(db: AsyncConnection) -> int | None:
+    """How many pages /myproxies had when the panel last read it, or None before any read (the
+    stored row of :data:`MTPROXYBOT_KEY`, read defensively)."""
+    row = (await db.execute(select(Setting.value).where(Setting.key == MTPROXYBOT_KEY))).first()
+    last = row[0].get("last_list") if row is not None and isinstance(row[0], dict) else None
+    pages = last.get("pages") if isinstance(last, dict) else None
+    return pages if isinstance(pages, int) and not isinstance(pages, bool) and pages >= 0 else None
 
 
 async def save_settings(db: AsyncConnection, value: SponsorSettings) -> None:

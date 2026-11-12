@@ -5,16 +5,20 @@ machines in proxyhub/sponsor/botlist.py; this module keeps the job, the entries 
 One job at a time (settings row :data:`KEY`), started by the owner's button or the CLI
 (``python -m proxyhub.sponsor``), or **by the panel itself** (P30, 2026-11-07: the owner should not
 have to press anything when a node goes): with removal on, a ``cleanup`` is queued when a
-registration was retired as ``node_gone`` at least :data:`AUTO_AFTER` ago and after the last job
-(:func:`auto_cleanup_due`), at most once per :data:`AUTO_GAP`, never after a job that got stuck
-(the owner looks at those first). The **promotion check** is queued the same way (decision D63,
+registration was retired as ``node_gone`` at least :data:`AUTO_AFTER` ago and after the last
+cleanup was queued (:func:`auto_cleanup_due`; one whose cleanup did not finish ``done`` is offered
+again :data:`CHECK_RETRY` later), at most one job per :data:`AUTO_GAP`, never after a job that got
+stuck (the owner looks at those first, and is told when the panel queued it, :func:`_stuck`). The
+**promotion check** is queued the same way (decision D63,
 2026-11-12: what the dashboard said of each proxy's sponsor was five days old, read before the bot's
 titles were understood, and two proxies had never been read): an ``inventory`` once per
 :data:`CHECK_EVERY`, and :data:`AUTO_AFTER` after a sponsor was set (:func:`auto_inventory_due`).
 What a finished inventory read is then acted on (:func:`repair_promotions`): a live proxy whose
 screen names no sponsor, or another one, while the panel holds the wanted one as set, has its
 sponsor set again by the sponsor loop (at most once per :data:`REPAIR_GAP` each); if the next read
-still does not show it, the owner is told (at most once per :data:`ALERT_GAP` each).
+still does not show it, the owner is told (at most once per :data:`ALERT_GAP` each). A read taken
+before the sponsor was last set, or a reply that does not name the proxy (not its screen), is never
+acted on.
 
 The jobs:
 
@@ -45,6 +49,7 @@ button was pressed.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -60,6 +65,7 @@ from proxyhub.cloudflare.service import node_dns_name
 from proxyhub.db.models import MtproxyRegistration, Setting
 from proxyhub.db.models_sponsor import MtproxybotEntry
 from proxyhub.fleet.actions import iso
+from proxyhub.mtproto import settings as mtproto_settings
 from proxyhub.mtproxy import state as account_state
 from proxyhub.mtproxy import store as account_store
 from proxyhub.mtproxy.userclient import BotChat, MtpError
@@ -76,7 +82,12 @@ from proxyhub.sponsor.botlist import (
     WalkStuck,
 )
 from proxyhub.sponsor.conversation import MESSAGES_NEEDED, PromoteJob, RegisterJob, Step
-from proxyhub.sponsor.messages import cleanup_stuck_alert, list_reason, promotion_alert
+from proxyhub.sponsor.messages import (
+    auto_job_stuck_alert,
+    cleanup_stuck_alert,
+    list_reason,
+    promotion_alert,
+)
 from proxyhub.sponsor.provider import node_of
 from proxyhub.sponsor.service import NOT_COUNTED, Deps, _log, in_use, with_bot_chat
 from proxyhub.telegram import store as tg_store
@@ -84,7 +95,7 @@ from proxyhub.telegram.store import enqueue_owner_alert
 
 log = logging.getLogger(__name__)
 
-KEY: Final = "sponsor.mtproxybot"
+KEY: Final = store.MTPROXYBOT_KEY
 INVENTORY: Final = "inventory"
 CLEANUP: Final = "cleanup"
 LOOK: Final = "look"
@@ -259,8 +270,10 @@ class BotListState:
     ``observation``: what the latest observe run saw on a dead proxy's screen. ``screens``: the
     current job's screens as shapes (no secret), at most :data:`MAX_SCREENS`. ``check_queued_at``
     and ``checked_at``: when an inventory was last queued and last finished ``done`` (the promotion
-    check). ``repaired_job``: the ``requested_at`` of the inventory whose reads were acted on.
-    ``repairs``: by registration id (:class:`Repair`)."""
+    check). ``cleanup_queued_at`` and ``cleaned_at``: when a removing cleanup was last queued, and
+    when the last one that finished ``done`` was queued (what it covered). ``repaired_job``: the
+    ``requested_at`` of the inventory whose reads were acted on. ``repairs``: by registration id
+    (:class:`Repair`)."""
 
     removal_enabled: bool = False
     job: Job | None = None
@@ -269,6 +282,8 @@ class BotListState:
     screens: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     check_queued_at: datetime | None = None
     checked_at: datetime | None = None
+    cleanup_queued_at: datetime | None = None
+    cleaned_at: datetime | None = None
     repaired_job: datetime | None = None
     repairs: dict[str, Repair] = field(default_factory=dict)
 
@@ -281,6 +296,8 @@ class BotListState:
             "screens": list(self.screens),
             "check_queued_at": iso(self.check_queued_at),
             "checked_at": iso(self.checked_at),
+            "cleanup_queued_at": iso(self.cleanup_queued_at),
+            "cleaned_at": iso(self.cleaned_at),
             "repaired_job": iso(self.repaired_job),
             "repairs": {k: v.to_json() for k, v in self.repairs.items()},
         }
@@ -302,6 +319,8 @@ class BotListState:
             else (),
             check_queued_at=_time(value.get("check_queued_at")),
             checked_at=_time(value.get("checked_at")),
+            cleanup_queued_at=_time(value.get("cleanup_queued_at")),
+            cleaned_at=_time(value.get("cleaned_at")),
             repaired_job=_time(value.get("repaired_job")),
             repairs=_repairs(value.get("repairs")),
         )
@@ -502,14 +521,38 @@ def plan(job: Job, info: ListInfo | None, items: Sequence[tuple[Entry, Mapped]],
 
 @dataclass(frozen=True)
 class _Prepared:
+    """``ports``: every port our proxies use or used, for an entry with no row at its address
+    (:func:`proxyhub.sponsor.botlist.target_of`)."""
+
     state: BotListState
     plan: Plan
     copies: int
     live_tags: frozenset[str] = frozenset()
+    ports: tuple[int, ...] = ()
 
 
 def _copies(entries: Sequence[Entry], entry: Entry) -> int:
     return sum(1 for e in entries if e.label_fp == entry.label_fp)
+
+
+async def our_ports(db: AsyncConnection, regs: Sequence[store.Reg]) -> tuple[int, ...]:
+    """The ports of our registrations, the MTProto default and the port set now (the panel has only
+    ever used 8443): what the screen of a proxy whose rows were deleted can name it by."""
+    ports = {r.port for r in regs} | {mtproto_settings.DEFAULT_PORT}
+    with contextlib.suppress(mtproto_settings.SettingsCorrupt):
+        ports.add((await mtproto_settings.load_settings(db)).port)
+    return tuple(sorted(ports))
+
+
+def walk_target(prepared: _Prepared, entry: Entry, mapped: Mapped) -> botlist.Target:
+    """The target of a walk to this entry's screen (and the removal permit's words)."""
+    return botlist.target_of(
+        entry.facts(),
+        mapped,
+        copies=prepared.copies,
+        live_tags=prepared.live_tags,
+        fallback_ports=prepared.ports,
+    )
 
 
 async def known_addresses(db: AsyncConnection, regs: Sequence[store.Reg]) -> botlist.Known:
@@ -574,7 +617,13 @@ async def _prepare(deps: Deps, now: datetime, paused: bool) -> _Prepared | str:
                 context={"requested_by": job.requested_by},
             )
         copies = _copies(entries, step_plan.entry) if step_plan.entry is not None else 0
-        return _Prepared(state=state, plan=step_plan, copies=copies, live_tags=live_tags(regs))
+        return _Prepared(
+            state=state,
+            plan=step_plan,
+            copies=copies,
+            live_tags=live_tags(regs),
+            ports=await our_ports(db, regs),
+        )
 
 
 async def step(deps: Deps, *, paused: bool = False) -> str:
@@ -592,12 +641,10 @@ async def step(deps: Deps, *, paused: bool = False) -> str:
     if entry is None or mapped is None:
         machine, target = botlist.ListWalk(), "@MTProxybot"
     else:
-        walk_target = botlist.target_of(
-            entry.facts(), mapped, copies=prepared.copies, live_tags=prepared.live_tags
-        )
-        machine, target = MenuWalk(walk_target, remove=the_plan.kind == "remove"), entry.address
+        to = walk_target(prepared, entry, mapped)
+        machine, target = MenuWalk(to, remove=the_plan.kind == "remove"), entry.address
         if the_plan.kind == "remove":
-            permit = walk_target.words
+            permit = to.words
 
     async def talk(
         chat: BotChat, take_slot: Callable[[], Awaitable[object]], recorder: driver.Recorder
@@ -719,6 +766,10 @@ async def _record_menu(
     same: bool,
 ) -> str:
     result = outcome.result
+    if isinstance(result, MenuSeen) and not result.names_proxy:
+        # Not the proxy's screen (a toast, an error text, the list again): a read error, never
+        # "no sponsor shown", which the promotion repair would act on.
+        result = WalkStuck(step=Step.PRESSED_PROXY, reason="menu_does_not_name_proxy", screens=result.screens)
     if isinstance(result, MenuSeen):
         channels = result.channels
         note = "shown" if len(channels) == 1 else ("several" if channels else "not_shown")
@@ -863,8 +914,14 @@ async def _stuck(
     *,
     alert: bool,
 ) -> str:
-    """The walk met something unknown: the job stops here (fail-closed)."""
+    """The walk met something unknown: the job stops here (fail-closed). A stuck removal alerts the
+    owner (``alert``); so does any stuck job the panel queued by itself, since no automatic job
+    starts again until the owner starts one (:func:`auto_cleanup_due`, :func:`auto_inventory_due`)
+    and nobody is looking at the page."""
+    auto_kind: str | None = None
     if same and state.job is not None:
+        if state.job.requested_by == AUTO_ACTOR:
+            auto_kind = state.job.kind
         state = replace(
             state, job=replace(state.job, state=STUCK, reason=reason[:80], step=step_name, finished_at=now)
         )
@@ -879,6 +936,10 @@ async def _stuck(
     )
     if alert:
         await enqueue_owner_alert(db, cleanup_stuck_alert(address=target, step=step_name, reason=reason))
+    elif auto_kind is not None:
+        await enqueue_owner_alert(
+            db, auto_job_stuck_alert(kind=auto_kind, target=target, step=step_name, reason=reason)
+        )
     return f"mtproxybot:stuck:{reason}"
 
 
@@ -931,7 +992,13 @@ async def _finish(
         return
     job = replace(state.job, state=final, reason=reason, finished_at=now)
     checked = now if job.kind == INVENTORY and final == DONE else state.checked_at
-    await save_state(db, replace(state, job=job, checked_at=checked))
+    # Every registration retired before this cleanup was queued was in the list it walked.
+    cleaned = (
+        job.requested_at
+        if job.kind == CLEANUP and job.mode == REMOVE and final == DONE and job.requested_at is not None
+        else state.cleaned_at
+    )
+    await save_state(db, replace(state, job=job, checked_at=checked, cleaned_at=cleaned))
     await _log(
         db,
         "sponsor.mtproxybot_finished",
@@ -962,31 +1029,41 @@ async def request_job(engine: AsyncEngine, kind: str, *, actor: str, now: dateti
         mode = LOOK if kind == INVENTORY else (REMOVE if state.removal_enabled else OBSERVE)
         job = Job(kind=kind, mode=mode, requested_by=actor[:120], requested_at=now)
         queued = now if kind == INVENTORY else state.check_queued_at
-        await save_state(db, replace(state, job=job, check_queued_at=queued))
+        cleanup_queued = now if kind == CLEANUP and mode == REMOVE else state.cleanup_queued_at
+        await save_state(
+            db, replace(state, job=job, check_queued_at=queued, cleanup_queued_at=cleanup_queued)
+        )
         await _log(db, "sponsor.mtproxybot_requested", "@MTProxybot", reasons=[kind, mode], actor=actor)
     return job
 
 
 async def auto_cleanup_due(db: AsyncConnection, now: datetime) -> bool:
-    """Whether the panel should queue a ``cleanup`` by itself now (see the module doc)."""
+    """Whether the panel should queue a ``cleanup`` by itself now (see the module doc): a
+    registration retired as ``node_gone`` at least :data:`AUTO_AFTER` ago that no cleanup covered
+    yet. Due at once when it was retired after the last cleanup was queued; one that a cleanup was
+    already queued for, which did not finish ``done``, is offered again :data:`CHECK_RETRY` later.
+    An inventory never moves these marks (the promotion check is no cleanup)."""
     state = await load_state(db)
     if not state.removal_enabled:
         return False
-    last: datetime | None = None
     if state.job is not None:
         if state.job.open or state.job.state == STUCK:
             return False
         last = state.job.finished_at or state.job.requested_at
         if last is not None and now - last < AUTO_GAP:
             return False
-    gone = select(func.count()).where(
+    newest = select(func.max(MtproxyRegistration.updated_at)).where(
         MtproxyRegistration.state == "retired",
         MtproxyRegistration.state_reason == "node_gone",
         MtproxyRegistration.updated_at <= now - AUTO_AFTER,
     )
-    if last is not None:
-        gone = gone.where(MtproxyRegistration.updated_at > last)
-    return bool((await db.execute(gone)).scalar_one())
+    if state.cleaned_at is not None:
+        newest = newest.where(MtproxyRegistration.updated_at > state.cleaned_at)
+    gone_at = (await db.execute(newest)).scalar_one()
+    if gone_at is None:
+        return False
+    queued = state.cleanup_queued_at
+    return queued is None or gone_at > queued or now - queued >= CHECK_RETRY
 
 
 def _checkable(reg: store.Reg, nodes: dict[uuid.UUID, str]) -> bool:
@@ -1050,6 +1127,15 @@ async def repair_promotions(engine: AsyncEngine, *, wanted: str, now: datetime) 
         for entry, found in zip(entries, mapped, strict=True):
             reg = found.regs[0] if found.regs else None
             if reg is None or reg.registration_id is None or not _since(entry.menu_read_at, job):
+                continue
+            if (
+                reg.promotion_set_at is not None
+                and entry.menu_read_at is not None
+                and entry.menu_read_at <= reg.promotion_set_at
+            ):
+                # The screen was read before the sponsor was last set (the sponsor loop goes first
+                # and may set it during the check): the next check, queued AUTO_AFTER after that
+                # set, reads it again and is the one acted on.
                 continue
             key = str(reg.registration_id)
             promotion = _promotion(entry, found, wanted, wanted_title)

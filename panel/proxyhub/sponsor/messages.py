@@ -65,6 +65,8 @@ def error_message(code: str) -> str:
 
 
 STEP_FA: Final[dict[str, str]] = {
+    # No message reached the bot: opening the chat failed, or Telegram refused the first message.
+    "start": "در آغاز گفتگو، پیش از آنکه پیامی به ‎@MTProxybot‎ برسد",
     "sent_newproxy": "پس از فرمان ‎/newproxy",
     "sent_address": "پس از فرستادن نشانی و پورت",
     "sent_secret": "پس از فرستادن secret",
@@ -81,11 +83,15 @@ REASON_FA: Final[dict[str, str]] = {
     "unexpected_reply": "پاسخ ربات با آنچه انتظار میرفت فرق داشت.",
     "address_refused": "ربات نشانی و پورت را نپذیرفت.",
     "no_tag_in_reply": "در پاسخ ربات tag ۳۲ رقمی پیدا نشد.",
-    "proxy_not_in_list": "این پروکسی در فهرست ‎/myproxies‎ نبود.",
+    "proxy_not_in_list": (
+        "این پروکسی در فهرست ‎/myproxies‎ نبود. اگر در ‎@MTProxybot‎ هم نیست، «ثبت دوباره» آن را از نو در ربات "
+        "ثبت میکند و اسپانسرش را میگذارد."
+    ),
     "proxy_listed_twice": "این پروکسی دو بار در فهرست ‎/myproxies‎ بود.",
     "tag_not_in_list": (
         "نشانی این پروکسی در فهرست ‎/myproxies‎ بود، ولی هیچ دکمه‌ای tag ثبت ما را نداشت "
-        "(احتمالاً ثبت قدیمی همین IP است)."
+        "(احتمالاً ثبت قدیمی همین IP است). اگر ثبت ما در ‎@MTProxybot‎ نیست، «ثبت دوباره» پروکسی را از نو "
+        "در ربات ثبت میکند."
     ),
     "menu_of_another_tag": "صفحه‌ی پروکسی tag دیگری داشت، نه tag ثبت ما؛ چیزی زده نشد.",
     "menu_of_another_proxy": "ربات منوی پروکسی دیگری را نشان داد.",
@@ -191,6 +197,29 @@ def cleanup_stuck_alert(*, address: str, step: str | None, reason: str) -> str:
         lines.append(f"کجا: {html.escape(STEP_FA.get(step, step))}")
     lines.append(f"چرا: {html.escape(list_reason(reason) or reason)}")
     lines.append("پنل چیز دیگری نمیزند. شکل صفحه‌ها (بی secret) در صفحه‌ی «اسپانسر» داشبورد ثبت شده است.")
+    return "\n".join(lines)
+
+
+AUTO_JOB_FA: Final[dict[str, str]] = {
+    "inventory": "⚠️ <b>وارسی خودکار اسپانسر روی ‎@MTProxybot‎ متوقف شد</b>",
+    "cleanup": "⚠️ <b>پاک‌سازی خودکار ‎@MTProxybot‎ متوقف شد</b>",
+}
+
+
+def auto_job_stuck_alert(*, kind: str, target: str, step: str | None, reason: str) -> str:
+    """The owner alert (HTML) when a job the panel queued by itself (the promotion check, the
+    cleanup) stopped on a screen it does not know: until the owner starts a job, neither starts
+    again by itself (decision D63)."""
+    lines = [AUTO_JOB_FA.get(kind, AUTO_JOB_FA["inventory"])]
+    if target != "@MTProxybot":
+        lines.append(f"پروکسی: <code>{html.escape(target)}</code>")
+    if step:
+        lines.append(f"کجا: {html.escape(STEP_FA.get(step, step))}")
+    lines.append(f"چرا: {html.escape(list_reason(reason) or reason)}")
+    lines.append(
+        "تا شما از صفحه‌ی «اسپانسر» داشبورد یک کار تازه با فهرست ‎@MTProxybot‎ شروع نکنید، پنل نه وارسی "
+        "اسپانسر را خودش شروع میکند نه پاک‌سازی پروکسی‌های مرده را. شکل صفحه‌ها (بی secret) همان‌جا ثبت شده است."
+    )
     return "\n".join(lines)
 
 
