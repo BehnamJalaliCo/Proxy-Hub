@@ -11,9 +11,12 @@ keeps the campaign states up to date.
 
 A pass with nothing to do for a live proxy (``idle``, or ``paused``) runs one step of the owner's
 job on @MTProxybot's own list instead (:func:`proxyhub.sponsor.inventory.step`): the inventory, the
-promotion check, or the cleanup of proxies whose node was deleted. With no job and removal on, an
-idle pass queues that cleanup by itself once a deleted node's registration waits
-(:func:`proxyhub.sponsor.inventory.auto_cleanup_due`).
+promotion check, or the cleanup of proxies whose node was deleted. With no job, an idle pass works
+on that list by itself (:meth:`SponsorReconciler._auto_job`): with removal on it queues that cleanup
+once a deleted node's registration waits (:func:`proxyhub.sponsor.inventory.auto_cleanup_due`); it
+acts on what the last promotion check read (:func:`proxyhub.sponsor.inventory.repair_promotions`);
+and it queues the next promotion check (:func:`proxyhub.sponsor.inventory.auto_inventory_due`,
+decision D63).
 """
 
 from __future__ import annotations
@@ -76,19 +79,30 @@ class SponsorReconciler(Reconciler):
         # (inventory, promotion check, cleanup), if any. A removal waits while conversations pause.
         listed = await inventory.step(deps, paused=outcome == "paused")
         if listed == "idle" and outcome == "idle":
-            return await self._auto_cleanup(engine)
+            return await self._auto_job(engine)
         return outcome if listed == "idle" else listed
 
-    async def _auto_cleanup(self, engine: AsyncEngine) -> str:
-        """Queue the cleanup of deleted nodes' proxies when one waits (no owner button needed)."""
+    async def _auto_job(self, engine: AsyncEngine) -> str:
+        """What the panel does on @MTProxybot's list with no owner button: the cleanup of deleted
+        nodes' proxies, then the repair of a sponsor the last check did not see, then the next
+        promotion check. One of them per pass."""
         now = datetime.now(UTC)
         async with engine.connect() as db:
-            due = await inventory.auto_cleanup_due(db, now)
-        if not due:
+            kind = inventory.CLEANUP if await inventory.auto_cleanup_due(db, now) else None
+        if kind is None:
+            async with engine.connect() as db:
+                wanted = await service.wanted_now(db, now)
+            again = await inventory.repair_promotions(engine, wanted=wanted, now=now)
+            if again:
+                log.info("sponsor: %d proxy sponsors are set again", len(again))
+                return "promotion_repair"
+            async with engine.connect() as db:
+                kind = inventory.INVENTORY if await inventory.auto_inventory_due(db, now) else None
+        if kind is None:
             return "idle"
         try:
-            await inventory.request_job(engine, inventory.CLEANUP, actor=inventory.AUTO_ACTOR, now=now)
+            await inventory.request_job(engine, kind, actor=inventory.AUTO_ACTOR, now=now)
         except inventory.InventoryError as exc:
-            log.info("sponsor: automatic cleanup not queued (%s)", exc.code)
+            log.info("sponsor: automatic %s not queued (%s)", kind, exc.code)
             return "idle"
-        return "cleanup_queued"
+        return f"{kind}_queued"

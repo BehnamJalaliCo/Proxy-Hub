@@ -192,3 +192,24 @@ def cleanup_stuck_alert(*, address: str, step: str | None, reason: str) -> str:
     lines.append(f"چرا: {html.escape(list_reason(reason) or reason)}")
     lines.append("پنل چیز دیگری نمیزند. شکل صفحه‌ها (بی secret) در صفحه‌ی «اسپانسر» داشبورد ثبت شده است.")
     return "\n".join(lines)
+
+
+PROMOTION_FA: Final[dict[str, str]] = {
+    "not_shown": "هیچ کانالی را اسپانسر این پروکسی نشان نمیدهد",
+    "other": "کانال دیگری را اسپانسر این پروکسی نشان میدهد",
+}
+
+
+def promotion_alert(*, address: str, promotion: str, wanted: str) -> str:
+    """The owner alert (HTML) when @MTProxybot still does not show the wanted sponsor on a live proxy
+    after the panel set it again (decision D63, proxyhub/sponsor/inventory.py)."""
+    seen = PROMOTION_FA.get(promotion, promotion)
+    return "\n".join(
+        [
+            "⚠️ <b>تبلیغ کانال روی یک پروکسی دیده نمیشود</b>",
+            f"پروکسی: <code>{html.escape(address)}</code>",
+            f"‎@MTProxybot‎ {html.escape(seen)}، با اینکه پنل ‎@{html.escape(wanted)}‎ را تنظیم کرده است.",
+            "پنل یک بار دوباره تنظیمش کرد و درست نشد. روزی یک بار باز هم امتحان میکند.",
+            "وضعیت هر پروکسی در صفحه‌ی «اسپانسر» داشبورد دیده میشود.",
+        ]
+    )
