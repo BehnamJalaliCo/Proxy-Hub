@@ -358,13 +358,30 @@ def mtproto_switch_text(old: str, new: str, choice: Choice) -> str:
     )
 
 
-def no_candidate_text(kinds: Sequence[str]) -> str:
-    what = " و ".join("سایت هدف Reality" if k == "reality" else "دامنه‌ی TLS پروکسی MTProto" for k in kinds)
-    return (
-        f"⚠️ {what} از ایران مشکل دارد، ولی هیچ‌کدام از سایت‌های نامزد در «تنظیمات» از همراه اول و رایتل "
-        "باز نبود؛ فعلاً همان قبلی میماند. چند سایت بزرگ دیگر (TLS 1.3 و HTTP/2) را به فهرست نامزدها "
-        "اضافه کنید؛ هر سایت تازه چند دقیقه بعد از ایران سنجیده میشود."
+def no_candidate_text(stuck: Sequence[tuple[str, Choice]]) -> str:
+    """The owner's alert when a target should change but no candidate can take its place, with each
+    target's own reason (a Reality target may be fine from Iran and fail only our nodes' check, or
+    have been taken off the list)."""
+    lines: list[str] = []
+    for kind, choice in stuck:
+        host = html.escape(choice.host)
+        if kind == "reality":
+            lines.append(
+                f"⚠️ سایت هدف Reality (<code>{host}</code>) {why_fa(choice)}، ولی هیچ سایت نامزد دیگری در "
+                "«تنظیمات» نیست که از همراه اول و رایتل باز باشد و nodeهای ما آن را رد نکرده باشند."
+            )
+        else:
+            lines.append(
+                f"⚠️ دامنه‌ی TLS پروکسی MTProto (<code>{host}</code>) {why_fa(choice)}، ولی هیچ‌کدام از "
+                "سایت‌های نامزد در «تنظیمات» از همراه اول و رایتل باز نبود."
+            )
+    lines.append(
+        "فعلاً همان قبلی میماند. چند سایت بزرگ دیگر (TLS 1.3 و HTTP/2) را به فهرست نامزدها اضافه کنید؛ "
+        "هر سایت تازه چند دقیقه بعد از ایران سنجیده میشود."
     )
+    if any(kind == "reality" and c.why == "node_check_failed" for kind, c in stuck):
+        lines.append("هر سایت تازه را nodeهای ما هم با همین آزمون TLS 1.3 و HTTP/2 میسنجند.")
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -381,7 +398,7 @@ async def apply_auto(db: Db, settings: TargetSettings, keys: Sequence[str], now:
     states = await load_candidates(db)
     listed = settings.candidates
     out: list[Switched] = []
-    stuck: list[str] = []
+    stuck: list[tuple[str, Choice]] = []
 
     reality = await load_reality_settings(db)
     if reality.target_mode == "auto" and not await _reality_corrupt(db):
@@ -398,7 +415,7 @@ async def apply_auto(db: Db, settings: TargetSettings, keys: Sequence[str], now:
                 db, reality_switch_text(reality.target_host, choice.host, choice, reality.transport, passed)
             )
         elif choice.why is not None:
-            stuck.append("reality")
+            stuck.append(("reality", choice))
 
     try:
         mt: MtprotoSettings | None = await load_settings(db)
@@ -418,7 +435,7 @@ async def apply_auto(db: Db, settings: TargetSettings, keys: Sequence[str], now:
             await _logged_switch(db, "mtproto", mt.tls_domain, choice)
             await enqueue_owner_alert(db, mtproto_switch_text(mt.tls_domain, choice.host, choice))
         elif choice.why is not None:
-            stuck.append("mtproto")
+            stuck.append(("mtproto", choice))
 
     # "No open candidate" is news only once the candidates have been measured (not on a fresh panel).
     measured = any(iran_view(states.get(h), keys, now).fresh for h in listed)
@@ -431,12 +448,12 @@ async def apply_auto(db: Db, settings: TargetSettings, keys: Sequence[str], now:
                 db,
                 actor=ACTOR,
                 action="target_no_candidate",
-                target=",".join(stuck),
+                target=",".join(kind for kind, _ in stuck),
                 dry_run=False,
                 allowed=False,
                 reasons=["no_open_candidate"],
-                context={"candidates": list(listed)},
-                result="the current target stays: no candidate is open from Iran",
+                context={"candidates": list(listed), "why": {kind: c.why for kind, c in stuck}},
+                result="the current target stays: no other candidate can take its place",
             )
             state["no_candidate_alert_at"] = now.isoformat()
             await save_state(db, state)

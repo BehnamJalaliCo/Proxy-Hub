@@ -183,7 +183,34 @@ def test_target_texts_are_persian_and_name_the_reason() -> None:
     )
     assert "فهرست سایت‌های نامزد" in text and "قبول کرده‌اند" in text and "WebSocket" not in text
     assert "D42" in mtproto_switch_text("www.microsoft.com", "www.mozilla.org", blocked)
-    assert "سایت هدف Reality و دامنه‌ی TLS" in no_candidate_text(["reality", "mtproto"])
+    alone = states(cand("www.mozilla.org", MCI_DOWN, MCI_DOWN))
+    stuck = choose_reality("www.mozilla.org", LISTED, alone, KEYS, T0)
+    assert not stuck.switch and stuck.host == "www.mozilla.org"
+    both = no_candidate_text([("reality", stuck), ("mtproto", stuck)])
+    assert "سایت هدف Reality (<code>www.mozilla.org</code>)" in both and "دامنه‌ی TLS پروکسی MTProto" in both
+    assert "با دست‌دادن TLS بسته بود" in both
+
+
+def test_the_no_candidate_alert_names_the_real_reason() -> None:
+    """targets-analytics:4. The current Reality target and both other candidates are open from
+    Iran, but our nodes failed all of them: the alert must not blame Iran."""
+    failed = states(
+        cand("www.mozilla.org", UP, UP, node_fail=1),
+        cand("github.com", UP, UP, node_fail=2),
+        cand("aws.amazon.com", UP, UP, node_fail=3),
+    )
+    listed = ["www.mozilla.org", "github.com", "aws.amazon.com"]
+    choice = choose_reality("www.mozilla.org", listed, failed, KEYS, T0)
+    assert (choice.switch, choice.why) == (False, "node_check_failed")
+    text = no_candidate_text([("reality", choice)])
+    assert "آزمون TLS 1.3 و HTTP/2 خود nodeها" in text and "از ایران مشکل دارد" not in text
+    assert "nodeهای ما آن را رد نکرده باشند" in text and "nodeهای ما هم با همین آزمون" in text
+    # Taken off the list (dl.google.com is not a candidate) and every candidate closed.
+    closed = states(*(cand(h, {k: "down" for k in KEYS}) for h in LISTED))
+    choice = choose_reality("dl.google.com", LISTED, closed, KEYS, T0)
+    assert choice.why == "not_a_candidate" and not choice.switch
+    text = no_candidate_text([("reality", choice)])
+    assert "فهرست سایت‌های نامزد" in text and "nodeهای ما هم با همین آزمون" not in text
 
 
 def test_target_round_planning() -> None:
