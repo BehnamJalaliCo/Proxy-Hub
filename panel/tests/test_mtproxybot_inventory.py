@@ -486,6 +486,12 @@ async def enable_removal(engine: AsyncEngine) -> None:
         assert state.job is None
 
 
+async def finish_job(engine: AsyncEngine, final: str, at: datetime, reason: str | None = None) -> None:
+    """The open job ends as the job code ends it (:func:`proxyhub.sponsor.inventory._finish`)."""
+    async with engine.begin() as db:
+        await inventory._finish(db, await inventory._locked_state(db), final, reason, at)
+
+
 async def test_removal_removes_only_dead_proxies_then_reads_the_list_again(
     engine: AsyncEngine, vault: Vault, seal_key: bytes
 ) -> None:
@@ -735,8 +741,6 @@ async def test_the_panel_queues_the_cleanup_by_itself_after_a_node_is_gone(
 ) -> None:
     """P30 (2026-11-07): with removal on, a deleted node's proxy is cleaned up with no owner button:
     once its registration has waited AUTO_AFTER, at most once per AUTO_GAP, never after a stuck job."""
-    from dataclasses import replace
-
     from test_sponsor_support import TelemtUsersProvider
 
     from proxyhub.reconcilers.sponsor import SponsorReconciler
@@ -768,18 +772,11 @@ async def test_the_panel_queues_the_cleanup_by_itself_after_a_node_is_gone(
     async with engine.connect() as db:
         assert not await inventory.auto_cleanup_due(db, later)  # a job is open
 
-    async def finish(state: str, at: datetime) -> None:
-        async with engine.begin() as db:
-            current = await inventory._locked_state(db)
-            assert current.job is not None
-            await inventory.save_state(
-                db, replace(current, job=replace(current.job, state=state, finished_at=at))
-            )
-
-    await finish(inventory.DONE, now)
+    await finish_job(engine, inventory.DONE, now)
     async with engine.connect() as db:
-        # The registration is older than that job: nothing new to clean up, even after the gap.
+        # The registration is older than that cleanup: nothing new to clean up, ever.
         assert not await inventory.auto_cleanup_due(db, now + inventory.AUTO_GAP + timedelta(hours=1))
+        assert not await inventory.auto_cleanup_due(db, now + inventory.CHECK_RETRY + timedelta(hours=1))
     async with engine.begin() as db:
         await db.execute(
             text("UPDATE mtproxy_registrations SET updated_at = now() WHERE id = :i"), {"i": ids["dead"]}
@@ -787,9 +784,68 @@ async def test_the_panel_queues_the_cleanup_by_itself_after_a_node_is_gone(
     async with engine.connect() as db:
         assert not await inventory.auto_cleanup_due(db, later)  # gone after it, but within the gap
         assert await inventory.auto_cleanup_due(db, now + inventory.AUTO_GAP + timedelta(minutes=1))
-    await finish(inventory.STUCK, now)
+    await finish_job(engine, inventory.STUCK, now)
     async with engine.connect() as db:
         assert not await inventory.auto_cleanup_due(db, now + timedelta(days=1))  # the owner looks first
+
+
+async def test_a_promotion_check_does_not_hide_a_dead_proxy_from_the_automatic_cleanup(
+    engine: AsyncEngine, vault: Vault, seal_key: bytes
+) -> None:
+    """D63 queues inventories too: one that ran just after a node went (its sponsor check, the daily
+    one) must not count as the cleanup of that node's proxy. A cleanup that did not finish done is
+    offered again CHECK_RETRY later, and the promotion check is not starved meanwhile."""
+    from test_sponsor_support import TelemtUsersProvider
+
+    from proxyhub.reconcilers.sponsor import SponsorReconciler
+
+    ids = await seed(engine, seal_key)
+    await seed_connected(engine, vault, port=closed_port(), mtproxybot_id=BOT_ID)
+    await enable_removal(engine)
+    now = datetime.now(UTC)
+    gone_at = now - timedelta(hours=3)
+    async with engine.begin() as db:
+        await db.execute(
+            text("UPDATE mtproxy_registrations SET updated_at = :t WHERE id = :i"),
+            {"t": gone_at, "i": ids["dead"]},
+        )
+        # Another proxy's sponsor was set an hour ago: the next promotion check is due.
+        await db.execute(
+            text("UPDATE sponsor_flows SET promotion_set_at = :t WHERE registration_id = :i"),
+            {"t": now - timedelta(hours=1), "i": ids["live"]},
+        )
+    # The promotion check queued before the cleanup was due, and finished after the node went.
+    queued_at = gone_at - timedelta(minutes=2)
+    await inventory.request_job(engine, inventory.INVENTORY, actor=inventory.AUTO_ACTOR, now=queued_at)
+    await finish_job(engine, inventory.DONE, gone_at + timedelta(minutes=8))
+    async with engine.connect() as db:
+        assert await inventory.auto_cleanup_due(db, now)
+    loop = SponsorReconciler(
+        vault_factory=lambda: vault,
+        provider=lambda: TelemtUsersProvider(seal_key),
+        options=ClientOptions(endpoint=Endpoint("127.0.0.1", closed_port()), deadline_s=3),
+    )
+    assert await loop.step(engine) == "cleanup_queued"
+    cleanup = await job(engine)
+    assert cleanup.requested_at is not None
+    assert (await state_of(engine)).cleanup_queued_at == cleanup.requested_at
+
+    # It ends failed: not again within the hours after it (the check goes first), again later.
+    t = cleanup.requested_at
+    await finish_job(engine, inventory.FAILED, t + timedelta(minutes=3), "no_reply")
+    gap = t + inventory.AUTO_GAP + timedelta(minutes=5)
+    async with engine.connect() as db:
+        assert not await inventory.auto_cleanup_due(db, gap)
+        assert await inventory.auto_inventory_due(db, gap)
+        assert await inventory.auto_cleanup_due(db, t + inventory.CHECK_RETRY + timedelta(minutes=1))
+    # Done: what it covered is never offered again.
+    retry_at = t + inventory.CHECK_RETRY + timedelta(minutes=1)
+    await inventory.request_job(engine, inventory.CLEANUP, actor=inventory.AUTO_ACTOR, now=retry_at)
+    await finish_job(engine, inventory.DONE, retry_at + timedelta(minutes=5), "nothing_to_remove")
+    state = await state_of(engine)
+    assert state.cleaned_at == retry_at and state.cleanup_queued_at == retry_at
+    async with engine.connect() as db:
+        assert not await inventory.auto_cleanup_due(db, retry_at + timedelta(days=2))
 
 
 # --- the promotion check the panel queues, and what it does with it (decision D63) -------------------------

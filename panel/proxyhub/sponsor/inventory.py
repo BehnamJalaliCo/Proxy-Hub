@@ -5,9 +5,10 @@ machines in proxyhub/sponsor/botlist.py; this module keeps the job, the entries 
 One job at a time (settings row :data:`KEY`), started by the owner's button or the CLI
 (``python -m proxyhub.sponsor``), or **by the panel itself** (P30, 2026-11-07: the owner should not
 have to press anything when a node goes): with removal on, a ``cleanup`` is queued when a
-registration was retired as ``node_gone`` at least :data:`AUTO_AFTER` ago and after the last job
-(:func:`auto_cleanup_due`), at most once per :data:`AUTO_GAP`, never after a job that got stuck
-(the owner looks at those first). The **promotion check** is queued the same way (decision D63,
+registration was retired as ``node_gone`` at least :data:`AUTO_AFTER` ago and after the last
+cleanup was queued (:func:`auto_cleanup_due`; one whose cleanup did not finish ``done`` is offered
+again :data:`CHECK_RETRY` later), at most one job per :data:`AUTO_GAP`, never after a job that got
+stuck (the owner looks at those first). The **promotion check** is queued the same way (decision D63,
 2026-11-12: what the dashboard said of each proxy's sponsor was five days old, read before the bot's
 titles were understood, and two proxies had never been read): an ``inventory`` once per
 :data:`CHECK_EVERY`, and :data:`AUTO_AFTER` after a sponsor was set (:func:`auto_inventory_due`).
@@ -261,8 +262,10 @@ class BotListState:
     ``observation``: what the latest observe run saw on a dead proxy's screen. ``screens``: the
     current job's screens as shapes (no secret), at most :data:`MAX_SCREENS`. ``check_queued_at``
     and ``checked_at``: when an inventory was last queued and last finished ``done`` (the promotion
-    check). ``repaired_job``: the ``requested_at`` of the inventory whose reads were acted on.
-    ``repairs``: by registration id (:class:`Repair`)."""
+    check). ``cleanup_queued_at`` and ``cleaned_at``: when a removing cleanup was last queued, and
+    when the last one that finished ``done`` was queued (what it covered). ``repaired_job``: the
+    ``requested_at`` of the inventory whose reads were acted on. ``repairs``: by registration id
+    (:class:`Repair`)."""
 
     removal_enabled: bool = False
     job: Job | None = None
@@ -271,6 +274,8 @@ class BotListState:
     screens: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     check_queued_at: datetime | None = None
     checked_at: datetime | None = None
+    cleanup_queued_at: datetime | None = None
+    cleaned_at: datetime | None = None
     repaired_job: datetime | None = None
     repairs: dict[str, Repair] = field(default_factory=dict)
 
@@ -283,6 +288,8 @@ class BotListState:
             "screens": list(self.screens),
             "check_queued_at": iso(self.check_queued_at),
             "checked_at": iso(self.checked_at),
+            "cleanup_queued_at": iso(self.cleanup_queued_at),
+            "cleaned_at": iso(self.cleaned_at),
             "repaired_job": iso(self.repaired_job),
             "repairs": {k: v.to_json() for k, v in self.repairs.items()},
         }
@@ -304,6 +311,8 @@ class BotListState:
             else (),
             check_queued_at=_time(value.get("check_queued_at")),
             checked_at=_time(value.get("checked_at")),
+            cleanup_queued_at=_time(value.get("cleanup_queued_at")),
+            cleaned_at=_time(value.get("cleaned_at")),
             repaired_job=_time(value.get("repaired_job")),
             repairs=_repairs(value.get("repairs")),
         )
@@ -961,7 +970,13 @@ async def _finish(
         return
     job = replace(state.job, state=final, reason=reason, finished_at=now)
     checked = now if job.kind == INVENTORY and final == DONE else state.checked_at
-    await save_state(db, replace(state, job=job, checked_at=checked))
+    # Every registration retired before this cleanup was queued was in the list it walked.
+    cleaned = (
+        job.requested_at
+        if job.kind == CLEANUP and job.mode == REMOVE and final == DONE and job.requested_at is not None
+        else state.cleaned_at
+    )
+    await save_state(db, replace(state, job=job, checked_at=checked, cleaned_at=cleaned))
     await _log(
         db,
         "sponsor.mtproxybot_finished",
@@ -992,31 +1007,41 @@ async def request_job(engine: AsyncEngine, kind: str, *, actor: str, now: dateti
         mode = LOOK if kind == INVENTORY else (REMOVE if state.removal_enabled else OBSERVE)
         job = Job(kind=kind, mode=mode, requested_by=actor[:120], requested_at=now)
         queued = now if kind == INVENTORY else state.check_queued_at
-        await save_state(db, replace(state, job=job, check_queued_at=queued))
+        cleanup_queued = now if kind == CLEANUP and mode == REMOVE else state.cleanup_queued_at
+        await save_state(
+            db, replace(state, job=job, check_queued_at=queued, cleanup_queued_at=cleanup_queued)
+        )
         await _log(db, "sponsor.mtproxybot_requested", "@MTProxybot", reasons=[kind, mode], actor=actor)
     return job
 
 
 async def auto_cleanup_due(db: AsyncConnection, now: datetime) -> bool:
-    """Whether the panel should queue a ``cleanup`` by itself now (see the module doc)."""
+    """Whether the panel should queue a ``cleanup`` by itself now (see the module doc): a
+    registration retired as ``node_gone`` at least :data:`AUTO_AFTER` ago that no cleanup covered
+    yet. Due at once when it was retired after the last cleanup was queued; one that a cleanup was
+    already queued for, which did not finish ``done``, is offered again :data:`CHECK_RETRY` later.
+    An inventory never moves these marks (the promotion check is no cleanup)."""
     state = await load_state(db)
     if not state.removal_enabled:
         return False
-    last: datetime | None = None
     if state.job is not None:
         if state.job.open or state.job.state == STUCK:
             return False
         last = state.job.finished_at or state.job.requested_at
         if last is not None and now - last < AUTO_GAP:
             return False
-    gone = select(func.count()).where(
+    newest = select(func.max(MtproxyRegistration.updated_at)).where(
         MtproxyRegistration.state == "retired",
         MtproxyRegistration.state_reason == "node_gone",
         MtproxyRegistration.updated_at <= now - AUTO_AFTER,
     )
-    if last is not None:
-        gone = gone.where(MtproxyRegistration.updated_at > last)
-    return bool((await db.execute(gone)).scalar_one())
+    if state.cleaned_at is not None:
+        newest = newest.where(MtproxyRegistration.updated_at > state.cleaned_at)
+    gone_at = (await db.execute(newest)).scalar_one()
+    if gone_at is None:
+        return False
+    queued = state.cleanup_queued_at
+    return queued is None or gone_at > queued or now - queued >= CHECK_RETRY
 
 
 def _checkable(reg: store.Reg, nodes: dict[uuid.UUID, str]) -> bool:
