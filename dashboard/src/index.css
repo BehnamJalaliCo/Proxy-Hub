@@ -251,6 +251,13 @@
     background: transparent;
   }
 
+  /* A grid item may shrink below its content (a chart, a long address): without this a single wide
+     child made whole cards wider than a phone (/stats, /sponsor, /sources). Zero specificity, so any
+     min-w-* utility still wins. */
+  :where(.grid) > * {
+    min-width: 0;
+  }
+
   /* Tokens, secrets, IDs and codes are Latin text inside a right-to-left page. */
   .ltr {
     direction: ltr;
@@ -283,17 +290,20 @@
       radial-gradient(52rem 26rem at -10% 0%, var(--ph-bg-glow-2), transparent 60%),
       var(--ph-bg);
   }
+  /* Absolute (not fixed): a fixed, masked layer under the glass panels is not painted below the
+     first screen by Chromium on a tall page. The lattice belongs to the top of the page anyway. */
   .ph-backdrop::before {
     content: "";
-    position: fixed;
-    inset: 0;
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: min(100%, 64rem);
     z-index: -1;
     pointer-events: none;
     background-image: var(--ph-pattern);
     background-size: 72px 72px;
     opacity: var(--ph-pattern-opacity);
-    -webkit-mask-image: radial-gradient(120% 70% at 85% 0%, #000 0%, transparent 72%);
-    mask-image: radial-gradient(120% 70% at 85% 0%, #000 0%, transparent 72%);
+    -webkit-mask-image: radial-gradient(120% 90% at 85% 0%, #000 0%, transparent 72%);
+    mask-image: radial-gradient(120% 90% at 85% 0%, #000 0%, transparent 72%);
   }
 
   /* The card material: a surface lit from above, a hairline, and a thin sheen on its top edge. */
