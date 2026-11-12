@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
 from proxyhub.cloudflare import TOKEN_SECRET as TOKEN_SECRET  # re-exported (the vault entry name)
 from proxyhub.cloudflare.client import CloudflareClient, CloudflareError, Zone, valid_token_format
+from proxyhub.cloudflare.delegation import sync_baselines
 from proxyhub.cloudflare.deletion import (
     CLAIM_TTL,
     DeletionContext,
@@ -248,7 +249,11 @@ async def store_zones(db: Db, zones: Sequence[Zone], dns_edit: dict[str, bool], 
             .returning(CfZone.name)
         )
     ).scalars()
-    return list(gone)
+    names = list(gone)
+    # After the zone rows (the order record_lookup locks them in): the name servers each zone must
+    # be delegated to are the ones Cloudflare assigned it.
+    await sync_baselines(db, zones, now)
+    return names
 
 
 async def set_token(

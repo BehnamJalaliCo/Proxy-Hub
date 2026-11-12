@@ -9,8 +9,9 @@ panel looks itself:
   query at Cloudflare's public resolver (1.1.1.1, JSON API at ``cloudflare-dns.com/dns-query``).
   After a bad answer it is looked up again 30 minutes later.
 * **Result** of one lookup: ``ok`` (every name server is ``*.ns.cloudflare.com`` and, once known,
-  the same set as before), ``nxdomain``, ``not_cloudflare``, ``ns_changed`` (lost), or
-  ``no_answer``, ``servfail``, ``error`` (inconclusive: they never decide anything).
+  the pair Cloudflare assigned the zone, read with the zone list; before that, the first good
+  lookup's), ``nxdomain``, ``not_cloudflare``, ``ns_changed`` (lost), or ``no_answer``,
+  ``servfail``, ``error`` (inconclusive: they never decide anything).
 * **Verdict** ``lost`` only when the two latest conclusive lookups since the domain's last pool
   change are both lost, at least 30 minutes apart, and both younger than 6 hours.
 * **Action** on ``lost``: the domain leaves rotation like a filtered one
@@ -40,6 +41,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession
 
 from proxyhub.agent_api.validation import valid_domain
+from proxyhub.cloudflare.client import Zone
 from proxyhub.cloudflare.pool import PoolState
 from proxyhub.cloudflare.rotation import GONE, NO_STANDBY_FA, PoolZone, load_zones, move, take_out
 from proxyhub.db.models_fleet import DelegationCheck, DelegationState
@@ -304,6 +306,38 @@ async def _upsert_state(db: Db, zone_id: str, now: datetime, **values: Any) -> N
             index_elements=[DelegationState.zone_id], set_={"updated_at": now, **values}
         )
     )
+
+
+async def sync_baselines(db: Db, zones: Sequence[Zone], now: datetime) -> None:
+    """Every zone's expected name servers are the pair Cloudflare assigned it (stored with the zones,
+    in their transaction, after the zone rows). A pair learned from the first lookup could be another
+    account's, still cached by the resolver right after a domain moved between Cloudflare accounts,
+    and every correct answer would then read ``ns_changed``. Only an active zone with a full
+    Cloudflare pair is taken; a missing or odd answer from Cloudflare never replaces a baseline."""
+    stored = {
+        r.zone_id: list(r.baseline_ns) if r.baseline_ns else None
+        for r in (await db.execute(select(DelegationState.zone_id, DelegationState.baseline_ns))).all()
+    }
+    for zone in sorted(zones, key=lambda z: z.id):
+        pair = list(zone.name_servers)
+        if zone.status != "active" or not pair or not all(ns.endswith(CF_NS_SUFFIX) for ns in pair):
+            continue
+        before = stored.get(zone.id)
+        if before is not None and sorted(before) == pair:
+            continue
+        await _upsert_state(db, zone.id, now, baseline_ns=pair, baseline_at=now)
+        if before is not None:
+            await log_action(
+                db,
+                actor=ACTOR,
+                action="domain_delegation_baseline",
+                target=zone.name,
+                dry_run=False,
+                allowed=True,
+                reasons=["cloudflare_assigned"],
+                context={"from": sorted(before), "to": pair},
+                result="expected name servers taken from Cloudflare",
+            )
 
 
 async def record_lookup(

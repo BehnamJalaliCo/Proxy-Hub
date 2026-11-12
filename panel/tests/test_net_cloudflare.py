@@ -147,6 +147,13 @@ def test_parse_zone_and_record_shapes() -> None:
     auto = parse_record(ZONE_ID, cf_record_json("x.example.com", "198.51.100.4", ttl=1, proxied=True))
     assert auto.ttl == 1 and auto.proxied
     assert _codes(CF_INVALID_TOKEN_VERIFY) == (1000,)
+    # The name servers Cloudflare assigned the zone: normalised, odd entries dropped.
+    assert zone.name_servers == ("bob.ns.cloudflare.com", "lola.ns.cloudflare.com")
+    raw = cf_zone_json()
+    raw["name_servers"] = ["LOLA.ns.cloudflare.com.", 5, "not a host", "bob.ns.cloudflare.com"]
+    assert parse_zone(raw).name_servers == ("bob.ns.cloudflare.com", "lola.ns.cloudflare.com")
+    raw["name_servers"] = None
+    assert parse_zone(raw).name_servers == ()
 
 
 def test_token_format_check_runs_before_any_network_call() -> None:
