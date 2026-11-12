@@ -127,6 +127,15 @@ def test_only_panel_containers_are_labelled_for_log_shipping() -> None:
     assert not any("docker.sock" in str(v) for v in services["alloy"].get("volumes", []))
 
 
+def test_every_container_log_rotates() -> None:
+    """The json-file default never rotates and can fill the panel disk. Rotation must not add the
+    io.proxyhub.logs label to anything but the panel containers (checked above)."""
+    for name, svc in _compose()["services"].items():
+        logging = svc.get("logging") or {}
+        assert logging.get("driver") == "json-file", name
+        assert logging.get("options", {}).get("max-size") and logging["options"].get("max-file"), name
+
+
 def test_new_secrets_are_files_created_by_ensure_secrets() -> None:
     """Rule 3: every compose secret is a file that ensure_secrets.sh creates; none comes from env."""
     compose = _compose()
