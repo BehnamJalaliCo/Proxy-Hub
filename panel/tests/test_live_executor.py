@@ -565,19 +565,25 @@ async def test_list_and_events_follow_the_contract(world: LiveWorld) -> None:
     gone = await world.add_node(state="deleted", is_test=False)
     await world.rows("UPDATE nodes SET deleted_at = now() - interval '8 days' WHERE id = :n", n=gone)
     await agent_row(world, node_id, at=datetime.now(UTC), report=True)
-    for name, conns in (("alice", 7), ("bob", 5)):
+    # carol's 800 are from a report 20 minutes ago (Telemt down since, or a user no longer
+    # exported): not "connections now".
+    for name, conns, ago in (("alice", 7, 0), ("bob", 5, 0), ("carol", 800, 20)):
         await world.rows(
             "INSERT INTO telemt_users (id, node_id, name, secret_sealed, enabled, last_current_connections, "
             "last_stats_at) VALUES (gen_random_uuid(), :n, :name, decode(repeat('00', 45), 'hex'), true, :c, "
-            "now())",
+            "now() - make_interval(mins => :ago))",
             n=node_id,
             name=name,
             c=conns,
+            ago=ago,
         )
     async with api_client(world) as c:
         nodes = (await c.get("/api/nodes")).json()
         events = (await c.get(f"/api/nodes/{node_id}/events")).json()
         missing = await c.get(f"/api/nodes/{uuid.uuid4()}/events")
+        await world.rows("UPDATE telemt_users SET last_stats_at = now() - interval '20 minutes'")
+        silent = (await c.get("/api/nodes")).json()
+    assert silent[0]["agent"]["connections"] is None  # the node stopped reporting: not known
     assert [n["id"] for n in nodes] == [str(node_id)]  # deleted over a week ago: not listed
     node = nodes[0]
     assert set(node) == {

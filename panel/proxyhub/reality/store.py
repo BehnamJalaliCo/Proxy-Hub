@@ -33,6 +33,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from proxyhub.acme.store import Material, material
+from proxyhub.agent_api.validation import XRAY_API_PORT  # Telemt may not use it
 from proxyhub.cloudflare.service import NodeNames, node_names
 from proxyhub.db.models import Node
 from proxyhub.db.models_agent import AgentNode, TelemtNodeConfig
@@ -49,7 +50,6 @@ log = logging.getLogger(__name__)
 # Nodes that keep serving their scope's configs (a burned or draining node until it is gone: its
 # clients may still reach it, and the slot's replacement serves the same configs).
 SERVE_STATES: Final = frozenset({S.READY, S.UNHEALTHY, S.REPAIRING, S.BURNED, S.DRAINING})
-XRAY_API_PORT: Final = 10085  # node-image/files/agent-xray.json; Telemt may not use it
 # The first agent that renders the ws_tls inbound; an older one would refuse the whole document.
 WS_TLS_AGENT: Final = (0, 3, 0)
 # The first agent that renders the XHTTP inbound (an older one would refuse the "xhttp" key).
@@ -96,9 +96,19 @@ class NodeView:
     ipv4: str | None
     location: str
     ready_at: datetime | None
+    created_at: datetime | None = None
 
 
-_NODE_COLS = (Node.id, Node.name, Node.slot, Node.state, Node.ipv4, Node.location, Node.ready_at)
+_NODE_COLS = (
+    Node.id,
+    Node.name,
+    Node.slot,
+    Node.state,
+    Node.ipv4,
+    Node.location,
+    Node.ready_at,
+    Node.created_at,
+)
 
 
 def _node(r: Any) -> NodeView:
@@ -110,6 +120,7 @@ def _node(r: Any) -> NodeView:
         ipv4=node_ipv4(r.ipv4),
         location=r.location,
         ready_at=r.ready_at,
+        created_at=r.created_at,
     )
 
 

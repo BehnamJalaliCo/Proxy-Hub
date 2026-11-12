@@ -34,6 +34,7 @@ from proxyhub.reality.keys import public_from_private
 from proxyhub.reality.links import provide_links
 from proxyhub.reality.policy import (
     MOVE_GRACE,
+    RESUME_GRACE,
     create_configs,
     end_configs,
     ensure_keys,
@@ -41,7 +42,7 @@ from proxyhub.reality.policy import (
     renew_configs,
     retarget_scopes,
 )
-from proxyhub.reality.settings import GB, RealitySettings, save_reality_settings
+from proxyhub.reality.settings import GB, RealitySettings, load_state, save_reality_settings, save_state
 from proxyhub.reality.store import store_xray_report, xray_section
 from proxyhub.reconcilers.reality import RealityReconciler
 from proxyhub.telegram.store import save_channel
@@ -288,6 +289,9 @@ async def test_a_slot_links_flag_follows_the_server_that_serves_it_now(world: Wo
     await world.report(new, now=datetime.now(UTC))
     await world.rows("UPDATE nodes SET state = 'deleted' WHERE id = :n", n=old)
     assert flags_of(await flags()) == {"🇺🇸"}
+    # The only node of the slot misses heartbeats for a while: still the US server, not Finland.
+    await world.rows("UPDATE nodes SET state = 'unhealthy' WHERE id = :n", n=new)
+    assert flags_of(await flags()) == {"🇺🇸"}
 
 
 def flags_of(fragments: set[str]) -> set[str]:
@@ -400,6 +404,92 @@ NEW_TARGET = ("www.example.org:443", "www.example.org")
 async def _loop(world: World) -> None:
     async with world.engine.begin() as conn:
         await RealityReconciler().run_once(conn)
+
+
+async def _outage(world: World, *nodes: uuid.UUID) -> None:
+    """The panel was down for three hours: the configs' ends passed meanwhile, the nodes' last
+    reports are from before it, and the nodes loop has marked them unhealthy (heartbeat lost)."""
+    await world.rows(
+        "UPDATE reality_configs SET created_at = now() - interval '2 days', "
+        "expires_at = now() - interval '1 hour'"
+    )
+    for n in nodes:
+        await world.rows(
+            "UPDATE reality_node_status SET reported_at = now() - interval '3 hours' WHERE node_id = :n", n=n
+        )
+        await world.rows("UPDATE nodes SET state = 'unhealthy' WHERE id = :n", n=n)
+
+
+async def _back(world: World, node: uuid.UUID, *, target_ok: bool = True) -> None:
+    """The node's agent reaches the panel again; the nodes loop moves it back to READY."""
+    await world.report(node, now=datetime.now(UTC), target_ok=target_ok)
+    await world.rows("UPDATE nodes SET state = 'ready' WHERE id = :n", n=node)
+
+
+async def _ended_ids(world: World) -> set[str]:
+    rows = await world.rows("SELECT target FROM actions_log WHERE action = 'reality_config_ended'")
+    return {r.target for r in rows}
+
+
+async def test_a_config_whose_end_passed_while_the_panel_was_down_is_renewed_once_its_node_reports(
+    world: World,
+) -> None:
+    """reality:4. The first tick after a long panel outage sees no fresh report from any node: a
+    config that only its time ends waits for its node instead of expiring for good."""
+    node = await world.node(slot=3)
+    await world.report(node, now=datetime.now(UTC))
+    await _loop(world)
+    [c] = await _configs(world)
+    await _outage(world, node)
+    await _loop(world)
+    [held] = await _configs(world)
+    assert held.status == "active" and await _ended_ids(world) == set()
+    await _back(world, node)
+    await _loop(world)
+    after = {r.id: r for r in await _configs(world)}[c.id]  # (a staggered second one may be made)
+    life = timedelta(hours=reality_settings().cap_hours)
+    assert (after.id, after.uuid, after.status) == (c.id, c.uuid, "active")
+    assert after.expires_at > datetime.now(UTC) + life - timedelta(minutes=5)  # renewed from now
+    assert await _ended_ids(world) == set()
+
+
+@pytest.mark.parametrize("case", ["target_failing", "never_reports", "renew_off", "not_blind"])
+async def test_a_held_config_still_ends_when_it_should(world: World, case: str) -> None:
+    node = await world.node(slot=3)
+    other = await world.node(slot=4, ipv4="203.0.113.44")
+    for n in (node, other):
+        await world.report(n, now=datetime.now(UTC))
+    if case == "renew_off":
+        async with world.engine.begin() as conn:
+            await save_reality_settings(conn, reality_settings(renew=False))
+    await _loop(world)
+    configs = {r.slot: r for r in await _configs(world)}
+    assert set(configs) == {3, 4}
+    await _outage(world, *((node,) if case == "not_blind" else (node, other)))
+    if case == "not_blind":  # only this node is silent; the panel sees the other one
+        await world.rows("UPDATE reality_configs SET expires_at = now() + interval '1 day' WHERE slot = 4")
+        await _loop(world)
+        assert f"reality:{configs[3].id}" in await _ended_ids(world)
+        return
+    await _loop(world)
+    if case == "renew_off":  # as before: it ends at its time
+        assert await _ended_ids(world) == {f"reality:{configs[3].id}", f"reality:{configs[4].id}"}
+        return
+    assert await _ended_ids(world) == set()
+    await _back(world, other)
+    if case == "target_failing":  # the fresh report shows the config cannot work: it ends
+        await _back(world, node, target_ok=False)
+        await _loop(world)
+        assert f"reality:{configs[3].id}" in await _ended_ids(world)
+        return
+    await _loop(world)  # slot 4 is renewed; slot 3's node has not reported: still held
+    assert await _ended_ids(world) == set()
+    async with world.engine.begin() as conn:
+        state = await load_state(conn)
+        state["blind_at"] = (datetime.now(UTC) - RESUME_GRACE - timedelta(seconds=1)).isoformat()
+        await save_state(conn, state)
+    await _loop(world)
+    assert await _ended_ids(world) == {f"reality:{configs[3].id}"}
 
 
 async def test_a_new_scope_gets_its_key_first_and_a_config_once_the_node_confirmed_the_target(
@@ -979,6 +1069,20 @@ async def test_dashboard_api(world: World) -> None:
             body = (await c.get("/api/reality")).json()
             assert body["settings"]["cap_hours"] == 48 and body["settings"]["port"] == 443
             assert body["totals"]["active"] == 1 and body["totals"]["nodes_enabled"] == 1
+            # reality:3. A deleted server's last status row is not counted; a stale report is not up.
+            gone = await world.node(slot=11, ipv4="203.0.113.111")
+            await world.report(gone, now=datetime.now(UTC))
+            await world.rows("UPDATE nodes SET state = 'deleted' WHERE id = :n", n=gone)
+            totals = (await c.get("/api/reality")).json()
+            assert (totals["totals"]["nodes_enabled"], totals["totals"]["nodes_up"]) == (1, 1)
+            assert str(gone) not in {n["node_id"] for n in totals["nodes"]}
+            await world.rows(
+                "UPDATE reality_node_status SET reported_at = now() - interval '1 hour' WHERE node_id = :n",
+                n=node,
+            )
+            totals = (await c.get("/api/reality")).json()["totals"]
+            assert (totals["nodes_enabled"], totals["nodes_up"]) == (1, 0)
+            await world.report(node, now=datetime.now(UTC))
             [cfg] = body["configs"]
             assert (
                 cfg["status"] == "active"

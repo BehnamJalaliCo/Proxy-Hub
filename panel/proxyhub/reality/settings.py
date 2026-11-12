@@ -40,9 +40,12 @@ import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from proxyhub.agent_api.validation import valid_domain
+from proxyhub.db.models import Setting
 from proxyhub.telegram.store import get_setting, put_setting
 
 log = logging.getLogger(__name__)
@@ -129,6 +132,24 @@ async def load_reality_settings(db: Db) -> RealitySettings:
     except ValidationError:
         log.warning("reality: stored settings are invalid; using the defaults")
         return RealitySettings()
+
+
+async def load_reality_settings_for_update(db: Db) -> RealitySettings | None:
+    """Lock the row (created with the defaults if missing) and read it again: a loop that writes the
+    whole object back sees an owner's save that landed after its own plain read. ``None`` if the
+    stored value does not validate."""
+    await db.execute(
+        insert(Setting)
+        .values(key=SETTINGS_KEY, value=RealitySettings().model_dump(mode="json"))
+        .on_conflict_do_nothing(index_elements=[Setting.key])
+    )
+    value = (
+        await db.execute(select(Setting.value).where(Setting.key == SETTINGS_KEY).with_for_update())
+    ).scalar_one()
+    try:
+        return RealitySettings.model_validate(value)
+    except ValidationError:
+        return None
 
 
 async def save_reality_settings(db: Db, settings: RealitySettings) -> None:

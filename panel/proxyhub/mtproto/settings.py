@@ -31,7 +31,7 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
-from proxyhub.agent_api.validation import valid_domain
+from proxyhub.agent_api.validation import XRAY_API_PORT, valid_domain
 from proxyhub.db.models import Setting
 
 MTPROTO_KEY = "mtproto"
@@ -39,8 +39,9 @@ DEFAULT_PORT = 8443
 DEFAULT_TLS_DOMAIN = "www.microsoft.com"
 # Never a proxy port: SSH (22, dropped by the node firewall), Xray VLESS Reality (443 on every node),
 # Xray VLESS + XHTTP + REALITY (2083, proxyhub/reality/settings.py XHTTP_PORT), Telemt's own
-# metrics and API (9090/9091, loopback only and dropped by the node firewall).
-FORBIDDEN_PORTS = frozenset({22, 443, 2083, 9090, 9091})
+# metrics and API (9090/9091, loopback only and dropped by the node firewall), Xray's own API
+# (10085, loopback only and dropped by the node firewall; a Telemt there also turns Xray off).
+FORBIDDEN_PORTS = frozenset({22, 443, 2083, 9090, 9091, XRAY_API_PORT})
 
 Mode = Literal["tls", "secure", "classic"]
 TargetMode = Literal["auto", "manual"]

@@ -34,6 +34,7 @@ from proxyhub.probes.globalping import GlobalpingClient, RateLimit, parse_http
 from proxyhub.probes.types import Measurement
 from proxyhub.reality.settings import RealitySettings, load_reality_settings, save_reality_settings
 from proxyhub.reconcilers.targets import TargetsReconciler
+from proxyhub.targets import service
 from proxyhub.targets.service import (
     TargetRound,
     apply_auto,
@@ -210,6 +211,52 @@ async def test_auto_mode_switches_targets_logs_and_tells_the_owner(engine: Async
     # Settled: the next pass changes nothing.
     async with engine.begin() as conn:
         assert await apply_auto(conn, P15, KEYS, now) == []
+
+
+async def test_an_owner_save_during_a_reality_switch_is_kept(
+    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sweep-concurrency:5. The owner turns Reality off (and changes the transport) after the loop
+    read the settings and before it saves its switch: the owner's save stays, nothing switches on
+    that tick, the MTProto branch still runs, and the next tick switches on the owner's values."""
+    now = datetime.now(UTC)
+    async with engine.begin() as conn:
+        await set_owner_chat(conn, 424242, now)
+        await store_round(
+            conn,
+            site_round(now - timedelta(hours=7), ["www.mozilla.org", "github.com"], ["www.microsoft.com"]),
+        )
+        await store_round(
+            conn, site_round(now - timedelta(hours=1), ["www.mozilla.org"], ["www.microsoft.com"])
+        )
+    owner = RealitySettings(enabled=False, transport="reality")
+    real_corrupt = service._reality_corrupt
+
+    async def owner_saves_meanwhile(db: Any) -> bool:
+        """Runs right after the loop's plain read of the settings: the owner's PUT commits now."""
+        async with engine.begin() as other:
+            await save_reality_settings(other, owner)
+        return await real_corrupt(db)
+
+    monkeypatch.setattr(service, "_reality_corrupt", owner_saves_meanwhile)
+    async with engine.begin() as conn:
+        switched = await apply_auto(conn, P15, KEYS, now)
+    assert [(s.kind, s.new) for s in switched] == [("mtproto", "www.mozilla.org")]
+    async with engine.connect() as conn:
+        stored = await load_reality_settings(conn)
+        alerts = (await conn.execute(text("SELECT payload FROM outbox WHERE kind = 'alert'"))).scalars().all()
+    assert (stored.enabled, stored.transport, stored.target_host) == (False, "reality", "dl.google.com")
+    assert [a["action"] + ":" + a["target"] for a in await actions(engine)] == [
+        "target_auto_switched:mtproto"
+    ]
+    assert len(alerts) == 1 and "MTProto" in alerts[0]["text"]
+    monkeypatch.setattr(service, "_reality_corrupt", real_corrupt)
+    async with engine.begin() as conn:
+        switched = await apply_auto(conn, P15, KEYS, now)
+    assert [(s.kind, s.new) for s in switched] == [("reality", "www.mozilla.org")]
+    async with engine.connect() as conn:
+        stored = await load_reality_settings(conn)
+    assert (stored.enabled, stored.transport, stored.target_host) == (False, "reality", "www.mozilla.org")
 
 
 async def test_manual_mode_never_switches_and_no_open_site_is_told_daily(engine: AsyncEngine) -> None:

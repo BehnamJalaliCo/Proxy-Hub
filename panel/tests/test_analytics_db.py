@@ -420,6 +420,9 @@ async def test_usage_agg_is_stored_folded_and_runs_add_up(engine: AsyncEngine) -
         u = await report.usage(conn, now)
     assert u["has_data"] and u["days"][-1]["unique_users"] == 1300  # max of the runs of one node
     assert u["by_country"][0]["key"] == "IR" and u["per_user_mb"]["p50"] == pytest.approx(35.5)
+    # Both runs counted the same 1200 Iranian users: once, as in the daily total; bytes add up.
+    ir = u["by_country"][0]
+    assert (ir["user_days"], ir["avg_daily_users"], ir["bytes"]) == (1200, 1200.0, 2 * 10**10)
     assert {p["ref"] for p in u["proxies"]} == {"u_main1", "rl_de1"}
     assert sum(h["bytes"] for h in u["heatmap"]) == 2 * (2 * 10**8 + 13 * 10**9)
     # The database itself refuses a bucket of fewer than 3 users that is not "other".

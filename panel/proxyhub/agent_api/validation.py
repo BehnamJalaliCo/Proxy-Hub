@@ -28,8 +28,11 @@ ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{0,59}")
 ETAG = re.compile(r'"[0-9a-f]{64}"')
 # A lower-case DNS name with at least one dot; never an IP literal (checked separately).
 DOMAIN = re.compile(r"(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]")
-# Ports a node may never be told to serve proxies on: the agent's local Telemt metrics listener.
-RESERVED_PORTS = frozenset({9090})
+# Xray's loopback gRPC API (node-image/files/agent-xray.json); the node firewall drops it from outside.
+XRAY_API_PORT = 10085
+# Ports a node may never be told to serve proxies on: the agent's local Telemt metrics listener, and
+# Xray's API port (a Telemt there would be unreachable, and the node's Xray section left out).
+RESERVED_PORTS = frozenset({9090, XRAY_API_PORT})
 
 # Real agent bodies nest at most four containers (report > telemt > users > user); far more
 # than that is not an agent body at all.
