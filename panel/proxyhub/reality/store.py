@@ -96,9 +96,19 @@ class NodeView:
     ipv4: str | None
     location: str
     ready_at: datetime | None
+    created_at: datetime | None = None
 
 
-_NODE_COLS = (Node.id, Node.name, Node.slot, Node.state, Node.ipv4, Node.location, Node.ready_at)
+_NODE_COLS = (
+    Node.id,
+    Node.name,
+    Node.slot,
+    Node.state,
+    Node.ipv4,
+    Node.location,
+    Node.ready_at,
+    Node.created_at,
+)
 
 
 def _node(r: Any) -> NodeView:
@@ -110,6 +120,7 @@ def _node(r: Any) -> NodeView:
         ipv4=node_ipv4(r.ipv4),
         location=r.location,
         ready_at=r.ready_at,
+        created_at=r.created_at,
     )
 
 

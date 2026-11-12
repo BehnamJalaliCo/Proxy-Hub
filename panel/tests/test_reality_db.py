@@ -288,6 +288,9 @@ async def test_a_slot_links_flag_follows_the_server_that_serves_it_now(world: Wo
     await world.report(new, now=datetime.now(UTC))
     await world.rows("UPDATE nodes SET state = 'deleted' WHERE id = :n", n=old)
     assert flags_of(await flags()) == {"🇺🇸"}
+    # The only node of the slot misses heartbeats for a while: still the US server, not Finland.
+    await world.rows("UPDATE nodes SET state = 'unhealthy' WHERE id = :n", n=new)
+    assert flags_of(await flags()) == {"🇺🇸"}
 
 
 def flags_of(fragments: set[str]) -> set[str]:
