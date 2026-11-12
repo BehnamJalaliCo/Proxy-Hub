@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from hcloud import APIException
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from proxyhub.accounts.hetzner_io import HetznerFailure, ServersObservation, call_hetzner, observe_servers
@@ -42,7 +42,7 @@ from proxyhub.agent_api.tokens import issue_registration_token
 from proxyhub.config import get_config
 from proxyhub.db.models import HetznerAccount, Node
 from proxyhub.db.models_agent import AgentNode, AgentNodeReport, TelemtNodeConfig
-from proxyhub.db.models_fleet import AccountServer
+from proxyhub.db.models_fleet import AccountObservation, AccountServer
 from proxyhub.db.models_live import NodeOperation
 from proxyhub.fleet.actions import log_action
 from proxyhub.fleet.ip_history import burned_hit, public_ipv4, record_ip
@@ -888,11 +888,23 @@ class NodeExecutor:
 
     @staticmethod
     async def _forget_server(s: AsyncSession, account_id: uuid.UUID, hetzner_id: int | None) -> None:
-        """Drop the deleted server from the last account observation (the guard refreshes it anyway)."""
+        """Drop the deleted server from the last account observation (the guard refreshes it anyway),
+        and its count with it: until the guard looks again (10 min), the planner would see the
+        account as full and keep refusing the slot's rebuild (fleet:2). Only when the row was still
+        there, so a server is never taken off twice; a create still looks at the account live."""
         if hetzner_id is None:
             return
-        await s.execute(
+        gone = await s.execute(
             delete(AccountServer).where(
                 AccountServer.account_id == account_id, AccountServer.hetzner_id == hetzner_id
             )
         )
+        if getattr(gone, "rowcount", 0) == 1:
+            await s.execute(
+                update(AccountObservation)
+                .where(AccountObservation.account_id == account_id, AccountObservation.servers_total > 0)
+                .values(
+                    servers_total=AccountObservation.servers_total - 1,
+                    managed_servers=func.greatest(AccountObservation.managed_servers - 1, 0),
+                )
+            )

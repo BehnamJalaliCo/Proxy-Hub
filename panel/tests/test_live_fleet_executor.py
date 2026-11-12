@@ -208,3 +208,28 @@ async def test_the_executor_never_retires_an_unhealthy_slot_node_by_itself(world
     node = await world.node(node_id)
     assert node["state"] == "unhealthy" and node["retire_reason"] is None
     assert world.no_hetzner.calls == 0
+
+
+# --- the account's count -----------------------------------------------------------------------
+
+
+async def test_a_deleted_server_leaves_the_account_count_at_once(world: LiveWorld) -> None:
+    """fleet:2: the executor dropped a deleted server from the guard's list but not from its count, so
+    the planner saw the account as full (and refused the slot's rebuild) until the guard looked again."""
+    await world.rows(
+        "UPDATE hetzner_account_observations SET servers_total = 3, managed_servers = 3 "
+        "WHERE account_id = :a",
+        a=world.account_id,
+    )
+    await add_slot_node(world, 1, state="deleted", hetzner_id=9005, deleted_at=ago(minutes=1))
+    for _ in range(2):  # the second time the row is already gone (the guard looked): no change
+        async with world.sessions() as s:
+            await ex.NodeExecutor._forget_server(s, world.account_id, 9005)
+            await s.commit()
+        counts = await world.rows(
+            "SELECT servers_total, managed_servers FROM hetzner_account_observations WHERE account_id = :a",
+            a=world.account_id,
+        )
+        assert [tuple(r) for r in counts] == [(2, 2)]
+        left = await world.rows("SELECT count(*) FROM hetzner_account_servers WHERE hetzner_id = 9005")
+        assert [tuple(r) for r in left] == [(0,)]

@@ -674,6 +674,68 @@ def test_a_full_account_moves_one_removed_location_slot_at_a_time() -> None:
     assert not [a for a in plan.actions if a.action == "delete"]
 
 
+def gone_node(base: NodeSnapshot, why: str, min_ago: float = 1) -> NodeSnapshot:
+    return dataclasses.replace(
+        base, state=NodeState.DELETED, retire_reason=why, deleted_at=NOW - timedelta(minutes=min_ago)
+    )
+
+
+def test_a_slot_a_move_emptied_holds_the_next_move_until_it_is_rebuilt() -> None:
+    """fleet:2 (D60, one slot at a time): once the executor deleted the moved slot's server no live
+    node shows the move, and the account observation still says full until the guard looks again.
+    The next slot of the removed location kept losing its server, one per plan."""
+    s2 = node(2, slot=2, location="hel1")
+    s3 = node(3, slot=3, location="fsn1")
+    gone = gone_node(node(1, slot=1, location="hel1"), "location_removed")
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in (2, 3)}
+    moved = open_settings(target_slots=3, locations=["fsn1", "nbg1"])
+
+    def plan_with(*nodes: NodeSnapshot, servers_total: int, more: dict | None = None) -> FleetPlan:  # type: ignore[type-arg]
+        accounts = (account(limit=3, servers_total=servers_total),)
+        return plan_for(moved, nodes=nodes, servers={**servers, **(more or {})}, accounts=accounts)
+
+    def waiting(plan: FleetPlan) -> None:
+        assert {a.target: a.reasons for a in plan.actions if a.action == "none"}["slot-2"] == (
+            "location_move_waiting",
+        )
+        assert not [a for a in plan.actions if a.action == "delete"]
+
+    # The observation still counts n1: slot 1 is refused (full), slot 2 waits.
+    plan = plan_with(gone, s2, s3, servers_total=3)
+    (c,) = creates(plan)
+    assert c.target == "slot-1" and not c.allowed and "account_server_limit_reached" in c.reasons
+    waiting(plan)
+    # A fresh observation: slot 1 is built, and slot 2 still waits (it used to leave in the same plan).
+    plan = plan_with(gone, s2, s3, servers_total=2)
+    (c,) = creates(plan)
+    assert c.target == "slot-1" and c.allowed
+    waiting(plan)
+    # A request the executor refused (no server) does not end the move either.
+    refused = dataclasses.replace(
+        gone_node(node(4, slot=1, location="fsn1", ready_min_ago=None), "create_refused"),
+        hetzner_id=None,
+        create_attempted=False,
+    )
+    waiting(plan_with(gone, refused, s2, s3, servers_total=3))
+    # Slot 1 served again from an allowed location: the next slot moves.
+    rebuilt = node(4, slot=1, location="fsn1", created_min_ago=30, ready_min_ago=20)
+    plan = plan_with(gone, rebuilt, s2, s3, servers_total=3, more={("acc-a", 1004): server(1004)})
+    deletes = [(a.target, a.context["why"], a.allowed) for a in plan.actions if a.action == "delete"]
+    assert deletes == [("n2", "location_removed", True)]
+    assert {a.target: a.reasons for a in plan.actions if a.action == "none"}["slot-2"] == (
+        "making_room_location",
+    )
+    # Slots that never had a server do not hold a move.
+    full = (account(limit=3, servers_total=3),)
+    plan = plan_for(
+        open_settings(target_slots=5, locations=["fsn1", "nbg1"]),
+        nodes=(node(1, slot=1, location="hel1"), s2, s3),
+        servers={**servers, ("acc-a", 1001): server(1001)},
+        accounts=full,
+    )
+    assert [a.target for a in plan.actions if a.action == "delete"] == ["n1"]
+
+
 def test_a_learned_limit_is_tried_again_after_a_while() -> None:
     """2026-11-08: the owner asks Hetzner for 9 servers; a limit learned long ago (or before its time
     was kept) is unknown again, so the next creation tries and a refusal teaches it once more."""

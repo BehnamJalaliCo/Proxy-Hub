@@ -636,6 +636,15 @@ class _Planner:
             and self.now - n.deleted_at < CREATION_WINDOW
         }
 
+    def _vacated_by_move(self, slot: int) -> bool:
+        """The last server that served this slot left as ``location_removed`` (D60). A refused
+        request or a server that never became ready since does not end the move; a slot that never
+        had a server (no history) is not part of one."""
+        served = [n for n in self._slot_history(slot) if n.ready_at is not None]
+        if not served:
+            return False
+        return max(served, key=lambda n: n.deleted_at or self.now).retire_reason == "location_removed"
+
     @staticmethod
     def _none(target: str, reason: str, **context: Any) -> PlannedAction:
         return PlannedAction("none", target, False, (reason,), context)
@@ -654,8 +663,14 @@ class _Planner:
                 excess.append(n)
 
         # D60: at most one slot leaves a removed location per plan, and none while the fleet is
-        # already moving (a node starting or leaving).
-        moving = any(n.state in STARTING or n.state in (S.DRAINING, S.RETIRING) for n in self.fleet_nodes)
+        # already moving: a node starting or leaving, or a slot a move emptied and not yet rebuilt
+        # (its server is gone, so no live node shows the move; the account looks full until the
+        # guard looks again, and the next slot must not lose its server meanwhile).
+        moving = any(
+            n.state in STARTING or n.state in (S.DRAINING, S.RETIRING) for n in self.fleet_nodes
+        ) or any(
+            self._vacated_by_move(slot) for slot in range(1, self.s.target_slots + 1) if not by_slot.get(slot)
+        )
         moved = False
         for slot in range(1, self.s.target_slots + 1):
             nodes = by_slot.get(slot, [])
