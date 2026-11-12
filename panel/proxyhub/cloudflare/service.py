@@ -10,6 +10,7 @@ actions_log row are committed together right after the call.
 
 from __future__ import annotations
 
+import html
 import ipaddress
 import logging
 import uuid
@@ -50,6 +51,7 @@ from proxyhub.db.models import Node
 from proxyhub.db.models_net import CfRecord, CfState, CfZone, DomainCheck
 from proxyhub.fleet.actions import iso, log_action
 from proxyhub.fleet.lifecycle import NodeState
+from proxyhub.telegram.store import enqueue_owner_alert
 from proxyhub.vault import SecretValue, Vault, secret_exists
 
 log = logging.getLogger(__name__)
@@ -320,8 +322,34 @@ async def _log_token_attempt(
     await session.commit()
 
 
+CF_BACK_FA = "✅ توکن Cloudflare دوباره کار میکند؛ نام‌های DNS و گواهی TLS دوباره خودکار به‌روز میشوند."
+
+
+def token_lost_alert_fa(code: str, missing: Sequence[str] = (), *, sees_zones: bool = True) -> str:
+    """The Persian owner alert when the stored token stops working (never the token itself)."""
+    if code == "cf_token_multiple_accounts":
+        why = (
+            "توکن Cloudflare ذخیره‌شده حالا دامنه‌های بیش از یک حساب را میبیند؛ پنل برای امنیت دیگر با آن "
+            "کاری نمیکند. آن را در Cloudflare به حساب مخصوص Proxy-Hub محدود کنید یا توکن تازه بسازید."
+        )
+    elif code == "cf_permissions_missing" and not sees_zones:
+        why = "توکن Cloudflare ذخیره‌شده دیگر هیچ دامنه‌ای در حساب نمیبیند."
+    elif code == "cf_permissions_missing":
+        names = "، ".join(html.escape(m) for m in missing) or html.escape(PERM_DNS_EDIT)
+        why = f"توکن Cloudflare ذخیره‌شده دیگر این اجازه را ندارد: <code>{names}</code>."
+    else:
+        why = "توکن Cloudflare ذخیره‌شده دیگر کار نمیکند (باطل شده یا تاریخش گذشته است)."
+    return (
+        f"⚠️ <b>توکن Cloudflare</b>: {why}\n"
+        "تا درست شود، نام‌های DNS سرورها جابه‌جا نمیشوند، گواهی TLS تمدید نمیشود و دامنه‌های فیلترشده "
+        "پاک نمیشوند. در صفحه‌ی «Cloudflare» داشبورد یک توکن تازه ذخیره کنید."
+    )
+
+
 async def refresh_token_and_zones(db: Db, cf: CloudflareClient, now: datetime, *, actor: str) -> None:
-    """Periodic re-check of the stored token; new zones of the account are found here (D13, D35)."""
+    """Periodic re-check of the stored token; new zones of the account are found here (D13, D35).
+    A token that stops working is told to the owner once (at the change), and once more when it
+    works again without a new token."""
     previous = await load_state(db)
     was_verified = bool(previous and previous.verified)
     try:
@@ -344,6 +372,7 @@ async def refresh_token_and_zones(db: Db, cf: CloudflareClient, now: datetime, *
                     reasons=[exc.code],
                     result="the stored Cloudflare token is no longer usable; DNS changes stopped",
                 )
+                await enqueue_owner_alert(db, token_lost_alert_fa(exc.code))
         else:
             await save_state(db, now, error=exc.code)
         return
@@ -362,6 +391,12 @@ async def refresh_token_and_zones(db: Db, cf: CloudflareClient, now: datetime, *
     if verified:
         # A domain the owner just added to the account joins the pool here (D35).
         await auto_pool(db, now)
+    if was_verified and not verified:
+        await enqueue_owner_alert(
+            db, token_lost_alert_fa("cf_permissions_missing", check.missing, sees_zones=bool(check.zones))
+        )
+    elif verified and previous is not None and not was_verified:
+        await enqueue_owner_alert(db, CF_BACK_FA)  # fixed in Cloudflare, without a new token
     if gone or was_verified != verified:
         await log_action(
             db,

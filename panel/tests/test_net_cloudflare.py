@@ -29,7 +29,11 @@ from test_net_support import (
     CF_INVALID_TOKEN_VERIFY,
     ZONE_ID,
     ZONE_ID_2,
+    Answer,
+    LocalCloudflare,
     actions,
+    cf_error,
+    cf_ok,
     cf_record_json,
     cf_zone_json,
     clean_net_tables,
@@ -62,6 +66,7 @@ from proxyhub.cloudflare.records import (
     same_content,
 )
 from proxyhub.reconcilers.dns import DnsReconciler
+from proxyhub.telegram import store as tg_store
 from proxyhub.vault import SecretValue, Vault
 
 CF_PATHS = {
@@ -574,6 +579,142 @@ async def test_unreachable_cloudflare_error_does_not_carry_the_token(
     assert svc_err.value.code == "cf_unavailable"
     assert token not in str(err.value) and token not in repr(err.value) and token not in caplog.text
     assert token not in repr(CloudflareClient(SecretValue(token)))
+
+
+# --- the hourly token re-check tells the owner when the token stops working ----------------------
+
+
+def _cloudflare(
+    *,
+    verify: str = "active",
+    zones: list[dict[str, Any]] | None = None,
+    dns_edit: bool = True,
+    down: bool = False,
+) -> Any:
+    """Cloudflare's documented answers for the re-check (verify, zones, records, the edit probe)."""
+    listed = [cf_zone_json(ZONE_ID, "example.com")] if zones is None else zones
+
+    def answer(method: str, path: str) -> Answer:
+        if down:
+            return cf_error(503, 10000, "Service unavailable")
+        if path == "/user/tokens/verify":
+            return cf_ok({"id": "f267e341f3dd4697bd3b9f71dd96247f", "status": verify})
+        if path == "/zones":
+            return cf_ok(listed)
+        if method == "GET" and path.endswith("/dns_records"):
+            return cf_ok([])
+        if method == "PATCH":
+            return (
+                cf_error(404, 81044, "Record does not exist.")
+                if dns_edit
+                else cf_error(403, 10000, "Authentication error")
+            )
+        return cf_error(404, 7003, "Could not route to the path")
+
+    return answer
+
+
+async def _recheck(engine: AsyncEngine, answer: Any, token: SecretValue) -> None:
+    async with LocalCloudflare(answer) as cf_server, cf_server.client(token) as cf, engine.begin() as conn:
+        await service.refresh_token_and_zones(conn, cf, datetime.now(UTC), actor="dns")
+
+
+async def _owner_alerts(engine: AsyncEngine) -> list[str]:
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("SELECT payload FROM outbox WHERE kind = 'alert' ORDER BY id"))).all()
+    return [str(r.payload["text"]) for r in rows]
+
+
+@pytest.fixture
+async def owner(engine: AsyncEngine) -> AsyncIterator[None]:
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM outbox"))
+        await tg_store.set_owner_chat(conn, 424242, datetime.now(UTC))
+    yield
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM outbox"))
+        await conn.execute(text("DELETE FROM settings WHERE key = 'telegram.owner'"))
+
+
+async def _verified(engine: AsyncEngine) -> SecretValue:
+    token = SecretValue(secrets.token_urlsafe(30))
+    now = datetime.now(UTC)
+    async with engine.begin() as conn:
+        await service.store_zones(conn, [parse_zone(cf_zone_json())], {ZONE_ID: True}, now)
+        await service.save_state(conn, now, verified=True, checked_at=now, missing=[], token_kind="user")
+    return token
+
+
+@pytest.mark.db
+async def test_a_token_that_stopped_working_is_told_to_the_owner_once(
+    engine: AsyncEngine, owner: None
+) -> None:
+    token = await _verified(engine)
+    await _recheck(engine, _cloudflare(verify="expired"), token)
+    async with engine.connect() as conn:
+        state = await service.load_state(conn)
+    assert state is not None and not state.verified and state.error == "cf_token_invalid"
+    (alert,) = await _owner_alerts(engine)
+    assert "توکن Cloudflare" in alert and "تاریخش گذشته" in alert and "توکن تازه" in alert
+    assert token.reveal() not in alert
+    await _recheck(engine, _cloudflare(verify="expired"), token)  # an hour later: nothing new
+    assert len(await _owner_alerts(engine)) == 1
+    # The token works again (fixed in Cloudflare): one short note, then nothing.
+    await _recheck(engine, _cloudflare(), token)
+    alerts = await _owner_alerts(engine)
+    assert len(alerts) == 2 and alerts[1] == service.CF_BACK_FA
+    await _recheck(engine, _cloudflare(), token)
+    assert len(await _owner_alerts(engine)) == 2
+
+
+@pytest.mark.db
+async def test_cloudflare_being_down_is_not_a_token_problem(engine: AsyncEngine, owner: None) -> None:
+    token = await _verified(engine)
+    await _recheck(engine, _cloudflare(down=True), token)
+    async with engine.connect() as conn:
+        state = await service.load_state(conn)
+    assert state is not None and state.verified and state.error == "cf_unavailable"
+    assert await _owner_alerts(engine) == []
+
+
+@pytest.mark.db
+async def test_a_lost_permission_is_named_in_the_alert(engine: AsyncEngine, owner: None) -> None:
+    token = await _verified(engine)
+    await _recheck(engine, _cloudflare(dns_edit=False), token)
+    (alert,) = await _owner_alerts(engine)
+    assert "<code>DNS:Edit</code>" in alert and token.reveal() not in alert
+    async with engine.connect() as conn:
+        state = await service.load_state(conn)
+    assert state is not None and not state.verified and state.missing == ["DNS:Edit"]
+
+
+@pytest.mark.db
+async def test_a_token_that_sees_no_domain_does_not_blame_a_permission(
+    engine: AsyncEngine, owner: None
+) -> None:
+    token = await _verified(engine)
+    await _recheck(engine, _cloudflare(zones=[]), token)
+    (alert,) = await _owner_alerts(engine)
+    assert "هیچ دامنه‌ای" in alert and "اجازه" not in alert
+
+
+@pytest.mark.db
+async def test_without_an_owner_chat_the_lost_token_is_only_logged(engine: AsyncEngine) -> None:
+    token = await _verified(engine)
+    await _recheck(engine, _cloudflare(verify="disabled"), token)
+    assert await _owner_alerts(engine) == []
+    assert [(a["action"], a["reasons"]["reasons"]) for a in await actions(engine)] == [
+        ("cloudflare_token_check", ["cf_token_invalid"])
+    ]
+
+
+def test_token_alert_texts() -> None:
+    many = service.token_lost_alert_fa("cf_token_multiple_accounts")
+    assert "بیش از یک حساب" in many and "Proxy-Hub" in many
+    perm = service.token_lost_alert_fa("cf_permissions_missing", ["DNS:Edit", "<x>"])
+    assert "<code>DNS:Edit، &lt;x&gt;</code>" in perm
+    for text_ in (many, perm, service.token_lost_alert_fa("cf_token_invalid")):
+        assert "گواهی TLS" in text_ and "صفحه‌ی «Cloudflare»" in text_
 
 
 # --- API ---------------------------------------------------------------------------------------
