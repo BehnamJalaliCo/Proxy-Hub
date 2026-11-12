@@ -161,6 +161,7 @@ const REASON: Record<string, string> = {
   telegram_logout: "نشست در تلگرام بسته شد",
   session_already_ended: "نشست از قبل در تلگرام بسته شده بود",
   session_unreadable: "نشست ذخیره‌شده با کلید فعلی پنل باز نشد",
+  session_unusable: "تلگرام این نشست را دیگر نمیپذیرد؛ از پنل پاک شد",
   session_missing: "نشست در گاوصندوق نبود",
   credentials_missing: "api_id یا api_hash در گاوصندوق نبود",
   credentials_only: "فقط api_id و api_hash مانده بود",

@@ -359,6 +359,10 @@ def classify(exc: BaseException) -> MtpError | None:
         return MtpError("telegram_unavailable", rpc=_rpc_name(exc))
     if isinstance(exc, errors.RPCError):
         return MtpError("telegram_refused", rpc=_rpc_name(exc))
+    if isinstance(exc, errors.AuthKeyNotFound):
+        # Transport -404: Telegram no longer knows this session's key. Telethon says it may pass,
+        # so the check treats it as unreachable; logout can tell it apart (nothing left to end).
+        return MtpError("telegram_unavailable", rpc="AUTH_KEY_NOT_FOUND")
     if isinstance(exc, _TRANSPORT_TROUBLE):
         return MtpError("telegram_unavailable")
     return None

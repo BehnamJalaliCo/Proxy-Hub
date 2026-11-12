@@ -139,6 +139,7 @@ describe("operator account labels", () => {
       "telegram_logout",
       "session_already_ended",
       "session_unreadable",
+      "session_unusable",
       "session_missing",
       "credentials_missing",
       "credentials_only",

@@ -63,6 +63,11 @@ _LOGIN_OVER: Final = frozenset(
 )
 
 
+# Telegram refuses the stored session for good: logout cannot end it there, and keeping it would
+# block every new login (start_login refuses while a session is stored).
+_SESSION_UNUSABLE: Final = frozenset({"api_id_invalid", "api_id_published"})
+
+
 class ServiceError(Exception):
     """A contract error code (proxyhub/mtproxy/messages.py) with its details. No secret inside."""
 
@@ -408,7 +413,9 @@ async def _sign_in_failed(
 
 async def logout(deps: Deps, *, actor: str) -> AccountRow:
     """Ends the session on Telegram (auth.logOut), then removes it and the api credentials from the
-    vault. A login in progress is cancelled. Telegram unreachable: nothing is removed (502)."""
+    vault. A login in progress is cancelled. Telegram unreachable: nothing is removed (502). A
+    session Telegram refuses for good (api_id refused or published, auth key unknown) cannot be
+    ended from here and is removed like an unreadable one, so a new login is possible."""
     async with _Locked(deps):
         row, session_stored = await _read(deps)
         reason: str
@@ -450,6 +457,8 @@ async def _end_session_on_telegram(deps: Deps) -> str:
     except MtpError as exc:
         if exc.code == "session_terminated":
             return "session_already_ended"
+        if exc.code in _SESSION_UNUSABLE or exc.rpc == "AUTH_KEY_NOT_FOUND":
+            return "session_unusable"
         raise ServiceError("logout_unavailable", rpc=exc.rpc) from None
     return "telegram_logout"
 

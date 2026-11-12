@@ -191,6 +191,11 @@ def test_network_failures_are_unavailable_and_programming_errors_are_not_hidden(
     assert classify(KeyError("bug")) is None
 
 
+def test_an_unknown_auth_key_is_unavailable_but_named() -> None:
+    mapped = classify(errors.AuthKeyNotFound())
+    assert mapped is not None and (mapped.code, mapped.rpc) == ("telegram_unavailable", "AUTH_KEY_NOT_FOUND")
+
+
 def test_a_mapped_error_carries_nothing_from_the_request() -> None:
     api_hash = random_hash()
     request = _send_code_request(api_hash)
