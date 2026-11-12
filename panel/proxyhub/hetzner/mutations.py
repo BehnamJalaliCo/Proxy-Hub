@@ -7,6 +7,7 @@ server from Hetzner right before deleting and refuses if anything changed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from hcloud.images import Image
 from hcloud.locations import Location
@@ -54,13 +55,19 @@ def create_server(reader: HetznerReader, permit: CreatePermit, spec: CreateSpec)
     return int(server_id)
 
 
-def delete_server(reader: HetznerReader, permit: DeletePermit) -> None:
-    if not isinstance(permit, DeletePermit) or not permit.decision.allowed:
-        raise PermitError("a valid DeletePermit is required")
-    server = reader.raw.servers.get_by_id(permit.hetzner_id)
+def _still_deletable(server: Any) -> None:
+    """The last check of rule 5, on the server as Hetzner returns it right before the delete: ours
+    (label managed-by), a role we delete, and no delete protection. Raises PermitError otherwise."""
     labels = dict(server.labels or {})
     if labels.get(MANAGED_LABEL) != MANAGED_VALUE or labels.get("role") not in {"node", "builder"}:
         raise PermitError("server labels changed since the permit was issued")
     if _delete_protected(server.protection):
         raise PermitError("delete protection is on")
+
+
+def delete_server(reader: HetznerReader, permit: DeletePermit) -> None:
+    if not isinstance(permit, DeletePermit) or not permit.decision.allowed:
+        raise PermitError("a valid DeletePermit is required")
+    server = reader.raw.servers.get_by_id(permit.hetzner_id)
+    _still_deletable(server)
     reader.raw.servers.delete(server)

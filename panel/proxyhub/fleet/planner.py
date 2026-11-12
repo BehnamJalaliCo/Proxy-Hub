@@ -16,15 +16,16 @@ Model (docs/10_IMPLEMENTATION_PLAN.md section 3.11):
   learned from Hetzner's ``resource_limit_exceeded``, is reached on a fresh observation), no
   replacement can ever be built while the burned nodes hold the room. A slot with no serving node
   then lets its BURNED nodes go first (``making_room``): blocked from Iran they serve nobody. Its
-  replacement is built by a later plan, once the room is free. Unhealthy nodes keep the D14 order.
+  replacement is built by a later plan, once the room is free, still in another location if one is
+  left. Unhealthy nodes keep the D14 order; a node whose server Hetzner no longer has leaves at once.
 * **A location the owner removed** (D60, 2026-11-07: Reality on the Finland server failed on MCI
   while the US ones worked): a slot whose serving nodes are all in a location no longer in the
   owner's list moves. Its replacement is built first in an allowed location, and the old node
   leaves once that one has settled (D14), as ``location_removed``. With every account full, the
   old node leaves first (``making_room_location``) and the slot is built again by a later plan, but
-  only ONE slot at a time and only while no other node is starting or leaving
-  (``location_move_waiting``): a removed location may hold several working nodes, and they must
-  not all go at once.
+  only if that plan could build it, only ONE slot at a time, and only while no other node is
+  starting or leaving and no slot a move emptied is still unbuilt (``location_move_waiting``): a
+  removed location may hold several working nodes, and they must not all go at once.
 * A slot whose last request was refused by the executor waits a little before asking again; a
   server that got a burned IP (proxyhub/fleet/ip_history.py) is retried in another location.
 * Locations (P15): only the owner's allowed ones (fleet settings), preferring those whose recent TLS
@@ -40,16 +41,18 @@ Model (docs/10_IMPLEMENTATION_PLAN.md section 3.11):
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 
 from proxyhub.accounts.hetzner_io import LiveOffer
+from proxyhub.accounts.state import OBSERVED_STATES
 from proxyhub.fleet.costs import NodeCostInput, PriceKey, money, node_cost_items
 from proxyhub.fleet.lifecycle import LIVE_STATES, NodeState
 from proxyhub.fleet.locations import CLASS_RANK
@@ -130,6 +133,76 @@ def effective_server_limit(a: AccountSnapshot, now: datetime) -> int | None:
     if a.learned_limit_at is None or now - a.learned_limit_at >= LIMIT_RECHECK:
         return None
     return a.learned_server_limit
+
+
+def _frozen_accounts(accounts: Iterable[AccountSnapshot]) -> set[str]:
+    """Accounts whose offers the pricing loop no longer refreshes (locked, retired). Their rows stay:
+    they still price that account's nodes billed this month."""
+    return {a.id for a in accounts if a.state not in OBSERVED_STATES}
+
+
+def _offer_old(ao: AccountOffer, now: datetime) -> bool:
+    return ao.fetched_at is not None and now - ao.fetched_at > OFFER_MAX_AGE
+
+
+def projection_prices(
+    offers: Iterable[AccountOffer], accounts: Iterable[AccountSnapshot]
+) -> dict[PriceKey, Price]:
+    """Prices for the month projection by (account, type, location). A locked or retired account's
+    prices are frozen and Hetzner may have raised them since (twice in 2026), so each is raised to the
+    highest price of the same type and location that a refreshed account sees (rule 8). The planner
+    AND the executor's gate (``evaluate_create``) use this, as :func:`prices_stale`."""
+    offers = list(offers)
+    frozen = _frozen_accounts(accounts)
+    current: dict[tuple[str, str], Price] = {}
+    for ao in offers:
+        if ao.account_id in frozen:
+            continue
+        key, p = (ao.offer.server_type, ao.offer.location), ao.offer.price
+        cur = current.get(key)
+        current[key] = p if cur is None else Price(max(cur.hourly, p.hourly), max(cur.monthly, p.monthly))
+    out: dict[PriceKey, Price] = {}
+    for ao in offers:
+        p = ao.offer.price
+        cur = current.get((ao.offer.server_type, ao.offer.location)) if ao.account_id in frozen else None
+        if cur is not None:
+            p = Price(max(cur.hourly, p.hourly), max(cur.monthly, p.monthly))
+        out[(ao.account_id, ao.offer.server_type, ao.offer.location)] = p
+    return out
+
+
+def prices_stale(
+    offers: Iterable[AccountOffer],
+    accounts: Iterable[AccountSnapshot],
+    nodes: Iterable[NodeCostInput],
+    now: datetime,
+) -> bool:
+    """Fail closed while prices may be lower than today's: an offer older than OFFER_MAX_AGE of an
+    account the pricing loop still refreshes (the loop is broken), or a live node in a locked or
+    retired account whose frozen price is old and that no fresh offer of a refreshed account confirms
+    (:func:`projection_prices`). The old offers of such an account alone block nothing: the pricing
+    loop never reads them again, and they used to block every creation forever. The planner AND the
+    executor's gate (``evaluate_create``) use this, as :func:`effective_server_limit`."""
+    offers = list(offers)
+    frozen = _frozen_accounts(accounts)
+    if any(_offer_old(ao, now) and ao.account_id not in frozen for ao in offers):
+        return True
+    confirmed = {
+        (ao.offer.server_type, ao.offer.location)
+        for ao in offers
+        if ao.account_id not in frozen and not _offer_old(ao, now)
+    }
+    frozen_old = {
+        (ao.account_id, ao.offer.server_type, ao.offer.location)
+        for ao in offers
+        if ao.account_id in frozen and _offer_old(ao, now)
+    }
+    return any(
+        n.state in LIVE_STATES
+        and (n.account_id, n.server_type, n.location) in frozen_old
+        and (n.server_type, n.location) not in confirmed
+        for n in nodes
+    )
 
 
 def counts_as_creation(n: NodeSnapshot, now: datetime) -> bool:
@@ -277,10 +350,9 @@ class _Planner:
         self.limits = self.s.limits()
         allowed_types = set(self.s.allowed_server_types)
         self.offers: dict[str, dict[str, list[LiveOffer]]] = defaultdict(lambda: defaultdict(list))
-        self.prices: dict[PriceKey, Price] = {}
+        self.prices = projection_prices(snap.offers, snap.accounts)
         for ao in snap.offers:
             o = ao.offer
-            self.prices[(ao.account_id, o.server_type, o.location)] = o.price
             if o.server_type in allowed_types and o.orderable:
                 self.offers[ao.account_id][o.location].append(o)
         for by_loc in self.offers.values():
@@ -314,7 +386,7 @@ class _Planner:
             self.global_reasons.append("projection_incomplete")
         if not self.s.locations:
             self.global_reasons.append("no_location_configured")
-        if any(ao.fetched_at is not None and self.now - ao.fetched_at > OFFER_MAX_AGE for ao in snap.offers):
+        if prices_stale(snap.offers, snap.accounts, snap.nodes, self.now):
             self.global_reasons.append("prices_stale")  # fail closed until the pricing loop recovers
         self.accounts_by_id = {a.id: a for a in snap.accounts}
 
@@ -421,6 +493,18 @@ class _Planner:
         others = self._usable([loc for loc in locs if loc not in avoid])
         return sorted(others, key=lambda loc: (*self._spread_key(loc), self._rank(loc), locs.index(loc)))
 
+    def _server_gone(self, n: NodeSnapshot) -> bool:
+        """Hetzner no longer has the node's server (deleted outside the panel): a fresh look at ALL
+        servers of the account, taken after the server surely existed, does not list it. The guard
+        is green, so the server did not just lose its managed-by label (that locks the account)."""
+        if n.hetzner_id is None or (n.account_id, n.hetzner_id) in self.snap.servers:
+            return False
+        a = self.accounts_by_id.get(n.account_id)
+        if a is None or a.observed_at is None or not self._fresh(a) or a.guard_ok is not True:
+            return False
+        existed = [t for t in (n.ready_at, n.state_since) if t is not None]
+        return bool(existed) and a.observed_at > max(existed)
+
     def _repair_over(self, n: NodeSnapshot) -> bool:
         since = n.state_since or n.created_at
         return self.now - since > REPAIR_WINDOW
@@ -510,23 +594,26 @@ class _Planner:
             planner_reasons.append("account_not_usable")
         server: ServerView | None = None
         no_server = node.hetzner_id is None and node.state in (S.REQUESTED, S.CREATING, S.RETIRING)
+        gone = False
         if node.hetzner_id is None and not no_server:
             planner_reasons.append("no_hetzner_id")
         elif node.hetzner_id is not None:
             server = self.snap.servers.get((node.account_id, node.hetzner_id))
-            if server is None:
+            gone = server is None and self._server_gone(node)
+            if server is None and not gone:
                 planner_reasons.append("server_not_observed")
         gate_reasons: tuple[str, ...] = ()
-        # A node without any server (a request, or a create that never answered) is closed by the
-        # executor after its lookups by label: no delete gate is involved until a server is found.
-        gate_allowed = no_server
+        # A node without any server (a request, or a create that never answered, or a server Hetzner
+        # no longer has) is closed by the executor after its own live look, with no Hetzner delete:
+        # no delete gate is involved until a server is found, and then can_delete decides (rule 5).
+        gate_allowed = no_server or gone
         if server is not None:
             d = can_delete(
                 server, NodeRowView(node.account_id, node.hetzner_id, S.RETIRING.value), node.account_id
             )
             gate_reasons, gate_allowed = d.reasons, d.allowed
         reasons = planner_reasons + [r for r in gate_reasons if r not in planner_reasons]
-        context = {
+        context: dict[str, Any] = {
             "why": why,
             "node_id": node.id,
             "account_id": node.account_id,
@@ -535,6 +622,8 @@ class _Planner:
             "slot": node.slot,
             "location": node.location,
         }
+        if gone:
+            context["server_gone"] = True
         return PlannedAction(
             "delete", node.name, gate_allowed and not planner_reasons, tuple(reasons), context
         )
@@ -566,6 +655,56 @@ class _Planner:
             and self.now - n.deleted_at < CREATION_WINDOW
         }
 
+    def _served_history(self, slot: int) -> list[NodeSnapshot]:
+        """The slot's deleted nodes that once served, newest first. A refused request or a server
+        that never became ready is left out: it does not end what the last served node started."""
+        served = [n for n in self._slot_history(slot) if n.ready_at is not None]
+        return sorted(served, key=lambda n: n.deleted_at or self.now, reverse=True)
+
+    def _vacated_by_move(self, slot: int) -> bool:
+        """The last server that served this slot left as ``location_removed`` (D60). A slot that
+        never had a server (no history) is not part of a move."""
+        served = self._served_history(slot)
+        return bool(served) and served[0].retire_reason == "location_removed"
+
+    def _burned_since_served(self, slot: int) -> set[str]:
+        """Locations of the slot's nodes that burned and left since anything else last served it.
+        With every account full they leave before the replacement is planned (D57, ``making_room``),
+        and D14 still builds that replacement in another location, not where Iran blocked them."""
+        out: set[str] = set()
+        for n in self._served_history(slot):
+            if n.retire_reason != "burned":
+                break
+            out.add(n.location)
+        return out
+
+    def _rebuild_blocked(
+        self, slot: int, away: list[NodeSnapshot], avoid: set[str], prefer_not: set[str]
+    ) -> PlannedAction | None:
+        """D60 with every account full: would the slot be built again once ``away`` has left? The
+        creation is evaluated as the next plan will, with those nodes gone (counts and month cost).
+        Returns the blocked creation, or None when it would be allowed. Nothing it does counts
+        against the later slots of this plan."""
+        saved = self.run
+        trial = dataclasses.replace(
+            saved, per_account=dict(saved.per_account), per_location=dict(saved.per_location)
+        )
+        gone = {n.id for n in away}
+        for n in away:
+            trial.live_total -= 1
+            trial.fleet_live -= 1
+            trial.per_account[n.account_id] = trial.per_account.get(n.account_id, 0) - 1
+            trial.per_location[n.location] = trial.per_location.get(n.location, 0) - 1
+        after = [dataclasses.replace(n, deleted_at=self.now) if n.id in gone else n for n in self.snap.nodes]
+        items, _ = node_cost_items(after, self.prices, self.now)
+        trial.projected = projected_month_total(items, self.now) + (saved.projected - self.projected_start)
+        self.run = trial
+        try:
+            create = self._create(slot, "replace", avoid=avoid, prefer_not=prefer_not)
+        finally:
+            self.run = saved
+        return None if create.allowed else create
+
     @staticmethod
     def _none(target: str, reason: str, **context: Any) -> PlannedAction:
         return PlannedAction("none", target, False, (reason,), context)
@@ -584,8 +723,14 @@ class _Planner:
                 excess.append(n)
 
         # D60: at most one slot leaves a removed location per plan, and none while the fleet is
-        # already moving (a node starting or leaving).
-        moving = any(n.state in STARTING or n.state in (S.DRAINING, S.RETIRING) for n in self.fleet_nodes)
+        # already moving: a node starting or leaving, or a slot a move emptied and not yet rebuilt
+        # (its server is gone, so no live node shows the move; the account looks full until the
+        # guard looks again, and the next slot must not lose its server meanwhile).
+        moving = any(
+            n.state in STARTING or n.state in (S.DRAINING, S.RETIRING) for n in self.fleet_nodes
+        ) or any(
+            self._vacated_by_move(slot) for slot in range(1, self.s.target_slots + 1) if not by_slot.get(slot)
+        )
         moved = False
         for slot in range(1, self.s.target_slots + 1):
             nodes = by_slot.get(slot, [])
@@ -605,8 +750,13 @@ class _Planner:
                 elif self._backing_off(slot):
                     actions.append(self._none(target, "request_backoff", slot=slot))
                 elif self._no_room():
+                    avoid = {n.location for n in away + blocked + sick}
                     if moving or moved:
                         actions.append(self._none(target, "location_move_waiting", slot=slot))
+                    elif refused := self._rebuild_blocked(slot, away, avoid, self._burned_ip_locations(slot)):
+                        # The slot could not be built again (no open location, no price, a cap ...):
+                        # its node keeps serving, and the owner hears why where only he can help.
+                        actions.append(refused)
                     else:
                         deletes.extend((n, "location_removed") for n in away)
                         actions.append(self._none(target, "making_room_location", slot=slot))
@@ -643,11 +793,13 @@ class _Planner:
                 reason = "replacement_in_progress" if blocked or sick or leaving else "slot_starting"
                 actions.append(self._none(target, reason, slot=slot))
             elif sick and not all(self._repair_over(n) for n in sick):
+                # A node whose server Hetzner no longer has will not recover: it leaves at once.
+                deletes.extend((n, "unhealthy") for n in sick if self._server_gone(n))
                 actions.append(self._none(target, "slot_unhealthy", slot=slot))
             else:
                 # Nothing serves and nothing is on its way: build one. A node that never served
-                # (failed boot) is not worth keeping while its replacement is built.
-                deletes.extend((n, "unhealthy") for n in sick if n.ready_at is None)
+                # (failed boot), or whose server is gone, is not worth keeping meanwhile.
+                deletes.extend((n, "unhealthy") for n in sick if n.ready_at is None or self._server_gone(n))
                 if self._backing_off(slot):
                     actions.append(self._none(target, "request_backoff", slot=slot))
                     continue
@@ -658,8 +810,10 @@ class _Planner:
                     actions.append(self._none(target, "making_room", slot=slot))
                     continue
                 avoid = {n.location for n in blocked + sick}
-                prefer_not = {n.location for n in leaving} | self._burned_ip_locations(slot)
-                if blocked or sick or leaving:
+                # Soft: with only the burned location left, building there beats an empty slot.
+                burned = self._burned_since_served(slot)
+                prefer_not = {n.location for n in leaving} | self._burned_ip_locations(slot) | burned
+                if blocked or sick or leaving or burned:
                     actions.append(self._create(slot, "replace", avoid=avoid, prefer_not=prefer_not))
                 else:
                     actions.append(self._create(slot, "fill", prefer_not=prefer_not))

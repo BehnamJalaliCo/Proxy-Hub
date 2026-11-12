@@ -89,6 +89,50 @@ def test_a_silent_hetzner_endpoint_times_out(silent_server: int, monkeypatch: py
     assert time.monotonic() - started < 5
 
 
+def _failure(code: str | int) -> Any:
+    from hcloud import APIException
+
+    from proxyhub.accounts.hetzner_io import classify_api_exception
+
+    return classify_api_exception(APIException(code=code, message="x", details=None))
+
+
+TRANSIENT = [
+    "server_error",
+    "service_error",
+    "maintenance",
+    "locked",
+    "timeout",
+    "conflict",
+    500,
+    502,
+    503,
+    504,
+]
+FINAL = ["unavailable", "invalid_input", "resource_limit_exceeded", "resource_unavailable", "not_found"]
+
+
+@pytest.mark.parametrize("code", TRANSIENT, ids=str)
+def test_hetzners_passing_troubles_are_retried(code: str | int) -> None:
+    """sweep-failure:1: Hetzner's JSON-coded 5xx answers (server_error, service_error, maintenance)
+    closed a node request at once; they are retried within the executor's windows, like a timeout."""
+    assert ex._transient(_failure(code)) and ex._create_may_have_happened(_failure(code))
+
+
+@pytest.mark.parametrize("code", FINAL, ids=str)
+def test_hetzners_final_refusals_are_not_retried(code: str) -> None:
+    assert not ex._transient(_failure(code)) and not ex._create_may_have_happened(_failure(code))
+
+
+def test_a_create_refused_as_a_duplicate_may_have_made_the_server() -> None:
+    """nodes-hetzner:5: hcloud retries a POST by itself; a retry after a create that went through is
+    refused with uniqueness_error (the name is unique in the project). The server exists, so the
+    node stays creating and adopts it, instead of retiring and deleting a healthy new server. The
+    account read (``_transient``) does not change."""
+    failure = _failure("uniqueness_error")
+    assert ex._create_may_have_happened(failure) and not ex._transient(failure)
+
+
 # --- the agent artifact route refuses anything but the pinned binary --------------------------------
 
 

@@ -342,6 +342,39 @@ async def test_no_alert_and_no_change_on_the_kill_switch(world: LiveWorld) -> No
     assert await world.rows("SELECT count(*) FROM outbox") == [(0,)]
 
 
+@pytest.mark.parametrize("stop", [{"kill_switch": True}, {"dry_run": True}], ids=["kill_switch", "dry_run"])
+async def test_an_alert_clears_while_the_fleet_is_stopped(world: LiveWorld, stop: dict[str, bool]) -> None:
+    """fleet:6: only the live loop cleared alerts, so a warning from before a stop stayed on the
+    nodes page for as long as the fleet was stopped, and on resume its old start skipped the quiet
+    period. Stopped, nothing is told, but a warning not seen for CLEAR_AFTER clears as when live."""
+    from proxyhub.fleet.slots import slots_view
+
+    async with world.sessions() as s:
+        await set_owner_chat(s, 424242, datetime.now(UTC))
+        await s.commit()
+    await world.settings(live_settings(budget_cap_eur=Decimal("0.01")))
+    await run_fleet(world)
+    assert [tuple(r) for r in await world.rows("SELECT code, active FROM fleet_alerts")] == [
+        ("budget_cap_reached", True)
+    ]
+    await world.settings(live_settings(budget_cap_eur=Decimal("0.01"), **stop))
+    await run_fleet(world)  # seen a moment ago: still shown
+    assert [tuple(r) for r in await world.rows("SELECT active FROM fleet_alerts")] == [(True,)]
+    await world.rows(
+        "UPDATE fleet_alerts SET since = since - interval '1 day', "
+        "last_seen_at = now() - interval '11 minutes'"
+    )
+    await run_fleet(world)
+    assert [tuple(r) for r in await world.rows("SELECT active FROM fleet_alerts")] == [(False,)]
+    async with world.sessions() as s:
+        assert (await slots_view(s, datetime.now(UTC)))["alerts"] == []
+    # Live again: a new streak, so the 5-minute quiet period applies again.
+    await world.settings(live_settings(budget_cap_eur=Decimal("0.01")))
+    await run_fleet(world)
+    assert [tuple(r) for r in await world.rows("SELECT active FROM fleet_alerts")] == [(True,)]
+    assert await world.rows("SELECT count(*) FROM outbox WHERE kind = 'alert'") == [(0,)]
+
+
 def test_ip_history_addresses_are_ours_only() -> None:
     """The fleet records only global unicast IPv4 (what Hetzner gives a server)."""
     from proxyhub.fleet.ip_history import prefix24, public_ipv4
