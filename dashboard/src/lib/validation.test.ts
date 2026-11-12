@@ -5,6 +5,7 @@ import type { FleetSettings } from "./types";
 import {
   draftFromSettings,
   isSettingsChanged,
+  isSetupLinkDead,
   isTotp,
   LOCATION,
   MAX_BUDGET_EUR,
@@ -155,6 +156,15 @@ describe("a save over a newer change (lost update)", () => {
     });
     expect(withKillSwitch(READ, { kill_switch: false })?.updated_at).toBe(READ.updated_at);
     expect(withKillSwitch(undefined, { kill_switch: true })).toBeUndefined();
+  });
+});
+
+describe("a failed start of the setup", () => {
+  it("ends the page only when the link itself is dead", () => {
+    expect(isSetupLinkDead(new ApiError(404, "setup_token_invalid", "لینک نامعتبر"))).toBe(true);
+    expect(isSetupLinkDead(new ApiError(422, "invalid_request", "درخواست نادرست"))).toBe(true);
+    for (const status of [0, 500, 502, 503]) expect(isSetupLinkDead(new ApiError(status, `http_${String(status)}`, "x")), String(status)).toBe(false);
+    expect(isSetupLinkDead(new TypeError("Failed to fetch"))).toBe(false);
   });
 });
 

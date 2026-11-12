@@ -1,7 +1,7 @@
 // Client-side checks that mirror the server's rules, so the owner sees a clear Persian hint before
 // sending. The server is always the authority; these never replace its checks.
 
-import { isApiError } from "./api";
+import { isApiError, type ApiError } from "./api";
 import { formatDecimal } from "./format";
 import type { FleetSettings } from "./types";
 
@@ -167,6 +167,13 @@ function canonical(s: FleetSettings): unknown[] {
 }
 
 // --- login / setup -----------------------------------------------------------------------------
+
+/** The setup link itself is dead (unknown, used, revoked or expired; or malformed, which no retry
+ * fixes). Anything else (no network, a 5xx while the panel restarts) leaves the link usable:
+ * starting the setup does not use it up, only finishing does. */
+export function isSetupLinkDead(err: unknown): err is ApiError {
+  return isApiError(err) && (err.code === "setup_token_invalid" || err.status === 422);
+}
 
 /** Server rule (auth team): 3-32 chars of a-z 0-9 . _ - */
 export const USERNAME = /^[a-z0-9._-]{3,32}$/;

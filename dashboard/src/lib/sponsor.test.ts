@@ -21,6 +21,7 @@ import {
   leadText,
   moduleStatus,
   parseChannel,
+  parseLeadMinutes,
   priceText,
   regCounts,
   regStateInfo,
@@ -232,6 +233,12 @@ describe("campaigns", () => {
     expect(leadText(60)).toBe("۱ ساعت زودتر");
     expect(leadText(45)).toBe("۴۵ دقیقه زودتر");
     expect(leadText(0)).toMatch(/درست/);
+    // An empty field is not 0 (Number("") is 0); only plain whole minutes 0..360 pass.
+    for (const bad of ["", "  ", "1e2", "0x10", "1.5", "361", "-5"]) expect(parseLeadMinutes(bad).ok, bad).toBe(false);
+    expect(parseLeadMinutes("")).toMatchObject({ ok: false, error: expect.stringContaining("لازم") as unknown });
+    expect(parseLeadMinutes("۱۲۰")).toEqual({ ok: true, value: 120 });
+    expect(parseLeadMinutes("0")).toEqual({ ok: true, value: 0 });
+    expect(parseLeadMinutes(" 360 ")).toEqual({ ok: true, value: 360 });
   });
 
   it("gives the sponsor actions Persian names in the events page", () => {

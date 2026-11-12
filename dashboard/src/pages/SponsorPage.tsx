@@ -46,6 +46,7 @@ import {
   leadText,
   moduleStatus,
   parseChannel,
+  parseLeadMinutes,
   priceText,
   putSponsorSettings,
   regCounts,
@@ -67,7 +68,6 @@ import {
 import { toast } from "../lib/toast";
 import { TONE_SOFT, TONE_TEXT } from "../lib/tones";
 import { useNow } from "../lib/useNow";
-import { asciiDigits } from "../lib/validation";
 
 const fadeUp = (i: number) => ({
   initial: { opacity: 0, y: 14 },
@@ -554,17 +554,20 @@ function SettingsCard({ o }: { o: SponsorOverview }) {
     e.preventDefault();
     if (busy) return;
     const parsed = parseChannel(channel);
-    const minutes = Number(asciiDigits(lead.trim()));
+    const minutes = parseLeadMinutes(lead);
     const next: { channel?: string; lead?: string } = {};
     if (!parsed.ok) next.channel = parsed.error;
-    if (!Number.isInteger(minutes) || minutes < 0 || minutes > 360) next.lead = "عددی بین ۰ تا ۳۶۰ دقیقه.";
+    if (!minutes.ok) next.lead = minutes.error;
     setErrors(next);
-    if (!parsed.ok || next.lead) return;
+    if (!parsed.ok || !minutes.ok) return;
     setBusy(true);
-    putSponsorSettings({ default_channel: parsed.value, lead_minutes: minutes })
+    putSponsorSettings({ default_channel: parsed.value, lead_minutes: minutes.value })
       .then((o2) => {
         apply(o2);
-        toast.success("تنظیمات اسپانسر ذخیره شد", `کانال پیش‌فرض: ${channelText(o2.settings.default_channel)}`);
+        toast.success(
+          "تنظیمات اسپانسر ذخیره شد",
+          `کانال پیش‌فرض: ${channelText(o2.settings.default_channel)}، شروع تغییر: ${leadText(o2.settings.lead_minutes)}`,
+        );
       })
       .catch((err: unknown) => toast.error("ذخیره نشد", errorMessage(err)))
       .finally(() => setBusy(false));

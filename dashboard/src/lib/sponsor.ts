@@ -538,6 +538,16 @@ export function priceText(price: string | null, currency: string | null): string
   return `${formatDecimal(price)} ${currency ?? ""}`.trim();
 }
 
+/** The lead before a campaign, 0..360 minutes in Persian or Latin digits. An empty field is an
+ * error, never 0: Number("") is 0, and a lead of 0 makes the customer's channel show up about an
+ * hour late. Forms such as "1e2" or "0x10" are refused. */
+export function parseLeadMinutes(raw: string): Parsed<number> {
+  const s = asciiDigits(raw.trim());
+  if (s === "") return { ok: false, error: "این مقدار لازم است؛ ۰ یعنی درست در زمان شروع." };
+  if (!/^\d{1,3}$/.test(s) || Number(s) > 360) return { ok: false, error: "عددی بین ۰ تا ۳۶۰ دقیقه." };
+  return { ok: true, value: Number(s) };
+}
+
 export function leadText(minutes: number): string {
   if (minutes === 0) return "درست در زمان شروع";
   if (minutes % 60 === 0) return `${formatNumber(minutes / 60)} ساعت زودتر`;
