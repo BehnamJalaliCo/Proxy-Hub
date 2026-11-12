@@ -4,6 +4,8 @@
 # - creates /etc/proxy-hub (0700) with generated secrets (never printed),
 # - creates a read-only GitHub deploy key and prints ONLY its public half,
 # - clones the repo to /opt/proxy-hub and installs the GitOps deployer timer,
+# - from main: needs GitHub's signing key (it says how), installs the merge guard on a first
+#   install, and checks out nothing the guard refuses (deploy/install_guard.sh),
 # - installs "age" and the daily backup + weekly restore-test timers (M1.7).
 set -euo pipefail
 
@@ -69,6 +71,21 @@ if [ ! -d "$CHECKOUT/.git" ]; then
 fi
 # Always install from the requested branch, also when the checkout already existed.
 git -C "$CHECKOUT" fetch --quiet origin "$BRANCH"
+# Protected main (D31/D36), on the deployer's own condition: the branch tip is checked out, its
+# deployer and units installed and run as root only after the merge guard has passed it.
+require_merge="$(
+  set +eu
+  # shellcheck source=/dev/null
+  . "$ETC/deploy.env" >/dev/null 2>&1
+  echo "${REQUIRE_GITHUB_MERGE:-0}"
+)"
+if [ "$BRANCH" = main ] || [ "$require_merge" = 1 ]; then
+  if ! command -v gpg >/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gnupg
+  fi
+  bash "$(dirname "$0")/install_guard.sh" "$CHECKOUT" "origin/$BRANCH"
+fi
 git -C "$CHECKOUT" checkout --quiet --detach "origin/$BRANCH"
 
 install -m 0755 "$CHECKOUT/deploy/deployer.sh" /usr/local/sbin/proxyhub-deploy

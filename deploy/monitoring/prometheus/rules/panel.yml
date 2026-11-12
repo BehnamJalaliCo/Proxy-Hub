@@ -178,6 +178,29 @@ groups:
             ممکن است کسی مستقیم روی main کد فرستاده باشد. نسخه‌ی قبلی همچنان در حال کار است.
             جزئیات: journalctl -u proxyhub-deployer.service
 
+      # The newest commit failed its build or health check and the deployer went back to the previous
+      # one. It does not try that commit again by itself, so main is not what runs until the next merge.
+      - alert: DeployFailed
+        expr: proxyhub_deploy_failed == 1 and proxyhub_deploy_rollback_failed == 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "استقرار شکست خورد: تازه‌ترین commit اجرا نمیشود"
+          description: >-
+            سرور نتوانست تازه‌ترین commit شاخه‌ی main را مستقر کند (ساخت یا آزمون سلامت آن شکست خورد) و به نسخه‌ی قبلی برگشت.
+            نسخه‌ی قبلی همچنان در حال کار است. همین commit خودبه‌خود دوباره امتحان نمیشود؛ با ادغام بعدی، استقرار دوباره امتحان میشود.
+            جزئیات: journalctl -u proxyhub-deployer.service
+
+      - alert: DeployRollbackFailed
+        expr: proxyhub_deploy_rollback_failed == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "استقرار شکست خورد و برگشت به نسخه‌ی قبلی هم نشد"
+          description: >-
+            تازه‌ترین commit شاخه‌ی main مستقر نشد، و برگشت به نسخه‌ی سالم قبلی هم شکست خورد.
+            ممکن است پنل یا worker از کار افتاده باشد. جزئیات: journalctl -u proxyhub-deployer.service
+
   - name: proxyhub-watchdog
     rules:
       # Always firing on purpose. Alertmanager forwards it every few minutes to healthchecks.io

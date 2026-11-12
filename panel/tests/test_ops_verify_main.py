@@ -6,6 +6,7 @@ fingerprint is passed as PROXYHUB_GITHUB_MERGE_SIGNERS); a second key plays an i
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -17,6 +18,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "deploy" / "verify_main.sh"
 DEPLOYER = REPO / "deploy" / "deployer.sh"
+INSTALL = REPO / "deploy" / "install.sh"
+INSTALL_GUARD = REPO / "deploy" / "install_guard.sh"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("gpg") is None or shutil.which("git") is None, reason="needs git and gpg"
@@ -253,6 +256,98 @@ def test_the_deployer_runs_the_installed_guard_before_deploying_from_main() -> N
     guard_at = text.index('"$guard" "$CHECKOUT" "$current" "$target" "$ETC/github-web-flow.gpg"')
     assert guard_at < text.index('log "deploying $target')
     assert '[ "$DEPLOY_BRANCH" = main ]' in text
-    assert "guard=/usr/local/sbin/proxyhub-verify-main" in text  # the trusted copy, not the target's
+    # The trusted copy, not the target's (the sandbox prefix is for tests; systemd sets none).
+    assert 'SBIN="$ROOT/usr/local/sbin"' in text and 'ROOT="${PROXYHUB_DEPLOY_ROOT:-}"' in text
+    assert 'guard="$SBIN/proxyhub-verify-main"' in text
     assert '[ -x "$guard" ] &&' in text  # a missing guard refuses (fail closed)
-    assert 'install -m 0755 "$CHECKOUT/deploy/verify_main.sh" /usr/local/sbin/proxyhub-verify-main' in text
+    assert 'install -m 0755 "$CHECKOUT/deploy/verify_main.sh" "$SBIN/proxyhub-verify-main"' in text
+
+
+# --- deploy/install.sh runs the same guard before it checks anything out (D31/D36). ---------------
+
+
+@pytest.fixture
+def host(tmp_path: Path) -> Path:
+    """A sandbox root (PROXYHUB_DEPLOY_ROOT) with the installer's host directories."""
+    root = tmp_path / "host"
+    for d in ("etc/proxy-hub", "var/lib/proxy-hub", "usr/local/sbin"):
+        (root / d).mkdir(parents=True)
+    return root
+
+
+def install_guard(host: Path, repo: Repo, target: str, signers: str) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "PROXYHUB_DEPLOY_ROOT": str(host), "PROXYHUB_GITHUB_MERGE_SIGNERS": signers}
+    return subprocess.run(  # noqa: S603 - fixed argv: our own script
+        ["bash", str(INSTALL_GUARD), str(repo.path), target],  # noqa: S607 - bash from PATH
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def test_install_guard_first_install_of_a_signed_merge_installs_the_guard(
+    world: tuple[Repo, Key, Key], host: Path
+) -> None:
+    """A fresh server installing main: before, the deployer refused for lack of a guard, forever."""
+    repo, github, _ = world
+    target = repo.merge_pr("a", 1, key=github)
+    shutil.copy(github.public, host / "etc/proxy-hub/github-web-flow.gpg")
+    r = install_guard(host, repo, target, github.fpr)
+    assert r.returncode == 0, r.stdout + r.stderr
+    guard = host / "usr/local/sbin/proxyhub-verify-main"
+    assert guard.read_bytes() == SCRIPT.read_bytes() and os.access(guard, os.X_OK)
+    assert "verify-main: OK (1 merge commit(s)" in r.stdout
+
+
+def test_install_guard_without_the_signing_key_stops_and_installs_nothing(
+    world: tuple[Repo, Key, Key], host: Path
+) -> None:
+    repo, github, _ = world
+    target = repo.merge_pr("a", 1, key=github)
+    r = install_guard(host, repo, target, github.fpr)
+    assert r.returncode == 3 and "ACTION NEEDED" in r.stdout
+    assert "https://github.com/web-flow.gpg" in r.stdout
+    assert not (host / "usr/local/sbin/proxyhub-verify-main").exists()
+
+
+def test_install_guard_refuses_an_unsigned_tip_on_a_fresh_server(
+    world: tuple[Repo, Key, Key], host: Path
+) -> None:
+    repo, github, _ = world
+    repo.merge_pr("a", 1, key=github)
+    pushed = repo.commit("pushed-straight-to-main")
+    shutil.copy(github.public, host / "etc/proxy-hub/github-web-flow.gpg")
+    r = install_guard(host, repo, pushed, github.fpr)
+    assert r.returncode == 1 and "not a merge commit" in r.stdout and "REFUSED" in r.stdout
+
+
+def test_install_guard_runs_the_installed_guard_and_never_replaces_it(
+    world: tuple[Repo, Key, Key], host: Path
+) -> None:
+    """A re-run on a live server: the guard from the last good deploy decides, from the deployed
+    commit; the copy beside the installer (maybe of an unverified tip) is not installed over it."""
+    repo, github, _ = world
+    deployed = repo.merge_pr("a", 1, key=github)
+    target = repo.merge_pr("b", 2, key=github)
+    shutil.copy(github.public, host / "etc/proxy-hub/github-web-flow.gpg")
+    (host / "var/lib/proxy-hub/deployed_commit").write_text(deployed + "\n")
+    guard = host / "usr/local/sbin/proxyhub-verify-main"
+    guard.write_text('#!/bin/sh\necho "installed guard: $2 -> $3"\nexit 1\n')
+    guard.chmod(0o755)
+    before = guard.read_bytes()
+    r = install_guard(host, repo, target, github.fpr)
+    assert r.returncode == 1 and f"installed guard: {deployed} -> {target}" in r.stdout
+    assert guard.read_bytes() == before
+
+
+def test_install_sh_runs_the_guard_before_it_checks_out_or_installs_anything() -> None:
+    text = INSTALL.read_text()
+    fetch = text.index('git -C "$CHECKOUT" fetch --quiet origin "$BRANCH"')
+    guard = text.index('bash "$(dirname "$0")/install_guard.sh" "$CHECKOUT" "origin/$BRANCH"')
+    checkout = text.index('git -C "$CHECKOUT" checkout --quiet --detach "origin/$BRANCH"')
+    deployer = text.index('install -m 0755 "$CHECKOUT/deploy/deployer.sh"')
+    first_deploy = text.index("FORCE=1 /usr/local/sbin/proxyhub-deploy")
+    assert fetch < guard < checkout < deployer < first_deploy
+    assert '[ "$BRANCH" = main ] || [ "$require_merge" = 1 ]' in text  # the deployer's condition
+    pinned = re.search(r"PROXYHUB_GITHUB_MERGE_SIGNERS:-([0-9A-F]{40})\}", SCRIPT.read_text())
+    assert pinned and pinned.group(1) in INSTALL_GUARD.read_text()  # the key the operator must check

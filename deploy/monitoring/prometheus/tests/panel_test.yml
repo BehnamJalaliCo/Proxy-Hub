@@ -297,3 +297,51 @@ tests:
       - eval_time: 14m
         alertname: DeployRefused
         exp_alerts: []
+
+  # A failed deploy with a good rollback: warning at once, cleared by a good deploy. A failed rollback
+  # raises only the critical alert (the previous version is not known to run).
+  - interval: 1m
+    input_series:
+      - series: 'proxyhub_deploy_failed{job="node", instance="node-exporter:9100"}'
+        values: "0x5 1x5 1x5 0x5"
+      - series: 'proxyhub_deploy_rollback_failed{job="node", instance="node-exporter:9100"}'
+        values: "0x5 0x5 1x5 0x5"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: DeployFailed
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: DeployRollbackFailed
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: DeployFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: node
+              instance: "node-exporter:9100"
+            exp_annotations:
+              summary: "استقرار شکست خورد: تازه‌ترین commit اجرا نمیشود"
+              description: "سرور نتوانست تازه‌ترین commit شاخه‌ی main را مستقر کند (ساخت یا آزمون سلامت آن شکست خورد) و به نسخه‌ی قبلی برگشت. نسخه‌ی قبلی همچنان در حال کار است. همین commit خودبه‌خود دوباره امتحان نمیشود؛ با ادغام بعدی، استقرار دوباره امتحان میشود. جزئیات: journalctl -u proxyhub-deployer.service"
+      - eval_time: 7m
+        alertname: DeployRollbackFailed
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: DeployFailed
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: DeployRollbackFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: node
+              instance: "node-exporter:9100"
+            exp_annotations:
+              summary: "استقرار شکست خورد و برگشت به نسخه‌ی قبلی هم نشد"
+              description: "تازه‌ترین commit شاخه‌ی main مستقر نشد، و برگشت به نسخه‌ی سالم قبلی هم شکست خورد. ممکن است پنل یا worker از کار افتاده باشد. جزئیات: journalctl -u proxyhub-deployer.service"
+      - eval_time: 18m
+        alertname: DeployFailed
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: DeployRollbackFailed
+        exp_alerts: []
