@@ -18,6 +18,7 @@ from typing import Any, Literal, Self
 
 import httpx
 
+from proxyhub.agent_api.validation import valid_domain
 from proxyhub.vault import SecretValue
 
 API_BASE = "https://api.cloudflare.com/client/v4"
@@ -50,6 +51,7 @@ class Zone:
     name: str
     status: str
     account_id: str | None
+    name_servers: tuple[str, ...] = ()  # the pair Cloudflare assigned (lower case, sorted)
 
 
 @dataclass(frozen=True)
@@ -118,7 +120,16 @@ def parse_zone(raw: Mapping[str, Any]) -> Zone:
         name=_str(raw.get("name"), "name").lower().rstrip("."),
         status=str(raw.get("status") or "unknown")[:20],
         account_id=account_id if isinstance(account_id, str) else None,
+        name_servers=_name_servers(raw.get("name_servers")),
     )
+
+
+def _name_servers(value: Any) -> tuple[str, ...]:
+    """The zone's assigned name servers: valid host names only, lower case, no trailing dot, sorted."""
+    if not isinstance(value, list):
+        return ()
+    hosts = {v.strip().rstrip(".").lower() for v in value if isinstance(v, str)}
+    return tuple(sorted(h for h in hosts if valid_domain(h)))
 
 
 def parse_record(zone_id: str, raw: Mapping[str, Any]) -> DnsRecord:

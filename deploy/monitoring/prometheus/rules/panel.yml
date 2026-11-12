@@ -31,6 +31,19 @@ groups:
             | reReplaceAll "0" "۰" | reReplaceAll "1" "۱" | reReplaceAll "2" "۲" | reReplaceAll "3" "۳" | reReplaceAll "4" "۴"
             | reReplaceAll "5" "۵" | reReplaceAll "6" "۶" | reReplaceAll "7" "۷" | reReplaceAll "8" "۸" | reReplaceAll "9" "۹" | reReplaceAll "[.]" "٫" }} پیش بوده است{{ end }} (حد مجاز ۹۰ ثانیه). چرخه‌های کنترل اجرا نمیشوند.
 
+      # One worker loop no longer finishes passes (raises every time, or hangs) while the heartbeat,
+      # its own loop, stays fresh. Slack: three intervals plus 15 minutes (long passes, backoff).
+      - alert: ReconcilerStalled
+        expr: |
+          proxyhub_reconciler_last_success_age_seconds
+            > 3 * proxyhub_reconciler_interval_seconds + 900
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "چرخه‌ی کنترل {{ $labels.name }} در worker پنل کارش را تمام نمیکند"
+          description: "چرخه‌ی {{ $labels.name }} مدتی است هیچ دوری را با موفقیت تمام نکرده است (هر بار خطا میدهد یا گیر کرده). جزئیات در لاگ worker است."
+
       - alert: PanelDatabaseDown
         expr: proxyhub_db_up == 0
         for: 1m

@@ -21,9 +21,10 @@ How it goes (:func:`clean`), under the advisory lock :data:`LOCK_NAME` (one clea
    older than its 48-hour rule) is split into tens, then single ids; a single refused id stays in
    the channel and is counted. 429 waits ``retry_after`` (up to :data:`MAX_WAIT_S`). The whole run
    has a budget (:data:`MAX_CALLS`, :data:`BUDGET_S`); what is left can be done by pressing again.
-4. In one transaction: the panel forgets the test-channel posts whose ids were removed
-   (``channel_posts`` rows, their ``posts`` and ``post_links``), closes the edit jobs still waiting
-   for them (nothing is left to edit), lifts the hold and writes one actions_log row with counts.
+4. In one transaction: the panel forgets the test-channel messages whose ids were removed
+   (``channel_posts`` rows), marks their ``posts`` gone (kept: the publisher's day plan and caps
+   count them; the ended purge removes them later), closes the edit jobs still waiting for them
+   (nothing is left to edit), lifts the hold and writes one actions_log row with counts.
    The publisher then never tries to edit a removed post; an edit that was already in flight ends
    as Telegram's "message to edit not found", which the outbox fails gracefully.
 
@@ -351,8 +352,9 @@ async def sweep_channel(
 
 
 async def forget_removed(conn: AsyncConnection, t: Target, ids: list[int], now: datetime) -> dict[str, int]:
-    """The panel's records of the removed test-channel posts go, and edits waiting for them close
-    (nothing is left to edit). Never a row of the main channel's chat."""
+    """The panel's records of the removed test-channel messages go, their posts are marked gone and
+    edits waiting for them close (nothing is left to edit). Never a row of the main channel's chat.
+    ``posts`` counts the posts marked gone; ``post_links`` stays 0 (they are kept with their posts)."""
     counts = {"channel_posts": 0, "posts": 0, "post_links": 0, "edit_jobs_closed": 0}
     if not ids:
         return counts
@@ -390,16 +392,17 @@ async def forget_removed(conn: AsyncConnection, t: Target, ids: list[int], now: 
         ).scalars()
     )
     if post_ids:
-        counts["post_links"] = int(
-            (
-                await conn.execute(text("DELETE FROM post_links WHERE post_id = ANY(:p)"), {"p": post_ids})
-            ).rowcount
-            or 0
-        )
+        # Marked gone like a post whose message an edit found removed, never deleted here: the
+        # publisher's plan reads these rows (a slot already posted, the day's count, the gap since
+        # the last post, the breaking-news caps). The ended purge removes them once old enough.
         counts["posts"] = int(
             (
                 await conn.execute(
-                    text("DELETE FROM posts WHERE id = ANY(:p) AND role = 'test'"), {"p": post_ids}
+                    text(
+                        "UPDATE posts SET gone_at = COALESCE(gone_at, :now), last_edit_outbox_id = NULL, "
+                        "edit_retry_at = NULL WHERE id = ANY(:p) AND role = 'test'"
+                    ),
+                    {"p": post_ids, "now": now},
                 )
             ).rowcount
             or 0

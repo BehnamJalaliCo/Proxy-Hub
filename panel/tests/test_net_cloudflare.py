@@ -12,6 +12,7 @@ import logging
 import secrets
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,11 @@ from test_net_support import (
     CF_INVALID_TOKEN_VERIFY,
     ZONE_ID,
     ZONE_ID_2,
+    Answer,
+    LocalCloudflare,
     actions,
+    cf_error,
+    cf_ok,
     cf_record_json,
     cf_zone_json,
     clean_net_tables,
@@ -62,6 +67,7 @@ from proxyhub.cloudflare.records import (
     same_content,
 )
 from proxyhub.reconcilers.dns import DnsReconciler
+from proxyhub.telegram import store as tg_store
 from proxyhub.vault import SecretValue, Vault
 
 CF_PATHS = {
@@ -141,6 +147,13 @@ def test_parse_zone_and_record_shapes() -> None:
     auto = parse_record(ZONE_ID, cf_record_json("x.example.com", "198.51.100.4", ttl=1, proxied=True))
     assert auto.ttl == 1 and auto.proxied
     assert _codes(CF_INVALID_TOKEN_VERIFY) == (1000,)
+    # The name servers Cloudflare assigned the zone: normalised, odd entries dropped.
+    assert zone.name_servers == ("bob.ns.cloudflare.com", "lola.ns.cloudflare.com")
+    raw = cf_zone_json()
+    raw["name_servers"] = ["LOLA.ns.cloudflare.com.", 5, "not a host", "bob.ns.cloudflare.com"]
+    assert parse_zone(raw).name_servers == ("bob.ns.cloudflare.com", "lola.ns.cloudflare.com")
+    raw["name_servers"] = None
+    assert parse_zone(raw).name_servers == ()
 
 
 def test_token_format_check_runs_before_any_network_call() -> None:
@@ -262,6 +275,33 @@ def test_plan_is_stable_for_txt_quotes_and_case() -> None:
     assert plan_zone(ZONE_ID, [Desired("T.Example.com", "TXT", "proxy-hub test")], [rec], [row]) == []
 
 
+def test_plan_a_record_of_ours_renamed_in_cloudflare() -> None:
+    """slot1's record was renamed to foo by hand, its marker kept: it is deleted BEFORE slot1 is
+    created again (its row still holds slot1's name until then)."""
+    rec, row = ours("slot1.example.com", "203.0.113.1")
+    moved = remote("foo.example.com", "203.0.113.1", record_id=rec.id, comment=rec.comment)
+    changes = plan_zone(ZONE_ID, [Desired("slot1.example.com", "A", "203.0.113.1")], [moved], [row])
+    assert [(c.op, c.name, c.row) for c in changes] == [
+        ("delete", "foo.example.com", row),
+        ("create", "slot1.example.com", None),
+    ]
+    assert changes[0].remote == moved
+
+
+def test_plan_a_record_renamed_and_unmarked_is_foreign_and_only_our_row_goes() -> None:
+    rec, row = ours("slot1.example.com", "203.0.113.1")
+    moved = remote("foo.example.com", "203.0.113.1", record_id=rec.id, comment="edited by hand")
+    changes = plan_zone(ZONE_ID, [Desired("slot1.example.com", "A", "203.0.113.1")], [moved], [row])
+    assert [(c.op, c.name, c.row) for c in changes] == [
+        ("forget", "slot1.example.com", row),
+        ("create", "slot1.example.com", None),
+    ]
+    # The same name, unmarked: still a conflict, and the row is kept (nothing new here).
+    same = remote("slot1.example.com", "203.0.113.1", record_id=rec.id, comment="edited by hand")
+    changes = plan_zone(ZONE_ID, [Desired("slot1.example.com", "A", "203.0.113.1")], [same], [row])
+    assert [(c.op, c.name) for c in changes] == [("conflict", "slot1.example.com")]
+
+
 _names = st.sampled_from([f"slot{i}.example.com" for i in range(1, 6)] + ["www.example.com", "example.com"])
 _ips = st.sampled_from(["203.0.113.1", "203.0.113.2", "198.51.100.7"])
 
@@ -270,11 +310,29 @@ _ips = st.sampled_from(["203.0.113.1", "203.0.113.2", "198.51.100.7"])
 def _zone_state(draw: st.DrawFn) -> tuple[list[DnsRecord], list[OwnedRow], list[Desired]]:
     recs: list[DnsRecord] = []
     rows: list[OwnedRow] = []
+    kinds = [
+        "ours",
+        "foreign",
+        "marked_foreign",
+        "unmarked_with_row",
+        "pending",
+        "renamed",
+        "renamed_unmarked",
+    ]
     for _ in range(draw(st.integers(0, 8))):
-        kind = draw(st.sampled_from(["ours", "foreign", "marked_foreign", "unmarked_with_row", "pending"]))
+        kind = draw(st.sampled_from(kinds))
         name, ip = draw(_names), draw(_ips)
         ref = uuid.uuid4()
-        if kind == "foreign":
+        if kind != "foreign" and kind != "marked_foreign" and any(r.name == name for r in rows):
+            kind = "foreign"  # one row per name and type, as the database keeps it
+        if kind in ("renamed", "renamed_unmarked"):
+            # Our row holds ``name``; its record was renamed by hand (marker kept or removed).
+            other = draw(_names.filter(lambda n, name=name: n != name))
+            comment = managed_comment(ref) if kind == "renamed" else "edited by hand"
+            rec = remote(other, ip, comment=comment)
+            recs.append(rec)
+            rows.append(replace(row_for(rec, ref=ref), name=name))
+        elif kind == "foreign":
             recs.append(remote(name, ip, comment=draw(st.sampled_from([None, "owner", "managed-by=other"]))))
         elif kind == "marked_foreign":
             recs.append(remote(name, ip, comment=managed_comment(ref)))
@@ -311,6 +369,15 @@ def test_property_foreign_records_are_never_touched(
             assert all(owned_row(r, rows) is not None for r in recs if r.name == c.name)
     deleted = [c.remote.id for c in changes if c.op == "delete" and c.remote is not None]
     assert len(deleted) == len(set(deleted))
+    # A create never writes a new row while a row of ours still holds its name (unique key):
+    # that row is reused (pending) or removed earlier in the plan.
+    removed: set[uuid.UUID] = set()
+    for c in changes:
+        if c.op in ("forget", "delete") and c.row is not None:
+            removed.add(c.row.ref)
+        if c.op == "create" and c.row is None:
+            key = (c.name.lower(), c.type.upper())
+            assert not [r for r in rows if (r.name.lower(), r.type.upper()) == key and r.ref not in removed]
 
 
 # --- pool state machine --------------------------------------------------------------------------
@@ -576,6 +643,189 @@ async def test_unreachable_cloudflare_error_does_not_carry_the_token(
     assert token not in repr(CloudflareClient(SecretValue(token)))
 
 
+# --- the hourly token re-check tells the owner when the token stops working ----------------------
+
+
+def _cloudflare(
+    *,
+    verify: str = "active",
+    zones: list[dict[str, Any]] | None = None,
+    dns_edit: bool = True,
+    down: bool = False,
+) -> Any:
+    """Cloudflare's documented answers for the re-check (verify, zones, records, the edit probe)."""
+    listed = [cf_zone_json(ZONE_ID, "example.com")] if zones is None else zones
+
+    def answer(method: str, path: str) -> Answer:
+        if down:
+            return cf_error(503, 10000, "Service unavailable")
+        if path == "/user/tokens/verify":
+            return cf_ok({"id": "f267e341f3dd4697bd3b9f71dd96247f", "status": verify})
+        if path == "/zones":
+            return cf_ok(listed)
+        if method == "GET" and path.endswith("/dns_records"):
+            return cf_ok([])
+        if method == "PATCH":
+            return (
+                cf_error(404, 81044, "Record does not exist.")
+                if dns_edit
+                else cf_error(403, 10000, "Authentication error")
+            )
+        return cf_error(404, 7003, "Could not route to the path")
+
+    return answer
+
+
+async def _recheck(engine: AsyncEngine, answer: Any, token: SecretValue) -> None:
+    async with LocalCloudflare(answer) as cf_server, cf_server.client(token) as cf, engine.begin() as conn:
+        await service.refresh_token_and_zones(conn, cf, datetime.now(UTC), actor="dns")
+
+
+async def _owner_alerts(engine: AsyncEngine) -> list[str]:
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("SELECT payload FROM outbox WHERE kind = 'alert' ORDER BY id"))).all()
+    return [str(r.payload["text"]) for r in rows]
+
+
+@pytest.fixture
+async def owner(engine: AsyncEngine) -> AsyncIterator[None]:
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM outbox"))
+        await tg_store.set_owner_chat(conn, 424242, datetime.now(UTC))
+    yield
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM outbox"))
+        await conn.execute(text("DELETE FROM settings WHERE key = 'telegram.owner'"))
+
+
+async def _verified(engine: AsyncEngine) -> SecretValue:
+    token = SecretValue(secrets.token_urlsafe(30))
+    now = datetime.now(UTC)
+    async with engine.begin() as conn:
+        await service.store_zones(conn, [parse_zone(cf_zone_json())], {ZONE_ID: True}, now)
+        await service.save_state(conn, now, verified=True, checked_at=now, missing=[], token_kind="user")
+    return token
+
+
+@pytest.mark.db
+async def test_a_token_that_stopped_working_is_told_to_the_owner_once(
+    engine: AsyncEngine, owner: None
+) -> None:
+    token = await _verified(engine)
+    await _recheck(engine, _cloudflare(verify="expired"), token)
+    async with engine.connect() as conn:
+        state = await service.load_state(conn)
+    assert state is not None and not state.verified and state.error == "cf_token_invalid"
+    (alert,) = await _owner_alerts(engine)
+    assert "توکن Cloudflare" in alert and "تاریخش گذشته" in alert and "توکن تازه" in alert
+    assert token.reveal() not in alert
+    await _recheck(engine, _cloudflare(verify="expired"), token)  # an hour later: nothing new
+    assert len(await _owner_alerts(engine)) == 1
+    # The token works again (fixed in Cloudflare): one short note, then nothing.
+    await _recheck(engine, _cloudflare(), token)
+    alerts = await _owner_alerts(engine)
+    assert len(alerts) == 2 and alerts[1] == service.CF_BACK_FA
+    await _recheck(engine, _cloudflare(), token)
+    assert len(await _owner_alerts(engine)) == 2
+
+
+@pytest.mark.db
+async def test_cloudflare_being_down_is_not_a_token_problem(engine: AsyncEngine, owner: None) -> None:
+    token = await _verified(engine)
+    await _recheck(engine, _cloudflare(down=True), token)
+    async with engine.connect() as conn:
+        state = await service.load_state(conn)
+    assert state is not None and state.verified and state.error == "cf_unavailable"
+    assert await _owner_alerts(engine) == []
+
+
+@pytest.mark.db
+async def test_a_lost_permission_is_named_in_the_alert(engine: AsyncEngine, owner: None) -> None:
+    token = await _verified(engine)
+    await _recheck(engine, _cloudflare(dns_edit=False), token)
+    (alert,) = await _owner_alerts(engine)
+    assert "<code>DNS:Edit</code>" in alert and token.reveal() not in alert
+    async with engine.connect() as conn:
+        state = await service.load_state(conn)
+    assert state is not None and not state.verified and state.missing == ["DNS:Edit"]
+
+
+@pytest.mark.db
+async def test_a_token_that_sees_no_domain_does_not_blame_a_permission(
+    engine: AsyncEngine, owner: None
+) -> None:
+    token = await _verified(engine)
+    await _recheck(engine, _cloudflare(zones=[]), token)
+    (alert,) = await _owner_alerts(engine)
+    assert "هیچ دامنه‌ای" in alert and "اجازه" not in alert
+
+
+@pytest.mark.db
+async def test_without_an_owner_chat_the_lost_token_is_only_logged(engine: AsyncEngine) -> None:
+    token = await _verified(engine)
+    await _recheck(engine, _cloudflare(verify="disabled"), token)
+    assert await _owner_alerts(engine) == []
+    assert [(a["action"], a["reasons"]["reasons"]) for a in await actions(engine)] == [
+        ("cloudflare_token_check", ["cf_token_invalid"])
+    ]
+
+
+@pytest.mark.db
+async def test_records_of_a_zone_that_left_the_account_are_not_read_or_shown(
+    engine: AsyncEngine, vault: Vault
+) -> None:
+    now = datetime.now(UTC)
+    token = SecretValue(secrets.token_urlsafe(30))
+    async with engine.begin() as conn:
+        await vault.put(conn, service.TOKEN_SECRET, token)
+        await service.save_state(conn, now, verified=True, checked_at=now, zones_refreshed_at=now, missing=[])
+    await add_zone(engine, ZONE_ID, "left.example", status="gone", pool="standby")
+    await add_zone(engine, ZONE_ID_2, "live.example", pool="active")
+    async with engine.begin() as conn:
+        for purpose, name in (("slot", "slot1.left.example"), ("acme", "_acme-challenge.left.example")):
+            await conn.execute(
+                text(
+                    "INSERT INTO cf_records (id, zone_id, cf_record_id, name, type, content, ttl, proxied, "
+                    "purpose) VALUES (:id, :z, :cf, :n, :t, '203.0.113.7', 60, false, :p)"
+                ),
+                {
+                    "id": uuid.uuid4(),
+                    "z": ZONE_ID,
+                    "cf": secrets.token_hex(16),
+                    "n": name,
+                    "t": "A" if purpose == "slot" else "TXT",
+                    "p": purpose,
+                },
+            )
+        assert await service.zones_with_rows(conn, "slot") == []
+        assert await service.zones_with_rows(conn, "acme") == []  # the ACME loop's leftovers, too
+        assert (await service.status(conn))["records"] == []  # not shown as live records
+    async with LocalCloudflare(lambda method, path: cf_ok([])) as cf_server:
+        loop = DnsReconciler(vault_factory=lambda: vault, client_factory=cf_server.client)
+        async with engine.begin() as conn:
+            await loop.run_once(conn)
+        assert cf_server.requests == []  # nothing to do on the live zone, nothing tried on the gone one
+        async with engine.connect() as conn:
+            assert (await conn.execute(text("SELECT count(*) FROM cf_records"))).scalar_one() == 2
+        # Cloudflare lists the zone again (same id): it is reconciled like any other zone.
+        async with engine.begin() as conn:
+            await conn.execute(text("UPDATE cf_zones SET status = 'active' WHERE id = :id"), {"id": ZONE_ID})
+            await loop.run_once(conn)
+        assert ("GET", f"/zones/{ZONE_ID}/dns_records") in cf_server.requests
+    async with engine.connect() as conn:
+        left = (await conn.execute(text("SELECT purpose FROM cf_records"))).scalars().all()
+    assert left == ["acme"]  # the slot row whose record is gone was forgotten
+
+
+def test_token_alert_texts() -> None:
+    many = service.token_lost_alert_fa("cf_token_multiple_accounts")
+    assert "بیش از یک حساب" in many and "Proxy-Hub" in many
+    perm = service.token_lost_alert_fa("cf_permissions_missing", ["DNS:Edit", "<x>"])
+    assert "<code>DNS:Edit، &lt;x&gt;</code>" in perm
+    for text_ in (many, perm, service.token_lost_alert_fa("cf_token_invalid")):
+        assert "گواهی TLS" in text_ and "صفحه‌ی «Cloudflare»" in text_
+
+
 # --- API ---------------------------------------------------------------------------------------
 
 
@@ -805,3 +1055,82 @@ async def test_apply_plan_local_steps_refusals_and_crash_safe_create(engine: Asy
     assert ("dns_delete", False, "refused: not a record this panel manages") in log
     assert ("dns_create", True, "failed: unavailable") in log
     assert {"dns_sync", "dns_adopt", "dns_forget"} <= {x[0] for x in log}
+
+
+@pytest.mark.db
+async def test_a_renamed_record_is_removed_and_its_name_made_again(engine: AsyncEngine) -> None:
+    await add_zone(engine, ZONE_ID, "example.com", pool="active")
+    rec, row = ours("slot1.example.com", "203.0.113.1")
+    moved = remote("foo.example.com", "203.0.113.1", record_id=rec.id, comment=rec.comment)
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO cf_records (id, zone_id, cf_record_id, name, type, content, ttl, proxied, "
+                "purpose) VALUES (:r, :z, :c, 'slot1.example.com', 'A', '203.0.113.1', 60, false, 'slot')"
+            ),
+            {"r": row.ref, "z": ZONE_ID, "c": rec.id},
+        )
+    made: list[str] = []
+
+    def answer(method: str, path: str) -> Answer:
+        if method == "GET":
+            return cf_ok(
+                [cf_record_json(moved.name, moved.content, record_id=moved.id, comment=moved.comment)]
+            )
+        if method == "DELETE":
+            return cf_ok({"id": path.rsplit("/", 1)[1]})
+        name = ["slot1.example.com", "slot2.example.com", "slot4.example.com"][len(made)]
+        made.append(name)
+        return cf_ok(cf_record_json(name, "203.0.113.9", comment="managed-by=proxy-hub"))
+
+    desired = [
+        Desired("slot1.example.com", "A", "203.0.113.9"),
+        Desired("slot2.example.com", "A", "203.0.113.9"),
+    ]
+    async with (
+        LocalCloudflare(answer) as cf_server,
+        cf_server.client(SecretValue(secrets.token_urlsafe(30))) as cf,
+    ):
+        report = await service.reconcile_zone(
+            engine, cf, ZONE_ID, desired, purpose="slot", actor="dns", max_api_calls=10
+        )
+        assert report.failed == [] and report.done == [
+            "delete:foo.example.com",
+            "create:slot1.example.com",
+            "create:slot2.example.com",
+        ]
+        # A create whose name a row of ours still holds is skipped; the rest of the plan goes on.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO cf_records (id, zone_id, name, type, content, ttl, proxied, purpose) "
+                    "VALUES (:r, :z, 'slot3.example.com', 'A', '203.0.113.3', 60, false, 'slot')"
+                ),
+                {"r": uuid.uuid4(), "z": ZONE_ID},
+            )
+        steps = [
+            Change(
+                "create",
+                ZONE_ID,
+                "slot3.example.com",
+                "A",
+                desired=Desired("slot3.example.com", "A", "203.0.113.9"),
+            ),
+            Change(
+                "create",
+                ZONE_ID,
+                "slot4.example.com",
+                "A",
+                desired=Desired("slot4.example.com", "A", "203.0.113.9"),
+            ),
+        ]
+        report = await service.apply_plan(
+            engine, cf, steps, [], purpose="slot", actor="dns", max_api_calls=10, known_conflicts=set()
+        )
+    assert report.failed == ["create:slot3.example.com"] and report.done == ["create:slot4.example.com"]
+    assert ("DELETE", f"/zones/{ZONE_ID}/dns_records/{rec.id}") in cf_server.requests
+    async with engine.connect() as conn:
+        names = (await conn.execute(text("SELECT name FROM cf_records ORDER BY name"))).scalars().all()
+    assert names == ["slot1.example.com", "slot2.example.com", "slot3.example.com", "slot4.example.com"]
+    log = [(a["action"], a["result"]) for a in await actions(engine)]
+    assert ("dns_create", "failed: row_conflict") in log

@@ -13,11 +13,14 @@ imitation of Telegram anywhere).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import socket
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from telethon import TelegramClient, errors, functions, types
@@ -106,15 +109,31 @@ def test_code_and_password() -> None:
     assert validation.parse_code("12345") == "12345"
     assert validation.parse_code(" 12 345 ") == "12345"
     assert validation.parse_code("۱۲۳۴۵") == "12345"
-    for bad in ["", "1234", "123456789", "12a45", "١٢٣٤"]:
+    for bad in ["", "1234", "123456789", "12a45", "١٢٣٤", "apple"]:
         with pytest.raises(InputError) as caught:
-            validation.parse_code(bad)
+            validation.parse_code(bad, via="app")
+        assert caught.value.code == "code_format"
+    for bad in ["", "1234", "123456789", "١٢٣٤", "!!!!!", "x" * 65]:
+        with pytest.raises(InputError) as caught:
+            validation.parse_code(bad)  # the way is not known yet: no shape a code can have
         assert caught.value.code == "code_format"
     assert validation.parse_password(" with spaces ") == " with spaces "
     for bad in ["", "x" * 257]:
         with pytest.raises(InputError) as caught:
             validation.parse_password(bad)
         assert caught.value.code == "password_format"
+
+
+def test_a_code_sent_as_an_sms_word_is_typed_as_a_word() -> None:
+    assert validation.parse_code("apple", via="sms_word") == "apple"
+    assert validation.parse_code("  two   Words ", via="sms_word") == "two Words"
+    assert validation.parse_code("سیب", via="sms_word") == "سیب"
+    assert validation.parse_code("apple") == "apple"  # the route lets it through; the login decides
+    assert validation.parse_code(" 12 345 ") == "12345"
+    for bad in ["", "   ", "12345", "x" * 65, "no-dash", "a​b"]:
+        with pytest.raises(InputError) as caught:
+            validation.parse_code(bad, via="sms_word")
+        assert caught.value.code == "code_word_format"
 
 
 def test_mask_phone_shows_four_digits_and_never_the_length() -> None:
@@ -188,6 +207,11 @@ def test_network_failures_are_unavailable_and_programming_errors_are_not_hidden(
         assert mapped is not None and mapped.code == "telegram_unavailable", repr(exc)
     assert classify(TypeError("bug")) is None
     assert classify(KeyError("bug")) is None
+
+
+def test_an_unknown_auth_key_is_unavailable_but_named() -> None:
+    mapped = classify(errors.AuthKeyNotFound())
+    assert mapped is not None and (mapped.code, mapped.rpc) == ("telegram_unavailable", "AUTH_KEY_NOT_FOUND")
 
 
 def test_a_mapped_error_carries_nothing_from_the_request() -> None:
@@ -516,6 +540,32 @@ def test_connected_status_and_checks() -> None:
     )
 
 
+def test_an_error_is_checked_again_and_can_come_back() -> None:
+    later = NOW + timedelta(minutes=30)
+    broken = state.after_check(_connected(), code="api_id_invalid", now=later)
+    assert not state.check_due(broken, later + timedelta(minutes=29))
+    assert state.check_due(broken, later + timedelta(minutes=30))  # it does not wait for the owner
+    still = state.after_check(broken, code="telegram_unavailable", now=later + timedelta(minutes=30))
+    assert (still.state, still.error) == ("error", "api_id_invalid")
+    back = state.after_check(broken, code=None, now=later + timedelta(minutes=30))
+    assert (back.state, back.error, back.last_check_error) == ("connected", None, None)
+    assert not state.check_due(replace(broken, session_id=None), later + timedelta(days=1))
+
+
+def test_a_flood_wait_holds_the_next_check() -> None:
+    later = NOW + timedelta(minutes=30)
+    flooded = state.after_check(_connected(), code="flood_wait", seconds=3 * 3600, now=later)
+    assert flooded.state == "connected" and flooded.last_check_error == "flood_wait"
+    assert not state.check_due(flooded, later + timedelta(hours=2, minutes=59))
+    assert state.check_due(flooded, later + timedelta(hours=3))
+    short = state.after_check(_connected(), code="flood_wait", seconds=5, now=later)
+    assert not state.check_due(short, later + timedelta(minutes=29))  # never sooner than every 30 min
+    assert state.check_due(short, later + timedelta(minutes=30))
+    ok = state.after_check(flooded, code=None, now=later + timedelta(hours=3))
+    assert ok.check_after is None
+    assert AccountRow.from_json(flooded.to_json()) == flooded
+
+
 def test_a_stored_row_is_read_defensively() -> None:
     assert AccountRow.from_json(None) == AccountRow()
     assert AccountRow.from_json({"state": "hacked"}) == AccountRow()
@@ -547,3 +597,42 @@ def test_every_code_has_persian_text() -> None:
 def test_the_owner_alert_escapes_its_reason() -> None:
     text = messages.session_ended_alert("<b>SESSION_REVOKED</b>")
     assert "&lt;b&gt;SESSION_REVOKED&lt;/b&gt;" in text and "دستگاه‌ها" in text
+
+
+def test_the_check_failed_alerts() -> None:
+    api = messages.check_failed_alert("api_id_invalid", "API_ID_INVALID")
+    assert "api_id_invalid / API_ID_INVALID" in api and "api_id تازه" in api and "قطع اتصال" in api
+    key = messages.check_failed_alert("session_unreadable", None)
+    assert "<code>session_unreadable</code>" in key and "بررسی بعدی" in key
+    other = messages.check_failed_alert("telegram_refused", "<X>")
+    assert "&lt;X&gt;" in other and "<X>" not in other and "۳۰ دقیقه" in other
+    assert "دوباره کار میکند" in messages.check_recovered_alert()
+
+
+class _Refusing:
+    """A client whose every request fails with ``error`` (what Telegram answered)."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def __call__(self, request: object) -> object:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "rpc"),
+    [
+        (errors.UsernameNotOccupiedError(None), "channel_not_found", "USERNAME_NOT_OCCUPIED"),
+        (errors.UsernameInvalidError(None), "channel_not_found", "USERNAME_INVALID"),
+        (errors.FloodWaitError(None, capture=30), "flood_wait", "FLOOD_WAIT"),
+    ],
+)
+async def test_a_channel_name_nobody_holds_is_channel_not_found(
+    error: Exception, code: str, rpc: str
+) -> None:
+    creds = ApiCredentials(api_id=123456, api_hash=SecretValue(secrets.token_hex(16)))
+    client: Any = _Refusing(error)
+    op = userclient.OperatorSession(client, creds, ClientOptions(), contextlib.ExitStack())
+    with pytest.raises(MtpError) as raised:
+        await op.resolve_channel("@our_old_name", 1234567890)
+    assert (raised.value.code, raised.value.rpc) == (code, rpc)

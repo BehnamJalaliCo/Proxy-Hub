@@ -12,6 +12,7 @@ import asyncio
 import logging
 import secrets
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from fastapi.routing import APIRoute
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from telethon import errors
 from test_fleet_support import ADMIN, CSRF, make_vault
 from test_mtproxy_support import (
     MASKED,
@@ -40,8 +42,8 @@ from test_telegram_support import SilentServer, all_logs, free_closed_port
 
 from proxyhub.api.deps import require_admin
 from proxyhub.api.routes_mtproxy_account import get_client_options, get_lock_wait_s, get_vault
-from proxyhub.mtproxy import state, store
-from proxyhub.mtproxy.userclient import ClientOptions, Endpoint
+from proxyhub.mtproxy import service, state, store
+from proxyhub.mtproxy.userclient import ClientOptions, Endpoint, MtpError, classify
 from proxyhub.reconcilers.base import lock_key
 from proxyhub.vault import Vault, VaultDecryptError
 
@@ -214,7 +216,7 @@ async def test_put_with_a_wrong_shape_is_invalid_request(client: AsyncClient, bo
     ("path", "body", "code"),
     [
         ("code", {"code": "12"}, "code_format"),
-        ("code", {"code": "abcde"}, "code_format"),
+        ("code", {"code": "!!!!!"}, "code_format"),
         ("password", {"password": ""}, "password_format"),
         ("password", {"password": "x" * 300}, "password_format"),
     ],
@@ -372,6 +374,48 @@ async def test_the_pending_login_in_redis_is_sealed(
     assert pending.phone_code_hash.reveal() not in r.text and pending.session.reveal() not in r.text
 
 
+@pytest.mark.parametrize(
+    ("via", "typed", "sent", "error"),
+    [
+        ("sms_word", "  Blue   river ", "Blue river", None),
+        ("app", "apple", None, "code_format"),
+        ("sms_word", "12345", None, "code_word_format"),
+    ],
+)
+async def test_a_code_is_checked_against_how_telegram_sent_it(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    vault: Vault,
+    port: int,
+    monkeypatch: pytest.MonkeyPatch,
+    via: str,
+    typed: str,
+    sent: str | None,
+    error: str | None,
+) -> None:
+    seen: list[str] = []
+
+    class Op:
+        async def sign_in_code(self, phone: Any, phone_code_hash: Any, code: Any) -> Any:
+            seen.append(code.reveal())
+            raise MtpError("telegram_unavailable")
+
+    @asynccontextmanager
+    async def connected(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        yield Op()
+
+    monkeypatch.setattr(service, "operator_session", connected)
+    await seed_pending(engine, app_redis(), vault, port=port, via=via)
+    r = await client.post(f"{BASE}/code", json={"code": typed})
+    if error is None:
+        assert_error(r, 502, "telegram_unavailable")  # the word reached Telegram as typed
+        assert seen == [sent]
+    else:
+        assert_error(r, 400, error)
+        assert seen == [] and await actions(engine) == []  # nothing was sent, no attempt counted
+    assert (await load_row(engine)).state == "code_sent"
+
+
 async def test_a_code_with_telegram_unreachable_keeps_the_login(
     client: AsyncClient, engine: AsyncEngine, vault: Vault, port: int
 ) -> None:
@@ -439,6 +483,41 @@ async def test_logout_keeps_everything_when_telegram_cannot_end_the_session(
     assert await secret_names(engine) == [store.API_SECRET, store.SESSION_SECRET]
     assert await load_row(engine) == before
     assert await actions(engine) == []
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        MtpError("api_id_invalid", rpc="API_ID_INVALID"),
+        MtpError("api_id_published", rpc="API_ID_PUBLISHED_FLOOD"),
+        classify(errors.AuthKeyNotFound()),
+    ],
+    ids=["api_id_invalid", "api_id_published", "auth_key_not_found"],
+)
+async def test_logout_of_a_session_telegram_refuses_for_good(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    vault: Vault,
+    port: int,
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: MtpError | None,
+) -> None:
+    assert refusal is not None
+
+    @asynccontextmanager
+    async def refused(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        raise refusal
+        yield  # pragma: no cover - never reached
+
+    monkeypatch.setattr(service, "operator_session", refused)
+    await seed_connected(engine, vault, port=port)
+    r = await client.post(f"{BASE}/logout")
+    assert r.status_code == 200 and r.json()["state"] == "none"
+    assert await secret_names(engine) == []  # a new login is possible again
+    rows = await actions(engine)
+    assert [(r["action"], r["reasons"]["reasons"]) for r in rows] == [
+        ("mtproxy.account_logged_out", ["session_unusable"])
+    ]
 
 
 async def test_logout_of_an_account_telegram_already_ended(

@@ -13,6 +13,8 @@ from typing import Final
 API_ID_MAX: Final = 2**31 - 1
 CODE_MIN_DIGITS: Final = 5
 CODE_MAX_DIGITS: Final = 8
+CODE_MAX_WORD_CHARS: Final = 64
+CODE_VIA_WORD: Final = "sms_word"  # Telegram's SentCodeTypeSmsWord / SentCodeTypeSmsPhrase
 PASSWORD_MAX_CHARS: Final = 256
 MASK: Final = "•••••"
 
@@ -25,7 +27,8 @@ _PHONE_SEPARATORS_RE = re.compile(r"[\s\-().‌‎‏‪-‮]")
 
 
 class InputError(ValueError):
-    """``code`` is one of: api_id_format, api_hash_format, phone_format, code_format, password_format."""
+    """``code`` is one of: api_id_format, api_hash_format, phone_format, code_format, code_word_format,
+    password_format."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -65,12 +68,43 @@ def parse_phone(value: str) -> str:
     return text
 
 
-def parse_code(value: str) -> str:
-    """The login code Telegram sent: 5 to 8 digits (spaces and dashes dropped)."""
-    text = re.sub(r"[\s\-]", "", ascii_digits(value))
-    if not text.isascii() or not text.isdigit() or not CODE_MIN_DIGITS <= len(text) <= CODE_MAX_DIGITS:
+def parse_code(value: str, via: str | None = None) -> str:
+    """The login code Telegram sent, by how it was sent (``via``):
+
+    * ``sms_word``: a word or a phrase sent by SMS (Telegram's SmsWord / SmsPhrase), kept as typed
+      with runs of spaces made one: 1 to 64 letters, digits and single spaces (``code_word_format``);
+    * any other way: 5 to 8 digits, spaces and dashes dropped (``code_format``);
+    * None (the way is not known yet): either shape is accepted; the login's own way is checked later.
+    """
+    if via == CODE_VIA_WORD:
+        word = _word_code(value)
+        if word is None:
+            raise InputError("code_word_format")
+        return word
+    digits = _digit_code(value)
+    if digits is not None:
+        return digits
+    word = _word_code(value) if via is None else None
+    if word is None:
         raise InputError("code_format")
-    return text
+    return word
+
+
+def _digit_code(value: str) -> str | None:
+    text = re.sub(r"[\s\-]", "", ascii_digits(value))
+    ok = text.isascii() and text.isdigit() and CODE_MIN_DIGITS <= len(text) <= CODE_MAX_DIGITS
+    return text if ok else None
+
+
+def _word_code(value: str) -> str | None:
+    """Letters (any script), digits and single spaces, with at least one letter."""
+    text = " ".join(value.split())
+    ok = (
+        1 <= len(text) <= CODE_MAX_WORD_CHARS
+        and all(c.isalnum() or c == " " for c in text)
+        and any(c.isalpha() for c in text)
+    )
+    return text if ok else None
 
 
 def parse_password(value: str) -> str:

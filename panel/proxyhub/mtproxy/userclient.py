@@ -359,6 +359,10 @@ def classify(exc: BaseException) -> MtpError | None:
         return MtpError("telegram_unavailable", rpc=_rpc_name(exc))
     if isinstance(exc, errors.RPCError):
         return MtpError("telegram_refused", rpc=_rpc_name(exc))
+    if isinstance(exc, errors.AuthKeyNotFound):
+        # Transport -404: Telegram no longer knows this session's key. Telethon says it may pass,
+        # so the check treats it as unreachable; logout can tell it apart (nothing left to end).
+        return MtpError("telegram_unavailable", rpc="AUTH_KEY_NOT_FOUND")
     if isinstance(exc, _TRANSPORT_TROUBLE):
         return MtpError("telegram_unavailable")
     return None
@@ -1145,10 +1149,16 @@ class OperatorSession:
         return int(self._client.session.dc_id)
 
     async def resolve_channel(self, username: str, channel_id: int) -> ChannelRef:
-        """One of OUR public channels by its username; its id must be the configured one."""
-        found = await self._run(
-            self._client(functions.contacts.ResolveUsernameRequest(username=username.lstrip("@")))
-        )
+        """One of OUR public channels by its username; its id must be the configured one. A name
+        nobody holds any more (the channel's link changed) is ``channel_not_found`` too."""
+        try:
+            found = await self._run(
+                self._client(functions.contacts.ResolveUsernameRequest(username=username.lstrip("@")))
+            )
+        except MtpError as exc:
+            if exc.rpc in ("USERNAME_NOT_OCCUPIED", "USERNAME_INVALID"):
+                raise MtpError("channel_not_found", rpc=exc.rpc) from None
+            raise
         for chat in getattr(found, "chats", []):
             if (
                 isinstance(chat, types.Channel)

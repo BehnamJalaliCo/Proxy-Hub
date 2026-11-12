@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from test_cleanup_support import MAIN_CHAT, TEST_CHAT, World, mtproto_key, wipe
 from test_fleet_support import make_vault
 
-from proxyhub.cleanup import ended
+from proxyhub.cleanup import ended, test_channel
 from proxyhub.mtproto.urls import user_name_for
 from proxyhub.posts import settings as posting
 from proxyhub.safety.budget import month_bounds
@@ -387,6 +387,27 @@ async def test_test_posts_of_yesterday_stay_for_the_plan_even_with_a_short_edit_
     result = await run_purge(w, dry_run=False)
     assert result.removed["posts"] == 1
     assert {r.id for r in await w.rows("SELECT id FROM posts")} == set(kept)
+
+
+async def test_the_test_channels_highest_known_message_stays(engine: AsyncEngine, tmp_path: Path) -> None:
+    """A private test channel has no statistics rows: its newest channel_posts row is the only way
+    the test-channel cleaning knows how far to sweep, so the purge keeps it."""
+    w = World(engine)
+    await w.telegram(make_vault(tmp_path))
+    old = w.now - timedelta(days=5)
+    day = old.astimezone(TEHRAN).date()
+    for slot, message_id in enumerate((150, 230)):
+        job = await w.job("send_post", done_at=old, payload={"role": "test"})
+        await w.post(role="test", created_at=old, slot=slot, outbox_id=job, plan_day=day)
+        await w.channel_post(
+            role="test", chat_id=TEST_CHAT, message_id=message_id, outbox_id=job, created_at=old
+        )
+    result = await run_purge(w, dry_run=False)
+    assert (result.removed["posts"], result.removed["channel_posts"]) == (2, 1)
+    assert [r.message_id for r in await w.rows("SELECT message_id FROM channel_posts")] == [230]
+    async with engine.connect() as conn:
+        highest = await test_channel.highest_known_id(conn, TEST_CHAT)
+    assert highest == 230 and test_channel.id_range(highest) == (2, 430)
 
 
 async def test_min_age_decides_what_is_old_enough(engine: AsyncEngine, tmp_path: Path) -> None:

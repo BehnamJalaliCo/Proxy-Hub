@@ -19,6 +19,7 @@
 |---|---|
 | `PanelApiDown` | Prometheus بیش از ۲ دقیقه از API متریک نگرفته است |
 | `WorkerHeartbeatStale` | ضربان worker کهنه‌تر از ۹۰ ثانیه (همان عدد `/healthz`؛ یک تست هر دو را برابر نگه میدارد) |
+| `ReconcilerStalled` | یکی از چرخه‌های کنترل worker بیش از سه برابر فاصله‌ی خودش به‌اضافه‌ی ۱۵ دقیقه هیچ دوری را تمام نکرده است (۵ دقیقه)، در حالی که ضربان worker تازه است |
 | `PanelDatabaseDown`، `PanelRedisDown` | API بیش از ۱ دقیقه به Postgres یا Redis وصل نشده است |
 | `DiskAlmostFull` | بیش از ۸۵٪ دیسک پر است (۵ دقیقه) |
 | `BackupFailed`، `BackupTooOld`، `BackupMetricsMissing` | آخرین backup شکست خورده، یا آخرین backup موفق کهنه‌تر از ۲۶ ساعت است، یا backup اصلاً اجرا نشده است |

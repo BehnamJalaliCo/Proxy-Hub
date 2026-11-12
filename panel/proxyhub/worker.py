@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from collections.abc import Sequence
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from proxyhub.cloudflare.delegation import DelegationReconciler
 from proxyhub.db.session import get_engine
 from proxyhub.reconcilers.account_guard import AccountGuardReconciler
 from proxyhub.reconcilers.acme import AcmeReconciler
 from proxyhub.reconcilers.analytics import AnalyticsReconciler, ChannelStatsReconciler
-from proxyhub.reconcilers.base import Heartbeat, Reconciler
+from proxyhub.reconcilers.base import LOOP_KEY_PREFIX, Heartbeat, Reconciler
 from proxyhub.reconcilers.content import ContentReconciler
 from proxyhub.reconcilers.content_qc import ContentQcReconciler
 from proxyhub.reconcilers.dns import DnsReconciler
@@ -75,15 +79,41 @@ def reconcilers() -> list[Reconciler]:
     ]
 
 
-async def run() -> None:
+async def forget_other_loops(engine: AsyncEngine, names: Sequence[str]) -> None:
+    """Outcome records of loops this worker no longer runs (renamed or removed) would read as
+    stalled forever: they go at start. Best effort."""
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM settings WHERE key LIKE :prefix AND NOT (key = ANY(:keys))"),
+                {"prefix": LOOP_KEY_PREFIX + "%", "keys": [LOOP_KEY_PREFIX + n for n in names]},
+            )
+    except Exception as exc:
+        log.warning("worker: old loop records not removed (%s)", type(exc).__name__)
+
+
+async def run(loops: Sequence[Reconciler] | None = None) -> None:
+    """Run every loop until SIGTERM/SIGINT. A loop task that ends by itself (it catches every
+    ordinary error, so only something like a cancellation can end it) stops the worker with exit
+    code 1, so Docker restarts it instead of the worker running on without that loop."""
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
     engine = get_engine()
-    tasks = [asyncio.create_task(r.loop(engine, stop), name=r.name) for r in reconcilers()]
+    loops = reconcilers() if loops is None else list(loops)
+    await forget_other_loops(engine, [r.name for r in loops])
+    tasks = [asyncio.create_task(r.loop(engine, stop), name=r.name) for r in loops]
     log.info("worker started with %d reconcilers", len(tasks))
-    await stop.wait()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    stopping = asyncio.create_task(stop.wait(), name="stop")
+    done, _ = await asyncio.wait([*tasks, stopping], return_when=asyncio.FIRST_COMPLETED)
+    ended = [t for t in done if t is not stopping]
+    for task in ended:
+        reason = "cancelled" if task.cancelled() else repr(task.exception())
+        log.critical("worker: loop %s ended by itself (%s); stopping the worker", task.get_name(), reason)
+    stop.set()
+    await asyncio.gather(*tasks, stopping, return_exceptions=True)
     await engine.dispose()
     log.info("worker stopped")
+    if ended:
+        raise SystemExit(1)

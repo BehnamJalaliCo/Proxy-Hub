@@ -18,14 +18,20 @@ that appeared as measurement targets; none is an end-user address (CLAUDE.md rul
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import json
 import secrets
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
+
+from proxyhub.cloudflare.client import CloudflareClient
+from proxyhub.vault import SecretValue
 
 ZONE_ID = "023e105f4ecef8ad9ca31a8372d0c353"
 ZONE_ID_2 = "9a7806061c88ada191ed06f989cc3dac"
@@ -792,3 +798,74 @@ async def actions(engine: AsyncEngine) -> list[dict[str, Any]]:
             )
         ).mappings()
         return [dict(r) for r in rows]
+
+
+# --- the documented answers over real HTTP on loopback ----------------------------------------------
+
+Answer = tuple[int, dict[str, Any]]
+
+
+def cf_ok(result: Any, pages: int = 1) -> Answer:
+    """A success body in Cloudflare's v4 envelope."""
+    info = {"page": 1, "per_page": 50, "total_pages": pages, "count": 0, "total_count": 0}
+    return 200, {"success": True, "errors": [], "messages": [], "result": result, "result_info": info}
+
+
+def cf_error(status: int, code: int, message: str) -> Answer:
+    return status, {
+        "success": False,
+        "errors": [{"code": code, "message": message}],
+        "messages": [],
+        "result": None,
+    }
+
+
+class LocalCloudflare:
+    """A loopback HTTP server that answers the panel's real client with Cloudflare's documented JSON
+    (DATA, as above): ``answer(method, path)`` gives the status and body for each request. Requests
+    are kept as (method, path) so a test can say which calls were made."""
+
+    def __init__(self, answer: Callable[[str, str], Answer]) -> None:
+        self.answer = answer
+        self.requests: list[tuple[str, str]] = []
+        self.port = 0
+        self._server: asyncio.Server | None = None
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/client/v4"
+
+    def client(self, token: SecretValue) -> CloudflareClient:
+        return CloudflareClient(token, base_url=self.base_url)
+
+    async def __aenter__(self) -> LocalCloudflare:
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.port = self._server.sockets[0].getsockname()[1]
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        assert self._server is not None
+        self._server.close()
+        await self._server.wait_closed()
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+            lines = head.decode("latin-1").split("\r\n")
+            method, target, _ = lines[0].split(" ", 2)
+            headers = {k.strip().lower(): v.strip() for k, _, v in (h.partition(":") for h in lines[1:] if h)}
+            await reader.readexactly(int(headers.get("content-length") or 0))
+            path = target.split("?", 1)[0].removeprefix("/client/v4")
+            self.requests.append((method, path))
+            status, body = self.answer(method, path)
+            data = json.dumps(body).encode()
+            writer.write(
+                f"HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {len(data)}\r\n"
+                "Connection: close\r\n\r\n".encode("latin-1")
+                + data
+            )
+            await writer.drain()
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError, ConnectionError):
+            pass
+        finally:
+            writer.close()

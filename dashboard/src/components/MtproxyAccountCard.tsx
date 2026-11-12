@@ -79,7 +79,7 @@ function fieldOf(code: string): "api_id" | "api_hash" | "phone" | "code" | "pass
   if (code === "api_id_format") return "api_id";
   if (code === "api_hash_format") return "api_hash";
   if (code.startsWith("phone_number") || code === "phone_format") return "phone";
-  if (code === "code_format" || code === "phone_code_invalid") return "code";
+  if (code === "code_format" || code === "code_word_format" || code === "phone_code_invalid") return "code";
   if (code === "password_format" || code === "password_invalid") return "password";
   return null;
 }
@@ -255,13 +255,14 @@ function StepForm({ s, onDone }: { s: MtpAccount; onDone: (s: MtpAccount) => voi
   const now = useNow(1000);
   const left = s.login?.expires_at ? secondsLeft(s.login.expires_at, now) : 0;
   const id = isCode ? "mtp-code" : "mtp-password";
+  const isWord = s.login?.code_via === "sms_word";
 
   const submit = (e: SubmitEvent) => {
     e.preventDefault();
     if (busy) return;
     let call: Promise<MtpAccount>;
     if (isCode) {
-      const code = normalizeCode(value);
+      const code = normalizeCode(value, s.login?.code_via);
       if (!code.ok) {
         setError({ field: "code", text: code.error });
         return;
@@ -330,13 +331,13 @@ function StepForm({ s, onDone }: { s: MtpAccount; onDone: (s: MtpAccount) => voi
             id={id}
             name="mtproxy-login-code"
             latin
-            inputMode="numeric"
+            inputMode={isWord ? "text" : "numeric"}
             autoComplete="one-time-code"
-            className="text-center text-xl tracking-[0.4em]"
+            className={cn("text-center text-xl", !isWord && "tracking-[0.4em]")}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             invalid={error?.field === "code"}
-            placeholder="•••••"
+            placeholder={isWord ? undefined : "•••••"}
           />
         ) : (
           <SecretInput

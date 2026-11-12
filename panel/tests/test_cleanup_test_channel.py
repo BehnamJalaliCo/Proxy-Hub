@@ -20,8 +20,11 @@ from test_fleet_support import make_vault
 from test_telegram_support import closed_port_bot, real_bot, telegram_reachable
 
 from proxyhub.cleanup import test_channel as tc
+from proxyhub.content import breaking
+from proxyhub.posts import plan, publisher
 from proxyhub.reconcilers.base import lock_key
 from proxyhub.telegram import outbox
+from proxyhub.telegram.schedule import TEHRAN
 from proxyhub.vault import SecretValue, Vault
 
 # --- pure: the typed confirmation, the id range, the sweep -------------------------------------------
@@ -157,17 +160,65 @@ async def test_forgetting_removed_posts_touches_only_test_rows_of_removed_ids(
     async with engine.begin() as conn:
         # ids 2..10 were removed (3 also exists in the MAIN channel, under its own chat id)
         counts = await tc.forget_removed(conn, t, list(range(2, 11)), w.now)
-    assert counts == {"channel_posts": 3, "posts": 3, "post_links": 3, "edit_jobs_closed": 1}
+    assert counts == {"channel_posts": 3, "posts": 3, "post_links": 0, "edit_jobs_closed": 1}
     left = {r.message_id: r.role for r in await w.rows("SELECT message_id, role FROM channel_posts")}
     assert left == {900: "test", 3: "main"}
-    posts = {r.id for r in await w.rows("SELECT id FROM posts")}
-    assert posts == {ids["test_post_900"], ids["main_post"]}
+    # The posts stay for the publisher's plan, marked gone (never edited again); their links too.
+    posts = {r.id: r.gone_at is not None for r in await w.rows("SELECT id, gone_at FROM posts")}
+    assert posts == {
+        ids["test_post_3"]: True,
+        ids["test_post_4"]: True,
+        ids["test_post_5"]: True,
+        ids["test_post_900"]: False,
+        ids["main_post"]: False,
+    }
+    assert await w.one("SELECT count(*) FROM post_links") == 4
+    assert (
+        await w.one(
+            "SELECT count(*) FROM posts WHERE last_edit_outbox_id IS NOT NULL AND gone_at IS NOT NULL"
+        )
+        == 0
+    )
     jobs = {r.id: (r.done_at is not None, r.last_error) for r in await w.rows("SELECT * FROM outbox")}
     assert jobs[ids["edit_waiting"]] == (True, None)  # closed: nothing left to edit
     assert jobs[ids["edit_other"]] == (False, None)  # its post is still there
     assert jobs[ids["main_edit"]] == (False, None)  # the main channel is never touched
     async with engine.begin() as conn:
         assert await tc.forget_removed(conn, t, [], w.now) == dict.fromkeys(counts, 0)
+
+
+@pytest.mark.db
+async def test_a_cleaning_does_not_free_the_slot_it_just_removed(engine: AsyncEngine, vault: Vault) -> None:
+    """Posting to the test channel: today's slot 4 went out 20 minutes ago, then the channel was
+    cleaned. The publisher still sees the slot taken, the day's count, the last post time and the
+    breaking-news posts, so it does not post the slot again into the channel just emptied."""
+    w = World(engine)
+    await w.telegram(vault)
+    sent_at = w.now - timedelta(minutes=20)
+    today = sent_at.astimezone(TEHRAN).date()
+    job = await w.job("send_post", done_at=sent_at, payload={"role": "test", "text": "t"})
+    await w.post(role="test", created_at=sent_at, slot=4, outbox_id=job, plan_day=today)
+    await w.run("UPDATE posts SET breaking = true WHERE outbox_id = :o", o=job)
+    await w.channel_post(role="test", chat_id=TEST_CHAT, message_id=41, outbox_id=job, created_at=sent_at)
+    slot = plan.Slot(day=today, index=4, at=sent_at)
+
+    async def plan_view() -> tuple[bool, int, object, int]:
+        async with engine.connect() as conn:
+            return (
+                await publisher.slot_taken(conn, "test", slot),
+                await publisher.posts_on(conn, "test", today),
+                await publisher.last_post_at(conn),
+                len(await breaking.posted_since(conn, w.now - timedelta(hours=24))),
+            )
+
+    before = await plan_view()
+    assert before[0] is True and before[3] == 1
+    async with engine.connect() as conn:
+        t = await tc.target(conn)
+    async with engine.begin() as conn:
+        counts = await tc.forget_removed(conn, t, [41], w.now)
+    assert counts["channel_posts"] == 1 and counts["posts"] == 1
+    assert await plan_view() == before
 
 
 @pytest.mark.db
