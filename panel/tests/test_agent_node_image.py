@@ -169,6 +169,8 @@ def test_telemt_unit_never_runs_unconfigured_or_logs() -> None:
         "CapabilityBoundingSet=CAP_NET_BIND_SERVICE",
         "LimitCORE=0",
         "ExecReload=/bin/kill -HUP $MAINPID",
+        # A Telemt that exits cleanly (or dies of the reload's SIGHUP) is started again too.
+        "Restart=always",
     ):
         assert line in unit.splitlines(), line
     assert "CAP_NET_ADMIN" not in unit

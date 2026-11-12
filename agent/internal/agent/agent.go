@@ -60,9 +60,13 @@ type Agent struct {
 	// applyErr because the cached state is still applied (successfully) meanwhile, and that must
 	// not hide the refusal from the panel.
 	desiredErr string
-	pending    telemt.Action
 	telemtUp   bool
-	stats      metrics.Stats
+	// telemtDownSince: since when Telemt's metrics have not answered (zero while they do), and
+	// telemtRestartAt: the agent's last Telemt restart. Telemt down for downRestart is restarted,
+	// at most that often: systemd does not start a Telemt that exited cleanly.
+	telemtDownSince time.Time
+	telemtRestartAt time.Time
+	stats           metrics.Stats
 	// xr manages Xray (VLESS Reality); nil on a node without Xray.
 	xr *xrayRuntime
 }
@@ -72,6 +76,10 @@ type localState struct {
 	// PlaceholderSecret is used for the disabled placeholder user when no user may be served.
 	PlaceholderSecret string         `json:"placeholder_secret"`
 	Usage             *enforce.Usage `json:"usage"`
+	// TelemtPending: the Telemt config in place still needs this reload or restart (a failed
+	// command, or an agent restart in between, must not leave Telemt on the old config while the
+	// node reports the new one as applied).
+	TelemtPending telemt.Action `json:"telemt_pending,omitempty"`
 	// XrayUsage tracks Reality users (by label) across Xray restarts, like Usage for Telemt.
 	XrayUsage *enforce.Usage `json:"xray_usage,omitempty"`
 	// XrayRestartPending: a new Xray config is in place but Xray has not been restarted on it yet.
@@ -149,6 +157,9 @@ func (a *Agent) loadState() error {
 		}
 		if a.local.Usage == nil {
 			a.local.Usage = enforce.NewUsage()
+		}
+		if a.local.TelemtPending < telemt.ActionNone || a.local.TelemtPending > telemt.ActionRestart {
+			a.local.TelemtPending = telemt.ActionRestart // unknown: the action that covers every other
 		}
 	}
 	if len(a.local.PlaceholderSecret) != 32 {
@@ -305,9 +316,12 @@ func (a *Agent) Scrape(ctx context.Context) {
 	if err != nil {
 		a.telemtUp = false
 		a.stats = metrics.Stats{}
+		if a.telemtDownSince.IsZero() {
+			a.telemtDownSince = a.now()
+		}
 		return
 	}
-	a.telemtUp, a.stats = true, stats
+	a.telemtUp, a.stats, a.telemtDownSince = true, stats, time.Time{}
 	if a.doc == nil || a.doc.Telemt == nil {
 		return
 	}
@@ -355,6 +369,20 @@ func (a *Agent) Apply(ctx context.Context) error {
 		a.applyErr = "render_refused"
 		return err
 	}
+	need := action
+	if action == telemt.ActionNone && a.local.TelemtPending == telemt.ActionNone && a.telemtDown() {
+		a.log.Warn("telemt is not answering; restarting it")
+		need = telemt.ActionRestart
+	}
+	// The pending action is saved before the file is written: whatever stops the agent in between,
+	// the next run still reloads or restarts Telemt onto the file.
+	if need > a.local.TelemtPending {
+		a.local.TelemtPending = need
+		if err := a.saveLocal(); err != nil {
+			a.applyErr = "write_failed"
+			return err
+		}
+	}
 	if action != telemt.ActionNone {
 		if err := telemt.WriteConfig(a.cfg.TelemtConfig, data, a.owner); err != nil {
 			if errors.Is(err, telemt.ErrRefused) {
@@ -366,16 +394,38 @@ func (a *Agent) Apply(ctx context.Context) error {
 		}
 		a.log.Info("telemt config written", "action", action.String())
 	}
-	if action > a.pending {
-		a.pending = action
+	if a.local.TelemtPending == telemt.ActionRestart {
+		a.telemtRestartAt = a.now()
 	}
-	if err := a.service.Do(ctx, a.pending); err != nil {
+	if err := a.service.Do(ctx, a.local.TelemtPending); err != nil {
+		if a.local.TelemtPending == telemt.ActionReload {
+			// A reload fails on a Telemt that is not running; a restart starts it on the new file.
+			a.local.TelemtPending = telemt.ActionRestart
+			if err := a.saveLocal(); err != nil {
+				a.log.Warn("could not save local state", "error", err.Error())
+			}
+		}
 		a.applyErr = "service_failed"
 		return err
 	}
-	a.pending = telemt.ActionNone
+	if a.local.TelemtPending != telemt.ActionNone {
+		a.local.TelemtPending = telemt.ActionNone
+		if err := a.saveLocal(); err != nil {
+			a.log.Warn("could not save local state", "error", err.Error())
+		}
+	}
 	a.appliedETag, a.applyErr = a.etag, ""
 	return nil
+}
+
+// telemtDown: Telemt's metrics have not answered for downRestart, and the agent has not restarted
+// Telemt for as long. One slow scrape never restarts a Telemt that serves users.
+func (a *Agent) telemtDown() bool {
+	if a.telemtUp || a.telemtDownSince.IsZero() {
+		return false
+	}
+	now := a.now()
+	return now.Sub(a.telemtDownSince) >= downRestart && now.Sub(a.telemtRestartAt) >= downRestart
 }
 
 // Report sends the latest counters to the panel.

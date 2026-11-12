@@ -35,7 +35,8 @@ const targetRetry = 5 * time.Minute
 const ownTLSRetry = time.Minute
 
 // downRestart: an Xray whose API does not answer although its config is in place is restarted, at
-// most this often (systemd restarts it after a crash already; this covers a clean exit).
+// most this often (systemd restarts it after a crash already; this covers a clean exit). Telemt
+// likewise, once its metrics have not answered for this long (agent.go, telemtDown).
 const downRestart = 2 * time.Minute
 
 // Certificate files: readable by the Xray user (owner) and group, nobody else.
