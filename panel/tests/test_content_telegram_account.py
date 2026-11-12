@@ -26,10 +26,12 @@ from test_mtproxy_support import seed_connected
 from test_mtproxy_units import closed_port
 
 from proxyhub.content import candidates, sources
-from proxyhub.content.engine import Engine
+from proxyhub.content.engine import WAIT_RETRY, Engine
 from proxyhub.content.items import FetchedItem
 from proxyhub.content.net import FetchError, SafeHttp
 from proxyhub.content.telegram_account import (
+    READ_LIMIT,
+    AccountHold,
     AccountReader,
     items_from,
     media_ref,
@@ -268,6 +270,28 @@ def test_items_keep_the_previews_ids_and_one_item_per_album() -> None:
         assert parse_media_ref(bad) is None
 
 
+def test_an_album_cut_by_the_window_is_not_stored_again_in_pieces() -> None:
+    """The account reads the last READ_LIMIT messages; an album is several of them. When the
+    window cuts through the album at its old end, the pieces left are not new caption-less posts."""
+    pic = SourceMedia(kind="photo", size=1000)
+    album = [post(i, "متن آلبوم" if i == 100 else "", media=pic, group=55) for i in range(100, 104)]
+
+    def window(newest: int) -> list[SourcePost]:
+        older = [post(i, f"خبر {i}") for i in range(80, 100)]
+        everything = older + album + [post(i, f"خبر {i}") for i in range(104, newest + 1)]
+        return sorted(everything, key=lambda p: p.id, reverse=True)[:READ_LIMIT]
+
+    whole = items_from("imtproto", window(110), full=True)  # 91..110: the album is inside, whole
+    assert next(i for i in whole if i.external_id == "100").text == "متن آلبوم"
+    for newest in (119, 120, 121, 122):  # at the old edge (stored before), then cut
+        ids = {i.external_id for i in items_from("imtproto", window(newest), full=True)}
+        assert not ids & {"100", "101", "102", "103"}, newest
+        assert str(newest) in ids
+    # A window that is not full holds the whole channel: its oldest album is kept.
+    short = [post(i, media=pic, group=66) for i in (10, 11)] + [post(12, "خبر")]
+    assert {i.external_id for i in items_from("imtproto", short, full=False)} == {"10", "12"}
+
+
 def test_proxies_hidden_behind_a_posts_words_are_counted() -> None:
     """A proxy channel hides its proxies behind words (text links); their URLs come out of the
     message's entities as plain strings and only their number reaches the item."""
@@ -386,6 +410,66 @@ async def test_the_reader_says_why_the_account_cannot_read(engine: AsyncEngine, 
     assert await opened(held, {"imtproto"}) == "account_flood"
 
 
+class _Feed:
+    """An RSS source's place: records its reads (no network)."""
+
+    kind = "rss"
+
+    def __init__(self) -> None:
+        self.read: list[str] = []
+
+    async def fetch(self, http: SafeHttp, ref: str) -> list[FetchedItem]:
+        self.read.append(ref)
+        return []
+
+
+@pytest.mark.db
+async def test_telegram_sources_waiting_for_the_account_do_not_starve_a_feed(
+    engine: AsyncEngine, vault: Vault
+) -> None:
+    """Four Telegram sources wait out a flood hold; the round's four places go to what can be read."""
+    channels = [await add(engine, f"@channel{n}") for n in range(4)]
+    feed = await add(engine, "https://news.example/feed.xml", kind="rss")
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE content_sources SET next_fetch_at = :t WHERE kind = 'telegram'"),
+            {"t": T0 - timedelta(minutes=10)},
+        )
+        await conn.execute(
+            text("UPDATE content_sources SET next_fetch_at = :t WHERE kind = 'rss'"),
+            {"t": T0 - timedelta(minutes=1)},
+        )
+    clock = [T0]
+    held = AccountReader(engine=engine, vault=lambda: vault, clock=lambda: clock[0])
+    held.held.until = T0 + timedelta(hours=1)
+    rss = _Feed()
+    eng = Engine(engine=engine, clock=lambda: clock[0], plugins={"rss": rss}, account=held)  # type: ignore[dict-item]
+    first = await eng.run_round()
+    assert first.waiting == {c.id: "account_flood" for c in channels} and first.read == {}
+    for c in channels:
+        row = await source_row(engine, c.id)
+        assert (row["next_fetch_at"], row["failures"], row["last_error"]) == (
+            T0 + timedelta(hours=1),
+            0,
+            None,
+        )
+    clock[0] = T0 + timedelta(minutes=1)
+    second = await eng.run_round()
+    assert second.read == {feed.id: "ok:0"} and rss.read == [feed.ref]
+
+
+@pytest.mark.db
+async def test_a_flood_wait_stops_every_reader_of_the_process(engine: AsyncEngine, vault: Vault) -> None:
+    """The content loop and the supervisor each have a reader; Telegram's wait holds for both."""
+    shared = AccountHold()
+    first, second = reader(engine, vault), reader(engine, vault)
+    first.held = second.held = shared
+    first.hold(30)
+    assert second.hold_until == T0 + timedelta(minutes=1)
+    assert await opened(second, {"imtproto"}) == "account_flood"
+    assert reader(engine, vault).hold_until is None  # a reader of its own holds nothing
+
+
 async def add(engine: AsyncEngine, ref: str, kind: str = "telegram") -> sources.Source:
     async with engine.begin() as conn:
         return await sources.create(conn, kind=kind, ref=ref, label=None, now=T0)
@@ -439,7 +523,8 @@ async def test_the_engine_falls_back_to_the_preview_or_waits(engine: AsyncEngine
         result = await make(reader(engine, vault, port)).run_round()
     assert result.waiting == {source.id: "account_busy"} and result.read == {}
     row = await source_row(engine, source.id)
-    assert row["last_error"] is None and row["failures"] == 0 and row["next_fetch_at"] is None
+    assert row["last_error"] is None and row["failures"] == 0
+    assert row["next_fetch_at"] == T0 + WAIT_RETRY  # behind the sources that can be read now
     assert preview.read == ["imtproto"]  # not read again by its preview
 
     # A photo of a post the account read waits for the account; it is never fetched over https.

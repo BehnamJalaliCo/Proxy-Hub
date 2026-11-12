@@ -22,8 +22,11 @@ transaction open while Claude answers:
    :data:`~proxyhub.content.frames.FRAME_COUNT` frames are taken across its whole length with ffmpeg
    (proxyhub/content/frames.py). A video too long or unreadable is rejected by ``rules`` without
    Claude; a download that may work later is tried again next round (at most 3 times, then
-   ``video_unavailable``). The file is kept for the post: an approved video is never fetched twice;
-   a rejected one is removed at once (:func:`~proxyhub.content.candidates.drop_video`).
+   ``video_unavailable``). A video only the operator account can download (D55) waits, at no try,
+   while the account cannot be used (kill switch, busy, a flood wait: the panel's state, not the
+   video's), and the next candidate is reviewed instead. The file is kept for the post: an approved
+   video is never fetched twice; a rejected one is removed at once
+   (:func:`~proxyhub.content.candidates.drop_video`).
 4. **Ask Claude** about the best one (proxyhub/content/claude_backends.py): the bridge first, the API
    key as backup, each within its daily cap and after a pause when it failed. A photo goes as one
    image, a video as its frames in order, in ONE review. The prompt and its injection hardening:
@@ -79,7 +82,7 @@ from proxyhub.content.messages import qc_check_fa, qc_outcome_fa
 from proxyhub.content.net import FetchError, SafeHttp
 from proxyhub.content.plugins import PLUGINS, SourcePlugin
 from proxyhub.content.qc_settings import QcConfig
-from proxyhub.content.telegram_account import AccountReader
+from proxyhub.content.telegram_account import AccountReader, is_account_media
 from proxyhub.content.writer import Image, Review, ReviewRequest
 from proxyhub.db.models_content import ContentCandidate, ContentMedia, ContentQcCall, ContentSource
 from proxyhub.fleet.actions import iso, log_action
@@ -120,6 +123,10 @@ DEFAULT_COOLDOWN: Final = timedelta(minutes=3)
 # error of the panel's own (the candidate is tried at most MAX_TRIES times), or a later try.
 VIDEO_REJECTS: Final = frozenset({"video_too_long", "video_unreadable", "video_unavailable"})
 VIDEO_ERRORS: Final = frozenset({"ffmpeg_missing", "frames_failed"})
+# A failed run that may be this candidate's doing (an older bridge reports an API 400 this way): it
+# is an outage for the cooldown and the alert, and it also spends one of the candidate's MAX_TRIES,
+# so one candidate cannot take every review of a slot and the daily cap.
+CHARGED_FAILURES: Final = frozenset({"claude_failed", "timeout"})
 
 Clock = Callable[[], datetime]
 HarvestFn = Callable[[AsyncConnection], Awaitable[links.Harvest]]
@@ -151,6 +158,7 @@ class Pick:
     duration: int | None = None  # seconds: a stored video's, by its own header
     extra_sources: int = 0
     score: float = 0.0
+    by_account: bool = False  # its file is downloaded by the operator account (D55, ``tgmsg:``)
 
     @property
     def image_role(self) -> str | None:
@@ -206,6 +214,7 @@ async def eligible(db: AsyncConnection, now: datetime) -> list[Pick]:
                 main.width,
                 main.height,
                 main.duration,
+                ContentCandidate.media_url,
             )
             .join(ContentSource, ContentSource.id == ContentCandidate.source_id)
             .outerjoin(main, and_(main.candidate_id == ContentCandidate.id, main.role == "main"))
@@ -243,6 +252,7 @@ async def eligible(db: AsyncConnection, now: datetime) -> list[Pick]:
             height=r.height,
             duration=r.duration,
             extra_sources=len(also.get(int(r.id), [])),
+            by_account=is_account_media(r.media_url),
         )
         picks.append(replace(base, score=score(base.views, base.when, now, base.extra_sources, base.seen)))
     return sorted(picks, key=lambda p: (-p.score, -p.id))
@@ -283,8 +293,9 @@ def _time(value: Any) -> datetime | None:
 CLAUDE_HINT_FA: Final[dict[str, str]] = {
     "auth": "ورود اشتراک Claude روی سرور باید تازه شود (پرامپت P22، گام ورود).",
     "bridge_missing": "پل Claude روی سرور نصب یا روشن نیست (پرامپت P22).",
-    "bridge_denied": "worker به پل Claude دسترسی ندارد (پرامپت P22، گام اتصال).",
-    "claude_missing": "Claude Code برای کاربر پل نصب نیست (پرامپت P22).",
+    # Each hint is a line of its own: it starts with a Persian word, so it reads right to left.
+    "bridge_denied": "دسترسی worker به پل Claude برقرار نیست (پرامپت P22، گام اتصال).",
+    "claude_missing": "برای کاربر پل، Claude Code نصب نیست (پرامپت P22).",
     "rate_limited": (
         "سقف مصرف اشتراک Claude پر است و خودش باز میشود؛ اگر زیاد تکرار شد سقف روزانه را کم کنید."
     ),
@@ -298,7 +309,8 @@ def claude_alert_fa(reason: str | None, hours: int) -> str:
     return (
         f"🤖 <b>ناظر محتوا (Claude) بیش از {fa_digits(hours)} ساعت در دسترس نیست.</b>\n"
         f"دلیل: {why}\n"
-        "پست‌ها بی‌وقفه با بانک محتوای همیشگی میروند و چیزی بی بررسی منتشر نمیشود.\n"
+        "در این مدت پست‌ها بی‌وقفه میروند: با نوشته‌های تأییدشده‌ی خود شما در بانک محتوا، "
+        "وگرنه فقط با پروکسی‌ها؛ چیزی بی بررسی منتشر نمیشود.\n"
         f"{hint}"
     )
 
@@ -306,7 +318,7 @@ def claude_alert_fa(reason: str | None, hours: int) -> str:
 def sources_alert_fa(hours: int) -> str:
     return (
         f"📰 <b>هیچ منبع محتوایی بیش از {fa_digits(hours)} ساعت کار نکرده است.</b>\n"
-        "پست‌ها بی‌وقفه با بانک محتوای همیشگی میروند.\n"
+        "پست‌ها بی‌وقفه میروند، ولی بی خبر: با نوشته‌های خود شما در بانک محتوا، وگرنه فقط با پروکسی‌ها.\n"
         "در صفحه‌ی «منبع‌های محتوا» منبع تازه اضافه کنید یا خطای منبع‌ها را ببینید."
     )
 
@@ -516,22 +528,19 @@ class Supervisor:
                 if blocked in ("unavailable", "cooling"):
                     self._unavailable(state, now, state.get("unavailable_reason") or "unavailable")
                 return
-        pick = picks[0]
-        sampled: frames.Sampled | None = None
-        if pick.media_kind == "video":
-            got = await self._video(pick)
-            if isinstance(got, str):
-                await self._video_failed(config, pick, got, now, out)
-                return
-            sampled = got
+        ready = await self._first_ready(config, picks, now, out)
+        if ready == "account_wait":
+            out.action = ready
+        if isinstance(ready, str):  # else _video_failed said what happened
+            return
+        pick, sampled = ready
         async with self.engine.begin() as conn:
             prepared = await self._prepare(conn, config, pick, now, sampled)
         if prepared is None:
             out.action = "gone"
             return
         review = await ClaudeWriter(backends).review(prepared.request)
-        async with self.engine.begin() as conn:
-            await self._apply(conn, config, state, prepared, review, now, out)
+        await self._record(config, state, prepared, review, now, out)
 
     async def _breaking(self, config: QcConfig, state: dict[str, Any], now: datetime, out: Outcome) -> bool:
         """D56: review at once, out of the posting slots, the best young story several sources carry
@@ -561,14 +570,10 @@ class Supervisor:
             backends, _ = await self._backends(conn, config, state, now)
             if not backends:
                 return False
-        pick = picks[0]
-        sampled: frames.Sampled | None = None
-        if pick.media_kind == "video":
-            got = await self._video(pick)
-            if isinstance(got, str):
-                await self._video_failed(config, pick, got, now, out)
-                return True
-            sampled = got
+        ready = await self._first_ready(config, picks, now, out)
+        if isinstance(ready, str):
+            return ready == "video_failed"  # a video failed: this round's work is done
+        pick, sampled = ready
         async with self.engine.begin() as conn:
             prepared = await self._prepare(conn, config, pick, now, sampled)
         if prepared is None:
@@ -576,17 +581,41 @@ class Supervisor:
         breaking.note_review(state, now)
         out.breaking_review = True
         review = await ClaudeWriter(backends).review(prepared.request)
-        async with self.engine.begin() as conn:
-            await self._apply(conn, config, state, prepared, review, now, out, slot=False)
+        await self._record(config, state, prepared, review, now, out, slot=False)
         return True
 
     # -- a video, before its review --
+
+    async def _first_ready(
+        self, config: QcConfig, picks: list[Pick], now: datetime, out: Outcome
+    ) -> tuple[Pick, frames.Sampled | None] | str:
+        """The best pick that can be reviewed now, with its video's frames. A video only the
+        operator account can download, while the account cannot be used, is passed over with every
+        other such video (no try is spent: the panel's state, not the candidate's). Else
+        ``video_failed`` (another video failure, handled as before: the round ends) or
+        ``account_wait`` (nothing left to review this round)."""
+        account_down = False
+        for pick in picks:
+            if account_down and pick.needs_download and pick.by_account:
+                continue
+            if pick.media_kind != "video":
+                return pick, None
+            got = await self._video(pick)
+            if got == "account_wait":
+                account_down = True
+                continue
+            if isinstance(got, str):
+                await self._video_failed(config, pick, got, now, out)
+                return "video_failed"
+            return pick, got
+        return "account_wait"
 
     async def _video(self, pick: Pick) -> frames.Sampled | str:
         """The frames of a video candidate (see the module doc), from the panel's own copy of the file,
         downloaded first when there is none. No transaction is open while the network or ffmpeg
         works. Else why not: a code of :data:`VIDEO_REJECTS` or :data:`VIDEO_ERRORS`,
-        ``video_retry`` (a download that may work next round) or ``gone``."""
+        ``video_retry`` (a download that may work next round), ``account_wait`` (the operator
+        account, the only way to its file, cannot be used now) or ``gone``."""
         data: bytes | None = None
         task: candidates.MediaTask | None = None
         async with self.engine.begin() as conn:
@@ -620,6 +649,8 @@ class Supervisor:
         try:
             async with self.http_factory() as http:
                 info, data = await content_engine.fetch_media(http, task, self.plugins, self.account)
+        except content_engine.AccountWait:  # no try spent: the account comes back
+            return "account_wait"
         except FetchError as exc:
             final = exc.code in content_engine.FINAL_ERRORS
             async with self.engine.begin() as conn:
@@ -790,6 +821,35 @@ class Supervisor:
         state["unavailable_last"] = iso(now)
         state["unavailable_reason"] = reason
 
+    async def _record(
+        self,
+        config: QcConfig,
+        state: dict[str, Any],
+        prepared: Prepared,
+        review: Review,
+        now: datetime,
+        out: Outcome,
+        *,
+        slot: bool = True,
+    ) -> None:
+        """:meth:`_apply` in its own transaction. When that fails (a bug, a value the database
+        refuses), the calls made are still logged (they count toward the caps) and the candidate
+        spends one of its :data:`MAX_TRIES`, so it cannot be asked again at every slot; the error
+        still reaches the loop."""
+        try:
+            async with self.engine.begin() as conn:
+                await self._apply(conn, config, state, prepared, review, now, out, slot=slot)
+        except Exception as exc:  # the type only: a message could carry the candidate or the answer
+            log.error("content qc: recording a review failed (%s)", type(exc).__name__)
+            async with self.engine.begin() as conn:
+                await self._log_calls(conn, review, prepared.pick.id, now)
+                await conn.execute(
+                    update(ContentCandidate)
+                    .where(ContentCandidate.id == prepared.pick.id)
+                    .values(qc_tries=ContentCandidate.qc_tries + 1, qc_error="record_failed", updated_at=now)
+                )
+            raise
+
     async def _apply(
         self,
         conn: AsyncConnection,
@@ -821,9 +881,17 @@ class Supervisor:
                 .values(qc_tries=ContentCandidate.qc_tries + 1, qc_error=review.outcome[:40], updated_at=now)
             )
             return
-        if review.outcome != "ok" and review.outcome not in UNUSABLE:  # Claude was not reached
+        if review.outcome != "ok" and review.outcome not in UNUSABLE:  # no answer from Claude
             out.action = "unavailable"
             self._unavailable(state, now, review.outcome)
+            if review.outcome in CHARGED_FAILURES:
+                await conn.execute(
+                    update(ContentCandidate)
+                    .where(ContentCandidate.id == pick.id)
+                    .values(
+                        qc_tries=ContentCandidate.qc_tries + 1, qc_error=review.outcome[:40], updated_at=now
+                    )
+                )
             return
         if slot:  # a breaking-news review (D56) is not one of the slot's
             state["slot_calls"] = int(state.get("slot_calls") or 0) + 1

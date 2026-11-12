@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from proxyhub.config import get_config
 from proxyhub.content.supervisor import Outcome, Supervisor
-from proxyhub.content.telegram_account import AccountReader
+from proxyhub.content.telegram_account import PROCESS_HOLD, AccountReader
 from proxyhub.reconcilers.base import Reconciler
 from proxyhub.reconcilers.telegram import run_locked
 from proxyhub.telegram.store import now_utc
@@ -72,7 +72,9 @@ class ContentQcReconciler(Reconciler):
                     clock=self.now,
                     bridge_socket=socket,
                     vault=self._vault,
-                    account=AccountReader(engine=engine, vault=self._vault, clock=self.now),
+                    account=AccountReader(
+                        engine=engine, vault=self._vault, clock=self.now, held=PROCESS_HOLD
+                    ),
                 )
             try:
                 self.last = await self._supervisor.run_round()

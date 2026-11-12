@@ -67,6 +67,7 @@ class _Node:
     attrs: dict[str, str]
     text: list[str] = field(default_factory=list)
     children: list[_Node] = field(default_factory=list)
+    size: int = 0  # characters in ``text``, counted as they come (no re-summing per chunk)
 
     def first(self, *names: str) -> _Node | None:
         for child in self.children:
@@ -88,9 +89,12 @@ def _local(name: str) -> str:
 
 
 def parse_xml(data: bytes) -> _Node:
-    """A small tree of the document; FeedRefused for anything unsafe or too big."""
+    """A small tree of the document; FeedRefused for anything unsafe or too big. Linear in the
+    document's size: a text of many short chunks (one per newline or ``&amp;``) costs no more than
+    one long run."""
     parser = expat.ParserCreate(namespace_separator=" ")
     parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    parser.buffer_text = True  # one call per run of text, not one per line or entity reference
     root = _Node("#root", {})
     stack = [root]
     count = 0
@@ -109,7 +113,8 @@ def parse_xml(data: bytes) -> _Node:
 
     def chars(data: str) -> None:
         node = stack[-1]
-        if sum(len(t) for t in node.text) + len(data) > MAX_ELEMENT_TEXT:
+        node.size += len(data)
+        if node.size > MAX_ELEMENT_TEXT:
             raise FeedRefused("too_big")
         node.text.append(data)
 

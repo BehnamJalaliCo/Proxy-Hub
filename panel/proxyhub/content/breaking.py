@@ -211,7 +211,9 @@ async def promote(db: AsyncConnection, config: QcConfig, now: datetime) -> list[
 
 async def next_to_post(db: AsyncConnection, now: datetime) -> candidates.Candidate | None:
     """The promoted candidate to post now: approved, unused, promoted within :data:`POST_WITHIN`,
-    its file ready (or none, or failed: then it goes as text). The earliest promoted first."""
+    its file ready (or none, or failed: then it goes as text). The earliest promoted first. The
+    publisher's: the row stays locked until the post is queued (an owner's reject waits, then finds
+    it posted), and a row the owner is changing right now is passed over."""
     row = (
         await db.execute(
             select(ContentCandidate.id)
@@ -223,6 +225,7 @@ async def next_to_post(db: AsyncConnection, now: datetime) -> candidates.Candida
             )
             .order_by(ContentCandidate.breaking_at, ContentCandidate.id)
             .limit(1)
+            .with_for_update(skip_locked=True)
         )
     ).first()
     return None if row is None else await candidates.get(db, int(row.id))

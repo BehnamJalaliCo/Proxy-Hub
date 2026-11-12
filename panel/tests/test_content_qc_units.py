@@ -10,9 +10,14 @@ API's responses are bodies in its documented shape fed to the real reader; the r
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
+import re
+import shutil
+import tempfile
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -35,7 +40,15 @@ from proxyhub.content.claude_backends import (
 from proxyhub.content.frames import Sampler
 from proxyhub.content.qc_prompt import Limits, VerdictInvalid, parse_verdict
 from proxyhub.content.qc_settings import FLAGS, QcConfig
-from proxyhub.content.supervisor import Pick, alert_due, pre_gate, score
+from proxyhub.content.supervisor import (
+    CLAUDE_HINT_FA,
+    Pick,
+    alert_due,
+    claude_alert_fa,
+    pre_gate,
+    score,
+    sources_alert_fa,
+)
 from proxyhub.content.writer import Image, ReviewRequest
 from proxyhub.vault import SecretValue
 
@@ -199,6 +212,25 @@ def test_anything_else_is_unparsable(text: Any) -> None:
         parse_verdict(text)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        answer(reasons=["ok\x00x"]),  # JSON's \u0000: PostgreSQL's jsonb refuses it
+        answer().replace("🌍", "\\ud83d"),  # a lone surrogate in the title
+        answer(body="خبر \\udc00 تازه").replace("\\\\udc00", "\\udc00"),
+        answer(reasons=["دلیل \\ud83d"]).replace("\\\\ud83d", "\\ud83d"),
+    ],
+)
+def test_text_the_database_cannot_keep_is_unparsable(text: str) -> None:
+    with pytest.raises(VerdictInvalid):
+        parse_verdict(text)
+
+
+def test_a_paired_surrogate_escape_is_an_emoji() -> None:
+    verdict = parse_verdict(answer().replace("🌍", "\\ud83d\\udcf0"))
+    assert verdict.title.startswith("📰")
+
+
 def test_the_schema_matches_the_parser() -> None:
     schema = qc_prompt.output_schema()
     assert set(schema["required"]) == qc_prompt.KEYS and schema["additionalProperties"] is False
@@ -221,16 +253,42 @@ def test_a_clean_approval_passes() -> None:
         ({"body": "زمین‌لرزه کرمان را لرزاند. جزئیات در t.me/spam_channel"}, "link"),
         ({"body": "زمین‌لرزه کرمان را لرزاند. جزئیات در www.spam.example"}, "link"),
         ({"body": "زمین‌لرزه کرمان را لرزاند. جزئیات در spamnews.com"}, "link"),
+        *(
+            ({"body": f"زمین‌لرزه کرمان را لرزاند. جزئیات در {domain}"}, "link")
+            for domain in (
+                "x.com/abc",
+                "t.co/abc",
+                "youtu.be/abc",
+                "discord.gg/abc",
+                "winbet.pro",
+                "casino.bet",
+                "1xbet.mobi",
+                "whitehouse.gov",
+                "Binance.us",
+                "سایتwinbet.pro",
+                "xn--mgbaam7a8h.xn--mgberp4a5d4ar",
+            )
+        ),
         ({"body": "زمین‌لرزه کرمان را لرزاند. کانال @spam_channel را ببینید"}, "mention"),
         ({"body": "زمین‌لرزه کرمان را لرزاند. #زلزله #کرمان"}, "hashtag"),
         ({"body": "زمین‌لرزه کرمان را لرزاند. برای کمک تماس: ۰۹۱۲۳۴۵۶۷۸۹"}, "phone"),
         ({"body": "زمین‌لرزه کرمان را لرزاند. تماس +98 912 345 6789"}, "phone"),
+        ({"body": "زمین‌لرزه کرمان را لرزاند. تماس ۸۸۷۷ ۶۶۵۵"}, "phone"),
+        ({"body": "زمین‌لرزه کرمان را لرزاند. تماس ۰۲۱-۸۸۷۷۶۶۵۵"}, "phone"),
+        ({"body": "زمین‌لرزه کرمان را لرزاند. سال ۱۴۰۵-۱۴۰۶ ۱۲۳"}, "phone"),
         ({"body": "زمین‌لرزه کرمان را لرزاند. برای خبرهای بیشتر عضو شوید"}, "signature"),
         ({"body": "زمین‌لرزه کرمان را لرزاند. 🆔 خبرها"}, "signature"),
+        ({"body": "زمین‌لرزه کرمان را لرزاند. کانال ما را دنبال کنید"}, "signature"),
+        ({"body": "زمین‌لرزه کرمان را لرزاند. عضو شو"}, "signature"),
         ({"body": "به گزارش BBC فارسی زمین‌لرزه کرمان را لرزاند."}, "source_name"),
         ({"body": "به گزارش ایران اینترنشنال زمین‌لرزه کرمان را لرزاند."}, "source_name"),
         ({"body": "خبرگزاری نمونه گزارش داد زمین‌لرزه کرمان را لرزاند."}, "source_name"),
         ({"body": "زمین‌لرزه کرمان را لرزاند به نقل از bbcpersian"}, "source_name"),
+        # An invisible character inside a name does not hide it.
+        ({"title": "🌍 گزارش B\u200bB\u200bC فارسی از زمین‌لرزه کرمان"}, "source_name"),
+        ({"body": "به گزارش B\u200dB\u200dC فارسی زمین‌لرزه کرمان را لرزاند."}, "source_name"),
+        ({"body": "زمین‌لرزه کرمان را لرزاند به نقل از bbc\u2060persian"}, "source_name"),
+        ({"body": "به گزارش BBC\u200dفارسی زمین‌لرزه کرمان را لرزاند."}, "source_name"),
         ({"body": "An earthquake hit Kerman this morning with no damage reported so far."}, "not_persian"),
         ({"title": "زلزله کرمان را لرزاند"}, "title_emoji"),
         ({"title": "🌍 زلزله کرمان را لرزاند 🔥"}, "title_emoji"),
@@ -244,6 +302,36 @@ def test_a_clean_approval_passes() -> None:
 def test_what_claude_writes_is_checked_again(over: dict[str, Any], expected: str | None) -> None:
     found = codes(answer(**over))
     assert found == ([] if expected is None else [expected]) or (expected in found), found
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"title": "🏛 عضو شورای شهر تهران از افزایش بودجه مترو خبر داد"},
+        {"body": "یک عضو شورای نگهبان گفت بررسی این طرح تا پایان هفته تمام میشود."},
+        {"body": "گروهی از مهاجران دیشب از کانال مانش گذشتند و به ساحل بریتانیا رسیدند."},
+        {"body": "یک کانال ماهواره‌ای تازه از امروز پخش برنامه‌هایش را آغاز کرد."},
+    ],
+)
+def test_ordinary_news_words_are_not_a_signature(over: dict[str, Any]) -> None:
+    assert codes(answer(**over)) == []
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"title": "⚽ برنامه فصل ۲۰۲۵-۲۰۲۶ لیگ قهرمانان اعلام شد"},
+        {"body": "سال تحصیلی ۱۴۰۵-۱۴۰۶ از اول مهر آغاز میشود و مدرسه‌ها آماده‌اند."},
+        {"body": "نسخه‌ی تازه‌ی iOS 26.1 و مدل GPT-4.5 با حجم 2.5GB منتشر شد و در U.S. فروش رفت."},
+    ],
+)
+def test_years_and_versions_are_not_phones_or_links(over: dict[str, Any]) -> None:
+    assert codes(answer(**over)) == []
+
+
+def test_the_title_loses_invisible_and_direction_characters() -> None:
+    verdict = parse_verdict(answer(title="🌍 زلزله\u202e کرمان\u200b را لرزاند"))
+    assert qc_checks.tidy_caption(verdict).title == "🌍 زلزله کرمان را لرزاند"
 
 
 def test_policy_flags_and_categories_override_an_approval() -> None:
@@ -267,6 +355,8 @@ def test_policy_flags_and_categories_override_an_approval() -> None:
 def test_forbidden_words_and_the_caption_room() -> None:
     words = QcConfig(forbidden_words=["خسارت", "casino"])
     assert codes(answer(), words) == ["forbidden_word"]
+    hidden = answer(body="زمین‌لرزه کرمان را لرزاند و خس\u200dارت گزارش نشد.")
+    assert codes(hidden, QcConfig(forbidden_words=["خسارت"])) == ["forbidden_word"]
     assert codes(answer(), QcConfig(forbidden_words=["قمار"])) == []
     assert codes(answer(), limits=Limits(70, 320, 60)) == ["caption_too_long"]
     assert codes(answer(), limits=Limits(70, 320, 400)) == []
@@ -329,6 +419,19 @@ def test_gates_that_need_no_claude() -> None:
 
 
 # --- alerts ---------------------------------------------------------------------------------------------
+
+
+def test_owner_alerts_tell_what_posts_carry_now_and_read_right_to_left() -> None:
+    """D58 retired the seeded bank: with no news a post carries the owner's own bank items, else the
+    proxies alone. Every line of an alert starts with a Persian letter (Telegram sets each line's
+    direction by its first strong character)."""
+    texts = [claude_alert_fa(reason, 6) for reason in [*CLAUDE_HINT_FA, None, "something_new"]]
+    texts.append(sources_alert_fa(6))
+    for text in texts:
+        assert "همیشگی" not in text and "فقط با پروکسی‌ها" in text
+        for line in re.sub(r"<[^>]+>", "", text).split("\n"):
+            strong = next(c for c in line if unicodedata.bidirectional(c) in ("L", "R", "AL"))
+            assert unicodedata.bidirectional(strong) in ("R", "AL"), line
 
 
 def test_an_alert_goes_once_per_episode_and_then_daily() -> None:
@@ -466,6 +569,30 @@ async def test_an_unreachable_backend_says_so() -> None:
     got = await bridge.review(REQUEST)
     assert isinstance(got, Attempt) and got.outcome == "bridge_missing"
     assert await bridge.health() == {"ok": False, "error": "bridge_missing"}
+
+
+async def test_a_bridge_that_stops_reading_cannot_hang_the_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bridge alive but stopped (SIGSTOP, a frozen cgroup) still completes connects from the
+    kernel's backlog; a request bigger than the socket's buffer then never drains."""
+    import socket
+
+    from proxyhub.content import claude_backends
+
+    monkeypatch.setattr(claude_backends, "WRITE_TIMEOUT_S", 0.3)
+    folder = Path(tempfile.mkdtemp(prefix="phb-"))  # short: a unix socket path is at most 107 bytes
+    path = folder / "bridge.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listening:
+            listening.bind(str(path))
+            listening.listen(1)  # never accepted, never read
+            got = await asyncio.wait_for(
+                claude_backends.bridge_call(path, {"op": "review", "x": "A" * 2_000_000}, 1.0), 5
+            )
+        assert got == {"ok": False, "error": "bridge_timeout"}
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 @dataclass

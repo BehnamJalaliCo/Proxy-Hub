@@ -370,6 +370,20 @@ def test_the_output_is_read_strictly() -> None:
     )
     turns = {**OK, "is_error": True, "subtype": "error_max_turns"}
     assert bridge.interpret(_events(INIT, turns)).outcome == "max_turns"
+    failed = {**OK, "is_error": True, "subtype": "success"}
+    image = {**failed, "api_error_status": 400, "result": "API Error: 400 Could not process image"}
+    assert bridge.interpret(_events(INIT, image)).outcome == "claude_bad_input"
+    assert bridge.interpret(_events(INIT, {**failed, "api_error_status": 413})).outcome == "claude_bad_input"
+    policy = {
+        **failed,
+        "result": "API Error: Claude Code is unable to respond to this request, which appears to violate "
+        "our Usage Policy (https://www.anthropic.com/legal/aup).",
+    }
+    assert bridge.interpret(_events(INIT, policy)).outcome == "refused"
+    for status in (500, 529):
+        overloaded = {**failed, "api_error_status": status, "result": "API Error: Overloaded"}
+        assert bridge.interpret(_events(INIT, overloaded)).outcome == "claude_overloaded"
+    assert bridge.interpret(_events(INIT, {**failed, "result": "something else"})).outcome == "claude_failed"
     assert bridge.interpret(_events(INIT, {**OK, "result": "  "})).outcome == "empty"
     long = {**OK, "result": "x" * (bridge.MAX_RESULT_CHARS + 1)}
     assert bridge.interpret(_events(INIT, long)).outcome == "too_long"

@@ -260,7 +260,10 @@ def _int(value: Any) -> int | None:
 
 def interpret(lines: Sequence[bytes]) -> RunResult:
     """Claude Code's stream-json output -> one outcome. The init event must show no tool and no MCP
-    server; the result event must be a success with text."""
+    server; the result event must be a success with text. A failed run is told apart by what the
+    panel does next: ``auth`` and ``rate_limited`` wait, ``claude_bad_input`` (the API answered 400
+    or 413: this candidate's request) counts a try of the candidate, ``refused`` (a usage-policy
+    block) rejects it, ``claude_overloaded`` (5xx) is an outage, ``claude_failed`` anything else."""
     init_seen = False
     rate: dict[str, Any] | None = None
     result: dict[str, Any] | None = None
@@ -307,6 +310,12 @@ def interpret(lines: Sequence[bytes]) -> RunResult:
             out.outcome = "rate_limited"
         elif result.get("subtype") == "error_max_turns":
             out.outcome = "max_turns"
+        elif status in (400, 413):  # the API refused this request: its image, its size
+            out.outcome = "claude_bad_input"
+        elif "usage policy" in lowered:  # the API declined the content itself
+            out.outcome = "refused"
+        elif isinstance(status, int) and not isinstance(status, bool) and status >= 500:
+            out.outcome = "claude_overloaded"  # an outage (529 overloaded, 5xx), not the candidate
         else:
             out.outcome = "claude_failed"
         return out

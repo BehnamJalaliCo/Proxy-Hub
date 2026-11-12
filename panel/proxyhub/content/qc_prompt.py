@@ -272,6 +272,19 @@ def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def _storable(value: str) -> bool:
+    """Text the database can keep: no NUL (a JSON ``\\u0000``) and no lone surrogate (an unpaired
+    ``\\ud83d``), which PostgreSQL and UTF-8 refuse. A review that could not be recorded would be
+    asked again at every slot."""
+    if "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def parse_verdict(text: str | None) -> Verdict:
     """The answer, strictly (see the module doc). Raises :class:`VerdictInvalid`."""
     if not isinstance(text, str) or not text.strip() or len(text) > MAX_ANSWER_CHARS:
@@ -293,7 +306,9 @@ def parse_verdict(text: str | None) -> Verdict:
     if (
         not isinstance(reasons, list)
         or not 1 <= len(reasons) <= MAX_REASONS
-        or not all(isinstance(r, str) and r.strip() and len(r) <= MAX_REASON_CHARS for r in reasons)
+        or not all(
+            isinstance(r, str) and r.strip() and len(r) <= MAX_REASON_CHARS and _storable(r) for r in reasons
+        )
     ):
         raise VerdictInvalid("reasons")
     if (
@@ -303,6 +318,8 @@ def parse_verdict(text: str | None) -> Verdict:
     ):
         raise VerdictInvalid("flags")
     if not isinstance(title, str) or not isinstance(body, str) or len(title) > 400 or len(body) > 4000:
+        raise VerdictInvalid("title or body")
+    if not _storable(title) or not _storable(body):
         raise VerdictInvalid("title or body")
     breaking = data["breaking"]
     if not isinstance(breaking, bool):
