@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -13,6 +15,7 @@ import {
   parseCount,
   parseWords,
   QC_NUMBERS,
+  qcFormKey,
   qcVerdict,
   qualityText,
   sizeText,
@@ -184,6 +187,11 @@ const CONFIG: QcView["config"] = {
   source_min: 10,
   source_max_reject_pct: 80,
   alert_after_hours: 6,
+  breaking_enabled: true,
+  breaking_per_day: 5,
+  breaking_gap_minutes: 20,
+  breaking_max_age_min: 30,
+  breaking_min_sources: 2,
 };
 
 const view = (over: Partial<QcView> = {}): QcView => ({
@@ -211,6 +219,27 @@ describe("the content supervisor (D52)", () => {
   it("names every category and flag in Persian", () => {
     for (const label of [...Object.values(CATEGORY_LABEL), ...Object.values(FLAG_LABEL)]) expect(label).toMatch(PERSIAN);
     for (const f of QC_NUMBERS) expect(f.label).toMatch(PERSIAN);
+  });
+
+  it("edits every number of the server's settings, with the server's ranges (D56 included)", () => {
+    // Field(default=..., ge=..., le=...) of every int setting in panel/proxyhub/content/qc_settings.py.
+    const src = readFileSync(fileURLToPath(new URL("../../../panel/proxyhub/content/qc_settings.py", import.meta.url)), "utf8");
+    const server = new Map(
+      [...src.matchAll(/^ {4}(\w+): int = Field\(default=\d+, ge=(\d+), le=(\d+)\)/gm)].map((m) => [m[1] ?? "", [Number(m[2]), Number(m[3])]]),
+    );
+    server.delete("timeout_s"); // set by the panel, not on the form
+    expect(server.has("breaking_per_day")).toBe(true);
+    const ours = new Map(QC_NUMBERS.map((f) => [f.key as string, [f.min, f.max]]));
+    expect(ours).toEqual(server);
+    for (const f of QC_NUMBERS) expect(f.key in CONFIG, f.key).toBe(true);
+  });
+
+  it("keeps unsaved settings when only the API key or the live fields change", () => {
+    expect(qcFormKey(view({ api_key_set: false }))).toBe(qcFormKey(view({ api_key_set: true })));
+    expect(qcFormKey(view({ calls_24h: { bridge: 9, api: 1 }, last_outcome_at: "2026-11-12T08:00:00Z" }))).toBe(qcFormKey(view()));
+    // A saved change of the config still re-reads the form.
+    expect(qcFormKey(view({ config: { ...CONFIG, mode: "review" } }))).not.toBe(qcFormKey(view()));
+    expect(qcFormKey(view({ config: { ...CONFIG, breaking_enabled: false } }))).not.toBe(qcFormKey(view()));
   });
 
   it("says how Claude can be reached", () => {
