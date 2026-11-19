@@ -120,6 +120,10 @@ async def put_fleet_settings(admin: Admin, db: Db, payload: Annotated[Any, Body(
     # The kill switch is changed ONLY by POST /api/kill-switch: a stale settings form (another
     # device, an old tab) must never turn it back off. Corrupt settings keep it on (fail closed).
     new = new.model_copy(update={"kill_switch": old.kill_switch if old is not None else True})
+    if old is not None and isinstance(body, dict) and "location_max" not in body:
+        # A form that does not know the per-location caps keeps them (it must not lift the owner's
+        # "one server in the USA" by saving another field).
+        new = new.model_copy(update={"location_max": old.location_max})
     await save_fleet_settings(db, new)
     changed = settings_diff(old, new) if old is not None else {"*": ["corrupt", "replaced"]}
     await log_action(

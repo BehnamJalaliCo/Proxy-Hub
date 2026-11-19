@@ -25,6 +25,10 @@ class FleetSettings(BaseModel):
     target_slots: int = Field(default=9, ge=0, le=200)  # decision D14: 9 active + 1 spare
     allowed_server_types: list[str] = Field(default_factory=lambda: ["cpx02"])
     locations: list[str] = Field(default_factory=lambda: ["fsn1", "nbg1", "hel1"])
+    # The most fleet servers one location may hold (the owner, 2026-11-19: "only Germany and
+    # Finland, and one in the USA"). A location not named here has no cap. Slots above a cap move
+    # out like a removed location (D60), the lowest slot numbers stay.
+    location_max: dict[str, int] = Field(default_factory=dict)
 
     def limits(self) -> OperatorLimits:
         return OperatorLimits(
