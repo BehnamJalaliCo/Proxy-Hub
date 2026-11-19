@@ -69,6 +69,7 @@ export const SETTINGS_LABEL: Record<Exclude<keyof FleetSettings, "updated_at">, 
   target_slots: "جایگاه‌های هدف",
   allowed_server_types: "نوع‌های مجاز سرور",
   locations: "locationها",
+  location_max: "سقف سرور هر location",
 };
 
 const REASON: Record<string, string> = {
