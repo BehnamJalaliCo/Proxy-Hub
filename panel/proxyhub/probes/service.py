@@ -437,9 +437,13 @@ async def run_cycle(
                         )
                     )
             if not ch_nodes:  # check-host off, unreachable, or without Iranian nodes
-                jobs.append(_done(_skipped("check-host", "tcp", t.ip, t.port, ch_status, t.node_id, now)))
+                jobs.append(_done(_skipped("check-host", "tcp", t.ip, TLS_PORT, ch_status, t.node_id, now)))
             else:
-                jobs.append(_limited(ch_sem, ch.tcp(t.ip, t.port, ch_nodes, role="node", node_id=t.node_id)))
+                # 443 (Xray), the port round_problem checks is up: a stopped Telemt on the MTProto
+                # port must never look like a block (D66 decides on this measurement).
+                jobs.append(
+                    _limited(ch_sem, ch.tcp(t.ip, TLS_PORT, ch_nodes, role="node", node_id=t.node_id))
+                )
         node_results = list(await asyncio.gather(*jobs))
         rate = gp.last_rate or rate
     return CycleResult(

@@ -156,7 +156,7 @@ def test_parse_http_gives_no_data_for_what_says_nothing_about_the_node() -> None
 
 def test_probe_settings_tls_defaults_and_validation() -> None:
     s = ProbeSettings()
-    assert (s.interval_s, s.max_round_age_s, s.tls_control_host) == (1800, 5400, "github.com")
+    assert (s.interval_s, s.max_round_age_s, s.tls_control_host) == (900, 5400, "github.com")
     assert s.tls_probe_limit == 8 and s.key_networks == KEYS and s.verdict_asns == KEY_ASNS
     with pytest.raises(ValidationError):
         ProbeLocation.model_validate({"asn": 197207, "country": "IR"})
@@ -573,3 +573,47 @@ def test_node_network_states_per_round() -> None:
         "8443": {"asn:197207": "down", "asn:57218": "down"},
     }
     assert node_network_states(cells) == {"asn:197207": "open", "asn:57218": "closed"}
+
+
+def ch(valid: int, up: int, state: str | None = None) -> SourceObservation:
+    """A check-host TCP observation: ``valid`` Iranian nodes reached the control, ``up`` the node."""
+    if state is None:
+        state = "reachable" if up == valid else "unreachable" if up == 0 else "partial"
+    return SourceObservation(state, None, valid, up)  # type: ignore[arg-type]
+
+
+def test_checkhost_mostly_unreachable_in_two_rounds_is_blocked() -> None:
+    """D66 (the owner, 2026-11-19: check the IPs often, replace them when they fail). The real ash
+    case: TLS from Globalping's MCI probe worked (``ok``), while 5 of 6 check-host nodes timed out in
+    two rounds. That is now ``blocked``, whatever the TLS rounds say."""
+    tls_ok = SourceObservation("reachable", None, 2, 2)
+    now = T0 + timedelta(minutes=31)
+
+    def rounds(*obs: SourceObservation, tls: SourceObservation = tls_ok) -> list[RoundObs]:
+        return [
+            RoundObs(T0 + timedelta(minutes=30 - 15 * i), {"https": tls, "check-host": o})
+            for i, o in enumerate(obs)
+        ]
+
+    assert decide(rounds(ch(6, 1), ch(6, 1)), now=now, sources=TLS_SOURCES) == (
+        "blocked",
+        ["checkhost_mostly_unreachable"],
+    )
+    assert decide(rounds(ch(6, 0), ch(6, 2)), now=now, sources=TLS_SOURCES)[0] == "blocked"  # a third
+    # One round only, or a healthy round in between: not blocked.
+    assert decide(rounds(ch(6, 1), ch(6, 6)), now=now, sources=TLS_SOURCES) == ("ok", ["all_reachable"])
+    assert decide(rounds(ch(6, 6), ch(6, 1)), now=now, sources=TLS_SOURCES)[0] == "ok"
+    # More than a third up, or too few nodes that reached the control: TLS decides as before.
+    assert decide(rounds(ch(6, 3), ch(6, 3)), now=now, sources=TLS_SOURCES)[0] == "ok"
+    assert decide(rounds(ch(2, 0), ch(2, 0)), now=now, sources=TLS_SOURCES)[0] == "ok"
+    # A check-host round that says nothing (control failed): never blocked by it.
+    invalid = SourceObservation("invalid", "control_failed")
+    assert decide(rounds(invalid, ch(6, 0)), now=now, sources=TLS_SOURCES)[0] == "ok"
+    # The node was not serving (Xray down, or just started): its silence is ours, not Iran's.
+    for why in ("service_down", "node_not_serving"):
+        down = SourceObservation("invalid", why)
+        verdict, _ = decide(rounds(ch(6, 0), ch(6, 0), tls=down), now=now, sources=TLS_SOURCES)
+        assert verdict == "unknown"
+    # Globalping's TLS gave nothing (its allowance ran out): check-host alone still decides.
+    missing = SourceObservation("invalid", "source_missing")
+    assert decide(rounds(ch(6, 1), ch(6, 0), tls=missing), now=now, sources=TLS_SOURCES)[0] == "blocked"

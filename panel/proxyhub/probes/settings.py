@@ -8,9 +8,10 @@ AND Rightel (the ``verdict_asns``) in 2 rounds while the control worked from bot
 
 Budget: the free Globalping limit is 250 tests per hour per IP, and every probe that runs a
 measurement is one test. A round costs (1 + 2 x nodes) x probes (about 5 probes in Iran today), so
-nodes are measured every 30 minutes and a cycle only takes as many nodes as the remaining allowance
-covers (proxyhub/probes/service.py ``tls_plan``); the TCP/ICMP/DNS information runs only on what is
-left. Rounds may be up to 90 minutes old for a verdict (two rounds plus one delayed by the budget).
+nodes are measured every 15 minutes (D66; 30 before) and a cycle only takes as many nodes as the
+remaining allowance covers (proxyhub/probes/service.py ``tls_plan``); the TCP/ICMP/DNS information
+runs only on what is left. Rounds may be up to 90 minutes old for a verdict (two rounds plus one
+delayed by the budget).
 """
 
 from __future__ import annotations
@@ -77,7 +78,9 @@ class ProbeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    interval_s: int = Field(default=1800, ge=120, le=86400)
+    # Every 15 minutes (D66, the owner: check the IPs often); Globalping's hourly allowance still
+    # bounds the TLS part (tls_fit), so with many nodes some wait for the next window.
+    interval_s: int = Field(default=900, ge=120, le=86400)
     min_rounds: int = Field(default=2, ge=2, le=10)
     max_round_age_s: int = Field(default=5400, ge=600, le=7 * 86400)
     tls_locations: list[ProbeLocation] = Field(

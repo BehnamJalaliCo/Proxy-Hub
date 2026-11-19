@@ -25,6 +25,16 @@ least 2), all younger than ``max_age``:
 * anything else (partial, or rounds disagreeing) -> ``suspect``
 
 So no single round can produce ``ok`` or ``blocked``, and a failed control always gives ``unknown``.
+
+**Also blocked (D66, the owner, 2026-11-19: «فقط باید تند به تند آیپی ها چک بشوند و اگر مشکل داشت عوض
+بشوند»):** check-host's Iranian nodes (data-centre networks) that reach the control host
+(www.hetzner.com, on Hetzner like our nodes) in the same round, at least :data:`CH_MIN_VALID` of
+them, and at most a third of them reach the node, in each of the latest ``min_rounds`` rounds
+(:func:`checkhost_down`). A TCP *timeout* is never faked the way MCI and Rightel fake a SYN answer,
+so this direction of TCP can be trusted. Real case: the ash server answered TLS from Globalping's MCI
+probe while 5 of 6 check-host nodes, TCI (Globalping) and the owner's own MCI phone timed out; it
+stayed ``ok`` for hours. Rounds whose TLS observation says the node was not serving
+(``node_not_serving``, ``service_down``) never count.
 :func:`observe` (per TCP source, the earlier rule) is still computed for the information it gives.
 """
 
@@ -43,6 +53,11 @@ SOURCES: tuple[str, ...] = ("globalping", "check-host")
 TLS_SOURCE = "https"
 TLS_SOURCES: tuple[str, ...] = (TLS_SOURCE,)
 MIN_ROUNDS_FLOOR = 2
+# check-host (TCP from Iranian data centres): blocked when at most a third of at least this many
+# valid nodes reach the node, in every one of the latest rounds (D66).
+CHECKHOST_SOURCE = "check-host"
+CH_MIN_VALID = 3
+NOT_SERVING_REASONS = frozenset({"node_not_serving", "service_down"})
 
 ObsState = Literal["reachable", "unreachable", "partial", "invalid"]
 Verdict = Literal["ok", "suspect", "blocked", "unknown"]
@@ -175,6 +190,24 @@ def observe_tls(
     return SourceObservation(state, None, len(valid), up, cells)
 
 
+def checkhost_down(rounds: Sequence[RoundObs]) -> bool:
+    """D66: in every given round, check-host's Iranian nodes that reached the control (at least
+    :data:`CH_MIN_VALID`) mostly failed to reach the node (at most a third up), and the node was
+    serving (its TLS observation does not say otherwise)."""
+    if not rounds:
+        return False
+    for rnd in rounds:
+        tls = rnd.observations.get(TLS_SOURCE)
+        if tls is not None and tls.reason in NOT_SERVING_REASONS:
+            return False
+        obs = rnd.observations.get(CHECKHOST_SOURCE)
+        if obs is None or obs.state not in ("unreachable", "partial"):
+            return False
+        if obs.valid_networks < CH_MIN_VALID or obs.up_networks * 3 > obs.valid_networks:
+            return False
+    return True
+
+
 def decide(
     rounds: Iterable[RoundObs],
     *,
@@ -188,6 +221,8 @@ def decide(
     recent = sorted((r for r in rounds if now - r.at <= max_age), key=lambda r: r.at, reverse=True)[:need]
     if len(recent) < need:
         return "unknown", [f"not_enough_rounds:{len(recent)}/{need}"]
+    if checkhost_down(recent):
+        return "blocked", ["checkhost_mostly_unreachable"]
     reasons: list[str] = []
     states: list[ObsState] = []
     for i, rnd in enumerate(recent):
