@@ -1008,3 +1008,57 @@ def test_a_learned_limit_is_tried_again_after_a_while() -> None:
         plan = plan_for(settings_, nodes=nodes, servers=servers, accounts=(old,))
         assert [c.allowed for c in creates(plan)] == [True, True]  # slots 5 and 6 try again
         assert not [a for a in plan.actions if a.reasons == ("making_room",)]
+
+
+def test_a_location_cap_moves_the_slots_above_it_and_builds_no_more_there() -> None:
+    """The owner, 2026-11-19: "only Germany and Finland, and one in the USA". With
+    ``location_max={"hil": 1}`` (here hel1, a location the test offers price) the lowest slot
+    stays; a higher one moves like a removed location (D60), and no new slot goes there while it
+    holds its one server."""
+    s1 = node(1, slot=1, location="fsn1")
+    s2 = node(2, slot=2, location="hel1")
+    s3 = node(3, slot=3, location="hel1")
+    nodes = (s1, s2, s3)
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in range(1, 4)}
+    capped = open_settings(target_slots=4, locations=["fsn1", "nbg1", "hel1"], location_max={"hel1": 1})
+    plan = plan_for(capped, nodes=nodes, servers=servers, accounts=(account(servers_total=3),))
+    by_slot = {a.context.get("slot"): a for a in creates(plan)}
+    assert set(by_slot) == {3, 4}
+    assert by_slot[3].context["kind"] == "replace" and by_slot[3].context["location"] != "hel1"
+    assert "hel1" in by_slot[3].context["avoid"]
+    assert by_slot[4].context["location"] != "hel1"
+    assert not [a for a in plan.actions if a.action == "delete"]  # slot 3 serves until it has moved
+    # Without the cap nothing moves.
+    plan = plan_for(
+        open_settings(target_slots=3, locations=["fsn1", "nbg1", "hel1"]),
+        nodes=nodes,
+        servers=servers,
+        accounts=(account(servers_total=3),),
+    )
+    assert not creates(plan) and not [a for a in plan.actions if a.action == "delete"]
+    # With the account full the higher slot leaves first, the lower one stays.
+    full = (account(limit=3, servers_total=3),)
+    plan = plan_for(
+        capped.model_copy(update={"target_slots": 3}), nodes=nodes, servers=servers, accounts=full
+    )
+    deletes = [(a.target, a.context["why"]) for a in plan.actions if a.action == "delete"]
+    assert deletes == [("n3", "location_removed")]
+
+
+def test_a_location_cap_of_one_still_places_the_first_server_there() -> None:
+    capped = open_settings(target_slots=4, locations=["hel1", "fsn1"], location_max={"hel1": 1})
+    plan = plan_for(capped)
+    locs = sorted(a.context["location"] for a in creates(plan) if a.allowed)
+    assert locs.count("hel1") <= 1 and "fsn1" in locs
+
+
+def test_location_max_input_is_checked() -> None:
+    from pydantic import ValidationError
+
+    from proxyhub.fleet.settings_store import FleetSettingsInput
+
+    ok = FleetSettingsInput.model_validate({"location_max": {" HIL ": 1}}).to_settings()
+    assert ok.location_max == {"hil": 1}
+    for bad in ({"hil": -1}, {"hil": 201}, {"not a place": 1}):
+        with pytest.raises(ValidationError):
+            FleetSettingsInput.model_validate({"location_max": bad})

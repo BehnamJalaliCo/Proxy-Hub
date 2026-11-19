@@ -68,6 +68,17 @@ class FleetSettingsInput(FleetSettings):
     def _locations(cls, v: list[str]) -> list[str]:
         return _unique_list(v, _LOCATION_RE, "location")
 
+    @field_validator("location_max")
+    @classmethod
+    def _location_max(cls, v: dict[str, int]) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for loc, n in v.items():
+            name = _unique_list([loc], _LOCATION_RE, "location")[0]
+            if not 0 <= n <= 200:
+                raise ValueError("a location cap must be between 0 and 200")
+            out[name] = n
+        return out
+
     def to_settings(self) -> FleetSettings:
         return FleetSettings.model_validate(self.model_dump())
 

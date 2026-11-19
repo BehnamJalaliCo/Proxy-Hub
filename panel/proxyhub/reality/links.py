@@ -271,7 +271,8 @@ async def links_for(db: Db, now: datetime) -> list[tuple[ProxyLink, Any]]:
                 continue
             with_xhttp = r.transport == "reality" and xhttp_on and _xhttp_confirmed(r, scope_nodes, statuses)
         status: LinkStatus = r.status
-        key, name = f"reality:{r.id}", config_name(prefix, serving_location(r, nodes), r.id)
+        place = serving_location(r, nodes)
+        key, name = f"reality:{r.id}", config_name(prefix, place, r.id)
         out.append(
             (
                 ProxyLink(
@@ -282,6 +283,7 @@ async def links_for(db: Db, now: datetime) -> list[tuple[ProxyLink, Any]]:
                     url=config_url(r, name),
                     expires_at=r.expires_at,
                     status=status,
+                    location=place,
                 ),
                 r,
             )
@@ -298,6 +300,7 @@ async def links_for(db: Db, now: datetime) -> list[tuple[ProxyLink, Any]]:
                         expires_at=r.expires_at,
                         status=status,
                         companion_of=key,
+                        location=place,
                     ),
                     r,
                 )

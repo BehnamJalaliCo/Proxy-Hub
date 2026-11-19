@@ -42,6 +42,7 @@ def to_link(view: ProxyView) -> ProxyLink | None:
         expires_at=None,
         status=status,
         extra_of=view.extra_of,
+        location=view.location,
     )
 
 

@@ -91,6 +91,7 @@ export interface FleetSettings {
   target_slots: number;
   allowed_server_types: string[];
   locations: string[];
+  location_max?: Record<string, number>;
   /** When the settings were last saved (null before the first save). Sent back with a save as
    * expected_updated_at, so a save over a newer change from another device is refused (409). */
   updated_at?: string | null;

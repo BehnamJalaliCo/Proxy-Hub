@@ -170,7 +170,7 @@ async def test_the_links_always_fit_the_caption_and_the_content_gives_way(
         assert context["caption_limit"] == CAPTION_LIMIT
         assert [d["kind"] for d in context["dropped"]] == ["reality"] * (5 - kept)
     assert caption.count("vless://") == kept >= 1
-    content = caption[: caption.index('<a href="https://t.me/proxy')]  # the title and the body
+    content = caption[: caption.index("<b>⚡ ")]  # the title and the body, over the proxy card (D65)
     assert visible_text(content).rstrip().endswith("…")  # the content was shortened, not a link
 
 

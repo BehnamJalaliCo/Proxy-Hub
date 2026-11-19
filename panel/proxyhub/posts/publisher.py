@@ -161,6 +161,7 @@ def views_for_new_post(chosen: Sequence[ProxyLink], names: Mapping[str, str] | N
             url=x.url,
             expires_at=x.expires_at,
             operator=(names or {}).get(x.key),
+            location=x.location,
         )
         for x in chosen
     ]
@@ -867,7 +868,13 @@ def current_view(carried: _Carried, h: links.Harvest, now: datetime) -> Shown:
         return Shown(_as(carried, current.status), new_status=current.status)
     if current.expires_at is not None and current.expires_at <= now:
         return Shown(_as(carried, "expired"), new_status="expired")
-    view = LinkView(kind=current.kind, status="active", url=current.url, expires_at=current.expires_at)
+    view = LinkView(
+        kind=current.kind,
+        status="active",
+        url=current.url,
+        expires_at=current.expires_at,
+        location=current.location,
+    )
     return Shown(view)
 
 

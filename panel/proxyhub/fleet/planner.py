@@ -389,6 +389,12 @@ class _Planner:
         if prices_stale(snap.offers, snap.accounts, snap.nodes, self.now):
             self.global_reasons.append("prices_stale")  # fail closed until the pricing loop recovers
         self.accounts_by_id = {a.id: a for a in snap.accounts}
+        # Slots above a location's cap: the lowest slot numbers there stay, the others move (D60).
+        self.over_cap_slots: dict[str, set[int]] = {}
+        for loc, cap in self.s.location_max.items():
+            slots = sorted({n.slot for n in self.fleet_nodes if n.location == loc and n.slot is not None})
+            if len(slots) > cap:
+                self.over_cap_slots[loc] = set(slots[cap:])
 
     # --- accounts and placement -------------------------------------------------------------
 
@@ -413,8 +419,16 @@ class _Planner:
         return view.guard_ok and (limit is None or view.servers_in_account + 1 <= limit)
 
     def _location_removed(self, n: NodeSnapshot) -> bool:
-        """D60: the node's location is no longer in the owner's list (an empty list removes none)."""
-        return bool(self.s.locations) and n.location not in self.s.locations
+        """D60: the node's location is no longer in the owner's list (an empty list removes none),
+        or its slot is above the owner's cap for that location (``location_max``)."""
+        if bool(self.s.locations) and n.location not in self.s.locations:
+            return True
+        return n.slot is not None and n.slot in self.over_cap_slots.get(n.location, set())
+
+    def _at_cap(self, location: str) -> bool:
+        """The location already holds as many fleet servers as the owner allows: no new one there."""
+        cap = self.s.location_max.get(location)
+        return cap is not None and self.run.per_location.get(location, 0) >= cap
 
     def _no_room(self) -> bool:
         """Every active account is full: its server limit is known and reached, on a fresh
@@ -463,6 +477,10 @@ class _Planner:
     def _usable(self, locations: list[str]) -> list[str]:
         return [loc for loc in locations if self._rank(loc) < CLASS_RANK["bad"]]
 
+    def _open(self, locations: list[str]) -> list[str]:
+        """Usable and below the owner's cap: where a new server may go."""
+        return [loc for loc in self._usable(locations) if not self._at_cap(loc)]
+
     def _spread_key(self, location: str) -> tuple[int, int]:
         """Placement order among usable locations (P16, the owner: "build other locations too, not
         only hel1"): a location open from Iran and one without data yet count the same, so the slots
@@ -481,7 +499,7 @@ class _Planner:
         start = (slot - 1) % len(locs)
         rotated = [locs[(start + k) % len(locs)] for k in range(len(locs))]
         # Stable: the slot's own rotation decides among locations with the same key.
-        return sorted(self._usable(rotated), key=self._spread_key)
+        return sorted(self._open(rotated), key=self._spread_key)
 
     def _slot_locations_all(self, slot: int) -> list[str]:
         locs = list(self.s.locations)
@@ -490,7 +508,7 @@ class _Planner:
 
     def _replacement_locations(self, avoid: set[str]) -> list[str]:
         locs = list(self.s.locations)
-        others = self._usable([loc for loc in locs if loc not in avoid])
+        others = self._open([loc for loc in locs if loc not in avoid])
         return sorted(others, key=lambda loc: (*self._spread_key(loc), self._rank(loc), locs.index(loc)))
 
     def _server_gone(self, n: NodeSnapshot) -> bool:
@@ -528,7 +546,7 @@ class _Planner:
             if not preferred and self.s.locations:
                 if hard:
                     planner_reasons.append("no_other_location")
-                    preferred = self._usable(list(self.s.locations))
+                    preferred = self._open(list(self.s.locations))
                 else:
                     preferred = self._slot_locations(slot)
         if self._all_closed():

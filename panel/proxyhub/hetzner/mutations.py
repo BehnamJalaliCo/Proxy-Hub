@@ -12,6 +12,7 @@ from typing import Any
 from hcloud.images import Image
 from hcloud.locations import Location
 from hcloud.server_types import ServerType
+from hcloud.servers import ServerCreatePublicNetwork
 
 from proxyhub.hetzner.client import HetznerReader, _delete_protected
 from proxyhub.safety.gates import (
@@ -48,6 +49,10 @@ def create_server(reader: HetznerReader, permit: CreatePermit, spec: CreateSpec)
         location=Location(name=spec.location),
         labels=labels,
         user_data=spec.user_data,
+        # IPv4 only: nothing on a node uses IPv6, and each IPv6 is a Primary IP that counts against
+        # the project's Primary IP limit (2026-11-19: 4 servers x 2 IPs filled the limit of 8 and
+        # Hetzner refused a fifth server with primary_ip_limit).
+        public_net=ServerCreatePublicNetwork(enable_ipv4=True, enable_ipv6=False),
     )
     server_id = resp.server.id
     if server_id is None:

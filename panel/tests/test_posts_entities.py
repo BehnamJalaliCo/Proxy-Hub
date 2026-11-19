@@ -31,7 +31,6 @@ from proxyhub.posts.entities import (
     with_custom_emoji,
 )
 from proxyhub.telegram.templates import (
-    NBSP,
     REALITY_MARK,
     TITLE_MARK,
     PostLink,
@@ -210,7 +209,8 @@ def test_the_real_template_matches_telethons_own_html_parser() -> None:
         for t in sorted(theirs, key=lambda t: (t.offset, -t.length))
         if type(t).__name__ == "MessageEntityBlockquote"
     ]
-    assert [e.collapsed for e in ours.entities if e.kind == "blockquote"] == [True, True, True]
+    # The proxy card (layout B, D65) is an open quote; each config link has its own collapsed one.
+    assert [e.collapsed for e in ours.entities if e.kind == "blockquote"] == [False, True, True, True]
     # No quote for the body (plain text since 2026-11-07); one collapsed quote per config LINK
     # (TCP, XHTTP, the WS config): each
     # quote covers exactly its one inline-code config and nothing else, so copying it gives one
@@ -220,10 +220,11 @@ def test_the_real_template_matches_telethons_own_html_parser() -> None:
     assert len(configs) == 3 and not any(e.kind == "pre" for e in ours.entities)
     assert all("\n" not in covered(ours, e) for e in configs)
     assert [(q.offset, q.length) for q in quotes] == [(c.offset, c.length) for c in configs]
-    assert "\nTCP\nvless://" in ours.text and "\n\nXHTTP\nvless://" in ours.text  # labels outside
-    # The proxy words are the links' whole text, with no mark (D48).
+    assert "\n۱. معمولی (TCP)\nvless://" in ours.text  # labels outside the quotes
+    assert "\n۲. اگر اولی وصل نشد (XHTTP)\nvless://" in ours.text
+    # Each live proxy's whole line is its link (layout B, D65).
     words = [covered(ours, e) for e in ours.entities if e.kind == "text_url"]
-    assert words == ["پروکسی", "پروکسی"]  # the same word in every cell (2026-11-07)
+    assert words == ["پروکسی ◂ همه‌ی اپراتورها"] * 2
 
 
 _KIND = {
@@ -264,9 +265,9 @@ def test_the_owners_emoji_become_custom_emoji_over_exactly_their_units() -> None
     assert ("💡", 0) not in got  # not in the pack: stays a plain emoji
     assert got[:3] == [("🇮🇷", 5_004), ("👨‍👩‍👧", 5_005), ("♻️", 5_009)]
     assert ("⌛️", 5_002) in got and ("🔗", 5_003) in got  # an ended proxy's mark, the signature
-    assert got.count(("🔒", 5_013)) == 2  # the line above each config's quote
+    assert got.count(("🔐", 5_007)) == 2  # the head line of each config
+    assert ("⚡", 5_012) in got  # the proxy card's head line (layout B, D65)
     assert all(doc != 5_011 for _, doc in got)  # 🔑 is inside <code>: Telegram draws code plain
-    assert "⚡" not in m.text and "🔐" not in m.text  # no mark on a proxy word, no Reality header
     # No custom emoji inside inline code (a config or the body's) or a link (Telegram's nesting rules).
     closed = [(e.offset, e.end) for e in m.entities if e.kind in ("code", "pre", "text_url")]
     assert len(closed) == 6  # the body's code, three configs, two proxy words
@@ -329,10 +330,10 @@ def test_a_configs_quote_holds_only_its_code_and_a_status_line_gets_its_custom_e
     [code] = [e for e in m.entities if e.kind == "code"]
     assert quote.collapsed and (quote.offset, quote.end) == (code.offset, code.end)
     got = [(covered(m, e), e.offset) for e in m.entities if e.kind == "custom_emoji"]
-    # The "⌛" inside the config stays plain, and so does the 🔒: without content it is the
+    # The "⌛" inside the config stays plain, and so does the 🔐: without content it is the
     # message's first character (see the next test).
-    assert [emoji for emoji, _ in got] == ["⌛️", "🔗"] and m.text.startswith("🔒")
-    status = m.text.index("XHTTP\n⌛️ زمان این کانفیگ تمام شد") + len("XHTTP\n")
+    assert [emoji for emoji, _ in got] == ["⌛️", "🔗"] and m.text.startswith("🔐")
+    status = m.text.index("(XHTTP)\n⌛️ زمان این کانفیگ تمام شد") + len("(XHTTP)\n")
     assert got[0][1] == utf16_len(m.text[:status]) and got[0][1] > quote.end
 
 
@@ -375,8 +376,8 @@ def test_the_messages_first_character_stays_a_plain_emoji(title: str) -> None:
     assert (first.offset, first.length) == (0, 3 if "\ufe0f" in title else 2)  # what the entity would be
     assert not any(e.kind == "custom_emoji" and e.offset == 0 for e in m.entities)
     assert [(e.kind, e.offset) for e in m.entities][:1] == [("bold", 0)]  # the bold line is untouched
-    assert [covered(m, e) for e in m.entities if e.kind == "custom_emoji"] == ["🔒", "🔗"]
-    assert dict(emoji_report(post, pack))["🔒"] is True
+    assert [covered(m, e) for e in m.entities if e.kind == "custom_emoji"] == ["🔐", "🔗"]
+    assert dict(emoji_report(post, pack))["🔐"] is True
     assert dict(emoji_report(post, pack))[first.emoji] is False  # the dashboard says it stays plain
     # Not only the title: whatever stands first in a message stays plain; a later twin still counts.
     again = with_custom_emoji(MessageText("🔄 x 🔄"), pack)
@@ -392,10 +393,10 @@ def test_the_bot_path_keeps_plain_emoji() -> None:
 
 def test_the_preview_report() -> None:
     report = dict(emoji_report(_post_html(), PACK))
-    assert report["🔒"] is True and report["⌛️"] is True and report["🔗"] is True
+    assert report["🔐"] is True and report["⌛️"] is True and report["🔗"] is True
     assert report["💡"] is False  # not in the pack
     assert report["🔑"] is False  # only inside code
-    assert "🔐" not in report and "⚡" not in report and "📡" not in report  # gone with D48
+    assert report["⚡"] is True and "📡" not in report  # the proxy card's head (D65); 📡 gone (D48)
     assert emoji_report(_post_html(), {}) == [(e, False) for e, _ in emoji_report(_post_html(), PACK)]
 
 
@@ -460,9 +461,9 @@ def test_each_emoji_kind_after_mixed_text(emoji: str) -> None:
 
 
 def test_the_compact_layouts_emoji_sit_on_exact_utf16_offsets() -> None:
-    """D48: the title line's emoji (the panel's own when a title has none; it stays a plain emoji as
-    the message's first character), the lock above a config and the signature; each custom emoji
-    covers exactly its two units after Persian text, no-break spaces and bullets."""
+    """D48/D65: the title line's emoji (the panel's own when a title has none; it stays a plain emoji
+    as the message's first character), the proxy card's head, the config's head and the signature;
+    each custom emoji covers exactly its units after Persian text."""
     six = [
         PostLink(
             kind="mtproto",
@@ -475,22 +476,25 @@ def test_the_compact_layouts_emoji_sit_on_exact_utf16_offsets() -> None:
     post = render_post(compose_content("عنوان خبر", "متن خبر"), [*six, config], "@ipoxxo").text
     m = operator_message(post, PACK)
     title = f"{TITLE_MARK} عنوان خبر"
-    grid = "\n".join([f"پروکسی{NBSP}• پروکسی{NBSP}•"] * 3)
+    line = "پروکسی ◂ همه‌ی اپراتورها"
+    head = "⚡ پروکسی تلگرام، با یک لمس وصل شو"
+    card = "\n".join([line] * 6)
     lock = f"{REALITY_MARK} کانفیگ V2Ray"
     tag = "🔗 \u200e@ipoxxo"
     share = "📲 این پست را برای دوستانت بفرست"  # D62
-    assert (
-        m.text == f"{title}\n\nمتن خبر\n\n{grid}\n\n{lock}\nvless://a@203.0.113.9:443#x\n\n{share}\n—\n{tag}"
+    assert m.text == (
+        f"{title}\n\nمتن خبر\n\n{head}\n{card}\n\n{lock}\n\nvless://a@203.0.113.9:443#x\n\n{share}\n{tag}"
     )
     got = [(covered(m, e), e.offset, e.length, e.document_id) for e in m.entities if e.kind == "custom_emoji"]
     assert m.text.startswith(TITLE_MARK)  # a plain emoji: no entity at offset 0 (iOS)
     assert got == [
-        ("🔒", utf16_len(f"{title}\n\nمتن خبر\n\n{grid}\n\n"), 2, 5_013),
+        ("⚡", utf16_len(f"{title}\n\nمتن خبر\n\n"), 1, 5_012),
+        ("🔐", utf16_len(f"{title}\n\nمتن خبر\n\n{head}\n{card}\n\n"), 2, 5_007),
         ("🔗", utf16_len(m.text) - utf16_len(tag), 2, 5_003),
     ]
     links = [(covered(m, e), e.offset) for e in m.entities if e.kind == "text_url"]
-    assert [w for w, _ in links] == ["پروکسی"] * 6
-    assert links[1][1] - links[0][1] == utf16_len(f"پروکسی{NBSP}• ")  # the word's bullet and a space
+    assert [w for w, _ in links] == [line] * 6
+    assert links[1][1] - links[0][1] == utf16_len(f"{line}\n")  # one whole line each
 
 
 def test_module_has_no_telethon_import() -> None:

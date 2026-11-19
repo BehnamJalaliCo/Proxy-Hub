@@ -143,8 +143,26 @@ async def test_settings_defaults_have_no_budget_cap(client: AsyncClient) -> None
         "target_slots": 9,
         "allowed_server_types": ["cpx02"],
         "locations": ["fsn1", "nbg1", "hel1"],
+        "location_max": {},
         "updated_at": None,  # never saved yet
     }
+
+
+async def test_settings_put_keeps_location_caps_a_form_does_not_send(client: AsyncClient) -> None:
+    """The owner's "one server in the USA" (location_max) survives a save from a form that does not
+    know the field; a body that names it replaces it."""
+    form = {k: v for k, v in (await client.get("/api/settings/fleet")).json().items() if k != "updated_at"}
+    r = await client.put("/api/settings/fleet", json={**form, "location_max": {"HIL": 1}})
+    assert r.status_code == 200, r.text
+    assert r.json()["location_max"] == {"hil": 1}
+    without = {k: v for k, v in form.items() if k != "location_max"}
+    r = await client.put("/api/settings/fleet", json={**without, "budget_cap_eur": "70"})
+    assert r.status_code == 200, r.text
+    assert r.json()["location_max"] == {"hil": 1} and r.json()["budget_cap_eur"] == "70.00"
+    r = await client.put("/api/settings/fleet", json={**form, "location_max": {}})
+    assert r.status_code == 200 and r.json()["location_max"] == {}
+    r = await client.put("/api/settings/fleet", json={**form, "location_max": {"hil": -1}})
+    assert r.status_code == 422
 
 
 async def test_settings_put_refuses_a_stale_form(client: AsyncClient, engine: AsyncEngine) -> None:
