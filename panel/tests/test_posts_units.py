@@ -37,11 +37,8 @@ from proxyhub.telegram.templates import (
     BODY_TAGS,
     CONFIG_VALIDITY_HOURS,
     MAX_MESSAGE_CHARS,
-    NBSP,
     PAUSED_LINE,
     TITLE_MARK,
-    WORD_MARK,
-    WORD_SEPARATOR,
     PostLink,
     PostTooLong,
     StatusTexts,
@@ -83,9 +80,9 @@ def rl(
 
 
 def word(n: int) -> str:
-    """The visible proxy word of the n-th MTProto link: the same word in every cell, no number (the
-    owner, 2026-11-07, after the competitor's grid); ``n`` only names the link in a test."""
-    return "پروکسی"
+    """The visible line of the n-th MTProto link without a known location and without an operator
+    (layout B, D65); ``n`` only names the link in a test."""
+    return "پروکسی ◂ همه‌ی اپراتورها"
 
 
 def code(link: PostLink) -> str:
@@ -106,53 +103,58 @@ def one_config_per_quote(post: str) -> bool:
 
 CONTENT = compose_content("💡 عنوان <آزمایشی>", "متن <b>پررنگ</b> و <i>کج</i>\nخط دوم")
 EXP = datetime(2026, 11, 5, 15, 0, tzinfo=UTC)  # Thursday 18:30 Tehran
-LINE = "🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت"  # the period, not the end (the owner, 2026-11-07)
+# The period, not the end (the owner, 2026-11-07); layout B (D65): bold head, then the hint.
+LINE = "<b>🔐 کانفیگ V2Ray</b>\n⏳ اعتبار ۴۸ ساعت؛ برای کپی روی کانفیگ بزن"
 QUOTE = "<blockquote expandable>"
+HEAD = "<b>⚡ پروکسی تلگرام، با یک لمس وصل شو</b>"
+TAIL = "📲 این پست را برای دوستانت بفرست\n🔗 \u200e@ipoxxo"
+TCP = "۱. معمولی (TCP)"
+XHTTP = "۲. اگر اولی وصل نشد (XHTTP)"
 
 
 # --- layout (decision D48) -----------------------------------------------------------------------
 
 
-def test_post_is_title_body_proxy_grid_config_and_tag_in_that_order() -> None:
+def test_post_is_title_body_proxy_lines_config_and_tag_in_that_order() -> None:
+    """Layout B (D65, the owner on Android, 2026-11-19): a head line, then a quote card with one
+    proxy per line, the whole line the link, then the config with its country, then the tag."""
     sec = secret()
     tcp, xhttp = rl(1, expires=EXP, variant="TCP"), rl(1, expires=EXP, variant="XHTTP", companion=True)
-    post = render_post(CONTENT, [mt(1, sec=sec), mt(2), mt(3), tcp, xhttp], "@ipoxxo").text
+    tcp, xhttp = replace(tcp, location="nbg1"), replace(xhttp, location="nbg1")
+    one = replace(mt(1, sec=sec), location="hel1")
+    post = render_post(CONTENT, [one, mt(2), replace(mt(3), location="hil"), tcp, xhttp], "@ipoxxo").text
     assert post.startswith("<b>💡 عنوان &lt;آزمایشی&gt;</b>\n\nمتن <b>پررنگ</b>")  # plain text, no quote
-    # Right under the body: the proxy words, two to a row with a bullet between them; no header,
-    # no mark, the whole word is the link.
     assert (
-        'خط دوم\n\n<a href="https://t.me/proxy?server=slot1.example.com'
-        f'&amp;port=8443&amp;secret={sec}">{word(1)}</a>{WORD_SEPARATOR}<a href="' in post
+        f'خط دوم\n\n{HEAD}\n<blockquote><a href="https://t.me/proxy?server=slot1.example.com'
+        f'&amp;port=8443&amp;secret={sec}">🇫🇮 پروکسی فنلاند ◂ همه‌ی اپراتورها</a>\n<a href="' in post
     )
-    assert f">{word(2)}</a>{WORD_MARK}\n<a href=" in post and f">{word(3)}</a>{WORD_MARK}\n\n🔒 " in post
-    # The config: ONE line with its end time, then each link under a tiny label line in its OWN
-    # collapsed quote that holds nothing but the config as inline code (one tap, one config).
+    assert ">پروکسی ◂ همه‌ی اپراتورها</a>\n<a href=" in post  # no location known: no flag
+    assert ">🇺🇸 پروکسی آمریکا ◂ همه‌ی اپراتورها</a></blockquote>\n\n<b>🔐 " in post
+    # The config: its head with the country, the period and the hint, then each link under its
+    # label in its OWN collapsed quote holding nothing but the config (one tap, one config).
     assert (
-        f"\n\n{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{quoted(xhttp)}\n\n"
-        "📲 این پست را برای دوستانت بفرست\n—\n🔗 ‎@ipoxxo"
+        "\n\n<b>🔐 کانفیگ V2Ray 🇩🇪 آلمان</b>\n⏳ اعتبار ۴۸ ساعت؛ برای کپی روی کانفیگ بزن\n\n"
+        f"{TCP}\n{quoted(tcp)}\n{XHTTP}\n{quoted(xhttp)}\n\n{TAIL}"
     ) in post
     assert one_config_per_quote(post)
-    assert post.endswith("</blockquote>\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗 ‎@ipoxxo")
+    assert post.endswith(f"</blockquote>\n\n{TAIL}")
     assert "#%40ipoxxo%201" in post  # the config's own name (D41) stays inside it
-    # No section headers, no ⚡, no <pre> (Telegram nests no pre in a quote), no «کانفیگ ۱».
-    for gone in ("<pre", "⚡", "📡", "🔐", "⏳", "پروکسی‌ها", "کانفیگ ۱", "اتصال"):
+    for gone in ("<pre", "📡", "پروکسی‌ها", "کانفیگ ۱", "\n—\n", "•"):
         assert gone not in post, gone
-    assert post.count("<blockquote") == 2  # one per config link; the body is plain text
+    assert post.count("<blockquote") == 3  # the proxy card and one per config link
     assert visible_text(post).count("https://") == 0
     assert ALL_DEAD_LINE not in post
     assert fits(post)
     assert "·" not in post  # a middle dot next to Persian digits reads as a zero
 
 
-def test_proxy_words_are_the_same_word_two_to_a_row_each_followed_by_a_bullet() -> None:
+def test_every_proxy_is_its_own_whole_line_link() -> None:
     post = render_post(None, [mt(i) for i in range(1, 8)], "@ipoxxo").text
-    rows = post.split("\n\n")[0].split("\n")
-    assert [r.count("<a href=") for r in rows] == [2, 2, 2, 1]
-    assert [r.count(WORD_MARK) for r in rows] == [2, 2, 2, 1]  # every word, the last one too
-    shown = re.findall(r'<a href="[^"]+">([^<]+)</a>', post)
-    assert shown == ["پروکسی"] * 7  # no number: the rows line up
-    assert visible_text(rows[0]) == f"پروکسی{NBSP}• پروکسی{NBSP}•"
-    assert not any(visible_text(r).startswith("•") for r in rows)
+    card = re.search(r"<blockquote>(.*?)</blockquote>", post, flags=re.DOTALL)
+    assert card is not None and post.startswith(HEAD + "\n<blockquote>")
+    rows = card.group(1).split("\n")
+    assert len(rows) == 7 and all(re.fullmatch(r'<a href="[^"]+">[^<]+</a>', r) for r in rows)
+    assert [visible_text(r) for r in rows] == [word(1)] * 7
 
 
 def test_rendering_is_deterministic() -> None:
@@ -173,45 +175,37 @@ def test_dead_links_keep_their_place_lose_their_link_and_get_marks() -> None:
         PostLink(kind="reality", status="burned"),
     ]
     post = render_post(CONTENT, items, "@ipoxxo").text
-    assert f"🚫{NBSP}<s>{word(1)}</s>{WORD_SEPARATOR}<a href=" in post  # the first stays first
-    assert (
-        f">{word(2)}</a>{WORD_MARK}\n⌛️{NBSP}<s>{word(3)}</s>{WORD_SEPARATOR}🔴{NBSP}<s>{word(4)}</s>{WORD_MARK}\n\n"
-        in post
-    )
+    assert f"<blockquote>🚫 <s>{word(1)}</s>\n<a href=" in post  # the first stays first
+    assert f">{word(2)}</a>\n⌛️ <s>{word(3)}</s>\n🔴 <s>{word(4)}</s></blockquote>\n\n" in post
     assert post.count("<a href=") == 1 and sec in post
-    # A config with nothing left is ONE status line in its place: no lock line, no quote.
+    # A config with nothing left is ONE status line in its place: no head line, no quote.
     assert (
-        f"<s>{word(4)}</s>{WORD_MARK}\n\n⌛️ زمان این کانفیگ تمام شد\n\n"
-        "🔴 ظرفیت این کانفیگ پر شد\n\n🚫 این کانفیگ از دسترس خارج شد\n\n"
-        "📲 این پست را برای دوستانت بفرست\n—\n🔗" in post
+        f"<s>{word(4)}</s></blockquote>\n\n⌛️ زمان این کانفیگ تمام شد\n\n"
+        f"🔴 ظرفیت این کانفیگ پر شد\n\n🚫 این کانفیگ از دسترس خارج شد\n\n{TAIL}" in post
     )
-    assert "🔒" not in post and QUOTE not in post and "<code" not in post and "vless://" not in post
+    assert "🔐" not in post and QUOTE not in post and "<code" not in post and "vless://" not in post
     assert ALL_DEAD_LINE not in post  # one link still works
 
 
-def test_a_config_and_its_xhttp_link_share_one_line_each_in_its_own_quote() -> None:
+def test_a_config_and_its_xhttp_link_share_one_head_each_in_its_own_quote() -> None:
     later = EXP + timedelta(hours=2)
     tcp, xhttp = rl(1, expires=EXP, variant="TCP"), rl(1, expires=EXP, variant="XHTTP", companion=True)
     alone = rl(2, expires=later)
     post = render_post(None, [tcp, xhttp, alone], "@ipoxxo").text
     assert post == (
-        f"{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{quoted(xhttp)}\n\n{LINE}\n{quoted(alone)}\n\n"
-        "📲 این پست را برای دوستانت بفرست\n—\n🔗 ‎@ipoxxo"
+        f"{LINE}\n\n{TCP}\n{quoted(tcp)}\n{XHTTP}\n{quoted(xhttp)}\n\n{LINE}\n\n{quoted(alone)}\n\n{TAIL}"
     )  # a config without its XHTTP link: no label (an older post may carry several configs)
     assert one_config_per_quote(post) and post.count(QUOTE) == 3
     # Half of the pair is not live: its status line takes its place under its label, OUTSIDE any
-    # quote, and the line shows the end of the link that still works.
+    # quote.
     paused_xhttp = PostLink(kind="reality", status="paused", variant="XHTTP", companion=True)
     half = render_post(None, [tcp, paused_xhttp], "@ipoxxo").text
-    assert (
-        half == f"{LINE}\nTCP\n{quoted(tcp)}\n\nXHTTP\n{PAUSED_LINE}\n\n"
-        "📲 این پست را برای دوستانت بفرست\n—\n🔗 ‎@ipoxxo"
-    )
+    assert half == f"{LINE}\n\n{TCP}\n{quoted(tcp)}\n{XHTTP}\n{PAUSED_LINE}\n\n{TAIL}"
     full_tcp = PostLink(kind="reality", status="full", variant="TCP")
     other = render_post(
         None, [full_tcp, rl(1, expires=later, variant="XHTTP", companion=True)], "@ipoxxo"
     ).text
-    assert f"{LINE}\nTCP\n🔴 ظرفیت این کانفیگ پر شد\n\nXHTTP\n{QUOTE}<code>" in other
+    assert f"{LINE}\n\n{TCP}\n🔴 ظرفیت این کانفیگ پر شد\n{XHTTP}\n{QUOTE}<code>" in other
     assert one_config_per_quote(other) and other.count(QUOTE) == 1
     # Both end: ONE status line for the pair, no quote; the pause line only when both are paused.
     for statuses, line in [
@@ -224,12 +218,11 @@ def test_a_config_and_its_xhttp_link_share_one_line_each_in_its_own_quote() -> N
             PostLink(kind="reality", status=statuses[1], variant="XHTTP", companion=True),  # type: ignore[arg-type]
         ]
         ended = render_post(None, [*pair, alone], "@ipoxxo").text
-        later_line = LINE
-        assert ended.startswith(f"{line}\n\n{later_line}\n{QUOTE}"), statuses
-        assert ended.count(QUOTE) == 1 and " — TCP" not in ended and "XHTTP" not in ended
-    # Two ends in one pair (never expected): the line names the earlier one.
+        assert ended.startswith(f"{line}\n\n{LINE}\n\n{QUOTE}"), statuses
+        assert ended.count(QUOTE) == 1 and "TCP" not in ended and "XHTTP" not in ended
+    # Two ends in one pair (never expected): one head line.
     apart = render_post(None, [tcp, rl(1, expires=later, variant="XHTTP", companion=True)], "@ipoxxo").text
-    assert apart.count("🔒") == 1 and apart.startswith(LINE + "\n")
+    assert apart.count("🔐") == 1 and apart.startswith(LINE + "\n")
 
 
 def test_all_dead_gets_the_closing_line_and_owner_texts() -> None:
@@ -246,16 +239,21 @@ def test_a_config_line_states_its_period_not_its_end() -> None:
     # The owner (2026-11-07): «اعتبار ۴۸ ساعت», never a weekday and a clock.
     for end in (datetime(2026, 11, 5, 23, 0, tzinfo=UTC), datetime(2026, 11, 8, 9, 0, tzinfo=UTC)):
         text = render_post(None, [rl(1, expires=end)], "@ipoxxo").text
-        assert text.startswith(f"{LINE}\n") and "ساعت ۰" not in text.split("\n", 1)[0]
+        assert text.startswith(f"{LINE}\n") and "ساعت ۰" not in text.split("\n", 2)[1]
     # The line tells the configs' real period: the Reality settings' cap_hours, which the owner can
     # change; 48 (the default cap_hours) only when the caller gives none.
     assert CONFIG_VALIDITY_HOURS == RealitySettings().cap_hours
     end = datetime(2026, 11, 8, 9, 0, tzinfo=UTC)
     for hours, shown in ((24, "۲۴"), (72, "۷۲"), (720, "۷۲۰")):
         text = render_post(None, [rl(1, expires=end)], "@ipoxxo", validity_hours=hours).text
-        assert text.startswith(f"🔒 کانفیگ V2Ray — اعتبار {shown} ساعت\n")
-    # A config that never ends: the line without a period.
-    assert render_post(None, [rl(1)], "@ipoxxo").text.startswith(f"🔒 کانفیگ V2Ray\n{QUOTE}<code>")
+        assert text.startswith(f"<b>🔐 کانفیگ V2Ray</b>\n⏳ اعتبار {shown} ساعت؛ ")
+    # A config that never ends: the head line without a period.
+    assert render_post(None, [rl(1)], "@ipoxxo").text.startswith(f"<b>🔐 کانفیگ V2Ray</b>\n\n{QUOTE}<code>")
+    # The country of the server the config goes to now (D60, D65); an unknown location has none.
+    de = render_post(None, [replace(rl(1, expires=end), location="fsn1")], "@ipoxxo").text
+    assert de.startswith("<b>🔐 کانفیگ V2Ray 🇩🇪 آلمان</b>\n")
+    xx = render_post(None, [replace(rl(1, expires=end), location="mars9")], "@ipoxxo").text
+    assert xx.startswith(f"{LINE}\n")
 
 
 def test_paused_links_keep_their_place_without_a_link_and_are_not_dead() -> None:
@@ -265,11 +263,7 @@ def test_paused_links_keep_their_place_without_a_link_and_are_not_dead() -> None
         PostLink(kind="reality", status="paused", url=rl(1).url, variant="TCP"),
     ]
     post = render_post(None, items, "@ipoxxo").text
-    # One proxy word in the post: no number (D50).
-    assert (
-        post
-        == f"⏸{NBSP}پروکسی{WORD_MARK}\n\n{PAUSED_LINE}\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗 ‎@ipoxxo"
-    )
+    assert post == f"{HEAD}\n<blockquote>⏸ {word(1)}</blockquote>\n\n{PAUSED_LINE}\n\n{TAIL}"
     assert sec not in post and "vless://" not in post
     assert ALL_DEAD_LINE not in post  # paused is not dead: it may come back
     dead_and_paused = [PostLink(kind="mtproto", status="burned"), items[0]]
@@ -293,7 +287,7 @@ def test_body_tags_have_no_custom_emoji_for_the_bot() -> None:
 
 def test_active_link_without_url_is_never_a_link() -> None:
     post = render_post(None, [PostLink(kind="mtproto", status="active")], "@ipoxxo").text
-    assert "<a " not in post and f"🚫{NBSP}<s>پروکسی</s>" in post
+    assert "<a " not in post and f"🚫 <s>{word(1)}</s>" in post
     config = render_post(None, [PostLink(kind="reality", status="active")], "@ipoxxo").text
     assert "<code" not in config and QUOTE not in config and "🚫 این کانفیگ از دسترس خارج شد" in config
 
@@ -313,18 +307,15 @@ def test_a_dead_link_never_shows_its_url_even_if_it_still_has_one() -> None:
 def test_a_marker_is_only_ever_a_plain_word() -> None:
     for bad in ('"><b>x</b>', "a b", "x" * 17, "", None):
         live = render_post(None, [rl(1, variant=bad)], "@ipoxxo").text
-        assert live.startswith(f"🔒 کانفیگ V2Ray\n{QUOTE}<code>vless://") and "<b>x" not in live
+        assert live.startswith(f"<b>🔐 کانفیگ V2Ray</b>\n\n{QUOTE}<code>vless://") and "<b>x" not in live
         ended = render_post(None, [PostLink(kind="reality", status="full", variant=bad)], "@ipoxxo").text
         assert ended.split("\n")[0] == "🔴 ظرفیت این کانفیگ پر شد"
         half = render_post(None, [rl(1, variant="TCP"), PostLink(kind="reality", status="full", variant=bad,
                                                                 companion=True)], "@ipoxxo").text  # fmt: skip
-        assert (
-            "</code></blockquote>\n\n🔴 ظرفیت این کانفیگ پر شد\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗"
-            in half
-        )
+        assert f"</code></blockquote>\n🔴 ظرفیت این کانفیگ پر شد\n\n{TAIL}" in half
     assert (
         config_quote("vless://a@b:1?x=1&y=<2>", "XHTTP")
-        == "XHTTP\n<blockquote expandable><code>vless://a@b:1?x=1&amp;y=&lt;2&gt;</code></blockquote>"
+        == f"{XHTTP}\n<blockquote expandable><code>vless://a@b:1?x=1&amp;y=&lt;2&gt;</code></blockquote>"
     )
     assert (
         config_quote("vless://a@b:1", '"><b>')
@@ -431,12 +422,14 @@ def named(i: int, operator: str | None, status: str = "active") -> PostLink:
     return replace(mt(i, status=status), operator=operator)
 
 
-def grid(post: str) -> list[str]:
-    """The visible rows of a post's proxy grid (the first block of a post without content)."""
-    return visible_text(post.split("\n\n")[0]).split("\n")
+def card(post: str) -> list[str]:
+    """The visible lines of a post's proxy card (layout B, D65)."""
+    m = re.search(r"<blockquote>(.*?)</blockquote>", post, flags=re.DOTALL)
+    assert m is not None
+    return visible_text(m.group(1)).split("\n")
 
 
-def test_operator_names_come_first_each_group_on_its_own_rows() -> None:
+def test_operator_names_come_first_each_on_its_own_line() -> None:
     links = [
         named(1, None),
         named(2, "mci"),
@@ -446,36 +439,38 @@ def test_operator_names_come_first_each_group_on_its_own_rows() -> None:
         named(6, None),
     ]
     post = render_post(None, links, "@ipoxxo").text
-    mci = f"همراه{NBSP}اول"
-    assert grid(post) == [
-        f"{mci}{NBSP}• {mci}{NBSP}•",
-        f"رایتل{NBSP}•",  # a group starts its own row
-        f"پروکسی{NBSP}• پروکسی{NBSP}•",
-        f"پروکسی{NBSP}•",
+    assert card(post) == [
+        "پروکسی ◂ همراه اول",
+        "پروکسی ◂ همراه اول",
+        "پروکسی ◂ رایتل",
+        word(1),
+        word(1),
+        word(1),
     ]
-    # Within a word the posted order stays: the first «همراه اول» is link 2, the first «پروکسی» link 1.
+    # Within a name the posted order stays: the first «همراه اول» is link 2, the first other link 1.
     hrefs = re.findall(r'<a href="([^"]+)">', post)
     order = [links[i].url for i in (1, 4, 3, 0, 2, 5)]
     assert hrefs == [html.escape(u or "", quote=True) for u in order]
-    assert not any(row.startswith("•") for row in grid(post))  # no leading bullet
     assert render_post(None, links, "@ipoxxo") == render_post(None, links, "@ipoxxo")
+    flagged = render_post(None, [replace(named(1, "mci"), location="nbg1")], "@ipoxxo").text
+    assert card(flagged) == ["🇩🇪 پروکسی آلمان ◂ همراه اول"]
 
 
 def test_a_named_link_keeps_its_name_when_it_ends_or_pauses() -> None:
     links = [named(1, "mci", "burned"), named(2, "mci"), named(3, "rightel", "paused"), named(4, None)]
     post = render_post(None, links, "@ipoxxo").text
-    assert f"🚫{NBSP}<s>همراه{NBSP}اول</s>{WORD_SEPARATOR}<a href=" in post
-    assert f">همراه{NBSP}اول</a>{WORD_MARK}\n⏸{NBSP}رایتل{WORD_MARK}\n<a href=" in post
-    assert post.count("<a href=") == 2  # a dead or paused word has no link, named or not
+    assert "<blockquote>🚫 <s>پروکسی ◂ همراه اول</s>\n<a href=" in post
+    assert ">پروکسی ◂ همراه اول</a>\n⏸ پروکسی ◂ رایتل\n<a href=" in post
+    assert post.count("<a href=") == 2  # a dead or paused line has no link, named or not
 
 
-def test_posts_without_names_keep_their_words_and_get_the_sign_off() -> None:
-    """A post made before D50 has no stored names: «پروکسی» in every cell."""
+def test_posts_without_names_say_any_operator_and_end_with_the_tag() -> None:
+    """A post made before D50 has no stored names: «همه‌ی اپراتورها» on every line."""
     post = render_post(None, [mt(i) for i in range(1, 5)], "@ipoxxo").text
-    assert grid(post) == [f"پروکسی{NBSP}• پروکسی{NBSP}•"] * 2
-    assert post.endswith("\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗 \u200e@ipoxxo")
+    assert card(post) == [word(1)] * 4
+    assert post.endswith(f"\n\n{TAIL}")
     unknown = render_post(None, [named(1, "tci"), named(2, None)], "@ipoxxo").text
-    assert grid(unknown) == [f"پروکسی{NBSP}• پروکسی{NBSP}•"]  # an unknown code is no name
+    assert card(unknown) == [word(1)] * 2  # an unknown code is no name
     assert "همراه" not in unknown
 
 

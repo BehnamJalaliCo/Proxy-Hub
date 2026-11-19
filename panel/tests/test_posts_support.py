@@ -174,7 +174,7 @@ async def _nodes(db: AsyncConnection) -> list[Any]:
     return list(
         (
             await db.execute(
-                select(Node.id, Node.slot, Node.state, Node.ipv4, Node.ready_at)
+                select(Node.id, Node.slot, Node.state, Node.ipv4, Node.ready_at, Node.location)
                 .where(Node.name.like("posts-test-%"), Node.slot.is_not(None))
                 .order_by(Node.slot)
             )
@@ -203,6 +203,7 @@ async def mtproto_provider(db: AsyncConnection) -> list[ProxyLink]:
                 url=f"https://t.me/proxy?server={host}&port=8443&secret={node_secret(r.id)}",
                 expires_at=None,
                 status=status,  # type: ignore[arg-type]
+                location=r.location,
             )
         )
     return out
@@ -233,6 +234,7 @@ async def reality_provider(db: AsyncConnection) -> list[ProxyLink]:
                 url=url,
                 expires_at=expires,
                 status=status,  # type: ignore[arg-type]
+                location=r.location,
             )
         )
     return out

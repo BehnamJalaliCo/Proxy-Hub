@@ -99,6 +99,7 @@ class ProxyView:
     secret_hex: str = field(repr=False)
     ordinal: int = 0  # 0: the node's primary proxy; 1 and up: its extras (D49)
     extra_of: str | None = None  # an extra: its node's primary key (never registered itself)
+    location: str | None = None  # the node's Hetzner location (a post's flag, D65)
 
     @property
     def label(self) -> str:
@@ -152,6 +153,7 @@ async def list_proxies(db: Db, seal_key: bytes, now: datetime) -> list[ProxyView
                 Node.is_test,
                 Node.slot,
                 Node.ipv4,
+                Node.location,
                 TelemtUser.secret_sealed,
                 TelemtUser.enabled,
                 TelemtUser.ad_tag.label("user_ad_tag"),
@@ -211,6 +213,7 @@ async def list_proxies(db: Db, seal_key: bytes, now: datetime) -> list[ProxyView
                 status=proxy_status(r.state, bool(r.enabled), r.live_at),
                 secret_hex=secret_hex,
                 ordinal=int(r.ordinal),
+                location=r.location,
                 extra_of=(
                     proxy_key(r.node_id, primaries.get(r.node_id) or user_name_for(r.node_id))
                     if r.ordinal > 0

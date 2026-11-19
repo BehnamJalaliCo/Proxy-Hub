@@ -29,6 +29,9 @@ class ProxyLink:
     # secret, on the node's port and host): the key of that node's primary link. A new post takes
     # one link per node first and extras only after that (proxyhub/posts/links.py).
     extra_of: str | None = None
+    # The Hetzner location of the server the link goes to now ("nbg1"): a post shows its flag and
+    # country (decision D65). None when unknown.
+    location: str | None = None
 
 
 Provider = Callable[[AsyncConnection], Awaitable[list[ProxyLink]]]

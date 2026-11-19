@@ -50,8 +50,6 @@ from proxyhub.telegram.templates import (
     ALL_DEAD_LINE,
     NBSP,
     PAUSED_LINE,
-    WORD_MARK,
-    WORD_SEPARATOR,
     visible_text,
 )
 from proxyhub.vault import Vault
@@ -131,13 +129,15 @@ async def edit_text(engine: AsyncEngine) -> str:
 
 
 def word(n: int) -> str:
-    """The n-th proxy link's word: the same word in every cell, no number (2026-11-07)."""
-    return "پروکسی"
+    """The n-th proxy link's line (layout B, D65): the test nodes are in fsn1, no operator name."""
+    return "🇩🇪 پروکسی آلمان ◂ همه‌ی اپراتورها"
 
 
-SEP = WORD_SEPARATOR
-MARK = WORD_MARK
-LOCK = "🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت"
+# A link that is not live shows no flag: its server's location is only known while it is listed live.
+DEAD = "پروکسی ◂ همه‌ی اپراتورها"
+
+
+LOCK = "<b>🔐 کانفیگ V2Ray 🇩🇪 آلمان</b>\n⏳ اعتبار ۴۸ ساعت؛ برای کپی روی کانفیگ بزن"
 QUOTE = "<blockquote expandable>"
 # A post made before D48 carried up to three configs; these tests use that to see several configs
 # of one post end (each is still drawn in the compact layout).
@@ -185,8 +185,8 @@ async def test_due_post_carries_content_links_and_tag(engine: AsyncEngine, vault
     # D48: one config a post (the first post starts at slot 1), as one line over a collapsed quote.
     assert f"{QUOTE}<code>vless://{node_vless_id(nodes[0])}@slot1.proxyhub-posts.example:443" in body
     assert body.count(LOCK) == 1 and body.count("vless://") == 1 and "<pre" not in body
-    assert f">{word(2)}</a>{MARK}\n<a href=" in body and f">{word(3)}</a>{MARK}\n\n{LOCK}" in body
-    assert body.endswith("</blockquote>\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗 \u200e@ipoxxo")
+    assert f">{word(2)}</a>\n<a href=" in body and f">{word(3)}</a></blockquote>\n\n{LOCK}" in body
+    assert body.endswith("</blockquote>\n\n📲 این پست را برای دوستانت بفرست\n🔗 \u200e@ipoxxo")
     [post] = await rows(engine, "SELECT * FROM posts")
     assert (post.role, post.plan_slot, post.outbox_id, post.poster) == ("test", 1, job.id, "bot")
     assert post.content_html and post.channel_tag == "@ipoxxo" and post.content_item_id == first.id
@@ -280,16 +280,16 @@ async def test_a_post_states_the_period_the_owner_set_for_configs(engine: AsyncE
     async with engine.begin() as conn:  # the owner's Reality settings (D41): configs live 72 hours
         await save_reality_settings(conn, RealitySettings(cap_hours=72))
         shown = await views.preview(conn, slot_time(2), await links.harvest(conn, PROVIDERS))
-    assert "🔒 کانفیگ V2Ray — اعتبار ۷۲ ساعت\n" in shown["text"] and LOCK not in shown["text"]
+    assert "⏳ اعتبار ۷۲ ساعت؛" in shown["text"] and LOCK not in shown["text"]
     now = slot_time(2)
     await posted(engine, vault, now)
     body = (await jobs(engine, "send_post"))[-1].payload["text"]
-    assert "🔒 کانفیگ V2Ray — اعتبار ۷۲ ساعت\n" in body and LOCK not in body
+    assert "⏳ اعتبار ۷۲ ساعت؛" in body and LOCK not in body
     # The owner changes the period: a recent post gets one edit that states the new one.
     async with engine.begin() as conn:
         await save_reality_settings(conn, RealitySettings(cap_hours=24))
     assert await refresh(engine, now + timedelta(minutes=1)) == 1
-    assert "🔒 کانفیگ V2Ray — اعتبار ۲۴ ساعت\n" in await edit_text(engine)
+    assert "⏳ اعتبار ۲۴ ساعت؛" in await edit_text(engine)
     await deliver(engine, (await jobs(engine, "edit_post"))[-1].id, message_id=0)
     assert await refresh(engine, now + timedelta(minutes=20)) == 0
 
@@ -366,7 +366,7 @@ async def test_content_order_recycling_and_fallback(engine: AsyncEngine, vault: 
     # Nothing recyclable: the post still goes, with the fallback title, and the owner hears it.
     assert await publish(engine, slot_time(4)) == "queued"
     job = (await jobs(engine, "send_post"))[-1]
-    assert job.payload["text"].startswith("<b>📡 پروکسی‌ها و کانفیگ‌های تازه</b>\n\n<a href=")
+    assert job.payload["text"].startswith("<b>📡 پروکسی‌ها و کانفیگ‌های تازه</b>\n\n<b>⚡ ")
     assert any("پست بی محتوا رفت" in a.payload["text"] for a in await jobs(engine, "alert"))
     assert (await rows(engine, "SELECT content_item_id FROM posts ORDER BY id DESC LIMIT 1"))[
         0
@@ -446,7 +446,7 @@ async def test_burned_node_is_marked_by_an_edit_and_never_comes_back(
     assert edit.payload["post_id"] == cp_id
     body = edit.payload["text"]
     # The dead link keeps its place (and its number) with its mark; its link and config are gone.
-    assert f">{word(1)}</a>{SEP}🚫{NBSP}<s>{word(2)}</s>{MARK}\n<a href=" in body
+    assert f">{word(1)}</a>\n🚫 <s>{DEAD}</s>\n<a href=" in body
     assert node_secret(nodes[1]) not in body
     assert node_secret(nodes[0]) in body and node_secret(nodes[2]) in body
     # The middle config: one status line in its place, between the other two lines and quotes.
@@ -544,8 +544,8 @@ async def test_expired_and_gone_links(engine: AsyncEngine, vault: Vault) -> None
     assert await refresh(engine, t + publisher.MISSING_GRACE) == 1
     body = await edit_text(engine)
     assert (
-        f"</a>{SEP}⏸{NBSP}{word(2)}{MARK}\n\n⌛️ زمان این کانفیگ تمام شد\n\n{PAUSED_LINE}\n\n"
-        "📲 این پست را برای دوستانت بفرست\n—\n🔗" in body
+        f"</a>\n⏸ {DEAD}</blockquote>\n\n⌛️ زمان این کانفیگ تمام شد\n\n{PAUSED_LINE}\n\n"
+        "📲 این پست را برای دوستانت بفرست\n🔗" in body
     )
     assert "<s>" not in body and "<code" not in body and "🔒" not in body
     assert node_secret(nodes[1]) not in body and node_vless_id(nodes[1]) not in body
@@ -615,7 +615,7 @@ async def test_a_missing_config_past_its_own_expiry_is_marked_expired(
     assert await refresh(engine, later + grace, [mtproto_provider]) == 1
     body = await edit_text(engine)
     assert (
-        f"</a>{MARK}\n\n⌛️ زمان این کانفیگ تمام شد\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗" in body
+        "</a></blockquote>\n\n⌛️ زمان این کانفیگ تمام شد\n\n📲 این پست را برای دوستانت بفرست\n🔗" in body
         and node_secret(nodes[0]) in body
     )
     got = {label: status for label, (status, _) in (await carried_links(engine, post_id)).items()}
@@ -711,10 +711,13 @@ async def test_a_config_and_its_xhttp_link_are_marked_in_the_post_and_its_edits(
     # label in its OWN collapsed quote holding only the config (one tap, one config).
     assert body.count(node_vless_id(nodes[0])) == 2 and node_vless_id(nodes[1]) not in body
     assert body.count(LOCK) == 1 and body.count(QUOTE) == 2 and "<pre" not in body
-    assert f"\nTCP\n{QUOTE}<code>vless://{node_vless_id(nodes[0])}@" in body
-    assert f"</code></blockquote>\n\nXHTTP\n{QUOTE}<code>vless://{node_vless_id(nodes[0])}@" in body
+    assert f"\n۱. معمولی (TCP)\n{QUOTE}<code>vless://{node_vless_id(nodes[0])}@" in body
     assert (
-        body.count("</code></blockquote>\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗") == 1
+        f"</code></blockquote>\n۲. اگر اولی وصل نشد (XHTTP)\n{QUOTE}<code>vless://{node_vless_id(nodes[0])}@"
+        in body
+    )
+    assert (
+        body.count("</code></blockquote>\n\n📲 این پست را برای دوستانت بفرست\n🔗") == 1
     )  # the pair stays together, then the tag
     carried = await rows(engine, "SELECT key, label FROM post_links WHERE kind = 'reality' ORDER BY position")
     assert [c.key.endswith(":xhttp") for c in carried] == [False, True]
@@ -725,12 +728,12 @@ async def test_a_config_and_its_xhttp_link_are_marked_in_the_post_and_its_edits(
     assert await refresh(engine, now + timedelta(minutes=1), providers) == 1
     edited = await edit_text(engine)
     assert (
-        f">{word(2)}</a>{MARK}\n\n🚫 این کانفیگ از دسترس خارج شد\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗"
-        in edited
+        f">{word(2)}</a></blockquote>\n\n🚫 این کانفیگ از دسترس خارج شد\n\n"
+        "📲 این پست را برای دوستانت بفرست\n🔗" in edited
     )
     assert node_vless_id(nodes[0]) not in edited and "🔒" not in edited and QUOTE not in edited
     assert "TCP" not in edited and "XHTTP" not in edited
-    assert f"🚫{NBSP}<s>{word(1)}</s>{SEP}<a href=" in edited
+    assert f"🚫 <s>{DEAD}</s>\n<a href=" in edited
     # Its links are no longer listed at all: the markers come from the keys the post keeps, so the
     # text stays the same and no edit is queued.
     await deliver(engine, (await jobs(engine, "edit_post"))[-1].id, message_id=0)
@@ -752,14 +755,14 @@ async def test_an_older_post_with_two_pairs_keeps_each_in_its_own_quote(
     await deliver(engine, job.id, message_id=100, at=now + timedelta(seconds=5))
     body = job.payload["text"]
     assert all(body.count(node_vless_id(n)) == 2 for n in nodes)
-    assert body.count(LOCK) == 2 and body.count(QUOTE) == 4 and body.count(f"TCP\n{QUOTE}<code>") == 2
+    assert body.count(LOCK) == 2 and body.count(QUOTE) == 4 and body.count(f"(TCP)\n{QUOTE}<code>") == 2
     # Node 1 burns: its pair is one status line, node 2's pair keeps its line and quote.
     await set_node(engine, nodes[0], state="burned")
     assert await refresh(engine, now + timedelta(minutes=1), providers) == 1
     edited = await edit_text(engine)
     assert f"\n\n🚫 این کانفیگ از دسترس خارج شد\n\n{LOCK}" in edited
     assert node_vless_id(nodes[0]) not in edited and edited.count(node_vless_id(nodes[1])) == 2
-    assert edited.count(QUOTE) == 2 and edited.count(f"XHTTP\n{QUOTE}<code>") == 1
+    assert edited.count(QUOTE) == 2 and edited.count(f"(XHTTP)\n{QUOTE}<code>") == 1
 
 
 async def test_everything_dead_gets_the_closing_line(engine: AsyncEngine, vault: Vault) -> None:
@@ -833,11 +836,11 @@ def before_d48(text_html: str) -> str:
     """A post's text as the layout before D48 drew it (connect words three to a row, configs in
     <pre> blocks). Only that it differs from today's render matters here."""
     return (
-        text_html.replace(SEP, "  ")
-        .replace(f"پروکسی{NBSP}", f"⚡{NBSP}اتصال{NBSP}")
+        text_html.replace("◂", "  ")
+        .replace("🇩🇪 پروکسی", f"⚡{NBSP}اتصال")
         .replace(QUOTE, "<pre>")
         .replace(
-            "</blockquote>\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗",
+            "</blockquote>\n\n📲 این پست را برای دوستانت بفرست\n🔗",
             "</pre>\n\n📲 این پست را برای دوستانت بفرست\n—\n🔗",
         )
     )
@@ -877,8 +880,8 @@ async def test_posts_sent_in_the_old_layout_are_edited_once_into_the_new_one(
     assert len(edits) == 6 and oldest.cp not in {e.payload["post_id"] for e in edits}
     for e in edits:
         body = e.payload["text"]
-        assert f">{word(1)}</a>{SEP}<a href=" in body and LOCK in body and QUOTE in body
-        assert f"اتصال{NBSP}" not in body and "⚡" not in body and "<pre" not in body
+        assert f">{word(1)}</a>\n<a href=" in body and LOCK in body and QUOTE in body
+        assert f"⚡{NBSP}اتصال" not in body and "<pre" not in body
         await deliver(engine, e.id, message_id=0, at=t + timedelta(minutes=1))
     for k in range(1, 4):  # every later round: the channel shows the new layout, nothing to do
         assert await refresh(engine, t + k * (publisher.EDIT_MIN_GAP + timedelta(minutes=1))) == 0
@@ -1021,11 +1024,9 @@ async def probed(engine: AsyncEngine, node: Any, at: datetime, cells: dict[str, 
 
 
 def grid_rows(body: str) -> list[str]:
-    """The visible rows of the proxy grid: the block that holds the first proxy link."""
-    i = body.index('<a href="https://t.me/proxy')
-    start = body.rfind("\n\n", 0, i) + 2
-    end = body.find("\n\n", i)
-    return visible_text(body[start:end]).split("\n")
+    """The visible lines of the proxy card (layout B, D65): the quote that holds the proxy links."""
+    start = body.index("<blockquote>") + len("<blockquote>")
+    return visible_text(body[start : body.index("</blockquote>", start)]).split("\n")
 
 
 async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep_the_name(
@@ -1046,12 +1047,9 @@ async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep
         await probed(engine, nodes[2], now - timedelta(hours=8), {"443": {MCI_KEY: "up"}})  # another port
         post_id, _ = await posted(engine, vault, now)
         body = (await jobs(engine, "send_post"))[-1].payload["text"]
-        mci = f"همراه{NBSP}اول"
-        assert grid_rows(body) == [
-            f"{mci}{NBSP}• {mci}{NBSP}•",
-            f"پروکسی{NBSP}•",
-        ]  # named first, each group on its own rows, no number
-        assert "—\n🔗 \u200e@ipoxxo" in body
+        mci = "🇩🇪 پروکسی آلمان ◂ همراه اول"
+        assert grid_rows(body) == [mci, mci, word(3)]  # named first, one link per line
+        assert body.endswith("\n📲 این پست را برای دوستانت بفرست\n🔗 \u200e@ipoxxo")
         sql = (
             "SELECT slot, operator FROM post_links WHERE post_id = :p AND kind = 'mtproto' ORDER BY position"
         )
@@ -1069,8 +1067,8 @@ async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep
         await set_node(engine, nodes[1], state="burned")
         assert await refresh(engine, later + timedelta(minutes=1)) == 1
         edited = await edit_text(engine)
-        assert grid_rows(edited) == [f"{mci}{NBSP}• 🚫{NBSP}{mci}{NBSP}•", f"پروکسی{NBSP}•"]
-        assert f"🚫{NBSP}<s>{mci}</s>{MARK}" in edited
+        assert grid_rows(edited) == [mci, "🚫 پروکسی ◂ همراه اول", word(3)]
+        assert "\n🚫 <s>پروکسی ◂ همراه اول</s>\n" in edited
         # A new post now reads the new probes: node 3 is Rightel's, node 1 is a plain proxy again.
         await deliver(engine, (await jobs(engine, "edit_post"))[-1].id, message_id=0)
         await quiet(engine, [], interval=0)
@@ -1078,7 +1076,7 @@ async def test_links_are_named_after_an_operator_only_with_fresh_probes_and_keep
         await probed(engine, nodes[2], second - timedelta(minutes=10), {"8443": {RIGHTEL_KEY: "up"}})
         assert await publish(engine, second) == "queued"
         body2 = (await jobs(engine, "send_post"))[-1].payload["text"]
-        assert grid_rows(body2)[0].startswith(f"رایتل{NBSP}•")
+        assert grid_rows(body2)[0] == "🇩🇪 پروکسی آلمان ◂ رایتل"
         assert not any("همراه" in row for row in grid_rows(body2))
     finally:
         async with engine.begin() as conn:

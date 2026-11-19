@@ -21,6 +21,12 @@ the link part stays short so news can sit above it):
 
 * a bold title line with one emoji (:data:`TITLE_MARK` when the title has none), and the body as
   plain text under it (:func:`compose_content`; the owner, 2026-11-07: "معمولی و تمیز", no quote);
+* (layout B, decision D65, 2026-11-19, replacing the grid below) a bold head line «⚡ پروکسی
+  تلگرام، با یک لمس وصل شو», then a quote card with ONE proxy per line, the whole line the link:
+  «🇩🇪 پروکسی آلمان ◂ همراه اول» (the flag and country of the server the link goes to now, then the
+  operator or «همه‌ی اپراتورها»); each config under «🔐 کانفیگ V2Ray 🇩🇪 آلمان» and «⏳ اعتبار ۴۸
+  ساعت؛ برای کپی روی کانفیگ بزن», its links labelled «۱. معمولی (TCP)» and «۲. اگر اولی وصل نشد
+  (XHTTP)»; no «—» line. The rest of this list is the layout before D65, kept for its reasons:
 * the MTProto links as words, two to a row, each followed by " •", and no header (the words say
   what they are). A link's word is «پروکسی», or an operator's name («همراه اول», «رایتل»; never
   «ایرانسل», the owner's choice) when the post was made with the panel's own fresh probe from that
@@ -383,15 +389,37 @@ ShownStatus = Literal["active", "paused", "expired", "full", "burned"]
 # The one emoji of the title line when the title brings none (D48); the fallback title has it too.
 TITLE_MARK: Final = "📡"
 # The one line above a config's quote (D48): «🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت».
-REALITY_MARK: Final = "🔒"
+REALITY_MARK: Final = "🔐"
+VALIDITY_MARK: Final = "⏳"
 REALITY_NAME: Final = "کانفیگ V2Ray"
 # A config's lifetime as the post states it when the caller gives none: the default of
 # proxyhub/reality/settings.py ``cap_hours`` (tests/test_posts_units.py keeps the two equal). The
 # publisher passes the stored ``cap_hours`` (``validity_hours``), which the owner can change. A config
 # that ends sooner shows its status mark.
 CONFIG_VALIDITY_HOURS: Final = 48
-# The line over the channel tag, under the link part (decision D50).
+# The line over the channel tag, under the link part (decision D50). Layout B (D65) has none: the
+# share line sits right over the tag.
 SIGN_OFF: Final = "—"
+# Layout B (decision D65, the owner on Android, 2026-11-19, after two samples in the test channel:
+# «نمونه ب بهتر بود»): a bold head line, then one proxy per line inside a quote card, the WHOLE line
+# the link («🇩🇪 پروکسی آلمان ◂ همراه اول»), so a tap anywhere on it connects (in the old grid of short
+# words a tap had to land beside the word). The flag and country are those of the server the link
+# goes to now (D60).
+PROXY_HEAD: Final = "⚡ پروکسی تلگرام، با یک لمس وصل شو"
+PROXY_POINTER: Final = "◂"
+ANY_OPERATOR_WORD: Final = "همه‌ی اپراتورها"
+COUNTRIES: Final[dict[str, tuple[str, str]]] = {
+    "fsn1": ("🇩🇪", "آلمان"),
+    "nbg1": ("🇩🇪", "آلمان"),
+    "hel1": ("🇫🇮", "فنلاند"),
+    "ash": ("🇺🇸", "آمریکا"),
+    "hil": ("🇺🇸", "آمریکا"),
+    "sin": ("🇸🇬", "سنگاپور"),
+}
+CONFIG_HINT: Final = "برای کپی روی کانفیگ بزن"
+# The label over each link of a config (layout B): the plain one first, the other one for when the
+# first does not connect.
+VARIANT_LABELS: Final[dict[str, str]] = {"TCP": "۱. معمولی (TCP)", "XHTTP": "۲. اگر اولی وصل نشد (XHTTP)"}
 # Over the sign-off (decision D62, the owner, 2026-11-12): proxies forwarded reach strangers, whose
 # connections are what the @MTProxybot sponsor turns into members. 📲 is drawn in the channel's own
 # emoji pack (proxyhub/posts/emoji_art.py).
@@ -463,6 +491,9 @@ class PostLink:
     companion: bool = False
     # The operator a post names this MTProto link after (decision D50), stored with the post.
     operator: str | None = None
+    # The Hetzner location of the server the link goes to now ("nbg1"), for its flag and country
+    # (D65); None when unknown (a link no longer listed), and then the line has neither.
+    location: str | None = None
 
     @property
     def live(self) -> bool:
@@ -560,41 +591,44 @@ def tehran_until(at: datetime) -> str:
     return f"{WEEKDAYS_FA[local.weekday()]} ساعت {_tehran_clock(local)}"
 
 
-def _mtproto_word(link: PostLink, text: str) -> str:
-    """A live link is its word; a paused one keeps its word and a pause mark, without the link; a
-    dead one is struck through behind its status mark, without the link. An operator's name stays
-    in every state (D50)."""
-    if link.live:
-        assert link.url is not None
-        return link_word(link.url, text)
-    if link.status == "paused":
-        return f"{PAUSED_MARK}{NBSP}{text}"
-    mark = STATUS_MARKS.get(link.status, STATUS_MARKS["burned"])
-    return f"{mark}{NBSP}<s>{text}</s>"
-
-
-def _word_of(link: PostLink) -> str:
-    return OPERATOR_WORDS.get(link.operator or "", PROXY_WORD)
-
-
 def _word_rank(link: PostLink) -> int:
     order = list(OPERATOR_WORDS)
     return order.index(link.operator) if link.operator in OPERATOR_WORDS else len(order)
 
 
+def country(location: str | None) -> tuple[str, str] | None:
+    """(flag, Persian country name) of a Hetzner location, or None for an unknown one."""
+    return COUNTRIES.get(location or "")
+
+
+def proxy_line_text(link: PostLink) -> str:
+    """«🇩🇪 پروکسی آلمان ◂ همراه اول»: the server's country (when known), then the operator the link
+    is named after, or «همه‌ی اپراتورها» (D50 names; Irancell is never named)."""
+    word = OPERATOR_WORDS.get(link.operator or "", ANY_OPERATOR_WORD)
+    place = country(link.location)
+    head = f"{place[0]} {PROXY_WORD} {place[1]}" if place else PROXY_WORD
+    return html.escape(f"{head} {PROXY_POINTER} {word}", quote=False)
+
+
+def _proxy_line(link: PostLink) -> str:
+    """A live link is its whole line; a paused one keeps its line and a pause mark, without the
+    link; a dead one is struck through behind its status mark, without the link."""
+    text = proxy_line_text(link)
+    if link.live:
+        assert link.url is not None
+        return link_word(link.url, text)
+    if link.status == "paused":
+        return f"{PAUSED_MARK} {text}"
+    mark = STATUS_MARKS.get(link.status, STATUS_MARKS["burned"])
+    return f"{mark} <s>{text}</s>"
+
+
 def _mtproto_block(links: Sequence[PostLink]) -> str:
-    """The proxy grid (D50): operator-named links first (MCI, Rightel, Irancell), then «پروکسی»,
-    each group in the order the links were posted, which never changes (an edit renders a post's
-    links in that order, with the names stored with them). No header: the words say what they are.
-    Each group starts its own row and every cell of a group shows the same word with no number
-    (the owner, 2026-11-07), so the rows line up like the competitor's grid."""
-    ordered = sorted(links, key=_word_rank)  # stable: the posted order within a word
-    groups: dict[str, list[PostLink]] = {}
-    for link in ordered:
-        groups.setdefault(_word_of(link), []).append(link)
-    return "\n".join(
-        word_rows([_mtproto_word(link, plain_word(word)) for link in group]) for word, group in groups.items()
-    )
+    """Layout B (D65): the bold head line, then a quote card with one proxy per line, operator-named
+    links first (MCI, Rightel), each group in the order the links were posted (stable)."""
+    ordered = sorted(links, key=_word_rank)
+    rows = "\n".join(_proxy_line(link) for link in ordered)
+    return f"<b>{PROXY_HEAD}</b>\n<blockquote>{rows}</blockquote>"
 
 
 def _marker(variant: str | None) -> str | None:
@@ -602,18 +636,26 @@ def _marker(variant: str | None) -> str | None:
     return variant if variant and _VARIANT_RE.fullmatch(variant) else None
 
 
-def reality_line(until: datetime | None, *, validity_hours: int = CONFIG_VALIDITY_HOURS) -> str:
-    """The one line above a config's quote: «🔒 کانفیگ V2Ray — اعتبار ۴۸ ساعت» for a config with an
-    end (the period, not the end's day and clock: the owner, 2026-11-07). ``validity_hours``: the
-    configs' period, the Reality settings' ``cap_hours``."""
-    head = f"{REALITY_MARK} {REALITY_NAME}"
-    return f"{head} — اعتبار {fa_digits(validity_hours)} ساعت" if until is not None else head
+def reality_line(
+    until: datetime | None, *, validity_hours: int = CONFIG_VALIDITY_HOURS, location: str | None = None
+) -> str:
+    """The lines above a config's quotes (layout B, D65): «<b>🔐 کانفیگ V2Ray 🇩🇪 آلمان</b>», then
+    «⏳ اعتبار ۴۸ ساعت؛ برای کپی روی کانفیگ بزن» for a config with an end (the period, not the end's
+    day and clock: the owner, 2026-11-07). ``validity_hours``: the Reality settings' ``cap_hours``."""
+    place = country(location)
+    head = f"{REALITY_MARK} {REALITY_NAME}" + (f" {place[0]} {place[1]}" if place else "")
+    first = f"<b>{html.escape(head, quote=False)}</b>"
+    if until is None:
+        return first
+    return f"{first}\n{VALIDITY_MARK} اعتبار {fa_digits(validity_hours)} ساعت؛ {CONFIG_HINT}"
 
 
 def _labelled(variant: str | None, body: str) -> str:
-    """``body`` under its transport marker's label line ("TCP"), or alone without a marker."""
+    """``body`` under its transport marker's label line («۱. معمولی (TCP)»), or alone without one."""
     marker = _marker(variant)
-    return f"{marker}\n{body}" if marker else body
+    if not marker:
+        return body
+    return f"{html.escape(VARIANT_LABELS.get(marker, marker), quote=False)}\n{body}"
 
 
 def config_quote(url: str, variant: str | None = None) -> str:
@@ -658,8 +700,10 @@ def _config_group(group: Sequence[PostLink], texts: StatusTexts, *, validity_hou
         config_quote(x.url, x.variant) if x.live and x.url else _labelled(x.variant, _status_line(x, texts))
         for x in group
     ]
-    links = "\n\n".join(entries)
-    return f"{reality_line(min(ends) if ends else None, validity_hours=validity_hours)}\n{links}"
+    links = "\n".join(entries)
+    place = next((x.location for x in live if x.location), None)
+    head = reality_line(min(ends) if ends else None, validity_hours=validity_hours, location=place)
+    return f"{head}\n\n{links}"
 
 
 def _reality_block(links: Sequence[PostLink], texts: StatusTexts, *, validity_hours: int) -> str:
@@ -689,7 +733,7 @@ def post_tail(
     if links and all(x.dead for x in links):
         parts.append(ALL_DEAD_LINE)
     tag = html.escape(channel_tag(channel_username), quote=False)
-    parts.append(f"{SHARE_LINE}\n{SIGN_OFF}\n{TAG_PREFIX}{LRM}{tag}")
+    parts.append(f"{SHARE_LINE}\n{TAG_PREFIX}{LRM}{tag}")
     return "\n\n".join(parts)
 
 
