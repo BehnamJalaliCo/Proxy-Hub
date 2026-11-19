@@ -895,6 +895,32 @@ def test_a_full_account_moves_one_removed_location_slot_at_a_time() -> None:
     assert not [a for a in plan.actions if a.action == "delete"]
 
 
+def test_a_move_whose_room_another_slot_took_does_not_hold_the_next_move() -> None:
+    """2026-11-19: the ash server left (location removed), a creation for another slot took the room
+    it freed, and the account was full again. The emptied slot can only be rebuilt after another
+    move makes room, so the next over-cap or removed-location slot must move (it waited forever)."""
+    s2 = node(2, slot=2, location="hel1")
+    s3 = node(3, slot=3, location="fsn1")
+    s4 = node(4, slot=4, location="nbg1", created_min_ago=20, ready_min_ago=15)  # took the room
+    gone = gone_node(node(1, slot=1, location="hel1"), "location_removed", min_ago=30)
+    servers = {("acc-a", 1000 + i): server(1000 + i) for i in (2, 3, 4)}
+    moved = open_settings(target_slots=4, locations=["fsn1", "nbg1"])
+    full_seen_after = (account(limit=3, servers_total=3, observed_min_ago=1),)
+    plan = plan_for(moved, nodes=(gone, s2, s3, s4), servers=servers, accounts=full_seen_after)
+    deletes = [(a.target, a.context["why"], a.allowed) for a in plan.actions if a.action == "delete"]
+    assert deletes == [("n2", "location_removed", True)]
+    reasons = {a.target: a.reasons for a in plan.actions if a.action == "none"}
+    assert reasons["slot-2"] == ("making_room_location",)
+    # Not yet looked at since it left: the move is still in flight, slot 2 waits.
+    just_gone = gone_node(node(1, slot=1, location="hel1"), "location_removed", min_ago=1)
+    before = (account(limit=3, servers_total=3, observed_min_ago=5),)
+    plan = plan_for(moved, nodes=(just_gone, s2, s3, s4), servers=servers, accounts=before)
+    assert not [a for a in plan.actions if a.action == "delete"]
+    assert {a.target: a.reasons for a in plan.actions if a.action == "none"}["slot-2"] == (
+        "location_move_waiting",
+    )
+
+
 def test_a_slot_a_move_emptied_holds_the_next_move_until_it_is_rebuilt() -> None:
     """fleet:2 (D60, one slot at a time): once the executor deleted the moved slot's server no live
     node shows the move, and the account observation still says full until the guard looks again.
