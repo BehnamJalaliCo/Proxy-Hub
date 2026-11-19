@@ -680,10 +680,24 @@ class _Planner:
         return sorted(served, key=lambda n: n.deleted_at or self.now, reverse=True)
 
     def _vacated_by_move(self, slot: int) -> bool:
-        """The last server that served this slot left as ``location_removed`` (D60). A slot that
-        never had a server (no history) is not part of a move."""
+        """The last server that served this slot left as ``location_removed`` (D60) and the slot is
+        still waiting for the room it freed. A slot that never had a server (no history) is not part
+        of a move. Once a fresh look at the account, taken after that server left, finds every
+        account full again, the room went to another slot (2026-11-19: the server of a removed
+        location left, a creation in another slot took its place, and the next move waited for a
+        rebuild that could never come): the slot is rebuilt only after another move makes room, so
+        it no longer holds that move."""
         served = self._served_history(slot)
-        return bool(served) and served[0].retire_reason == "location_removed"
+        if not served or served[0].retire_reason != "location_removed":
+            return False
+        return not (self._no_room() and self._seen_after(served[0]))
+
+    def _seen_after(self, n: NodeSnapshot) -> bool:
+        """The node's account was looked at (fresh) after the node's server was deleted."""
+        a = self.accounts_by_id.get(n.account_id)
+        if a is None or a.observed_at is None or n.deleted_at is None or not self._fresh(a):
+            return False
+        return a.observed_at > n.deleted_at
 
     def _burned_since_served(self, slot: int) -> set[str]:
         """Locations of the slot's nodes that burned and left since anything else last served it.
